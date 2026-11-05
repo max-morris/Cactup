@@ -393,6 +393,22 @@ impl From<bool> for VarValue {
 /// `knobs` is the effective knob snapshot `@KNOB(…)@` reads (§5, §6.1):
 /// `None` in a context that has no knobs at all (MDB `[paths]` resolution,
 /// ad-hoc sets), where any `@KNOB@` token is an error rather than "unset".
+/// What a text uses ([`VarSet::references`]): `@NAME@` variables, and the
+/// `@KNOB(…)@`/`@ENV(…)@` tokens with whether every use of each carries a
+/// default (`-OPTIONAL`). Each name once, in order of first use.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct References {
+    pub vars: Vec<String>,
+    pub knobs: Vec<Reference>,
+    pub env: Vec<Reference>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct Reference {
+    pub name: String,
+    pub optional: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct VarSet {
     vars: IndexMap<String, VarValue>,
@@ -690,14 +706,35 @@ impl VarSet {
     }
 
     fn substitute_impl(&self, text: &str, syntax: Syntax, env_lenient: bool) -> Res<String> {
+        self.scan(text, syntax, env_lenient, None)
+    }
+
+    /// The variables and computed tokens `text` uses, in order of first use,
+    /// found by the very lexer substitution runs (so comments are skipped and
+    /// `@@` is no token, exactly as there) without resolving any of them. A
+    /// malformed token or a stray `@` is the same error substitution raises.
+    pub fn references(text: &str, syntax: Syntax) -> Res<References> {
+        let mut refs = References::default();
+        VarSet::default().scan(text, syntax, false, Some(&mut refs))?;
+        Ok(refs)
+    }
+
+    /// Substitute `text`, or — with `refs` — only record what it uses.
+    fn scan(
+        &self,
+        text: &str,
+        syntax: Syntax,
+        env_lenient: bool,
+        mut refs: Option<&mut References>,
+    ) -> Res<String> {
         let mut out = String::with_capacity(text.len());
         let mut done = 0;
         for span in syntax.comments(text) {
-            self.substitute_range(text, done..span.start, syntax, env_lenient, &mut out)?;
+            self.substitute_range(text, done..span.start, syntax, env_lenient, refs.as_deref_mut(), &mut out)?;
             out.push_str(&text[span.clone()]);
             done = span.end;
         }
-        self.substitute_range(text, done..text.len(), syntax, env_lenient, &mut out)?;
+        self.substitute_range(text, done..text.len(), syntax, env_lenient, refs, &mut out)?;
         Ok(out)
     }
 
@@ -709,6 +746,7 @@ impl VarSet {
         range: Range<usize>,
         syntax: Syntax,
         env_lenient: bool,
+        mut refs: Option<&mut References>,
         out: &mut String,
     ) -> Res<()> {
         let mut cur = Cursor { text, pos: range.start, end: range.end };
@@ -739,6 +777,12 @@ impl VarSet {
                 if name.is_empty() {
                     return Err(stray_at(text, pos, syntax));
                 }
+                if let Some(refs) = refs.as_deref_mut() {
+                    if !refs.vars.iter().any(|v| v == name) {
+                        refs.vars.push(name.to_owned());
+                    }
+                    continue;
+                }
                 match self.vars.get(name) {
                     Some(v) => out.push_str(&v.canonical()),
                     None => bail!("Unknown substitution variable @{name}@ on line {at}"),
@@ -756,7 +800,7 @@ impl VarSet {
             if let Some(source) = source
                 && matches!(cur.peek(), Some(b'(') | Some(b'-'))
             {
-                let value = self.computed_token(&mut cur, at, source, env_lenient)?;
+                let value = self.computed_token(&mut cur, at, source, env_lenient, refs.as_deref_mut())?;
                 out.push_str(&value);
                 continue;
             }
@@ -778,6 +822,7 @@ impl VarSet {
         at: usize,
         source: Source,
         env_lenient: bool,
+        refs: Option<&mut References>,
     ) -> Res<String> {
         let func = source.func();
         let optional = cur.eat(b'-');
@@ -814,6 +859,20 @@ impl VarSet {
 
         if !cur.eat(b')') || !cur.eat(b'@') {
             bail!("Malformed @{form}({arg}…)@ token on line {at}: expected ')@' to close it");
+        }
+
+        if let Some(refs) = refs {
+            let list = match source {
+                Source::Env => &mut refs.env,
+                Source::Knob => &mut refs.knobs,
+            };
+            match list.iter_mut().find(|r| r.name == arg) {
+                // Required anywhere is required: one bare use outweighs any
+                // number of defaulted ones.
+                Some(r) => r.optional &= optional,
+                None => list.push(Reference { name: arg.to_owned(), optional }),
+            }
+            return Ok(String::new());
         }
 
         let value = match source {
@@ -1032,6 +1091,24 @@ mod tests {
         // code but does not drag the rest of the file into a string.
         assert_eq!(sh("#echo \"@NODES@\n# me@host\n").unwrap(), "#echo \"4\n# me@host\n");
         assert_eq!(sh("#SBATCH -J '@QUEUE@\n# me@host\n").unwrap(), "#SBATCH -J 'checkpt\n# me@host\n");
+    }
+
+    /// `references` lexes exactly as substitution does: comments and `@@`
+    /// are skipped, each name is listed once in order of first use, and a
+    /// knob counts as optional only when every use of it has a default.
+    #[test]
+    fn references_lists_what_a_parfile_uses() {
+        let par = "# @NOT_ME@ me@host\n\
+                   IO::out_dir = \"@SIMULATION_NAME@/@@x\"\n\
+                   K::f = \"@KNOB(kadath-initial-data)@\" # @KNOB(commented)@\n\
+                   A::b = \"@KNOB-OPTIONAL(mail, none)@ @SIMULATION_NAME@ @WALLTIME_HOURS@\"\n\
+                   A::c = \"@KNOB-OPTIONAL(kadath-initial-data, x)@ @ENV(HOME)@\"\n";
+        let refs = VarSet::references(par, Syntax::Parfile).unwrap();
+        assert_eq!(refs.vars, ["SIMULATION_NAME", "WALLTIME_HOURS"]);
+        let knobs: Vec<(&str, bool)> = refs.knobs.iter().map(|r| (r.name.as_str(), r.optional)).collect();
+        assert_eq!(knobs, [("kadath-initial-data", false), ("mail", true)]);
+        assert_eq!(refs.env, [Reference { name: "HOME".into(), optional: false }]);
+        assert!(VarSet::references("x = a@b\n", Syntax::Parfile).is_err(), "a stray @ is still an error");
     }
 
     #[test]

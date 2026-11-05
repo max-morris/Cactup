@@ -1749,4 +1749,115 @@ mod tests {
         fs::remove_file(sim.dir.join(".cactup/cfg/cactup-config.toml")).unwrap();
         assert!(sim.frozen_config().unwrap().is_none());
     }
+
+    fn export_args(sim: &str, file: &Path) -> crate::args::SimExportArgs {
+        crate::args::SimExportArgs {
+            sim: sim.to_owned(),
+            file: Some(file.to_owned()),
+            force: true,
+            yes: true,
+            name: None,
+            summary: None,
+            description: None,
+            authors: vec!["A. Author".to_owned()],
+            license: Some("CC-BY-4.0".to_owned()),
+            allow_dirty: false,
+            allow_unpushed: false,
+        }
+    }
+
+    /// `sim export` (§8.9) end to end: the pins come from the build the
+    /// simulation froze, the parfile's required custom knob becomes an
+    /// input, its leading comment the summary and description; and sources
+    /// that were dirty, or whose commit no remote has, are refused unless
+    /// explicitly allowed.
+    #[test]
+    fn export_writes_a_sim_file_from_what_the_simulation_froze() {
+        use cactup_ecosystem_common::sim::SimFile;
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+
+        // A real repo behind the install, cloned from an upstream, as a fetch leaves it.
+        let upstream = tmp.path().join("upstream/carpetx");
+        crate::fetch::git::testrepo::init(&upstream);
+        let built = crate::fetch::git::testrepo::commit_tree(&upstream, &[("Makefile", "all:\n", false)]);
+        let (branch, _) = crate::fetch::git::head_of(&upstream).unwrap();
+        let url = upstream.to_string_lossy().into_owned();
+        let repo_dir = inst.cactus_root().join("repos/carpetx");
+        let mut progress = prodash::tree::Root::new().add_child("test clone");
+        crate::fetch::git::clone(&url, Some(&branch), &repo_dir, &mut progress).unwrap();
+
+        let cfg_dir = inst.cactus_root().join("configs/sim");
+        let list = format!(
+            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!TARGET = $ROOT/arrangements\n!TYPE = git\n\
+             !URL = {url}\n!REPO_BRANCH = {branch}\n!REPO_PATH = $2\n!CHECKOUT = CarpetX/Loop\n"
+        );
+        fs::write(cfg_dir.join("cactup-thornlist.src.th"), &list).unwrap();
+        fs::write(cfg_dir.join("cactup-thornlist.th"), format!("{list}#DISABLED Machine/Off\n")).unwrap();
+        let record = |state: &str| {
+            format!(
+                "schema = 2\nname = \"sim\"\nflavor = \"default\"\nthornlist = \"/x/bhns.th\"\n\
+                 machine = \"fake\"\nconfig-id = \"config-sim-1\"\nbuild-id = \"build-sim-1\"\n\
+                 [sources]\ncarpetx = \"{state}\"\n"
+            )
+        };
+        let cfg_path = cfg_dir.join("cactup-config.toml");
+        let parfile = tmp.path().join("bhns.par");
+        fs::write(
+            &parfile,
+            "\n# BHNS merger, GW230529-like\n# dense output\nActiveThorns = \"IOUtil\"\n\
+             K::f = \"@KNOB(kadath-initial-data)@\"\nA::b = \"@KNOB-OPTIONAL(mail, none)@ @WALLTIME_HOURS@\"\n",
+        )
+        .unwrap();
+        let out = tmp.path().join("out.sim");
+        let export = |sim: &str, args: crate::args::SimExportArgs| {
+            crate::sim::export::export_from(&ctx, &inst, crate::args::SimExportArgs { sim: sim.to_owned(), ..args })
+        };
+        let create = |name: &'static str| {
+            let req = crate::sim::CreateRequest { name, ..create_req(&parfile) };
+            crate::sim::create(&ctx, &machine, &inst, &req).unwrap();
+        };
+
+        // Clean, published: exported, fully specified.
+        fs::write(&cfg_path, record(&built.to_string())).unwrap();
+        create("bhns");
+        export("bhns", export_args("bhns", &out)).unwrap();
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(file.is_fully_specified(), "{:?}", file.unspecified());
+        assert_eq!(file.sim.root, "Cactus");
+        assert_eq!(file.sim.summary.as_deref(), Some("BHNS merger, GW230529-like"));
+        assert_eq!(file.sim.description.as_deref(), Some("BHNS merger, GW230529-like\ndense output"));
+        assert_eq!(file.thornlist.filename, "bhns.th");
+        assert_eq!(file.thornlist.text, list, "the thornlist goes in verbatim");
+        assert_eq!(file.repos.len(), 1);
+        assert_eq!(file.repos[0].commit.as_deref(), Some(built.to_string().as_str()));
+        assert_eq!(file.repos[0].git_ref.as_deref(), Some(branch.as_str()));
+        let inputs: Vec<&str> = file.inputs.iter().map(|i| i.knob.as_str()).collect();
+        assert_eq!(inputs, ["kadath-initial-data"], "optional and standard knobs are not inputs");
+        assert_eq!(file.parfile.vars, ["WALLTIME_HOURS"]);
+        let provenance = file.provenance.unwrap();
+        assert_eq!(provenance.machine.as_deref(), Some("fake"));
+        assert_eq!(provenance.flavor.as_deref(), Some("default"));
+        assert_eq!(provenance.machine_disabled, ["Machine/Off"]);
+
+        // Built from edited sources: refused, or marked dirty when allowed.
+        fs::write(&cfg_path, record(&format!("{built}+1mod@1700"))).unwrap();
+        create("dirty");
+        let err = format!("{:#}", export("dirty", export_args("dirty", &out)).unwrap_err());
+        assert!(err.contains("--allow-dirty") && err.contains("carpetx"), "{err}");
+        export("dirty", crate::args::SimExportArgs { allow_dirty: true, ..export_args("dirty", &out) }).unwrap();
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(file.repos[0].dirty && !file.is_fully_specified());
+
+        // Built from a commit no remote has: refused unless allowed.
+        let local = crate::fetch::git::testrepo::commit(&repo_dir, "local only");
+        fs::write(&cfg_path, record(&local.to_string())).unwrap();
+        create("unpushed");
+        let err = format!("{:#}", export("unpushed", export_args("unpushed", &out)).unwrap_err());
+        assert!(err.contains("--allow-unpushed"), "{err}");
+        export("unpushed", crate::args::SimExportArgs { allow_unpushed: true, ..export_args("unpushed", &out) })
+            .unwrap();
+    }
 }

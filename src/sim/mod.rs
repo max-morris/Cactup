@@ -7,6 +7,7 @@
 //! `.cactup/simulation.toml` (D10).
 
 pub mod cache;
+pub mod export;
 pub mod manage;
 pub mod restart;
 pub mod start;

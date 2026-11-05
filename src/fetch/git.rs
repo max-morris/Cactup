@@ -1371,6 +1371,49 @@ fn source_diff_walking(repo_dir: &Path, untracked_files: Untracked) -> Res<Sourc
 
 /// The branch and commit a repo is currently on, for post-pass assertions and
 /// `fetch-state.toml`.
+/// Whether `commit` is on the remote as far as this repo knows, without
+/// asking it: the tip of a remote-tracking branch or a tag, or in the
+/// history of one. What a `.sim` export pins must pass this, or nobody else
+/// can fetch it. Only the local copy of the remote's refs is consulted, so a
+/// commit pushed since the last fetch reads as unpublished; and in a shallow
+/// clone history stops at the boundary, so an old commit can too. Both err
+/// toward asking the user, never toward publishing a dead pin. `Ok(false)`
+/// for a commit the repo does not have at all.
+pub fn is_published(repo_dir: &Path, commit: ObjectId) -> Res<bool> {
+    let repo = gix::open(repo_dir).with_context(|| format!("Failed to open '{}'", repo_dir.display()))?;
+    if !repo.has_object(commit) {
+        return Ok(false);
+    }
+    let mut tips = Vec::new();
+    for prefix in ["refs/remotes/", "refs/tags/"] {
+        let refs = repo.references().with_context(|| "Failed to list references")?;
+        let iter = refs.prefixed(prefix).map_err(|e| anyhow!("Failed to list {prefix}: {e}"))?;
+        for mut r in iter.filter_map(Result::ok) {
+            if let Ok(id) = r.peel_to_id() {
+                tips.push(id.detach());
+            }
+        }
+    }
+    if tips.contains(&commit) {
+        return Ok(true);
+    }
+    if tips.is_empty() {
+        return Ok(false);
+    }
+    for info in repo.rev_walk(tips).all().with_context(|| "Failed to walk history")? {
+        if gix::interrupt::is_triggered() {
+            bail!("Interrupted");
+        }
+        // A shallow boundary or a missing parent ends the walk without an
+        // answer, which is "not published".
+        let Ok(info) = info else { break };
+        if info.id == commit {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// What [`head_of`] names the branch of a detached HEAD.
 pub const DETACHED: &str = "(detached)";
 

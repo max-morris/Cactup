@@ -903,6 +903,45 @@ pub(crate) enum ConfigCommand {
     },
 }
 
+/// `cactup sim export`. Every field the .sim carries has a default; on a
+/// terminal, export asks for each one a flag did not give (`--yes` takes
+/// them all as they are).
+// §8.9
+#[derive(clap::Args, Debug)]
+pub(crate) struct SimExportArgs {
+    /// The simulation to export.
+    pub sim: String,
+    /// Where to write it (default: <sim>.sim in the current directory).
+    pub file: Option<PathBuf>,
+    /// Overwrite the file if it exists.
+    #[clap(short, long)]
+    pub force: bool,
+    /// Take every default without asking.
+    #[clap(short, long)]
+    pub yes: bool,
+    /// The name the .sim carries (default: the simulation's).
+    #[clap(long, value_name = "NAME")]
+    pub name: Option<String>,
+    /// One-line summary (default: the first line of the parfile's leading comment).
+    #[clap(long, value_name = "TEXT")]
+    pub summary: Option<String>,
+    /// Description, in Markdown (default: the parfile's leading comment).
+    #[clap(long, value_name = "TEXT")]
+    pub description: Option<String>,
+    /// An author; repeat for several (default: your git user.name).
+    #[clap(long = "author", value_name = "NAME")]
+    pub authors: Vec<String>,
+    /// SPDX license expression (default: the default-license knob, if set).
+    #[clap(long, value_name = "SPDX")]
+    pub license: Option<String>,
+    /// Export even though some sources had uncommitted changes when the binary was built; they are marked dirty.
+    #[clap(long)]
+    pub allow_dirty: bool,
+    /// Export even though some pinned commits are on no remote branch or tag, so nobody else can fetch them.
+    #[clap(long)]
+    pub allow_unpushed: bool,
+}
+
 #[derive(Subcommand, Debug)]
 pub(crate) enum SimCommand {
     // §8.2
@@ -943,6 +982,9 @@ pub(crate) enum SimCommand {
     // §8.6
     /// Clean up a simulation's aborted restarts
     Clean { sim: String },
+    // §8.9 (Cactarium .sim files)
+    /// Write a simulation as a .sim file: its parfile plus the exact sources and build it ran on
+    Export(SimExportArgs),
     // §8.7
     /// Move a simulation to TRASH/
     Delete {

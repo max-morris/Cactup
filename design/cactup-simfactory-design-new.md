@@ -4133,6 +4133,59 @@ make (above), so there is no knob to expose. There is no user-facing chaining
 flag either; internally cactup still tracks `chained-job-id` in `restart.toml`
 (§9.3) to wire up scheduler dependencies — computed, not asked for.
 
+### 8.9 `sim export`: `.sim` files
+
+```
+cactup sim export <sim> [file] [-f] [-y] [--name N] [--summary S] [--description D]
+                  [--author A]… [--license SPDX] [--allow-dirty] [--allow-unpushed]
+```
+
+Writes a simulation as a `.sim` file (default `<sim>.sim`): the Cactup
+ecosystem's portable record of a parfile plus the exact sources and build it
+ran on, the unit the Cactarium registry stores and `cactup import` consumes.
+The format belongs to the shared `cactup-ecosystem-common` crate
+(`sim::SimFile`): TOML, strict, generation-versioned (`format`), with the
+thornlist and the parfile carried **verbatim** and the pins in a per-repo
+table beside them.
+
+Everything comes from what the simulation froze at create (§8.2 step 6), never
+from the installation as it is now: the **source** thornlist snapshot (which
+must be a CRL list; `!INCLUDE` is not spliced yet), and the config record,
+whose `sources` map gives each git repo's pin — the commit the binary was
+built from. A simulation created before the record was frozen falls back to
+the config's own record only while that still describes the same `build-id`.
+
+- **Pins.** One `[[repo]]` per repo the list names (keyed by the derived repo
+  name, not per section), `ref` = `!REPO_BRANCH` as a label. Non-git
+  components are listed unpinned.
+- **Dirty sources** (a state string with `+Nmod`, §7.4) are refused —
+  no commit reproduces that binary — unless `--allow-dirty`, which marks them
+  `dirty`.
+- **Unpublished commits** are refused unless `--allow-unpushed`: a pin passes
+  when cactup's fetch record shows it fetched that very commit, or when it is
+  the tip or in the history of a remote-tracking branch or tag in the
+  installation's repo — read locally, so a commit pushed since the last fetch,
+  or below a shallow boundary, reads as unpublished and errs toward asking.
+- **Inputs.** Every required `@KNOB(name)@` in a `.par` that is not a
+  standard knob (§5) becomes an `[[input]]`: something the simulation needs
+  from outside the source tree. `vars` lists the `@VAR@`s used. Both come
+  from the substitution lexer itself (`VarSet::references`), so comments and
+  `@@` are skipped exactly as at submit. A `.py` parfile has neither.
+- **Run hints** (`tasks`, `cpus-per-task`, `gpus-per-task`, `walltime`) come
+  from the latest restart; machine-shaped settings stay out.
+- **Provenance**: exporter version and time, machine, flavor or optionlist,
+  build universe, flags, and `machine-disabled` (thorns disabled in the list
+  Cactus was handed but not in the source list).
+- **Descriptive fields** default to the simulation's name, the parfile's
+  leading comment block (its first line as the summary), the git `user.name`,
+  and the `default-license` knob; on a terminal each one a flag did not give
+  is asked for, prefilled (`-y` takes them all). Absolute paths in parfile
+  values are warned about, suggesting a knob input instead.
+
+A file with every repo pinned and nothing dirty or untracked is **fully
+specified**; only such a file can be published, and export says so when its
+output is not.
+
 ---
 
 ## 9. ON-DISK LAYOUT — the binding compatibility contract
