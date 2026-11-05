@@ -1713,4 +1713,40 @@ mod tests {
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         assert_eq!(String::from_utf8_lossy(&out.stdout), format!("ran {}\n", script.display()));
     }
+
+    /// §8.2 step 6: `sim create` freezes the config record — the commit set
+    /// the binary was built from, its flags and flavor — so a later rebuild
+    /// of the config, which overwrites that record, cannot take it away.
+    #[test]
+    fn create_freezes_the_config_record_against_rebuilds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        let cfg_path = inst.cactus_root().join("configs/sim/cactup-config.toml");
+        let with_sources = |build_id: &str, head: &str| {
+            format!(
+                "schema = 2\nname = \"sim\"\nflavor = \"default\"\nthornlist = \"installation-default.th\"\n\
+                 machine = \"fake\"\nconfig-id = \"config-sim-1\"\nbuild-id = \"{build_id}\"\n\
+                 [flags]\ndebug = true\n[sources]\ncarpetx = \"{head}\"\n"
+            )
+        };
+        fs::write(&cfg_path, with_sources("build-sim-1", "3f2c")).unwrap();
+        let parfile = tmp.path().join("bbh.par");
+        fs::write(&parfile, "ActiveThorns = \"IOUtil\"\n").unwrap();
+        let sim = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
+
+        // The config is rebuilt from moved sources.
+        fs::write(&cfg_path, with_sources("build-sim-2", "9a9a")).unwrap();
+
+        let frozen = sim.frozen_config().unwrap().expect("create froze the record");
+        assert_eq!(frozen.build_id, sim.meta.build_id);
+        assert_eq!(frozen.build_id, "build-sim-1");
+        assert!(frozen.flags.debug);
+        assert_eq!(frozen.sources.unwrap().get("carpetx").map(String::as_str), Some("3f2c"));
+
+        // A simulation from before the record was frozen reads as "none".
+        fs::remove_file(sim.dir.join(".cactup/cfg/cactup-config.toml")).unwrap();
+        assert!(sim.frozen_config().unwrap().is_none());
+    }
 }

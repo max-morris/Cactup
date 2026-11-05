@@ -3429,7 +3429,12 @@ Port of `create()` (`simfactory-docs.txt` §14.1):
    (`cactup-thornlist.th` processed + `cactup-thornlist.src.th` source, §7.5).
    The processed thornlist is what records *which thorns the frozen binary
    contains*, so a simulation stays self-describing after its config is
-   rebuilt or deleted. `simulation.toml`'s `optionlist`/`thornlist` keys name
+   rebuilt or deleted. The config record itself (`cactup-config.toml`, §7.4)
+   is frozen alongside, serialized from the record whose `build-id` the
+   simulation names: its `sources` map is the per-repo commit set the binary
+   was compiled from, with the build flags and flavor, all of which the
+   config's next build overwrites. It is what `sim export` reads; a
+   simulation created before it was frozen has none. `simulation.toml`'s `optionlist`/`thornlist` keys name
    the fed-to-Cactus copy of each pair; both are empty strings when the config
    was built by a cactup old enough not to have written the artifact.
 
@@ -4179,8 +4184,8 @@ format. External tools do not read this metadata, so changing it is safe.
   exe                              hard link → CACHE/exe/<build-id> (the frozen
                                    binary for this sim's config; a plain copy only
                                    if CACHE is on a different filesystem — §8.1)
-  cfg/  par/                       master copies of the optionlist + thornlist, and
-                                   of the parfile (§8.2)
+  cfg/  par/                       master copies of the optionlist + thornlist and
+                                   the config record (§8.2), and of the parfile
 output-%04d/.cactup/               restart-level metadata              [cactup-owned]
   restart.toml                     (replaces restart properties.ini; absorbs the
                                     old timestamp/simulation mark files)

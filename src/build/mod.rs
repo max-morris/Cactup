@@ -206,12 +206,19 @@ impl std::fmt::Display for OptionlistSource {
 
 impl ConfigMeta {
     pub fn path_for(cactus_root: &Path, name: &str) -> PathBuf {
-        cactus_root.join("configs").join(name).join("cactup-config.toml")
+        cactus_root.join("configs").join(name).join(CONFIG_RECORD)
     }
 
     pub fn load(cactus_root: &Path, name: &str) -> Res<Option<ConfigMeta>> {
-        let path = Self::path_for(cactus_root, name);
-        let text = match fs::read_to_string(&path) {
+        Self::load_path(&Self::path_for(cactus_root, name))
+    }
+
+    /// A config record read from any path: the config's own, or the copy a
+    /// simulation froze at create (§8.2 step 6). `Ok(None)` when there is no
+    /// file. Either copy goes through the same upgrade and the same refusal
+    /// of a schema newer than this binary.
+    pub fn load_path(path: &Path) -> Res<Option<ConfigMeta>> {
+        let text = match fs::read_to_string(path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             other => other.with_context(|| format!("Failed to read '{}'", path.display()))?,
         };
@@ -290,6 +297,9 @@ fn upgrade_config_record(table: &mut toml::Table) {
 /// Public because `sim create` copies both into a simulation's `.cactup/cfg/`
 /// for provenance (§8.2) — a rename here must not silently break that.
 pub const THORNLIST_PROCESSED: &str = "cactup-thornlist.th";
+/// The config record's file name (§7.4), in the config directory and in the
+/// copy `sim create` freezes into a simulation's `.cactup/cfg/` (§8.2).
+pub const CONFIG_RECORD: &str = "cactup-config.toml";
 pub const THORNLIST_SNAPSHOT: &str = "cactup-thornlist.src.th";
 /// The optionlist source snapshot: the verbatim text the config was built
 /// from, which the §7.8 rebuild decision diffs and which stands in for a

@@ -190,6 +190,16 @@ impl Simulation {
     fn store_meta(&self) -> Res<()> {
         write_toml(&self.cactup_dir().join("simulation.toml"), &self.meta)
     }
+
+    /// The config record frozen at create (§8.2 step 6): what the
+    /// simulation's binary was built from — per-repo source states, flags,
+    /// flavor — even after the config has been rebuilt or deleted.
+    /// `Ok(None)` for a simulation created before cactup froze it.
+    // `sim export` (the Cactarium work) is its first caller outside the tests.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn frozen_config(&self) -> Res<Option<ConfigMeta>> {
+        ConfigMeta::load_path(&self.cactup_dir().join("cfg").join(build::CONFIG_RECORD))
+    }
 }
 
 /// Strip the single trailing `.par`/`.py` extension (§8.2: intra-name dots
@@ -372,6 +382,15 @@ pub fn create(
     // snapshot rides along to record what it was derived from. Both may be
     // absent for a config built by an older cactup, hence no hard requirement.
     let thornlist = copy_cfg(&[build::THORNLIST_PROCESSED, build::THORNLIST_SNAPSHOT])?;
+    // The config record as of the build this simulation freezes: its
+    // `sources` map is the commit set the binary was compiled from, next to
+    // the flags and flavor — all of which the config's next build overwrites,
+    // so without this copy a simulation loses its exact provenance the moment
+    // its config is rebuilt (what `sim export` reads, §8.2 step 6).
+    // Serialized from the record loaded above rather than copied from disk:
+    // that is the record whose build-id this simulation names, and a
+    // concurrent `cactup build` rewriting the file cannot hand us a torn copy.
+    write_toml(&cactup_dir.join("cfg").join(build::CONFIG_RECORD), &cfg)?;
 
     // 5. Freeze the binary: populate CACHE/exe/<build-id> and hard-link it in
     //    (port of CopyFileWithCaching, §8.1), GC-ing orphans opportunistically.
