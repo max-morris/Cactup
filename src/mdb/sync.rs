@@ -1386,7 +1386,7 @@ mod tests {
         let bare = tempfile::tempdir().unwrap();
         let err =
             format!("{:#}", sync_at(&bare.path().join("mdb"), &url, 1, Mode::Throttled).unwrap_err());
-        assert!(err.contains("no response for"), "{err}");
+        assert!(err.contains("No response for"), "{err}");
     }
 
     #[test]
