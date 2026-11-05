@@ -62,6 +62,10 @@ pub enum GitAction {
     /// Clean, wanted branch not yet checked out locally: fetch by explicit
     /// refspec, create the branch, check it out.
     Align,
+    /// A `!REPO_COMMIT` pin on a clean repo: check the commit out detached,
+    /// fetching it only if the repo lacks it. A repo already at its pin is
+    /// left alone, offline — a pinned repo is never fast-forwarded.
+    Pin,
 }
 
 #[derive(Debug)]
@@ -70,8 +74,12 @@ pub struct GitRepoPlan {
     /// Absolute repo directory: `<install_root>/<root>/repos/<repo>`.
     pub dir: PathBuf,
     pub url: String,
-    /// `None` = the remote's default branch (no `!REPO_BRANCH`).
+    /// `None` = the remote's default branch (no `!REPO_BRANCH`). For a pinned
+    /// repo, the branch or tag the pin was taken from: a label, and where to
+    /// look for the commit when the server will not send it by id.
     pub branch: Option<String>,
+    /// The `!REPO_COMMIT` pin: `Clone` and `Pin` check this commit out.
+    pub commit: Option<gix::ObjectId>,
     pub action: GitAction,
     /// The checkout names (thorns) this repo backs, for reporting.
     pub checkouts: Vec<String>,
@@ -92,6 +100,8 @@ pub struct SkippedRepo {
     pub dir: PathBuf,
     pub url: String,
     pub branch: Option<String>,
+    /// The `!REPO_COMMIT` pin, if any: forcing this repo pins it.
+    pub commit: Option<gix::ObjectId>,
     pub reason: DirtyReason,
     pub untracked: Vec<String>,
     pub checkouts: Vec<String>,
@@ -126,7 +136,9 @@ impl Plan {
             // carry the URL to retarget to before this item is ever fetched.
             let retarget =
                 matches!(&s.reason, DirtyReason::RemoteUrlChanged { .. }).then(|| s.url.clone());
-            let action = if retarget.is_some() {
+            let action = if s.commit.is_some() {
+                GitAction::Pin
+            } else if retarget.is_some() {
                 GitAction::Align
             } else {
                 match &s.branch {
@@ -139,13 +151,20 @@ impl Plan {
             // repo's actual head branch yet. Do that here too, or `execute`
             // errors out with "no branch resolved for existing repo" for any
             // dirty repo that was never given an explicit branch.
-            let branch = s.branch.or_else(|| git::head_of(&s.dir).ok().map(|(b, _)| b));
+            // A pinned repo needs no branch: it is checked out by commit.
+            let branch = match s.commit {
+                Some(_) => s.branch,
+                None => s.branch.or_else(|| {
+                    git::head_of(&s.dir).ok().map(|(b, _)| b).filter(|b| b != git::DETACHED)
+                }),
+            };
             moved.push(s.repo.clone());
             self.git.push(GitRepoPlan {
                 repo: s.repo,
                 dir: s.dir,
                 url: s.url,
                 branch,
+                commit: s.commit,
                 action,
                 checkouts: s.checkouts,
                 forced: Some(s.reason.describe()),
@@ -175,6 +194,8 @@ pub struct RepoResult {
     pub branch: Option<String>,
     /// The commit HEAD resolved to after the action (hex).
     pub head: String,
+    /// The pin this repo was fetched to, if any (see [`RepoRecord::commit`]).
+    pub commit: Option<gix::ObjectId>,
     /// Whether the action moved HEAD (false = already up to date).
     pub changed: bool,
     /// Carried through from the plan: why this repo needed forcing, if it did.
@@ -200,7 +221,12 @@ impl ExecReport {
             .map(|r| {
                 (
                     r.repo.clone(),
-                    RepoRecord { url: r.url.clone(), branch: r.branch.clone(), head: r.head.clone() },
+                    RepoRecord {
+                        url: r.url.clone(),
+                        branch: r.branch.clone(),
+                        head: r.head.clone(),
+                        commit: r.commit.map(|c| c.to_string()),
+                    },
                 )
             })
             .collect()
@@ -221,6 +247,8 @@ fn announce_repo(line: &crate::progress::Line, item: &GitRepoPlan, head: gix::Ob
     let head = head.to_string();
     let short = &head[..12.min(head.len())];
     let what = match (&item.action, item.branch.as_deref()) {
+        (GitAction::Clone, _) if item.commit.is_some() => format!("cloned, pinned at {short}"),
+        (GitAction::Pin, _) if changed => format!("pinned at {short}"),
         (GitAction::Clone, Some(branch)) => format!("cloned {branch} at {short}"),
         (GitAction::Clone, None) => format!("cloned at {short}"),
         (_, Some(branch)) if changed => format!("{branch} now at {short}"),
@@ -326,6 +354,7 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                         } else {
                             match (&item.action, item.branch.as_deref()) {
                                 (GitAction::Clone, _) => "cloning".to_string(),
+                                (GitAction::Pin, _) => "pinning".to_string(),
                                 (GitAction::Update, _) => "updating".to_string(),
                                 (GitAction::Align, Some(branch)) => format!("switching to {branch}"),
                                 (GitAction::Align, None) => "switching".to_string(),
@@ -354,18 +383,25 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                             GitAction::Clone => None,
                             _ => git::head_of(&item.dir).ok().map(|(_, id)| id),
                         };
-                        let outcome = match (&item.action, item.branch.as_deref()) {
-                            (GitAction::Clone, branch) => {
+                        // Forced (backed-up local edits) or repointed: only
+                        // a full overwrite is right there.
+                        let force = item.forced.is_some() || item.retarget.is_some();
+                        let outcome = match (&item.action, item.branch.as_deref(), item.commit) {
+                            (GitAction::Clone, branch, Some(commit)) => {
+                                git::clone_pinned(&item.url, branch, commit, &item.dir, &mut line)
+                            }
+                            (GitAction::Pin, branch, Some(commit)) => {
+                                git::pin(&item.dir, branch, commit, force, &mut line)
+                            }
+                            (GitAction::Pin, _, None) => {
+                                Err(anyhow::anyhow!("No commit to pin to (a bug in the fetch plan)"))
+                            }
+                            (GitAction::Clone, branch, None) => {
                                 git::clone(&item.url, branch, &item.dir, &mut line)
                                     .and_then(|()| git::head_of(&item.dir).map(|(_, id)| id))
                             }
-                            (_, Some(branch)) => {
-                                // Forced (backed-up local edits) or repointed:
-                                // only a full overwrite is right there.
-                                let force = item.forced.is_some() || item.retarget.is_some();
-                                git::align(&item.dir, branch, force, &mut line)
-                            }
-                            (_, None) => {
+                            (_, Some(branch), _) => git::align(&item.dir, branch, force, &mut line),
+                            (_, None, _) => {
                                 // plan() always fills in the probed head
                                 // branch for existing repos; this is a bug
                                 // guard, not a reachable path.
@@ -376,9 +412,19 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                         // branch: an independent read of HEAD on disk, taken
                         // here (outside the report lock) so it runs in
                         // parallel with the other workers.
-                        let wrong_branch = match (&outcome, &item.branch) {
-                            (Ok(_), Some(expected)) => match git::head_of(&item.dir) {
-                                Ok((actual, _)) if &actual != expected => Some(actual),
+                        // A pinned repo has no branch to be on: it must sit at
+                        // its commit instead.
+                        let wrong_branch = match (&outcome, &item.branch, item.commit) {
+                            (Ok(_), _, Some(pin)) => match git::head_of(&item.dir) {
+                                Ok((_, actual)) if actual != pin => {
+                                    Some(format!("post-fetch HEAD is at {actual}, expected the pin {pin}"))
+                                }
+                                _ => None,
+                            },
+                            (Ok(_), Some(expected), None) => match git::head_of(&item.dir) {
+                                Ok((actual, _)) if &actual != expected => {
+                                    Some(format!("post-fetch HEAD is on {actual}, expected {expected}"))
+                                }
                                 _ => None,
                             },
                             _ => None,
@@ -393,12 +439,12 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                                     url: item.url.clone(),
                                     branch: item.branch.clone(),
                                     head: head.to_string(),
+                                    commit: item.commit,
                                     changed,
                                     forced: item.forced.clone(),
                                     retargeted: item.retarget.clone(),
                                 });
-                                if let (Some(actual), Some(expected)) = (wrong_branch, &item.branch) {
-                                    let error = format!("post-fetch HEAD is on {actual}, expected {expected}");
+                                if let Some(error) = wrong_branch {
                                     report.failures.push(Failure { what: item.repo.clone(), error });
                                 }
                             }
@@ -584,6 +630,11 @@ pub struct RepoRecord {
     pub branch: Option<String>,
     /// The commit HEAD resolved to when cactup last fetched this repo.
     pub head: String,
+    /// The `!REPO_COMMIT` that fetch pinned the repo to, if any. A pinned
+    /// repo sits detached at it, so `branch` is only the label it was taken
+    /// from — not a branch HEAD is expected to be on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
 }
 
 impl FetchState {
@@ -619,6 +670,7 @@ impl FetchState {
                     url: record.url.clone(),
                     branch: record.branch.clone(),
                     head: record.head.clone(),
+                    commit: record.commit.clone(),
                 },
             );
         }
@@ -875,6 +927,15 @@ fn is_flesh(root: &str, c: &Component) -> bool {
 /// probe — a plain gix status walk — finishes. The probes run on the
 /// [`crate::par`] pool: even so, on ~80 repos they take long enough that
 /// without progress the command looks hung before anything appears.
+/// How a repo's source reads in a conflict message: its branch, and its pin.
+fn source_label(branch: Option<&str>, commit: Option<&str>) -> String {
+    let branch = branch.unwrap_or("<default>");
+    match commit {
+        Some(commit) => format!("{branch} pinned at {commit}"),
+        None => branch.to_owned(),
+    }
+}
+
 pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree::Item) -> Res<Plan> {
     let root = list.root().to_owned();
     let repos_dir = install_root.join(&root).join("repos");
@@ -884,6 +945,7 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
     struct Group<'c> {
         url: String,
         branch: Option<String>,
+        commit: Option<String>,
         checkouts: Vec<String>,
         first: &'c Component,
     }
@@ -906,6 +968,7 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
                             Group {
                                 url,
                                 branch: c.branch.clone(),
+                                commit: c.commit.clone(),
                                 checkouts: vec![c.checkout.clone()],
                                 first: c,
                             },
@@ -914,16 +977,16 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
                     Some(group) => {
                         // Two sections naming one repo dir must agree, or the
                         // fetch would be order-dependent.
-                        if group.url != url || group.branch != c.branch {
+                        if group.url != url || group.branch != c.branch || group.commit != c.commit {
                             bail!(
                                 "Thornlist names repo {} twice with conflicting \
                                  sources: {} @ {} (for {}) vs {} @ {} (for {})",
                                 c.repo,
                                 group.url,
-                                group.branch.as_deref().unwrap_or("<default>"),
+                                source_label(group.branch.as_deref(), group.commit.as_deref()),
                                 group.first.checkout,
                                 url,
-                                c.branch.as_deref().unwrap_or("<default>"),
+                                source_label(c.branch.as_deref(), c.commit.as_deref()),
                                 c.checkout,
                             );
                         }
@@ -972,7 +1035,11 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
     let probes = crate::par::parallel_map(&groups, |(repo, group)| {
         let current = progress.lock().expect("plan progress poisoned").add_child(repo.clone());
         let dir = repos_dir.join(repo);
-        let mut probe = git::probe(&dir, &group.url, group.branch.as_deref().unwrap_or(""));
+        // A pinned repo is checked out by commit, so the branch it happens to
+        // be on is no reason to skip it — only edits and local commits are.
+        // Probing against "no branch" checks exactly those.
+        let wanted_branch = if group.commit.is_some() { "" } else { group.branch.as_deref().unwrap_or("") };
+        let mut probe = git::probe(&dir, &group.url, wanted_branch);
         if let RepoState::Dirty(DirtyReason::BranchSwitched { head, .. }) = &probe.state
             && fetch_state
                 .as_ref()
@@ -996,13 +1063,33 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
 
     for ((repo, group), probe) in groups.into_iter().zip(probes) {
         let dir = repos_dir.join(&repo);
+        let commit = match &group.commit {
+            Some(hex) => Some(
+                gix::ObjectId::from_hex(hex.as_bytes())
+                    .with_context(|| format!("Thornlist pins repo {repo} to an invalid commit {hex}"))?,
+            ),
+            None => None,
+        };
+        let record = fetch_state.as_ref().and_then(|s| s.repos.get(&repo));
         match probe.state {
             RepoState::Absent => plan.git.push(GitRepoPlan {
                 repo,
                 dir,
                 url: group.url,
                 branch: group.branch,
+                commit,
                 action: GitAction::Clone,
+                checkouts: group.checkouts,
+                forced: None,
+                retarget: None,
+            }),
+            RepoState::Clean { .. } if commit.is_some() => plan.git.push(GitRepoPlan {
+                repo,
+                dir,
+                url: group.url,
+                branch: group.branch,
+                commit,
+                action: GitAction::Pin,
                 checkouts: group.checkouts,
                 forced: None,
                 retarget: None,
@@ -1017,11 +1104,53 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
                     dir,
                     url: group.url,
                     branch: Some(wanted),
+                    commit: None,
                     action,
                     checkouts: group.checkouts,
                     forced: None,
                     retarget: None,
                 });
+            }
+            RepoState::Detached { head } => {
+                // Detached where cactup's last fetch left it: an earlier pin
+                // (the fetch record holds the commit it checked out). That is
+                // cactup's state to move — to a new pin, or back onto a
+                // branch when the list no longer pins the repo. Detached
+                // anywhere else is the user's doing, unless it is already the
+                // pin itself.
+                let ours = record.is_some_and(|r| r.head == head.to_string());
+                let action = match commit {
+                    Some(pin) if pin == head || ours => Some((GitAction::Pin, group.branch.clone())),
+                    None if ours => group
+                        .branch
+                        .clone()
+                        .or_else(|| record.and_then(|r| r.branch.clone()))
+                        .map(|branch| (GitAction::Align, Some(branch))),
+                    _ => None,
+                };
+                match action {
+                    Some((action, branch)) => plan.git.push(GitRepoPlan {
+                        repo,
+                        dir,
+                        url: group.url,
+                        branch,
+                        commit,
+                        action,
+                        checkouts: group.checkouts,
+                        forced: None,
+                        retarget: None,
+                    }),
+                    None => plan.skipped.push(SkippedRepo {
+                        repo,
+                        dir,
+                        url: group.url,
+                        branch: group.branch,
+                        commit,
+                        reason: DirtyReason::DetachedHead(head),
+                        untracked: probe.untracked,
+                        checkouts: group.checkouts,
+                    }),
+                }
             }
             RepoState::Dirty(reason) => {
                 // BranchSwitched against "" happens only when no !REPO_BRANCH
@@ -1032,6 +1161,7 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
                     dir,
                     url: group.url,
                     branch: group.branch,
+                    commit,
                     reason,
                     untracked: probe.untracked,
                     checkouts: group.checkouts,
@@ -1191,6 +1321,7 @@ mod tests {
             dir,
             url: "https://example.invalid/repo.git".to_string(),
             branch: branch.map(str::to_string),
+            commit: None,
             reason: DirtyReason::WorktreeModified(vec!["src/foo.c".to_string()]),
             untracked: Vec::new(),
             checkouts: vec![repo.to_string()],
@@ -1258,6 +1389,7 @@ mod tests {
             dir: dir.clone(),
             url: wanted_url.clone(),
             branch: Some("main".to_string()),
+            commit: None,
             reason: DirtyReason::RemoteUrlChanged {
                 on_disk: "https://old.example.invalid/repo.git".to_string(),
                 wanted: wanted_url.clone(),
@@ -1615,6 +1747,89 @@ mod tests {
     }
 
     /// Regression pin for the split-installation bug's planning half:
+    /// §3.2 pins, end to end against a real upstream: a pinned repo is
+    /// cloned detached at its commit (not the tip); a refetch leaves it
+    /// there without touching the network; moving the pin moves it; dropping
+    /// the pin puts it back on its branch; and a detached HEAD cactup did
+    /// not leave is the user's, skipped like any other local state.
+    #[test]
+    fn pinned_repos_follow_their_pin_and_nothing_else() {
+        let tmp = tempfile::tempdir().unwrap();
+        let upstream = tmp.path().join("sources/upstream");
+        git::testrepo::init(&upstream);
+        let c1 = git::testrepo::commit_tree(&upstream, &[("v", "1\n", false)]);
+        let c2 = git::testrepo::commit_tree(&upstream, &[("v", "2\n", false)]);
+        let c3 = git::testrepo::commit_tree(&upstream, &[("v", "3\n", false)]);
+        let (branch, _) = git::head_of(&upstream).unwrap();
+        let url = upstream.to_string_lossy().into_owned();
+        let root = tmp.path().join("install");
+        let repo_dir = root.join("Cactus/repos/R");
+
+        let list = |pin: Option<&gix::ObjectId>| {
+            let pin = pin.map(|c| format!("!REPO_COMMIT = {c}\n")).unwrap_or_default();
+            crate::thornlist::parse(&format!(
+                "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\n!TARGET = $ROOT\n!TYPE = git\n\
+                 !URL = {url}\n!REPO_BRANCH = {branch}\n{pin}!NAME = R\n!CHECKOUT = Makefile\n"
+            ))
+            .unwrap()
+        };
+        let fetch = |list: &Thornlist| {
+            let mut progress = prodash::tree::Root::new().add_child("test plan");
+            let planned = plan(list, &root, &mut progress).unwrap();
+            let report = execute(&planned, &root).unwrap();
+            assert!(report.failures.is_empty(), "{:?}", report.failures);
+            FetchState::record(&root, &report.records()).unwrap();
+            (planned, report)
+        };
+        let content = || std::fs::read_to_string(repo_dir.join("v")).unwrap();
+
+        // Absent: cloned straight onto the pin, detached, though c3 is the tip.
+        let (planned, _) = fetch(&list(Some(&c2)));
+        assert!(matches!(planned.git[0].action, GitAction::Clone));
+        assert_eq!(git::head_of(&repo_dir).unwrap(), (git::DETACHED.to_owned(), c2));
+        assert_eq!(content(), "2\n");
+        let recorded = FetchState::read(&root).unwrap().unwrap();
+        assert_eq!(recorded.repos["R"].commit.as_deref(), Some(c2.to_string().as_str()));
+
+        // Upstream moves on, and is then unreachable: a refetch of the same
+        // pin plans a Pin that changes nothing and needs no network.
+        git::testrepo::commit_tree(&upstream, &[("v", "4\n", false)]);
+        let away = tmp.path().join("sources/away");
+        std::fs::rename(&upstream, &away).unwrap();
+        let (planned, report) = fetch(&list(Some(&c2)));
+        assert!(matches!(planned.git[0].action, GitAction::Pin));
+        assert!(!report.repos[0].changed, "a pinned repo is never moved by a refetch");
+        assert_eq!(git::head_of(&repo_dir).unwrap().1, c2);
+        std::fs::rename(&away, &upstream).unwrap();
+
+        // Moving the pin: the detached HEAD is cactup's (the fetch record
+        // holds it), so it moves.
+        fetch(&list(Some(&c3)));
+        assert_eq!(git::head_of(&repo_dir).unwrap(), (git::DETACHED.to_owned(), c3));
+        assert_eq!(content(), "3\n");
+
+        // Dropping the pin: back onto the branch, at its tip.
+        let (planned, _) = fetch(&list(None));
+        assert!(matches!(planned.git[0].action, GitAction::Align));
+        assert_eq!(git::head_of(&repo_dir).unwrap().0, branch);
+        assert_eq!(FetchState::read(&root).unwrap().unwrap().repos["R"].commit, None);
+        assert_eq!(content(), "4\n");
+
+        // A detached HEAD the user made is theirs: skipped, never moved. (A
+        // clean checkout of c1 that cactup's fetch record does not hold.)
+        let mut progress = prodash::tree::Root::new().add_child("test checkout");
+        git::pin(&repo_dir, None, c1, false, &mut progress).unwrap();
+        let tip = RepoRecord { url: url.clone(), branch: Some(branch.clone()), head: c3.to_string(), commit: None };
+        FetchState::record(&root, &[("R".to_owned(), tip)]).unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("test plan");
+        let mut skipped = plan(&list(Some(&c3)), &root, &mut progress).unwrap();
+        assert!(skipped.git.is_empty());
+        assert!(matches!(skipped.skipped[0].reason, DirtyReason::DetachedHead(id) if id == c1));
+        // Forcing it pins it all the same.
+        skipped.force();
+        assert!(matches!(skipped.git[0].action, GitAction::Pin));
+    }
+
     /// `plan()` must place every repo under the thornlist's declared root,
     /// not a hardcoded `Cactus` — before the fix, the fetcher already got
     /// this right (it read `list.root()`), but nothing enforced it, so a

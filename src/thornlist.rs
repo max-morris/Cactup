@@ -103,7 +103,15 @@ pub struct Component {
     pub anon_user: Option<String>,
     pub anon_pass: Option<String>,
     pub repo_path: Option<String>,
+    /// `!REPO_BRANCH`: the branch to follow, or — with a `commit` — the
+    /// branch or tag the pinned commit is fetched through (a label only).
     pub branch: Option<String>,
+    /// `!REPO_COMMIT`: the commit a git repo is pinned to, as full lowercase
+    /// hex. A cactup extension (GetComponents ignores the directive, so an
+    /// older tool fetches the branch unpinned instead of failing). A pinned
+    /// repo is checked out detached at exactly this commit and never
+    /// fast-forwarded.
+    pub commit: Option<String>,
     /// Derived repo directory name (rule 12): `!NAME` if present, else the
     /// URL basename with a trailing `.git`, `.hg`, or `_darcs` stripped.
     /// GetComponents only actually computes this for git/darcs/hg
@@ -252,6 +260,7 @@ pub fn parse_config_list(
         anon_pass: None,
         repo_path: None,
         branch: None,
+        commit: None,
         repo,
     };
     let mut components = Vec::new();
@@ -710,6 +719,7 @@ fn build_section(
                     anon_pass: map.get("ANON_PASS").cloned(),
                     repo_path: map.get("REPO_PATH").cloned(),
                     branch: map.get("REPO_BRANCH").cloned(),
+                    commit: None,
                     repo,
                 });
             }
@@ -736,6 +746,7 @@ fn build_section(
         .cloned()
         .ok_or_else(|| anyhow!("Section for target '{target}' (type {type_str:?}) is missing the required !URL directive"))?;
     let auth_url_orig = map.get("AUTH_URL").cloned();
+    let commit = map.get("REPO_COMMIT").map(|c| parse_commit(c, &target, ty)).transpose()?;
 
     for token in checkout_val.split_whitespace() {
         let (dir1, dir2) = split_checkout(token);
@@ -754,10 +765,30 @@ fn build_section(
             anon_pass: map.get("ANON_PASS").cloned(),
             repo_path: map.get("REPO_PATH").cloned(),
             branch: map.get("REPO_BRANCH").cloned(),
+            commit: commit.clone(),
             repo,
         });
     }
     Ok(())
+}
+
+/// A `!REPO_COMMIT` value: a full commit id (40 hex digits, or 64 for a
+/// SHA-256 repo), normalized to lowercase. Abbreviations are refused — a pin
+/// must name exactly one commit on every remote, forever — and so is a pin on
+/// anything but a git component, which nothing would honor.
+fn parse_commit(value: &str, target: &str, ty: ComponentType) -> crate::Res<String> {
+    if ty != ComponentType::Git {
+        bail!("Section for target '{target}' has !REPO_COMMIT, which only git components support");
+    }
+    let commit = value.trim().to_ascii_lowercase();
+    if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!(
+            "Section for target '{target}' has !REPO_COMMIT '{}', which is not a full commit id \
+             (40 or 64 hex digits)",
+            value.trim()
+        );
+    }
+    Ok(commit)
 }
 
 /// Rule 14: lexical-only path canonicalization (collapse `//`, drop `/./`,
@@ -1399,6 +1430,41 @@ CarpetX/Arith
 ";
         let message = err(src);
         assert!(message.contains("TYPE"), "{message}");
+    }
+
+    /// `!REPO_COMMIT` (a cactup extension): a full commit id, lowercased,
+    /// pinning every checkout of its section; `!REPO_BRANCH` stays the label
+    /// (here a track-style tag) it was taken from.
+    #[test]
+    fn repo_commit_pins_the_section() {
+        let pin = "3F2C9A0B1D4E5F60718293A4B5C6D7E8F9012345";
+        let t = ok(&format!(
+            "!CRL_VERSION = 1.0\n!TARGET = arrangements\n!TYPE = git\n\
+             !URL = https://github.com/max-morris/CarpetX.git\n!REPO_PATH = $2\n\
+             !REPO_BRANCH = mixed-precision/v1.4.0\n!REPO_COMMIT = {pin}\n\
+             !CHECKOUT = CarpetX/CarpetX CarpetX/Loop\n"
+        ));
+        assert_eq!(t.components().len(), 2);
+        for c in t.components() {
+            assert_eq!(c.commit.as_deref(), Some(pin.to_ascii_lowercase().as_str()));
+            assert_eq!(c.branch.as_deref(), Some("mixed-precision/v1.4.0"));
+        }
+        // Unpinned stays unpinned.
+        let t = ok("!CRL_VERSION = 1.0\n!TARGET = a\n!TYPE = git\n!URL = https://x/r.git\n!CHECKOUT = A/B\n");
+        assert_eq!(t.components()[0].commit, None);
+    }
+
+    #[test]
+    fn repo_commit_must_be_a_full_id_on_a_git_component() {
+        let section = |ty: &str, commit: &str| {
+            format!("!CRL_VERSION = 1.0\n!TARGET = a\n!TYPE = {ty}\n!URL = https://x/r\n!REPO_COMMIT = {commit}\n!CHECKOUT = A/B\n")
+        };
+        let full = "0123456789abcdef0123456789abcdef01234567";
+        assert!(err(&section("git", "0123abc")).contains("not a full commit id"));
+        assert!(err(&section("git", &format!("{}g", &full[..39]))).contains("not a full commit id"));
+        assert!(err(&section("svn", full)).contains("only git components"));
+        // SHA-256 repositories have 64-digit ids.
+        ok(&section("git", &format!("{full}{}", &full[..24])));
     }
 
     #[test]

@@ -932,7 +932,7 @@ fn prune_orphans(
             record.map(|r| r.url.as_str()).unwrap_or(""),
             record.and_then(|r| r.branch.as_deref()).unwrap_or(""),
         );
-        let dirty = !matches!(probe.state, fetch::git::RepoState::Clean { .. }) || !probe.untracked.is_empty();
+        let dirty = !pristine(&probe.state, record) || !probe.untracked.is_empty();
         if dirty && !args.force {
             println!(
                 "{}",
@@ -982,7 +982,7 @@ fn prune_orphans(
             record.map(|r| r.url.as_str()).unwrap_or(""),
             record.and_then(|r| r.branch.as_deref()).unwrap_or(""),
         );
-        let dirty = !matches!(probe.state, fetch::git::RepoState::Clean { .. }) || !probe.untracked.is_empty();
+        let dirty = !pristine(&probe.state, record) || !probe.untracked.is_empty();
         if dirty {
             let backup = backup_dir(&inst.alias)?.join(&o.repo);
             copy_tree(&o.dir, &backup)?;
@@ -998,6 +998,19 @@ fn prune_orphans(
     Ok(())
 }
 
+/// Whether a probed orphan holds nothing of the user's that pruning could
+/// lose: clean on a branch, or detached exactly where cactup's own pin left
+/// it. A detached HEAD anywhere else may carry commits no branch holds.
+fn pristine(state: &fetch::git::RepoState, record: Option<&fetch::RepoRecord>) -> bool {
+    match state {
+        fetch::git::RepoState::Clean { .. } => true,
+        fetch::git::RepoState::Detached { head } => {
+            record.is_some_and(|r| r.commit.is_some() && r.head == head.to_string())
+        }
+        _ => false,
+    }
+}
+
 fn print_dry_run(
     inst: &Installation,
     plan: &fetch::Plan,
@@ -1009,17 +1022,16 @@ fn print_dry_run(
 ) {
     println!("{}", "Dry run: nothing will be touched.".bold());
     for item in &plan.git {
-        let action = match item.action {
-            GitAction::Clone => "clone",
-            GitAction::Update => "fetch + fast-forward",
-            GitAction::Align => "switch branch to",
+        let branch = item.branch.as_deref().unwrap_or("<default branch>");
+        let target = match (&item.action, item.commit) {
+            (GitAction::Clone, Some(commit)) => format!("clone, pinned at {commit}"),
+            (GitAction::Pin, Some(commit)) => format!("check out pinned commit {commit}"),
+            (GitAction::Clone, None) => format!("clone {branch}"),
+            (GitAction::Update, _) => format!("fetch + fast-forward {branch}"),
+            (GitAction::Align, _) => format!("switch branch to {branch}"),
+            (GitAction::Pin, None) => "pin (no commit: a bug)".to_owned(),
         };
-        println!(
-            "  {}: {action} {} ({} thorn(s))",
-            item.repo.bold(),
-            item.branch.as_deref().unwrap_or("<default branch>"),
-            item.checkouts.len()
-        );
+        println!("  {}: {target} ({} thorn(s))", item.repo.bold(), item.checkouts.len());
     }
     for c in &plan.downloads {
         println!("  {}: download", c.checkout.bold());
@@ -1511,6 +1523,7 @@ mod tests {
             dir: PathBuf::from(format!("/nonexistent/{repo}")),
             url: "https://example.invalid/repo.git".to_string(),
             branch: Some("main".to_string()),
+            commit: None,
             reason: fetch::git::DirtyReason::WorktreeModified(vec!["src/foo.c".to_string()]),
             untracked: Vec::new(),
             checkouts: checkouts.iter().map(|s| s.to_string()).collect(),
@@ -1523,6 +1536,7 @@ mod tests {
             dir: PathBuf::from(format!("/nonexistent/{repo}")),
             url: "https://example.invalid/repo.git".to_string(),
             branch: Some("main".to_string()),
+            commit: None,
             action: GitAction::Update,
             checkouts: checkouts.iter().map(|s| s.to_string()).collect(),
             forced: None,

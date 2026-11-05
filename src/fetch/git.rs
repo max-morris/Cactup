@@ -23,6 +23,10 @@ pub enum RepoState {
     Absent,
     /// Safe to fetch/align; `head_branch` is the currently checked-out branch.
     Clean { head_branch: String },
+    /// HEAD detached at `head`, worktree clean — a pinned repo's normal state
+    /// (§3.2). Whether it is safe to move depends on who put it there, which
+    /// only the planner can tell (the pin, and cactup's own fetch record).
+    Detached { head: ObjectId },
     /// Skipped unless forced; the reason is the user-facing contract.
     Dirty(DirtyReason),
 }
@@ -164,7 +168,13 @@ fn probe_inner(repo_dir: &Path, wanted_url: &str, wanted_branch: &str) -> Res<Pr
             .id()
             .map(|id| id.detach())
             .unwrap_or_else(|| ObjectId::null(gix::hash::Kind::Sha1));
-        return Ok(dirty(DirtyReason::DetachedHead(id), Vec::new()));
+        // Edits are edits wherever HEAD is; a clean detached HEAD is left for
+        // the planner to judge.
+        let (modified, untracked) = status_paths(&repo, Untracked::List)?;
+        if !modified.is_empty() {
+            return Ok(dirty(edits_reason(&repo, repo_dir, modified), untracked));
+        }
+        return Ok(Probe { state: RepoState::Detached { head: id }, untracked });
     };
     let head_branch = head_ref.shorten().to_string();
 
@@ -172,12 +182,7 @@ fn probe_inner(repo_dir: &Path, wanted_url: &str, wanted_branch: &str) -> Res<Pr
     // and index↔worktree (unstaged + untracked) changes.
     let (modified, untracked) = status_paths(&repo, Untracked::List)?;
     if !modified.is_empty() {
-        let reason = if interrupted_align(&repo).is_some() && local_edits(repo_dir, &modified).is_empty() {
-            DirtyReason::UnfinishedCheckout(modified)
-        } else {
-            DirtyReason::WorktreeModified(modified)
-        };
-        return Ok(dirty(reason, untracked));
+        return Ok(dirty(edits_reason(&repo, repo_dir, modified), untracked));
     }
 
     // Branch placement. An empty wanted branch means "no !REPO_BRANCH":
@@ -244,6 +249,17 @@ fn probe_inner(repo_dir: &Path, wanted_url: &str, wanted_branch: &str) -> Res<Pr
     }
 
     Ok(Probe { state: RepoState::Clean { head_branch }, untracked })
+}
+
+/// Why a worktree whose tracked files differ from HEAD is dirty: an align or
+/// pin of cactup's that Ctrl-C cut short, when none of the differences is the
+/// user's; otherwise their modifications.
+fn edits_reason(repo: &gix::Repository, repo_dir: &Path, modified: Vec<String>) -> DirtyReason {
+    if interrupted_align(repo).is_some() && local_edits(repo_dir, &modified).is_empty() {
+        DirtyReason::UnfinishedCheckout(modified)
+    } else {
+        DirtyReason::WorktreeModified(modified)
+    }
 }
 
 fn dirty(reason: DirtyReason, untracked: Vec<String>) -> Probe {
@@ -470,6 +486,45 @@ pub fn align(
         return Ok(target_id);
     }
 
+    // Move refs/heads/<branch> (create or force-update — the probe guaranteed
+    // no local commits) and point HEAD at it.
+    let edits = vec![
+        update_ref(branch_ref.clone(), Target::Object(target_id), ALIGN_REFLOG_MESSAGE),
+        update_ref(head_ref_name(), Target::Symbolic(branch_ref), ALIGN_REFLOG_MESSAGE),
+    ];
+    // No context on the error: refetch recognizes an interrupted checkout by
+    // how its message begins (`INTERRUPTED_CHECKOUT`).
+    switch_tree(&repo, target_id, edits, force_overwrite, progress)?;
+    Ok(target_id)
+}
+
+/// A ref edit that sets `name` to `new`, logged as `message`.
+fn update_ref(name: gix::refs::FullName, new: Target, message: &str) -> RefEdit {
+    RefEdit {
+        change: Change::Update {
+            log: LogChange { mode: RefLog::AndReference, force_create_reflog: false, message: message.into() },
+            expected: PreviousValue::Any,
+            new,
+        },
+        name,
+        deref: false,
+    }
+}
+
+fn head_ref_name() -> gix::refs::FullName {
+    "HEAD".try_into().expect("HEAD is a valid ref name")
+}
+
+/// The tail [`align`] and [`pin`] share: apply `edits` (which move HEAD to
+/// `target_id`), then check the commit's tree out over the worktree,
+/// rewriting only what differs from the old index unless `force_overwrite`.
+fn switch_tree(
+    repo: &gix::Repository,
+    target_id: ObjectId,
+    edits: Vec<RefEdit>,
+    force_overwrite: bool,
+    progress: &mut (impl prodash::NestedProgress<SubProgress: 'static> + 'static),
+) -> Res<()> {
     // The old index tells us which tracked files may need deleting after the
     // switch, and which ones are already right on disk. Read it before
     // touching anything.
@@ -479,39 +534,12 @@ pub fn align(
         .map(|idx| idx.entries().iter().map(|e| e.path(idx).to_owned()).collect())
         .unwrap_or_default();
 
-    // Move refs/heads/<branch> (create or force-update — the probe guaranteed
-    // no local commits) and point HEAD at it.
-    let log = |msg: &str| LogChange {
-        mode: RefLog::AndReference,
-        force_create_reflog: false,
-        message: msg.into(),
-    };
     // From here until its index is written, an interruption leaves the repo
     // between two trees; the marker is how a later probe tells that apart
     // from a user's edits (see `interrupted_align`).
     let before = repo.head_id().ok().map(|id| id.detach());
-    write_align_marker(&repo, before, target_id)?;
-    repo.edit_references([
-        RefEdit {
-            change: Change::Update {
-                log: log(ALIGN_REFLOG_MESSAGE),
-                expected: PreviousValue::Any,
-                new: Target::Object(target_id),
-            },
-            name: branch_ref.clone(),
-            deref: false,
-        },
-        RefEdit {
-            change: Change::Update {
-                log: log(ALIGN_REFLOG_MESSAGE),
-                expected: PreviousValue::Any,
-                new: Target::Symbolic(branch_ref),
-            },
-            name: "HEAD".try_into().expect("HEAD is a valid ref name"),
-            deref: false,
-        },
-    ])
-    .with_context(|| format!("Failed to update refs for branch {branch}"))?;
+    write_align_marker(repo, before, target_id)?;
+    repo.edit_references(edits).with_context(|| "Failed to update refs")?;
 
     // Check out the new tree over the existing worktree.
     let tree_id = repo
@@ -521,9 +549,188 @@ pub fn align(
         .with_context(|| "Fetched commit has no tree")?
         .id;
     let old = if force_overwrite { None } else { old_index.as_ref() };
-    check_out_tree(&repo, tree_id, old, &old_paths, progress, &gix::interrupt::IS_INTERRUPTED)?;
-    clear_align_marker(&repo);
-    Ok(target_id)
+    check_out_tree(repo, tree_id, old, &old_paths, progress, &gix::interrupt::IS_INTERRUPTED)?;
+    clear_align_marker(repo);
+    Ok(())
+}
+
+/// The reflog message [`pin`] writes when it moves HEAD.
+const PIN_REFLOG_MESSAGE: &str = "cactup refetch: pin";
+
+/// Where [`pin`] parks what it fetches until HEAD holds the commit; deleted
+/// afterward, so a pinned repo carries no ref of cactup's own.
+const PIN_REF: &str = "refs/cactup/pin";
+
+/// Whether `commit` and its tree are in the object database: everything a
+/// checkout of it needs (a depth-1 fetch brings both).
+fn has_commit(repo: &gix::Repository, commit: ObjectId) -> bool {
+    repo.find_commit(commit).ok().and_then(|c| c.tree_id().ok()).is_some_and(|tree| repo.has_object(tree))
+}
+
+/// Fetch `refspec` from `origin` with the given depth.
+fn fetch_refspec(
+    repo: &gix::Repository,
+    refspec: &str,
+    shallow: Shallow,
+    progress: &mut (impl prodash::NestedProgress<SubProgress: 'static> + 'static),
+) -> Res<()> {
+    let mut remote = repo.find_remote("origin").with_context(|| "No origin remote")?;
+    remote
+        .replace_refspecs(Some(refspec), Direction::Fetch)
+        .with_context(|| "Failed to set fetch refspec")?;
+    remote
+        .connect(Direction::Fetch)
+        .with_context(|| "Failed to connect to origin")?
+        .prepare_fetch(&mut *progress, Default::default())
+        .with_context(|| "Failed to prepare fetch")?
+        .with_shallow(shallow)
+        .receive(&mut *progress, &gix::interrupt::IS_INTERRUPTED)?;
+    Ok(())
+}
+
+/// Bring `commit` into a repo that lacks it. First by its id alone at depth 1
+/// — exactly the pinned commit and its tree, whatever branch it is on and
+/// however far behind the tip. Not every server grants a want for an object
+/// it did not advertise; then through `git_ref` (`!REPO_BRANCH`, a branch or
+/// a tag, resolved by the remote), with full history, since nothing says how
+/// deep below that ref the commit sits.
+fn fetch_commit(
+    repo: &gix::Repository,
+    git_ref: Option<&str>,
+    commit: ObjectId,
+    progress: &mut (impl prodash::NestedProgress<SubProgress: 'static> + 'static),
+) -> Res<()> {
+    // Not retried: a server that refuses the want fails this way every time,
+    // and a real network failure gets its retries in the fallback below.
+    let by_id = fetch_refspec(repo, &format!("+{commit}:{PIN_REF}"), depth_one(), progress);
+    if gix::interrupt::is_triggered() {
+        by_id?;
+        bail!("Interrupted while fetching commit {commit}");
+    }
+    if by_id.is_ok() && has_commit(repo, commit) {
+        return Ok(());
+    }
+    let Some(git_ref) = git_ref else {
+        let why = by_id.err().map(|e| format!("{e:#}")).unwrap_or_else(|| "the server sent something else".into());
+        bail!(
+            "Failed to fetch commit {commit} by its id ({why}), and no !REPO_BRANCH names a branch or tag to \
+             fetch it through"
+        );
+    };
+    super::retry::with_backoff(progress, |progress| {
+        fetch_refspec(repo, &format!("+{git_ref}:{PIN_REF}"), Shallow::undo(), progress)
+            .with_context(|| format!("Failed to fetch {git_ref}"))
+    })?;
+    if !has_commit(repo, commit) {
+        bail!("Commit {commit} is not in the history of {git_ref} on origin");
+    }
+    Ok(())
+}
+
+fn depth_one() -> Shallow {
+    Shallow::DepthAtRemote(1.try_into().expect("nonzero"))
+}
+
+fn delete_pin_ref(repo: &gix::Repository) {
+    if let Ok(name) = gix::refs::FullName::try_from(PIN_REF)
+        && repo.try_find_reference(PIN_REF).ok().flatten().is_some()
+    {
+        let _ = repo.edit_reference(RefEdit {
+            change: Change::Delete { expected: PreviousValue::Any, log: RefLog::AndReference },
+            name,
+            deref: false,
+        });
+    }
+}
+
+/// Make a *clean* repo sit detached at exactly `commit` (a `!REPO_COMMIT`
+/// pin, §3.2), fetching the commit only when the repo lacks it, and returning
+/// it. A repo already at the commit is left alone without touching the
+/// network — which is what keeps a refetch from ever moving a pinned repo,
+/// and keeps it offline. `git_ref` is the branch or tag the pin was taken
+/// from, used only to find the commit when the server will not hand it out
+/// by id. As with [`align`], only what changed is written unless
+/// `force_overwrite`.
+pub fn pin(
+    repo_dir: &Path,
+    git_ref: Option<&str>,
+    commit: ObjectId,
+    force_overwrite: bool,
+    progress: &mut (impl prodash::NestedProgress<SubProgress: 'static> + 'static),
+) -> Res<ObjectId> {
+    let _span = crate::timing::span("git pin");
+    let mut repo = gix::open(repo_dir)
+        .with_context(|| format!("Failed to open '{}'", repo_dir.display()))?;
+    // Reflog entries need a committer identity (see `align`).
+    let _ = repo.committer_or_set_generic_fallback();
+
+    if !force_overwrite && repo.head_id().ok().map(|id| id.detach()) == Some(commit) {
+        clear_align_marker(&repo);
+        return Ok(commit);
+    }
+    if !has_commit(&repo, commit) {
+        let fetched = fetch_commit(&repo, git_ref, commit, progress);
+        if fetched.is_err() {
+            delete_pin_ref(&repo);
+        }
+        fetched?;
+    }
+    let edits = vec![update_ref(head_ref_name(), Target::Object(commit), PIN_REFLOG_MESSAGE)];
+    let switched = switch_tree(&repo, commit, edits, force_overwrite, progress);
+    // HEAD holds the commit now (or the fetch failed): the parking ref has
+    // done its job either way.
+    delete_pin_ref(&repo);
+    // Bare, as in `align`: see `INTERRUPTED_CHECKOUT`.
+    switched?;
+    Ok(commit)
+}
+
+/// Create `dest` as a repo pinned at `commit`: an empty repo whose `origin`
+/// is `url`, then [`pin`] — the clone a `!REPO_COMMIT` component gets, since
+/// a branch clone would fetch a tip that may not be the pin (or, for a tag,
+/// no branch at all). Like [`clone`], a failure before the checkout began
+/// leaves nothing behind; one during it leaves `dest` to be deleted.
+pub fn clone_pinned(
+    url: &str,
+    git_ref: Option<&str>,
+    commit: ObjectId,
+    dest: &Path,
+    progress: &mut (impl prodash::NestedProgress<SubProgress: 'static> + 'static),
+) -> Res<ObjectId> {
+    let _span = crate::timing::span("git clone");
+    std::fs::create_dir_all(dest).with_context(|| format!("Failed to create '{}'", dest.display()))?;
+    let pinned = gix::init(dest)
+        .with_context(|| format!("Failed to create a repository in '{}'", dest.display()))
+        .and_then(|repo| set_origin(&repo, url))
+        .and_then(|()| pin(dest, git_ref, commit, false, progress));
+    let Err(e) = pinned else { return pinned };
+    if dest.join(".git").join("cactup-align").exists() {
+        let name = dest.file_name().unwrap_or(dest.as_os_str()).to_string_lossy();
+        return Err(e.context(format!(
+            "'{}' is incomplete; delete it, then fetch {name} again",
+            dest.display()
+        )));
+    }
+    let _ = std::fs::remove_dir_all(dest);
+    Err(e.context(format!("Failed to clone {url} at {commit}")))
+}
+
+/// Give a fresh repo its `origin`: `url`, fetching every branch, as a clone
+/// would — so `git fetch` inside a pinned repo still does what a user expects.
+fn set_origin(repo: &gix::Repository, url: &str) -> Res<()> {
+    let config_path = repo.git_dir().join("config");
+    let mut file = gix::config::File::from_path_no_includes(config_path.clone(), gix::config::Source::Local)
+        .with_context(|| format!("Failed to read '{}'", config_path.display()))?;
+    let origin = Some("origin".into());
+    file.set_raw_value_by("remote", origin, "url", gix::bstr::BStr::new(url.as_bytes()))
+        .and_then(|_| {
+            let fetch = "+refs/heads/*:refs/remotes/origin/*";
+            file.set_raw_value_by("remote", origin, "fetch", gix::bstr::BStr::new(fetch.as_bytes()))
+        })
+        .with_context(|| format!("Failed to set remote.origin in '{}'", config_path.display()))?;
+    let mut text = Vec::new();
+    file.write_to(&mut text).with_context(|| "Failed to render git config")?;
+    std::fs::write(&config_path, text).with_context(|| format!("Failed to write '{}'", config_path.display()))
 }
 
 /// The reflog message [`align`] writes when it moves a branch and HEAD.
@@ -1164,6 +1371,9 @@ fn source_diff_walking(repo_dir: &Path, untracked_files: Untracked) -> Res<Sourc
 
 /// The branch and commit a repo is currently on, for post-pass assertions and
 /// `fetch-state.toml`.
+/// What [`head_of`] names the branch of a detached HEAD.
+pub const DETACHED: &str = "(detached)";
+
 pub fn head_of(repo_dir: &Path) -> Res<(String, ObjectId)> {
     let repo = gix::open(repo_dir)
         .with_context(|| format!("Failed to open '{}'", repo_dir.display()))?;
@@ -1171,7 +1381,7 @@ pub fn head_of(repo_dir: &Path) -> Res<(String, ObjectId)> {
     let branch = head
         .referent_name()
         .map(|n| n.shorten().to_string())
-        .unwrap_or_else(|| "(detached)".to_owned());
+        .unwrap_or_else(|| DETACHED.to_owned());
     let id = repo.head_id().with_context(|| "HEAD points at no commit")?.detach();
     Ok((branch, id))
 }
@@ -1386,6 +1596,82 @@ mod align_tests {
         text.push_str("\n[user]\n\tname = cactup-test\n\temail = test@invalid\n");
         std::fs::write(&config, text).unwrap();
         (upstream, clone_dir, branch)
+    }
+
+    /// An upstream of three commits whose middle one carries a track-style
+    /// tag, and a depth-1 clone of its tip. The first commit — returned — is
+    /// in the tag's history but no ref points at it, so a server that only
+    /// grants advertised wants will not send it by id.
+    fn tagged_upstream_and_clone(tmp: &Path) -> (PathBuf, PathBuf, ObjectId) {
+        let (upstream, clone_dir, _) = upstream_and_clone(tmp, &[("v", "1\n", false)]);
+        let old = head_of(&upstream).unwrap().1;
+        let tagged = testrepo::commit_tree(&upstream, &[("v", "2\n", false)]);
+        let repo = gix::open(&upstream).unwrap();
+        repo.reference("refs/tags/mp/v1.0.0", tagged, PreviousValue::Any, "tag").unwrap();
+        testrepo::commit_tree(&upstream, &[("v", "3\n", false)]);
+        // Re-clone so the clone's tip is the new commit, not `old`.
+        std::fs::remove_dir_all(&clone_dir).unwrap();
+        let (branch, _) = head_of(&upstream).unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("test clone");
+        clone(&upstream.to_string_lossy(), Some(&branch), &clone_dir, &mut progress).unwrap();
+        assert!(!has_commit(&gix::open(&clone_dir).unwrap(), old), "fixture: the old commit is not fetched yet");
+        (upstream, clone_dir, old)
+    }
+
+    /// A server that refuses a want for an object it did not advertise (git
+    /// protocol v0 without `allowAnySHA1InWant`) still yields the pin: it is
+    /// fetched through the tag named in `!REPO_BRANCH`.
+    #[test]
+    fn pin_falls_back_to_the_named_tag_when_the_server_refuses_the_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, clone_dir, old) = tagged_upstream_and_clone(tmp.path());
+        let config = clone_dir.join(".git/config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str("\n[protocol]\n\tversion = 0\n");
+        std::fs::write(&config, text).unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("test pin");
+        let by_id = fetch_refspec(&gix::open(&clone_dir).unwrap(), &format!("+{old}:{PIN_REF}"), depth_one(), &mut progress);
+        assert!(by_id.is_err(), "fixture: the server must refuse the commit by id, or the fallback is not exercised");
+
+        assert_eq!(pin(&clone_dir, Some("mp/v1.0.0"), old, false, &mut progress).unwrap(), old);
+        assert_eq!(head_of(&clone_dir).unwrap(), (DETACHED.to_owned(), old));
+        assert_eq!(std::fs::read_to_string(clone_dir.join("v")).unwrap(), "1\n");
+        let repo = gix::open(&clone_dir).unwrap();
+        assert!(repo.try_find_reference(PIN_REF).unwrap().is_none(), "the parking ref is cleaned up");
+        // Clean, detached, at the pin.
+        assert!(matches!(probe(&clone_dir, &repo_url(&clone_dir), "").state, RepoState::Detached { head } if head == old));
+    }
+
+    /// A commit the remote does not have fails the pin with a message naming
+    /// it, and a pinned clone that failed leaves no directory behind.
+    #[test]
+    fn a_pin_the_remote_lacks_fails_and_leaves_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (upstream, _, old) = tagged_upstream_and_clone(tmp.path());
+        let url = upstream.to_string_lossy().into_owned();
+        let bogus = ObjectId::from_hex(b"1111111111111111111111111111111111111111").unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("test clone");
+
+        let dest = tmp.path().join("pinned-bogus");
+        let err = format!("{:#}", clone_pinned(&url, Some("mp/v1.0.0"), bogus, &dest, &mut progress).unwrap_err());
+        assert!(err.contains("is not in the history of mp/v1.0.0"), "{err}");
+        assert!(!dest.exists(), "a failed pinned clone leaves nothing behind");
+
+        let err = format!("{:#}", clone_pinned(&url, None, bogus, &dest, &mut progress).unwrap_err());
+        assert!(err.contains("no !REPO_BRANCH"), "{err}");
+        assert!(!dest.exists());
+
+        // And the real tagged commit clones, detached, with origin set up.
+        let dest = tmp.path().join("pinned");
+        assert_eq!(clone_pinned(&url, Some("mp/v1.0.0"), old, &dest, &mut progress).unwrap(), old);
+        assert_eq!(head_of(&dest).unwrap(), (DETACHED.to_owned(), old));
+        assert!(matches!(probe(&dest, &url, "").state, RepoState::Detached { head } if head == old));
+    }
+
+    fn repo_url(dir: &Path) -> String {
+        let repo = gix::open(dir).unwrap();
+        let remote = repo.find_remote("origin").unwrap();
+        remote.url(Direction::Fetch).unwrap().to_bstring().to_string()
     }
 
     fn align_now(dir: &Path, branch: &str, force: bool) -> ObjectId {

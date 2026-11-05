@@ -450,6 +450,7 @@ mod tests {
             anon_pass: None,
             repo_path: None,
             branch: None,
+            commit: None,
             repo: repo.to_owned(),
         }
     }

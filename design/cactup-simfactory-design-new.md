@@ -610,6 +610,39 @@ thornlist's URL, persisted to `.git/config` and always reported, before
 fetching and checking out from it; this is the fork-adoption path (point the
 thornlist at a fork of a component, then `refetch --overwrite <that repo>`).
 
+**Pinned repos: `!REPO_COMMIT`.** A git section may carry
+`!REPO_COMMIT = <full commit id>` (40 hex digits, or 64 for a SHA-256 repo;
+abbreviations are refused, and so is a pin on any other `!TYPE`). It is a
+cactup extension: GetComponents ignores directives it does not know, so an
+older tool fetches the branch unpinned rather than failing. A pinned repo is
+checked out **detached at exactly that commit** and is **never
+fast-forwarded**: a refetch of an unchanged pin finds the repo already there
+and leaves it alone without touching the network. `!REPO_BRANCH` keeps
+naming where the pin came from — a branch, or a tag such as a Cactarium
+track tag `mixed-precision/v1.4.0` — and is only a label plus the place to
+look for the commit. The commit is fetched by its id alone at depth 1 when the
+repo lacks it; a server that will not hand out an unadvertised commit
+(protocol v0/v1 without `allowAnySHA1InWant`) gets the fallback of fetching
+`!REPO_BRANCH` with full history and finding the commit there. Every
+component of one repo must agree on the pin, as on URL and branch. A fresh
+pinned repo is created empty with `origin` set to the URL (fetching every
+branch, as a clone would) and then pinned; a failure before its checkout
+began leaves nothing behind.
+
+Classification of a pinned repo follows the rules above with one change:
+the branch it happens to be on is no reason to skip it — local edits and
+local commits still are. A clean **detached** HEAD is a pinned repo's normal
+state, and whether cactup may move it depends on who put it there:
+`fetch-state.toml` records, per repo, the commit each fetch left HEAD at and
+the pin it fetched to (`commit`). Detached at the pin, or where cactup's
+last fetch left it, the repo is cactup's to move — to a new pin, or back
+onto its branch when the list drops the pin. Detached anywhere else is the
+user's doing and is skipped (`detached HEAD at …`) unless forced; forcing a
+pinned repo pins it. `installation delta` compares a pinned repo by commit
+alone (its recorded branch is a label, not a branch HEAD should be on), and
+`refetch --prune` treats an orphan detached exactly at cactup's pin as
+clean.
+
 **The arrangement link pass.** After every fetch, each git component's
 `$TARGET/$CHECKOUT` is materialized as a **relative symlink** into
 `<root-dir>/repos/<repo>[/<REPO_PATH>]`. This is what actually puts a thorn into

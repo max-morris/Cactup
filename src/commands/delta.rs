@@ -138,7 +138,11 @@ pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
         };
         let record = recorded.get(repo);
         let moved = record.is_some_and(|r| r.head != diff.head.to_string());
+        // A pinned repo sits detached at its pin, and its recorded branch is
+        // only the label the pin came from: for it, the commit is the whole
+        // story (`moved`).
         let branch_changed = record
+            .filter(|r| r.commit.is_none())
             .and_then(|r| r.branch.as_deref())
             .is_some_and(|b| diff.branch.as_deref() != Some(b));
         if !moved && !branch_changed && diff.modified.is_empty() && diff.untracked.is_empty() {
