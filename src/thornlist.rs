@@ -157,6 +157,144 @@ fn repo_behind(path: &Path, repos_dir: &Path, repos_real: Option<&Path>) -> Opti
     first(real.strip_prefix(repos_real?).ok()?)
 }
 
+/// `text` with each repo in `pins` (repo name → full commit id) pinned by a
+/// `!REPO_COMMIT` (§3.2), and nothing else changed: the header, comments and
+/// every section without a pinned repo stay byte for byte. A section whose
+/// components all come from one repo gains the directive just before its
+/// `!CHECKOUT` (or has an existing one rewritten). A section that spans
+/// several repos — `$1`/`$2` in its `!URL` — is split into one copy per repo,
+/// in order of first checkout, each with that repo's checkouts and pin: every
+/// other directive is substituted per checkout, so the copies mean exactly
+/// what the one section did. The result is parsed back and must name the
+/// same checkouts with exactly these pins, or this fails rather than return
+/// a list that means something else. A pin for a repo the list does not
+/// name is an error too.
+pub fn pin_text(text: &str, pins: &std::collections::BTreeMap<String, String>) -> crate::Res<String> {
+    use anyhow::{bail, Context};
+    let original = parse(text).context("The thornlist does not parse")?;
+    for repo in pins.keys() {
+        if !original.components().iter().any(|c| &c.repo == repo) {
+            bail!("A pin names repo {repo}, which the thornlist does not");
+        }
+    }
+    let target_re = regex::Regex::new(r"(?m)^!TARGET\s*=").expect("valid regex");
+    let starts: Vec<usize> = target_re.find_iter(text).map(|m| m.start()).collect();
+    let Some(&first) = starts.first() else { return Ok(text.to_owned()) };
+    // Every section is parsed alone under the list's header plus all of its
+    // !DEFINEs (a define may sit anywhere in the body), to learn its repos.
+    let header = &text[..first];
+    let defines: String = text
+        .lines()
+        .filter(|l| l.trim_start().starts_with("!DEFINE"))
+        .filter(|l| !header.contains(*l))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let mut out = String::from(header);
+    for (i, &start) in starts.iter().enumerate() {
+        let end = starts.get(i + 1).copied().unwrap_or(text.len());
+        let section = &text[start..end];
+        let alone = parse(&format!("{header}{defines}\n{section}"))
+            .with_context(|| format!("Failed to read the section at byte {start} on its own"))?;
+        // (repo, its checkouts) in order of first checkout.
+        let mut repos: Vec<(String, Vec<String>)> = Vec::new();
+        for c in alone.components() {
+            match repos.iter_mut().find(|(r, _)| r == &c.repo) {
+                Some((_, checkouts)) => checkouts.push(c.checkout.clone()),
+                None => repos.push((c.repo.clone(), vec![c.checkout.clone()])),
+            }
+        }
+        if !repos.iter().any(|(r, _)| pins.contains_key(r)) {
+            out.push_str(section);
+            continue;
+        }
+        if let [(repo, _)] = repos.as_slice() {
+            out.push_str(&pin_section(section, None, &pins[repo]));
+            continue;
+        }
+        for (n, (repo, checkouts)) in repos.iter().enumerate() {
+            let pin = pins.get(repo).map_or("", String::as_str);
+            out.push_str(&pin_section(section, Some((checkouts, n == 0, n + 1 == repos.len())), pin));
+        }
+    }
+    // Same checkouts, and exactly the pins asked for.
+    let pinned = parse(&out).context("The pinned thornlist does not parse")?;
+    let key = |c: &Component| (c.repo.clone(), c.target.clone(), c.checkout.clone());
+    let mut want: Vec<_> = original.components().iter().map(key).collect();
+    let mut got: Vec<_> = pinned.components().iter().map(key).collect();
+    want.sort();
+    got.sort();
+    if want != got {
+        bail!("Pinning changed which checkouts the thornlist names (a bug in pinning this list)");
+    }
+    for c in pinned.components() {
+        let expected = pins.get(&c.repo).or(original.components().iter().find(|o| o.repo == c.repo).and_then(|o| o.commit.as_ref()));
+        if c.commit.as_ref() != expected {
+            bail!("Pinning left repo {} at {:?} instead of {:?} (a bug in pinning this list)", c.repo, c.commit, expected);
+        }
+    }
+    Ok(out)
+}
+
+/// One section, pinned to `commit` (empty: no pin, any existing one dropped)
+/// and, with `checkouts`, narrowed to them. Of a split section's checkout
+/// lines, the comments among the checkouts (a `#DISABLED` one included) go
+/// in the first copy and whatever follows the last checkout (blank lines and
+/// comments leading into the next section) after the last, so a split
+/// repeats nothing and moves nothing out of place.
+fn pin_section(section: &str, checkouts: Option<(&Vec<String>, bool, bool)>, commit: &str) -> String {
+    let key_re = regex::Regex::new(r"(?m)^\s*!([^\s=]+)\s*=").expect("valid regex");
+    let keys: Vec<(String, usize)> =
+        key_re.captures_iter(section).map(|c| (c[1].to_owned(), c.get(0).expect("match").start())).collect();
+    let value_end = |i: usize| keys.get(i + 1).map_or(section.len(), |k| k.1);
+    let mut out = String::new();
+    let mut done = 0;
+    for (i, (key, start)) in keys.iter().enumerate() {
+        match key.as_str() {
+            // Dropped here, written back just before !CHECKOUT.
+            "REPO_COMMIT" => {
+                out.push_str(&section[done..*start]);
+                done = next_line(section, value_end(i));
+            }
+            "CHECKOUT" => {
+                out.push_str(&section[done..*start]);
+                if !commit.is_empty() {
+                    out.push_str(&format!("!REPO_COMMIT = {commit}\n"));
+                }
+                match checkouts {
+                    None => done = *start,
+                    Some((checkouts, first, last)) => {
+                        out.push_str(&format!("!CHECKOUT = {}\n", checkouts.join(" ")));
+                        let lines: Vec<&str> = section[*start..value_end(i)].split_inclusive('\n').collect();
+                        let is_token = |l: &&str| !l.trim().is_empty() && !l.trim_start().starts_with('#');
+                        // The `!CHECKOUT` line itself is always a token line
+                        // here (or holds none, which changes nothing).
+                        let last_token = lines.iter().rposition(|l| is_token(l)).unwrap_or(0);
+                        if first {
+                            let among = lines[1..=last_token].iter();
+                            out.extend(among.filter(|l| l.trim_start().starts_with('#')).copied());
+                        }
+                        if last {
+                            out.extend(lines[last_token + 1..].iter().copied());
+                        }
+                        done = value_end(i);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out.push_str(&section[done..]);
+    out
+}
+
+/// The index just past the line `pos` falls in (or the end).
+fn next_line(text: &str, pos: usize) -> usize {
+    match text[..pos].rfind('\n') {
+        Some(nl) if nl + 1 == pos => pos,
+        _ => text[pos..].find('\n').map_or(text.len(), |nl| pos + nl + 1),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,5 +371,43 @@ mod tests {
             list.components().iter().filter(|c| c.ty == ComponentType::Git).map(|c| c.repo.as_str()).collect();
         assert_eq!(git, ["carpetx", "abs"]);
         assert_eq!(list.untracked(), ["the Cactus flesh".to_string()]);
+    }
+
+
+    /// `pin_text`: a one-repo section gains `!REPO_COMMIT` before its
+    /// `!CHECKOUT` (or has its old one rewritten); a section spanning repos
+    /// through `$2` in its URL is split per repo, keeping its `#DISABLED`
+    /// line; everything without a pin stays byte for byte.
+    #[test]
+    fn pin_text_pins_each_repo_and_leaves_the_rest_alone() {
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        let c = "c".repeat(40);
+        let text = "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n# the flesh\n\
+                    !TARGET = $ROOT\n!TYPE = git\n!URL = https://x/flesh.git\n!REPO_COMMIT = 0000000000000000000000000000000000000000\n!CHECKOUT = Makefile\n\n\
+                    !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://x/$2.git\n!REPO_PATH = ../$2\n\
+                    !CHECKOUT =\n  ET/Alpha\n#DISABLED ET/Gamma\n  ET/Beta\n\n\
+                    # untouched\n!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://x/other.git\n!CHECKOUT = O/One\n";
+        let pins: std::collections::BTreeMap<String, String> =
+            [("flesh", &a), ("Alpha", &b), ("Beta", &c)].iter().map(|(r, p)| (r.to_string(), p.to_string())).collect();
+        let out = pin_text(text, &pins).unwrap();
+
+        let list = parse(&out).unwrap();
+        let commit = |repo: &str| list.components().iter().find(|c| c.repo == repo).unwrap().commit.clone();
+        assert_eq!(commit("flesh"), Some(a.clone()));
+        assert_eq!(commit("Alpha"), Some(b.clone()));
+        assert_eq!(commit("Beta"), Some(c.clone()));
+        assert_eq!(commit("other"), None);
+        assert_eq!(list.disabled_thorns(), ["ET/Gamma".to_string()]);
+        assert!(!out.contains("0000000000"), "the old pin is rewritten, not doubled: {out}");
+        assert!(out.starts_with("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n# the flesh\n"), "{out}");
+        assert!(out.ends_with("# untouched\n!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://x/other.git\n!CHECKOUT = O/One\n"), "{out}");
+        assert_eq!(out.matches("!URL = https://x/$2.git").count(), 2, "the $2 section is split per repo: {out}");
+
+        // No pins: nothing changes at all.
+        assert_eq!(pin_text(text, &Default::default()).unwrap(), text);
+        // A pin for a repo the list does not name.
+        let stray = [("nope".to_string(), a.clone())].into_iter().collect();
+        assert!(format!("{:#}", pin_text(text, &stray).unwrap_err()).contains("nope"));
     }
 }

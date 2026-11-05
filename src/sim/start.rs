@@ -1859,5 +1859,14 @@ mod tests {
         assert!(err.contains("--allow-unpushed"), "{err}");
         export("unpushed", crate::args::SimExportArgs { allow_unpushed: true, ..export_args("unpushed", &out) })
             .unwrap();
+
+        // Unpack: the thornlist comes back with its pin, the parfile verbatim.
+        export("bhns", export_args("bhns", &out)).unwrap();
+        let unpacked = tmp.path().join("unpacked");
+        crate::sim::export::unpack(&out, &unpacked, false).unwrap();
+        let list = crate::thornlist::parse(&fs::read_to_string(unpacked.join("bhns.th")).unwrap()).unwrap();
+        assert_eq!(list.components()[0].commit.as_deref(), Some(built.to_string().as_str()));
+        assert_eq!(fs::read_to_string(unpacked.join("bhns.par")).unwrap(), fs::read_to_string(&parfile).unwrap());
+        assert!(crate::sim::export::unpack(&out, &unpacked, false).is_err(), "no silent overwrite");
     }
 }

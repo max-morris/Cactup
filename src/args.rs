@@ -985,6 +985,18 @@ pub(crate) enum SimCommand {
     // §8.9 (Cactarium .sim files)
     /// Write a simulation as a .sim file: its parfile plus the exact sources and build it ran on
     Export(SimExportArgs),
+    // §8.9
+    /// Unpack a .sim file into a thornlist (its pins as !REPO_COMMIT) and a parfile
+    Unpack {
+        /// The .sim file.
+        file: PathBuf,
+        /// Where to write them (default: the current directory).
+        #[clap(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+        /// Overwrite files that exist.
+        #[clap(short, long)]
+        force: bool,
+    },
     // §8.7
     /// Move a simulation to TRASH/
     Delete {

@@ -158,6 +158,40 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
     Ok(())
 }
 
+/// `cactup sim unpack` (§8.9): a `.sim` file back into the two files a
+/// veteran works with — its thornlist, with every pinned repo pinned by
+/// `!REPO_COMMIT`, and its parfile — both under the names they carried.
+pub fn unpack(file: &Path, dir: &Path, force: bool) -> Res<()> {
+    let text = std::fs::read_to_string(file).with_context(|| format!("Failed to read '{}'", file.display()))?;
+    let sim = SimFile::from_toml(&text).map_err(|e| anyhow!("'{}': {e}", file.display()))?;
+    let pins = sim.repos.iter().filter_map(|r| Some((r.name.clone(), r.commit.clone()?))).collect();
+    let thornlist = thornlist::pin_text(&sim.thornlist.text, &pins)
+        .with_context(|| format!("Failed to pin the thornlist in '{}'", file.display()))?;
+    let outputs = [(&sim.thornlist.filename, thornlist), (&sim.parfile.filename, sim.parfile.text.clone())];
+    for (name, _) in &outputs {
+        let path = dir.join(name);
+        if path.exists() && !force {
+            bail!("'{}' already exists (use -f to overwrite it)", path.display());
+        }
+    }
+    std::fs::create_dir_all(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
+    for (name, content) in outputs {
+        let path = dir.join(name);
+        std::fs::write(&path, content).with_context(|| format!("Failed to write '{}'", path.display()))?;
+        println!("Wrote '{}'", path.display());
+    }
+    let unpinned: Vec<&str> =
+        sim.repos.iter().filter(|r| r.commit.is_none()).map(|r| r.name.as_str()).collect();
+    if !unpinned.is_empty() {
+        println!("{}", format!("Not pinned, so they follow their branch: {}", unpinned.join(", ")).yellow());
+    }
+    for input in &sim.inputs {
+        let what = input.description.as_deref().map(|d| format!(": {d}")).unwrap_or_default();
+        println!("The parfile needs knob {}{what}", input.knob.bold());
+    }
+    Ok(())
+}
+
 /// The config record the simulation's binary was built from: the copy frozen
 /// at create, or — for a simulation created before cactup froze it — the
 /// config's own record, but only while it still describes that very build.

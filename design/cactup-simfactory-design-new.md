@@ -4186,6 +4186,15 @@ A file with every repo pinned and nothing dirty or untracked is **fully
 specified**; only such a file can be published, and export says so when its
 output is not.
 
+`cactup sim unpack <file.sim> [--dir D] [-f]` goes the other way, for whoever
+works with loose files: it writes the thornlist and the parfile under the
+names they carried, the thornlist with every pinned repo pinned by
+`!REPO_COMMIT` (`thornlist::pin_text`: a section from one repo gains the
+directive; a section spanning repos through `$1`/`$2` in its `!URL` is split
+into one copy per repo; everything else stays byte for byte, and the result
+is parsed back to prove it names the same checkouts with exactly those pins).
+It names the repos left unpinned and the knob inputs the parfile needs.
+
 ---
 
 ## 9. ON-DISK LAYOUT — the binding compatibility contract
