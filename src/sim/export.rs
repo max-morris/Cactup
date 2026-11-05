@@ -9,7 +9,7 @@
 //! the pins go in a per-repo table beside them.
 
 use super::Simulation;
-use crate::args::SimExportArgs;
+use crate::args::{SimDescribeArgs, SimExportArgs, SimPackArgs};
 use crate::build::{self, ConfigMeta, OptionlistSource};
 use crate::commands::Ctx;
 use crate::database::KNOWN_KNOBS;
@@ -33,9 +33,7 @@ pub fn export(ctx: &Ctx, args: SimExportArgs) -> Res<()> {
 pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<()> {
     let sim = Simulation::locate(inst, &args.sim)?;
     let file = args.file.clone().unwrap_or_else(|| PathBuf::from(format!("{}.sim", sim.name)));
-    if file.exists() && !args.force {
-        bail!("'{}' already exists (use -f to overwrite it)", file.display());
-    }
+    refuse_overwrite(&file, &args.describe)?;
 
     let config = frozen_config(inst, &sim)?;
     let cfg_dir = sim.cactup_dir().join("cfg");
@@ -47,39 +45,85 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
 
     // The pins, and the checks that decide whether anyone else could fetch them.
     let fetched = FetchState::read(&inst.root)?;
-    let mut repos = repo_pins(&list, &config);
+    let repos = repo_pins(&list, |repo| config.sources.as_ref().and_then(|s| s.get(repo)).cloned());
     let checks = check_repos(&sim.meta.sourcedir.join("repos"), &repos, fetched.as_ref())?;
+    refuse_unfetchable(&repos, &checks, args.allow_dirty, args.allow_unpushed, "when the binary was built")?;
+
+    let parfile = parfile_at(&sim.cactup_dir().join("par").join(&sim.meta.parfile))?;
+    let processed = std::fs::read_to_string(cfg_dir.join(build::THORNLIST_PROCESSED)).unwrap_or_default();
+    let provenance = provenance(&sim, &config, &list, &processed);
+    let fallback_summary = format!("{} on {}", super::parfile_stem(&parfile.filename), sim.meta.machine);
+    finish(
+        ctx,
+        &args.describe,
+        &file,
+        Parts {
+            default_name: sim.name.clone(),
+            fallback_summary,
+            root: list.root().to_owned(),
+            thornlist: ThornlistText { filename: thornlist_filename(&config.thornlist), text: source_text, untracked: Vec::new() },
+            parfile,
+            repos,
+            run: run_hints(&sim),
+            provenance,
+        },
+    )
+}
+
+/// What a `.sim` is made of before its descriptive fields are settled.
+struct Parts {
+    default_name: String,
+    /// The summary when the parfile has no leading comment.
+    fallback_summary: String,
+    root: String,
+    thornlist: ThornlistText,
+    parfile: Parfile,
+    repos: Vec<RepoPin>,
+    run: Option<RunHints>,
+    provenance: Provenance,
+}
+
+fn refuse_overwrite(file: &Path, describe: &SimDescribeArgs) -> Res<()> {
+    if file.exists() && !describe.force {
+        bail!("'{}' already exists (use -f to overwrite it)", file.display());
+    }
+    Ok(())
+}
+
+/// Refuse pins nobody else could reproduce: sources with uncommitted edits
+/// (`when` says when they had them), and commits no remote has.
+fn refuse_unfetchable(repos: &[RepoPin], published: &[bool], allow_dirty: bool, allow_unpushed: bool, when: &str) -> Res<()> {
     let dirty: Vec<&str> = repos.iter().filter(|r| r.dirty).map(|r| r.name.as_str()).collect();
-    if !dirty.is_empty() && !args.allow_dirty {
+    if !dirty.is_empty() && !allow_dirty {
         bail!(
-            "These sources had uncommitted changes when the binary was built, so no commit reproduces it: {}. \
-             Commit them and rebuild, or pass --allow-dirty to export them marked dirty",
+            "These sources had uncommitted changes {when}, so no commit reproduces them: {}. Commit them (and \
+             rebuild), or pass --allow-dirty to mark them dirty",
             dirty.join(", ")
         );
     }
     let unpushed: Vec<String> = repos
         .iter()
-        .zip(&checks)
+        .zip(published)
         .filter(|(_, published)| !**published)
         .map(|(r, _)| format!("{} ({})", r.name, short(r.commit.as_deref().unwrap_or(""))))
         .collect();
-    if !unpushed.is_empty() && !args.allow_unpushed {
+    if !unpushed.is_empty() && !allow_unpushed {
         bail!(
             "These commits are on no remote branch or tag this installation knows of, so nobody else could fetch \
              them: {}. Push them (and refetch, so cactup sees them), or pass --allow-unpushed",
             unpushed.join(", ")
         );
     }
+    Ok(())
+}
 
-    let parfile = parfile(&sim)?;
+/// Settle the descriptive fields — flags, else defaults, offered for editing
+/// on a terminal — then write the file and say what it holds.
+fn finish(ctx: &Ctx, describe: &SimDescribeArgs, file: &Path, parts: Parts) -> Res<()> {
+    let Parts { default_name, fallback_summary, root, thornlist, parfile, repos, run, provenance } = parts;
     warn_about_paths(&parfile);
-    let processed = std::fs::read_to_string(cfg_dir.join(build::THORNLIST_PROCESSED)).unwrap_or_default();
-    let provenance = provenance(&sim, &config, &list, &processed);
-    let run = run_hints(&sim);
-
-    // The descriptive fields: flags, else defaults, offered for editing on a terminal.
     let (lead_summary, lead_description) = leading_comment(&parfile.text);
-    let interactive = !args.yes && std::io::stdin().is_terminal();
+    let interactive = !describe.yes && std::io::stdin().is_terminal();
     let ask = |question: &str, given: &Option<String>, default: String| -> Res<String> {
         match given {
             Some(value) => Ok(value.clone()),
@@ -87,13 +131,9 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
             None => Ok(default),
         }
     };
-    let name = ask("Name", &args.name, sim.name.clone())?;
-    let summary = ask(
-        "Summary",
-        &args.summary,
-        lead_summary.unwrap_or_else(|| format!("{} on {}", super::parfile_stem(&parfile.filename), sim.meta.machine)),
-    )?;
-    let authors = match args.authors.as_slice() {
+    let name = ask("Name", &describe.name, default_name)?;
+    let summary = ask("Summary", &describe.summary, lead_summary.unwrap_or(fallback_summary))?;
+    let authors = match describe.authors.as_slice() {
         [] => {
             let default = git_user_name().unwrap_or_default();
             let given = ask("Authors (comma-separated)", &None, default)?;
@@ -102,7 +142,7 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
         given => given.to_vec(),
     };
     let license_default = ctx.db.read().ok().and_then(|db| db.knob("default-license").map(str::to_owned));
-    let license = ask("License (SPDX, empty for none)", &args.license, license_default.unwrap_or_default())?;
+    let license = ask("License (SPDX, empty for none)", &describe.license, license_default.unwrap_or_default())?;
     let mut inputs = inputs(&parfile);
     if interactive {
         for input in &mut inputs {
@@ -119,25 +159,21 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
         sim: SimMeta {
             name,
             summary: Some(summary).filter(|s| !s.is_empty()),
-            description: args.description.clone().or(lead_description),
+            description: describe.description.clone().or(lead_description),
             authors,
             license: Some(license).filter(|l| !l.is_empty()),
             cactarium: None,
-            root: list.root().to_owned(),
+            root,
         },
-        thornlist: ThornlistText {
-            filename: thornlist_filename(&config),
-            text: source_text,
-            untracked: Vec::new(),
-        },
+        thornlist,
         parfile,
         inputs,
-        repos: std::mem::take(&mut repos),
+        repos,
         run,
         provenance: Some(provenance),
     };
     let text = sim_file.to_toml().map_err(|e| anyhow!("{e}"))?;
-    std::fs::write(&file, text).with_context(|| format!("Failed to write '{}'", file.display()))?;
+    std::fs::write(file, text).with_context(|| format!("Failed to write '{}'", file.display()))?;
 
     let pinned = sim_file.repos.iter().filter(|r| r.commit.is_some() || r.sha256.is_some()).count();
     println!(
@@ -151,11 +187,159 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
         let what: Vec<String> = missing.iter().map(ToString::to_string).collect();
         println!(
             "{}",
-            format!("Not fully specified, so it cannot be published to the Cactarium: {}", what.join("; "))
-                .yellow()
+            format!("Not fully specified, so it cannot be published to the Cactarium: {}", what.join("; ")).yellow()
         );
     }
     Ok(())
+}
+
+/// `cactup sim pack` (§8.9): a `.sim` from a loose thornlist and parfile,
+/// for whoever has those and no simulation. With `-I`, each repo is pinned
+/// to what that installation has checked out (its live HEAD, checked like an
+/// export's); without, to the commit its branch or tag names on the remote
+/// today — a reproducible record of "the list as of now", and said so.
+pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
+    let parfile = parfile_at(&args.parfile)?;
+    let stem = super::parfile_stem(&parfile.filename).to_owned();
+    let file = args.file.clone().unwrap_or_else(|| PathBuf::from(format!("{stem}.sim")));
+    refuse_overwrite(&file, &args.describe)?;
+    let text = std::fs::read_to_string(&args.thornlist)
+        .with_context(|| format!("Failed to read '{}'", args.thornlist.display()))?;
+    let list = thornlist::parse(&text).with_context(|| {
+        format!("'{}' is not a GetComponents (CRL) list (with any !INCLUDE spliced in)", args.thornlist.display())
+    })?;
+
+    let (repos, published) = if ctx.globals.installation.is_some() {
+        let inst = Installation::resolve(ctx)?;
+        let repos_dir = inst.cactus_root().join("repos");
+        let states = installed_states(&repos_dir, &list)?;
+        let repos = repo_pins(&list, |repo| states.get(repo).cloned());
+        let published = check_repos(&repos_dir, &repos, FetchState::read(&inst.root)?.as_ref())?;
+        (repos, published)
+    } else {
+        let tips = remote_tips(&list)?;
+        let repos = repo_pins(&list, |repo| tips.get(repo).map(ToString::to_string));
+        println!(
+            "{}",
+            "Pinned each repo to the commit its branch or tag names today (pass -I to pin to what an installation \
+             has instead)."
+                .dimmed()
+        );
+        // Each commit is a remote tip by construction.
+        let published = vec![true; repos.len()];
+        (repos, published)
+    };
+    refuse_unfetchable(&repos, &published, args.allow_dirty, args.allow_unpushed, "in the installation")?;
+
+    let thornlist_name = thornlist_filename(&args.thornlist.to_string_lossy());
+    finish(
+        ctx,
+        &args.describe,
+        &file,
+        Parts {
+            default_name: stem.clone(),
+            fallback_summary: stem,
+            root: list.root().to_owned(),
+            thornlist: ThornlistText { filename: thornlist_name, text, untracked: Vec::new() },
+            parfile,
+            repos,
+            run: None,
+            provenance: exporter(),
+        },
+    )
+}
+
+/// Per git repo the list names, the source state (§7.4) of its checkout in
+/// an installation — when it is a checkout of the very repo the list names.
+/// One pointing elsewhere (a fork) is left out, so it is not pinned to a
+/// commit of the wrong repo, and said so.
+fn installed_states(repos_dir: &Path, list: &thornlist::Thornlist) -> Res<std::collections::BTreeMap<String, String>> {
+    let repos = git_repos(list);
+    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+    let item = progress.add_child("read installed repos");
+    item.init(Some(repos.len()), Some(prodash::unit::label("repos")));
+    let item = std::sync::Mutex::new(item);
+    let read = crate::par::parallel_map(&repos, |(repo, url, _, _)| {
+        let current = item.lock().expect("pack progress poisoned").add_child(repo.clone());
+        let dir = repos_dir.join(repo);
+        let same_repo = gix::open(&dir)
+            .ok()
+            .and_then(|r| r.find_remote("origin").ok()?.url(gix::remote::Direction::Fetch).map(|u| u.to_bstring().to_string()))
+            .is_some_and(|on_disk| fetch::git::normalize_url(&on_disk) == fetch::git::normalize_url(url));
+        let state = if same_repo { fetch::git::source_state(&dir).ok() } else { None };
+        drop(current);
+        item.lock().expect("pack progress poisoned").inc();
+        (repo.clone(), dir.exists() && !same_repo, state)
+    });
+    drop(item);
+    if let Some(renderer) = renderer {
+        renderer.shutdown_and_wait();
+    }
+    let mut states = std::collections::BTreeMap::new();
+    for (repo, elsewhere, state) in read? {
+        if elsewhere {
+            println!("{}", format!("{repo}: the installation's checkout is of another repo; left unpinned").yellow());
+        }
+        if let Some(state) = state {
+            states.insert(repo, state);
+        }
+    }
+    Ok(states)
+}
+
+/// Per git repo the list names, the commit it pins (`!REPO_COMMIT`), else
+/// the one its branch or tag (or default branch) names on its remote now.
+/// Any remote that cannot be asked fails the whole pack: a silently unpinned
+/// repo is worse than no file.
+fn remote_tips(list: &thornlist::Thornlist) -> Res<std::collections::BTreeMap<String, gix::ObjectId>> {
+    let (pinned, repos): (Vec<_>, Vec<_>) = git_repos(list).into_iter().partition(|r| r.3.is_some());
+    let scratch = tempfile::tempdir().context("Failed to create a scratch directory")?;
+    gix::init_bare(scratch.path()).context("Failed to create a scratch repository")?;
+    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+    let item = progress.add_child("ask remotes for their tips");
+    item.init(Some(repos.len()), Some(prodash::unit::label("repos")));
+    let item = std::sync::Mutex::new(item);
+    let asked = crate::par::parallel_map(&repos, |(repo, url, git_ref, _)| {
+        let current = item.lock().expect("pack progress poisoned").add_child(repo.clone());
+        let tip = fetch::git::remote_tip(scratch.path(), url, git_ref.as_deref());
+        drop(current);
+        item.lock().expect("pack progress poisoned").inc();
+        (repo.clone(), tip)
+    });
+    drop(item);
+    if let Some(renderer) = renderer {
+        renderer.shutdown_and_wait();
+    }
+    let mut tips = std::collections::BTreeMap::new();
+    for (repo, _, _, commit) in pinned {
+        let commit = commit.expect("partitioned on it");
+        tips.insert(repo, gix::ObjectId::from_hex(commit.as_bytes()).context("The list pins an invalid commit")?);
+    }
+    let mut failed = Vec::new();
+    for (repo, tip) in asked? {
+        match tip {
+            Ok(tip) => {
+                tips.insert(repo, tip);
+            }
+            Err(e) => failed.push(format!("{repo}: {e:#}")),
+        }
+    }
+    if !failed.is_empty() {
+        bail!("Could not ask every remote for its tip:\n  {}", failed.join("\n  "));
+    }
+    Ok(tips)
+}
+
+/// Each git repo the list names once: (name, URL, branch or tag, pin).
+type GitRepo = (String, String, Option<String>, Option<String>);
+fn git_repos(list: &thornlist::Thornlist) -> Vec<GitRepo> {
+    let mut repos: Vec<GitRepo> = Vec::new();
+    for c in list.components().iter().filter(|c| c.ty == ComponentType::Git) {
+        if !repos.iter().any(|r| r.0 == c.repo) {
+            repos.push((c.repo.clone(), c.url.clone().unwrap_or_default(), c.branch.clone(), c.commit.clone()));
+        }
+    }
+    repos
 }
 
 /// `cactup sim unpack` (§8.9): a `.sim` file back into the two files a
@@ -211,21 +395,21 @@ fn frozen_config(inst: &Installation, sim: &Simulation) -> Res<ConfigMeta> {
 }
 
 /// One pin per repo the list names, in order of first appearance: a git repo
-/// at the commit its build recorded (dirty when that build saw local edits),
-/// anything else unpinned.
-fn repo_pins(list: &thornlist::Thornlist, config: &ConfigMeta) -> Vec<RepoPin> {
-    let sources = config.sources.as_ref();
+/// at the commit of its source state (§7.4's `<commit>[+<n>mod@…]`), dirty
+/// when that state saw local edits; a repo with no state, or anything not
+/// git, unpinned.
+fn repo_pins(list: &thornlist::Thornlist, state_of: impl Fn(&str) -> Option<String>) -> Vec<RepoPin> {
     let mut pins: Vec<RepoPin> = Vec::new();
     for c in list.components() {
         if pins.iter().any(|p| p.name == c.repo) {
             continue;
         }
-        let state = (c.ty == ComponentType::Git).then(|| sources.and_then(|s| s.get(&c.repo))).flatten();
+        let state = if c.ty == ComponentType::Git { state_of(&c.repo) } else { None };
         pins.push(RepoPin {
             name: c.repo.clone(),
             url: c.url.clone().unwrap_or_default(),
             git_ref: c.branch.clone(),
-            commit: state.map(|s| fetch::committed(s).to_owned()),
+            commit: state.as_deref().map(|s| fetch::committed(s).to_owned()),
             sha256: None,
             cactarium: None,
             dirty: state.is_some_and(|s| s.contains('+')),
@@ -267,11 +451,13 @@ fn check_repos(repos_dir: &Path, pins: &[RepoPin], fetched: Option<&FetchState>)
     checked
 }
 
-/// The parfile's master copy, with the variables it uses.
-fn parfile(sim: &Simulation) -> Res<Parfile> {
-    let filename = sim.meta.parfile.clone();
-    let path = sim.cactup_dir().join("par").join(&filename);
-    let text = std::fs::read_to_string(&path).with_context(|| format!("Failed to read '{}'", path.display()))?;
+/// A parfile with the variables it uses, under its own file name.
+fn parfile_at(path: &Path) -> Res<Parfile> {
+    let filename = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| anyhow!("'{}' names no file", path.display()))?;
+    let text = std::fs::read_to_string(path).with_context(|| format!("Failed to read '{}'", path.display()))?;
     let kind = if filename.ends_with(".py") { ParfileKind::Py } else { ParfileKind::Par };
     // A `.py` parfile reads its variables through the preamble (§6.1), not
     // through `@…@` tokens, so there is nothing to scan.
@@ -359,6 +545,19 @@ fn provenance(sim: &Simulation, config: &ConfigMeta, list: &thornlist::Thornlist
             p.disabled_thorns().iter().filter(|t| !list.disabled_thorns().contains(t)).cloned().collect()
         })
         .unwrap_or_default();
+    Provenance {
+        machine: Some(sim.meta.machine.clone()),
+        flavor,
+        optionlist,
+        universe: config.universe.clone(),
+        flags,
+        machine_disabled,
+        ..exporter()
+    }
+}
+
+/// Provenance that says only who wrote the file, and when.
+fn exporter() -> Provenance {
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let version = match crate::build_info::DIST {
         Some(stamp) => format!("cactup {} ({})", env!("CARGO_PKG_VERSION"), stamp.id),
@@ -367,12 +566,12 @@ fn provenance(sim: &Simulation, config: &ConfigMeta, list: &thornlist::Thornlist
     Provenance {
         exported_by: Some(version),
         exported_at: now.parse().ok(),
-        machine: Some(sim.meta.machine.clone()),
-        flavor,
-        optionlist,
-        universe: config.universe.clone(),
-        flags,
-        machine_disabled,
+        machine: None,
+        flavor: None,
+        optionlist: None,
+        universe: None,
+        flags: Vec::new(),
+        machine_disabled: Vec::new(),
         base: None,
         extra: Default::default(),
     }
@@ -390,9 +589,9 @@ fn run_hints(sim: &Simulation) -> Option<RunHints> {
     })
 }
 
-/// The thornlist's own file name, as the config recorded it.
-fn thornlist_filename(config: &ConfigMeta) -> String {
-    Path::new(&config.thornlist)
+/// A thornlist path's file name.
+fn thornlist_filename(path: &str) -> String {
+    Path::new(path)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .filter(|n| !n.is_empty())

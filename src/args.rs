@@ -913,13 +913,46 @@ pub(crate) struct SimExportArgs {
     pub sim: String,
     /// Where to write it (default: <sim>.sim in the current directory).
     pub file: Option<PathBuf>,
+    #[command(flatten)]
+    pub describe: SimDescribeArgs,
+    /// Export even though some sources had uncommitted changes when the binary was built; they are marked dirty.
+    #[clap(long)]
+    pub allow_dirty: bool,
+    /// Export even though some pinned commits are on no remote branch or tag, so nobody else can fetch them.
+    #[clap(long)]
+    pub allow_unpushed: bool,
+}
+
+/// `cactup sim pack`: a .sim from a loose thornlist and parfile.
+// §8.9
+#[derive(clap::Args, Debug)]
+pub(crate) struct SimPackArgs {
+    /// The thornlist (a GetComponents CRL list).
+    pub thornlist: PathBuf,
+    /// The parfile (.par, or computed .py).
+    pub parfile: PathBuf,
+    /// Where to write it (default: <parfile name>.sim in the current directory).
+    pub file: Option<PathBuf>,
+    #[command(flatten)]
+    pub describe: SimDescribeArgs,
+    /// Pack even though some repos in the installation have uncommitted changes; they are marked dirty.
+    #[clap(long)]
+    pub allow_dirty: bool,
+    /// Pack even though some pinned commits are on no remote branch or tag, so nobody else can fetch them.
+    #[clap(long)]
+    pub allow_unpushed: bool,
+}
+
+/// What a .sim says about itself, shared by `sim export` and `sim pack`.
+#[derive(clap::Args, Debug, Default, Clone)]
+pub(crate) struct SimDescribeArgs {
     /// Overwrite the file if it exists.
     #[clap(short, long)]
     pub force: bool,
     /// Take every default without asking.
     #[clap(short, long)]
     pub yes: bool,
-    /// The name the .sim carries (default: the simulation's).
+    /// The name the .sim carries (default: the simulation's, or the parfile's).
     #[clap(long, value_name = "NAME")]
     pub name: Option<String>,
     /// One-line summary (default: the first line of the parfile's leading comment).
@@ -934,12 +967,6 @@ pub(crate) struct SimExportArgs {
     /// SPDX license expression (default: the default-license knob, if set).
     #[clap(long, value_name = "SPDX")]
     pub license: Option<String>,
-    /// Export even though some sources had uncommitted changes when the binary was built; they are marked dirty.
-    #[clap(long)]
-    pub allow_dirty: bool,
-    /// Export even though some pinned commits are on no remote branch or tag, so nobody else can fetch them.
-    #[clap(long)]
-    pub allow_unpushed: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -985,6 +1012,9 @@ pub(crate) enum SimCommand {
     // §8.9 (Cactarium .sim files)
     /// Write a simulation as a .sim file: its parfile plus the exact sources and build it ran on
     Export(SimExportArgs),
+    // §8.9
+    /// Make a .sim file from a thornlist and a parfile, pinning each repo to what an installation fetched (-I) or to each branch's tip today
+    Pack(SimPackArgs),
     // §8.9
     /// Unpack a .sim file into a thornlist (its pins as !REPO_COMMIT) and a parfile
     Unpack {

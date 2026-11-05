@@ -1754,13 +1754,13 @@ mod tests {
         crate::args::SimExportArgs {
             sim: sim.to_owned(),
             file: Some(file.to_owned()),
-            force: true,
-            yes: true,
-            name: None,
-            summary: None,
-            description: None,
-            authors: vec!["A. Author".to_owned()],
-            license: Some("CC-BY-4.0".to_owned()),
+            describe: crate::args::SimDescribeArgs {
+                force: true,
+                yes: true,
+                authors: vec!["A. Author".to_owned()],
+                license: Some("CC-BY-4.0".to_owned()),
+                ..Default::default()
+            },
             allow_dirty: false,
             allow_unpushed: false,
         }
@@ -1868,5 +1868,68 @@ mod tests {
         assert_eq!(list.components()[0].commit.as_deref(), Some(built.to_string().as_str()));
         assert_eq!(fs::read_to_string(unpacked.join("bhns.par")).unwrap(), fs::read_to_string(&parfile).unwrap());
         assert!(crate::sim::export::unpack(&out, &unpacked, false).is_err(), "no silent overwrite");
+    }
+
+
+    /// `sim pack` (§8.9) without an installation: each repo pinned to the
+    /// commit its branch names on the remote now, a repo the list already
+    /// pins kept at its pin, and a remote that does not have the branch
+    /// failing the whole pack.
+    #[test]
+    fn pack_pins_a_loose_thornlist_to_todays_tips() {
+        use cactup_ecosystem_common::sim::SimFile;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = fake_ctx(&tmp.path().join("db"));
+        ctx.globals.installation = None;
+        let upstream = tmp.path().join("upstream/carpetx");
+        crate::fetch::git::testrepo::init(&upstream);
+        let old = crate::fetch::git::testrepo::commit_tree(&upstream, &[("v", "1\n", false)]);
+        let tip = crate::fetch::git::testrepo::commit_tree(&upstream, &[("v", "2\n", false)]);
+        let (branch, _) = crate::fetch::git::head_of(&upstream).unwrap();
+        let url = upstream.to_string_lossy().into_owned();
+        let other = tmp.path().join("upstream/other");
+        crate::fetch::git::testrepo::init(&other);
+        crate::fetch::git::testrepo::commit_tree(&other, &[("w", "1\n", false)]);
+        let other_url = other.to_string_lossy().into_owned();
+
+        let th = tmp.path().join("bhns.th");
+        let par = tmp.path().join("bhns.par");
+        let section = |url: &str, branch: &str, pin: &str, checkout: &str| {
+            format!("!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = {url}\n!REPO_BRANCH = {branch}\n{pin}!CHECKOUT = {checkout}\n")
+        };
+        fs::write(
+            &th,
+            format!(
+                "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{}{}",
+                section(&url, &branch, "", "CarpetX/Loop"),
+                section(&other_url, &branch, &format!("!REPO_COMMIT = {old}\n"), "Other/Thorn"),
+            ),
+        )
+        .unwrap();
+        fs::write(&par, "# A test run\nActiveThorns = \"Loop\"\n").unwrap();
+        let out = tmp.path().join("out.sim");
+        let args = |th: &Path| crate::args::SimPackArgs {
+            thornlist: th.to_owned(),
+            parfile: par.clone(),
+            file: Some(out.clone()),
+            describe: crate::args::SimDescribeArgs { force: true, yes: true, ..Default::default() },
+            allow_dirty: false,
+            allow_unpushed: false,
+        };
+        crate::sim::export::pack(&ctx, args(&th)).unwrap();
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(file.is_fully_specified(), "{:?}", file.unspecified());
+        assert_eq!(file.sim.name, "bhns");
+        assert_eq!(file.sim.summary.as_deref(), Some("A test run"));
+        let commit = |repo: &str| file.repos.iter().find(|r| r.name == repo).unwrap().commit.clone().unwrap();
+        assert_eq!(commit("carpetx"), tip.to_string(), "pinned to the branch's tip today");
+        assert_eq!(commit("other"), old.to_string(), "a pin the list sets is kept");
+        assert!(file.run.is_none());
+
+        // A branch the remote does not have fails the pack.
+        let bad = tmp.path().join("bad.th");
+        fs::write(&bad, format!("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{}", section(&url, "no-such-branch", "", "CarpetX/Loop"))).unwrap();
+        let err = format!("{:#}", crate::sim::export::pack(&ctx, args(&bad)).unwrap_err());
+        assert!(err.contains("carpetx") && err.contains("no-such-branch"), "{err}");
     }
 }

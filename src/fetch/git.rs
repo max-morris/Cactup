@@ -1414,6 +1414,40 @@ pub fn is_published(repo_dir: &Path, commit: ObjectId) -> Res<bool> {
     Ok(false)
 }
 
+/// The commit `git_ref` (a branch or tag; `None`: the remote's default
+/// branch, its `HEAD`) names on the remote at `url` right now — `git
+/// ls-remote`, without fetching anything. An annotated tag yields the commit
+/// it tags. `scratch` is any repository on disk: gix needs one to speak to a
+/// remote from, and nothing is written to it.
+pub fn remote_tip(scratch: &Path, url: &str, git_ref: Option<&str>) -> Res<ObjectId> {
+    const LOCAL: &str = "refs/cactup/tip";
+    let repo = gix::open(scratch).with_context(|| format!("Failed to open '{}'", scratch.display()))?;
+    let name = git_ref.unwrap_or("HEAD");
+    let spec = format!("{name}:{LOCAL}");
+    let remote = repo
+        .remote_at(url)
+        .with_context(|| format!("Invalid remote URL {url}"))?
+        .with_refspecs(Some(spec.as_str()), Direction::Fetch)
+        .with_context(|| format!("Invalid branch or tag name {name}"))?;
+    let (map, _) = remote
+        .connect(Direction::Fetch)
+        .with_context(|| format!("Failed to connect to {url}"))?
+        .ref_map(gix::progress::Discard, Default::default())
+        .with_context(|| format!("Failed to list {url}'s branches and tags"))?;
+    let mapping = map
+        .mappings
+        .iter()
+        .find(|m| m.local.as_ref().is_some_and(|l| l == LOCAL))
+        .ok_or_else(|| anyhow!("{url} has no branch or tag {name}"))?;
+    match &mapping.remote {
+        gix::remote::fetch::refmap::Source::ObjectId(id) => Ok(*id),
+        gix::remote::fetch::refmap::Source::Ref(r) => {
+            let (_, target, peeled) = r.unpack();
+            peeled.or(target).map(ToOwned::to_owned).ok_or_else(|| anyhow!("{url}'s {name} points at no commit"))
+        }
+    }
+}
+
 /// What [`head_of`] names the branch of a detached HEAD.
 pub const DETACHED: &str = "(detached)";
 

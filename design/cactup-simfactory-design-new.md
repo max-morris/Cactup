@@ -4186,10 +4186,20 @@ A file with every repo pinned and nothing dirty or untracked is **fully
 specified**; only such a file can be published, and export says so when its
 output is not.
 
+`cactup sim pack <file.th> <file.par> [file]` makes a `.sim` for whoever has
+only a thornlist and a parfile, with the same descriptive fields and checks.
+With `-I <installation>`, each repo is pinned to what that installation has
+checked out (its live HEAD and source state, checked like an export's; a
+checkout of a different repo than the list names is left unpinned, with a
+note). Without, each is pinned to the commit its branch or tag names on the
+remote today (`git ls-remote`, no fetch), and the output says so; a remote
+that cannot be asked fails the whole pack, and a repo the list already pins
+keeps its pin. A packed file has no run hints and no build provenance.
+
 `cactup sim unpack <file.sim> [--dir D] [-f]` goes the other way, for whoever
 works with loose files: it writes the thornlist and the parfile under the
 names they carried, the thornlist with every pinned repo pinned by
-`!REPO_COMMIT` (`thornlist::pin_text`: a section from one repo gains the
+`!REPO_COMMIT` (`crl::pin_text` in the shared crate: a section from one repo gains the
 directive; a section spanning repos through `$1`/`$2` in its `!URL` is split
 into one copy per repo; everything else stays byte for byte, and the result
 is parsed back to prove it names the same checkouts with exactly those pins).
