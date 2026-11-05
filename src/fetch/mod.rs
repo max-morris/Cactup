@@ -9,6 +9,7 @@ pub mod download;
 pub mod external;
 pub mod git;
 pub mod link;
+pub(crate) mod retry;
 
 use crate::thornlist::{Component, ComponentType, Thornlist};
 use crate::Res;
@@ -232,8 +233,8 @@ fn announce_repo(line: &crate::progress::Line, item: &GitRepoPlan, head: gix::Ob
         _ => return,
     };
     match (&item.forced, &item.retarget) {
-        (Some(reason), _) => line.warned(format!("{what} — overwrote {reason}")),
-        (None, Some(url)) => line.warned(format!("{what} — origin re-pointed at {url}")),
+        (Some(reason), _) => line.warned(format!("{what}; overwrote {reason}")),
+        (None, Some(url)) => line.warned(format!("{what}; origin re-pointed at {url}")),
         (None, None) => line.succeeded(what),
     }
 }
@@ -368,7 +369,7 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                                 // plan() always fills in the probed head
                                 // branch for existing repos; this is a bug
                                 // guard, not a reachable path.
-                                Err(anyhow::anyhow!("no branch resolved for existing repo"))
+                                Err(anyhow::anyhow!("No branch resolved for existing repo"))
                             }
                         };
                         // Assert the repo actually landed on its expected
@@ -481,7 +482,7 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
             };
             report
                 .failures
-                .push(Failure { what, error: "interrupted before this component was fetched".into() });
+                .push(Failure { what, error: "Interrupted before this component was fetched".into() });
         }
         return Ok(report);
     }
@@ -492,7 +493,7 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
         if gix::interrupt::is_triggered() {
             report
                 .failures
-                .push(Failure { what: c.checkout.clone(), error: "interrupted".into() });
+                .push(Failure { what: c.checkout.clone(), error: "Interrupted".into() });
             continue;
         }
         if let Err(e) = external::fetch_external(install_root, c) {
@@ -513,7 +514,7 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
         // never fetched above, and nothing further runs (no settle pass).
         if gix::interrupt::is_triggered() {
             for c in &links[i..] {
-                let error = "interrupted before this link was made".to_owned();
+                let error = "Interrupted before this link was made".to_owned();
                 report.failures.push(Failure { what: c.checkout.clone(), error });
             }
             return Ok(report);
@@ -599,10 +600,10 @@ impl FetchState {
         let path = Self::path(install_root);
         let text = match std::fs::read_to_string(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            other => other.with_context(|| format!("Failed to read {}", path.display()))?,
+            other => other.with_context(|| format!("Failed to read '{}'", path.display()))?,
         };
         let state: FetchState = toml::from_str(&text)
-            .with_context(|| format!("Failed to parse {}", path.display()))?;
+            .with_context(|| format!("Failed to parse '{}'", path.display()))?;
         Ok(Some(state))
     }
 
@@ -624,14 +625,14 @@ impl FetchState {
         let path = Self::path(install_root);
         let dir = path.parent().expect("fetch-state path has a parent");
         std::fs::create_dir_all(dir)
-            .with_context(|| format!("Failed to create {}", dir.display()))?;
+            .with_context(|| format!("Failed to create '{}'", dir.display()))?;
         let text = toml::to_string_pretty(&state).with_context(|| "Failed to render fetch state")?;
         let tmp = tempfile::NamedTempFile::new_in(dir)
-            .with_context(|| format!("Failed to create temp file in {}", dir.display()))?;
+            .with_context(|| format!("Failed to create temp file in '{}'", dir.display()))?;
         std::fs::write(tmp.path(), text)
             .with_context(|| "Failed to write fetch state temp file")?;
         tmp.persist(&path)
-            .with_context(|| format!("Failed to replace {}", path.display()))?;
+            .with_context(|| format!("Failed to replace '{}'", path.display()))?;
         Ok(())
     }
 }
@@ -796,12 +797,11 @@ impl std::fmt::Display for NoSources {
             NoSources::NoGitRepos => write!(f, "its thornlist names no git repos"),
             NoSources::NoLinkedThorns { repos_dir } => write!(
                 f,
-                "none of its thorns is a link into {}, so cactup cannot tell which repo each \
-                 comes from",
+                "none of its thorns is a link into '{}'",
                 repos_dir.display()
             ),
             NoSources::NoneOnDisk { repos_dir, count, plain } => {
-                write!(f, "none of the {count} git repo(s) its thornlist names is in {}", repos_dir.display())?;
+                write!(f, "none of the {count} git repo(s) its thornlist names is in '{}'", repos_dir.display())?;
                 if !repos_dir.is_dir() {
                     write!(f, " (that directory does not exist")?;
                     if !plain {
@@ -815,7 +815,7 @@ impl std::fmt::Display for NoSources {
             }
             NoSources::NoneReadable { repos_dir, count, repo, error } => write!(
                 f,
-                "none of the {count} repo(s) in {} could be read as a git repo ({repo}: {error})",
+                "none of the {count} repo(s) in '{}' could be read as a git repo ({repo}: {error})",
                 repos_dir.display()
             ),
         }
@@ -916,7 +916,7 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
                         // fetch would be order-dependent.
                         if group.url != url || group.branch != c.branch {
                             bail!(
-                                "thornlist names repo {} twice with conflicting \
+                                "Thornlist names repo {} twice with conflicting \
                                  sources: {} @ {} (for {}) vs {} @ {} (for {})",
                                 c.repo,
                                 group.url,

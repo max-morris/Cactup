@@ -395,9 +395,9 @@ impl Database {
         }
 
         let contents = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read database from {}", path.display()))?;
+            .with_context(|| format!("Failed to read database from '{}'", path.display()))?;
         let db: Database = serde_json::from_str(&contents)
-            .with_context(|| format!("Failed to parse database at {}", path.display()))?;
+            .with_context(|| format!("Failed to parse database at '{}'", path.display()))?;
         db.check_schema(path)?;
         Ok(db)
     }
@@ -406,8 +406,8 @@ impl Database {
     fn check_schema(&self, path: &Path) -> Res<()> {
         if self.schema > SCHEMA {
             bail!(
-                "{} has schema {} but this cactup ({}) understands at most schema {SCHEMA}. \
-                 It was written by a newer cactup; please upgrade.",
+                "'{}' has schema {} but this cactup ({}) understands at most schema {SCHEMA}; \
+                 please upgrade cactup",
                 path.display(),
                 self.schema,
                 crate::VERSION
@@ -423,12 +423,12 @@ impl Database {
             serde_json::to_string_pretty(self).with_context(|| "Failed to serialize database")?;
         let dir = path.parent().expect("database path has a parent");
         let mut temp = tempfile::NamedTempFile::new_in(dir)
-            .with_context(|| format!("Failed to create temp file in {}", dir.display()))?;
+            .with_context(|| format!("Failed to create temp file in '{}'", dir.display()))?;
         temp.write_all(contents.as_bytes())
             .and_then(|()| temp.as_file().sync_all())
             .with_context(|| "Failed to write database temp file")?;
         temp.persist(path)
-            .with_context(|| format!("Failed to move database into place at {}", path.display()))?;
+            .with_context(|| format!("Failed to move database into place at '{}'", path.display()))?;
         Ok(())
     }
 }
@@ -530,7 +530,7 @@ impl Db {
     fn ensure_dir(&self) -> Res<()> {
         let dir = self.path.parent().expect("database path has a parent");
         fs::create_dir_all(dir)
-            .with_context(|| format!("Failed to create cactup directory {}", dir.display()))
+            .with_context(|| format!("Failed to create cactup directory '{}'", dir.display()))
     }
 }
 

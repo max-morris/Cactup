@@ -45,8 +45,8 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
                     let same_config = other_installation.root == installation.root && other_name == name;
                     if same_config && against_attempt == Some(build.attempt) {
                         bail!(
-                            "build attempt {:04} of config \"{name}\" would be compared with itself; name another \
-                             attempt, config or installation to compare against",
+                            "Build attempt {:04} of config \"{name}\" cannot be compared with itself; \
+                             name another attempt, config or installation",
                             build.attempt
                         );
                     }
@@ -56,7 +56,7 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
             println!("{}", build.title().bold());
             print!("{}{}", build.unreadable_note("this"), summary(&build.events));
             if let Some(other) = other {
-                println!("\n{}", format!("against {}", other.title()).bold());
+                println!("\n{}", format!("Against {}", other.title()).bold());
                 print!("{}{}", other.unreadable_note("that"), comparison(&build.events, &other.events, long));
             }
             Ok(())
@@ -69,7 +69,7 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
             };
             let config_dir = installation.cactus_root().join("configs").join(&name);
             if !config_dir.is_dir() {
-                bail!("no config named \"{name}\" in installation {} (see `cactup config list`)", installation.alias);
+                bail!("No config named \"{name}\" in installation {} (see `cactup config list`)", installation.alias);
             }
             // The build environment, as the newest attempt that builds froze
             // it (a `--virtual-executable` one has none: it neither
@@ -114,11 +114,11 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
                         renderer.shutdown_and_wait();
                     }
                     if gix::interrupt::is_triggered() {
-                        bail!("interrupted");
+                        bail!("Interrupted");
                     }
                     print!("{}", environment_findings(&findings));
                 }
-                None => println!("{}", format!("{name} has not been built yet: its build environment is checked once it has").bold()),
+                None => println!("{}", format!("{name} has not been built yet; skipping the build environment checks").bold()),
             }
             // What the newest build that went through the cache found.
             match Recorded::open(&installation, &name, attempt, None, "serve") {
@@ -130,31 +130,28 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
             }
             Ok(())
         }
-        CacheCommand::Stats => {
-            let (root, from) = store_root(ctx)?;
-            stats(&root, &from)
-        }
+        CacheCommand::Stats => stats(&store_root(ctx)?),
         CacheCommand::Gc { unused_for, to_size, dry_run } => {
             if unused_for.is_none() && to_size.is_none() {
-                bail!("say what to remove: --unused-for <age>, --to-size <size>, or both");
+                bail!("Specify --unused-for <age>, --to-size <size>, or both");
             }
             let unused_for = unused_for.as_deref().map(upkeep::parse_age).transpose()?;
             let to_size = to_size.as_deref().map(upkeep::parse_size).transpose()?;
-            let (root, from) = store_root(ctx)?;
-            println!("The build cache in {} ({from}).", root.display());
+            let root = store_root(ctx)?;
+            println!("The build cache in '{}'.", root.display());
             gc(&root, unused_for, to_size, dry_run)
         }
         CacheCommand::Verify => {
-            let (root, from) = store_root(ctx)?;
-            println!("The build cache in {} ({from}).", root.display());
+            let root = store_root(ctx)?;
+            println!("The build cache in '{}'.", root.display());
             verify(&root)
         }
     }
 }
 
-/// The store's root, as a build on this machine would have it, and where
-/// that came from (`objcache::store_root`).
-fn store_root(ctx: &Ctx) -> Res<(PathBuf, String)> {
+/// The store's root, as a build on this machine would have it
+/// (`objcache::store_root`).
+fn store_root(ctx: &Ctx) -> Res<PathBuf> {
     let db = ctx.db.read()?;
     // The machine is only asked for its places: a host it cannot resolve,
     // or does not recognize (a build there uses `generic`, which sets none),
@@ -162,9 +159,9 @@ fn store_root(ctx: &Ctx) -> Res<(PathBuf, String)> {
     let machine = crate::commands::machine::resolve_quietly(ctx).ok().flatten();
     let root = crate::objcache::store_root(&db, machine.as_ref());
     for warning in &root.warnings {
-        println!("{} {warning}; looking further for the build cache", "warning:".yellow().bold());
+        println!("{} {warning}; ignored", "warning:".yellow().bold());
     }
-    Ok((root.path, root.from))
+    Ok(root.path)
 }
 
 /// When, as people read it: so many days ago.
@@ -178,19 +175,19 @@ fn ago(now: SystemTime, then: SystemTime) -> String {
 }
 
 /// `cactup cache stats` (§18.9).
-fn stats(root: &Path, from: &str) -> Res<()> {
+fn stats(root: &Path) -> Res<()> {
     if !root.is_dir() {
-        println!("The build cache in {} ({from}) is empty: nothing has been stored there yet.", root.display());
+        println!("The build cache in '{}' is empty.", root.display());
         return Ok(());
     }
     let scan = upkeep::scan(root)?;
     // The fileserver's clock where this user can write in the store; ages
     // shown in days need nothing finer than this host's, where not.
     let now = crate::lock::fileserver_now(root).unwrap_or_else(|_| SystemTime::now());
-    println!("{}", format!("build cache in {} ({from})", root.display()).bold());
+    println!("{}", format!("Build cache in '{}'", root.display()).bold());
     for (log, why) in &scan.unreadable_logs {
         println!(
-            "  {} use log {} cannot be read ({why}): `cactup cache gc` will not run until it can",
+            "  {} cannot read use log '{}' ({why}); `cactup cache gc` will not run until it is readable",
             "warning:".yellow().bold(),
             log.display()
         );
@@ -205,7 +202,7 @@ fn stats(root: &Path, from: &str) -> Res<()> {
         match record_bytes {
             0 => println!("  {}: {} objects, {}", machine.name.bold(), machine.entries.len(), upkeep::human(bytes)),
             _ => println!(
-                "  {}: {} objects, {} (and {} of records of what made them)",
+                "  {}: {} objects, {} (plus {} of unit records)",
                 machine.name.bold(),
                 machine.entries.len(),
                 upkeep::human(bytes),
@@ -228,16 +225,16 @@ fn stats(root: &Path, from: &str) -> Res<()> {
             println!("    used or stored in the last {days} days: {used}");
         }
         if !machine.records.is_empty() {
-            println!("    records of what made them (a miss reads them to say what differed): {}", machine.records.len());
+            println!("    unit records: {}", machine.records.len());
         }
         if !machine.temps.is_empty() {
-            println!("    left over from interrupted builds: {} files (cactup cache gc removes those a day old)", machine.temps.len());
+            println!("    left over from interrupted builds: {} files (`cactup cache gc` removes those over a day old)", machine.temps.len());
         }
     }
     for dir in &scan.other_formats {
         println!(
-            "  {} holds objects in another version of cactup's format, which this cactup neither reads nor removes; \
-             once no older cactup builds with this cache, remove it with: rm -r {}",
+            "  '{}' holds objects in another cactup version's format; \
+             once no older cactup builds with this cache, remove it with `rm -r '{}'`",
             dir.display(),
             dir.display()
         );
@@ -252,7 +249,7 @@ fn stats(root: &Path, from: &str) -> Res<()> {
 /// `cactup cache gc` (§18.9).
 fn gc(root: &Path, unused_for: Option<Duration>, to_size: Option<u64>, dry_run: bool) -> Res<()> {
     if !root.is_dir() {
-        println!("The build cache in {} is empty: nothing to remove.", root.display());
+        println!("The build cache in '{}' is empty.", root.display());
         return Ok(());
     }
     // One at a time per store, across hosts.
@@ -262,8 +259,8 @@ fn gc(root: &Path, unused_for: Option<Duration>, to_size: Option<u64>, dry_run: 
     // entry can be judged unused.
     if let Some((log, why)) = scan.unreadable_logs.first() {
         bail!(
-            "the use log {} cannot be read ({why}), so what it records as in use is not known; \
-             nothing was removed (make it readable, or remove it if that is right, and run gc again)",
+            "Cannot read use log '{}' ({why}); nothing was removed \
+             (make it readable or remove it, then run `cactup cache gc` again)",
             log.display()
         );
     }
@@ -273,10 +270,10 @@ fn gc(root: &Path, unused_for: Option<Duration>, to_size: Option<u64>, dry_run: 
     let bytes: u64 = plan.entries.iter().map(|(e, _)| e.bytes).sum::<u64>() + plan.records.iter().map(|(_, _, bytes)| bytes).sum::<u64>();
     if dry_run {
         for (entry, last) in &plan.entries {
-            println!("  would remove {} ({}, last used or stored {})", entry.path.display(), upkeep::human(entry.bytes), ago(now, *last));
+            println!("  would remove '{}' ({}, last used or stored {})", entry.path.display(), upkeep::human(entry.bytes), ago(now, *last));
         }
         println!(
-            "Would remove {} of {} objects and {} record(s) of objects not stored or removed with them ({} in all), leaving {}; and {} file(s) left over from interrupted builds.",
+            "Would remove {} of {} objects and {} unit record(s) ({} in all), leaving {}, and {} file(s) left over from interrupted builds.",
             plan.entries.len(),
             scan.machines.iter().map(|m| m.entries.len()).sum::<usize>(),
             plan.records.len(),
@@ -289,7 +286,7 @@ fn gc(root: &Path, unused_for: Option<Duration>, to_size: Option<u64>, dry_run: 
     let done = upkeep::carry_out(&plan)?;
     upkeep::stamp_size(root, plan.bytes_after)?;
     println!(
-        "Removed {} objects and {} record(s) of objects no longer stored ({} in all), and {} file(s) left over from interrupted builds; the build cache holds {}.",
+        "Removed {} objects and {} unit record(s) ({} in all), and {} file(s) left over from interrupted builds; the build cache holds {}.",
         done.entries,
         done.records,
         upkeep::human(done.bytes),
@@ -303,7 +300,7 @@ fn gc(root: &Path, unused_for: Option<Duration>, to_size: Option<u64>, dry_run: 
 fn verify(root: &Path) -> Res<()> {
     use crate::objcache::store::{Miss, Store};
     if !root.is_dir() {
-        println!("The build cache in {} is empty: nothing to verify.", root.display());
+        println!("The build cache in '{}' is empty.", root.display());
         return Ok(());
     }
     let scan = upkeep::scan(root)?;
@@ -339,18 +336,18 @@ fn verify(root: &Path) -> Res<()> {
     if let Err(e) = ran {
         bail!("{e:#}, having removed {removed} damaged objects");
     }
-    println!("{} objects are whole; {removed} were damaged and are removed.", good.load(Relaxed));
+    println!("{} objects are intact; {removed} damaged objects were removed.", good.load(Relaxed));
     let damaged = damaged.load(Relaxed);
     if damaged > 0 {
-        println!("{damaged} are damaged and could not be removed (no permission, or replaced meanwhile).");
+        println!("{damaged} damaged objects could not be removed.");
     }
     let foreign = foreign.load(Relaxed);
     if foreign > 0 {
-        println!("{foreign} were stored by another version of cactup, and are left as they are.");
+        println!("{foreign} were stored by another cactup version and were skipped.");
     }
     let unreadable = unreadable.load(Relaxed);
     if unreadable > 0 {
-        println!("{unreadable} could not be read just now (left as they are: try again).");
+        println!("{unreadable} could not be read; run `cactup cache verify` again.");
     }
     Ok(())
 }
@@ -364,7 +361,7 @@ fn doctor(events: &[Event], mode: Option<crate::objcache::Mode>) -> String {
     // By the mode the build was made in; without it, by its compiles.
     let served_by_store = mode.map_or_else(|| events.iter().any(|event| event.outcome.is_some()), |mode| mode.serves());
     if !served_by_store {
-        out.push_str("  this build only recorded its compiles: nothing was served or stored (see `cactup cache report`)\n");
+        out.push_str("  this build only recorded its compiles; see `cactup cache report`\n");
     } else {
         let line = summary::line(events);
         out.push_str(&format!("  {}\n", line.trim_start_matches("cactup: build cache: ").trim_end_matches(" (see cactup cache doctor)")));
@@ -387,7 +384,7 @@ fn doctor(events: &[Event], mode: Option<crate::objcache::Mode>) -> String {
         for event in &kept {
             let why = match (&event.not_cached, &event.store, event.stable) {
                 (Some(why), _, _) => why.clone(),
-                (_, _, Some(false)) => "what it read changed while it compiled".to_owned(),
+                (_, _, Some(false)) => "its inputs changed during the compile".to_owned(),
                 (_, Some(why), _) => why.clone(),
                 _ => "the build cache could not be used".to_owned(),
             };
@@ -408,7 +405,7 @@ fn doctor(events: &[Event], mode: Option<crate::objcache::Mode>) -> String {
 
     let other = of(Compiled::OtherSources);
     if !other.is_empty() {
-        out.push_str(&format!("\n  {} ({}), by what differed, most often first:\n", "with other sources".bold(), other.len()));
+        out.push_str(&format!("\n  {} ({}), by what differed:\n", "with other sources".bold(), other.len()));
         // By file: a difference is `<file>: <how this key took it>`, and
         // one file taken in several ways (units that keep other
         // definitions of it) is one file all the same.
@@ -447,7 +444,7 @@ fn doctor(events: &[Event], mode: Option<crate::objcache::Mode>) -> String {
         }
         let unlisted: u64 = other.iter().map(|event| event.differs_more).sum();
         if unlisted > 0 {
-            out.push_str(&format!("           (and {unlisted} differences the compiles did not list: each lists at most {})\n", crate::objcache::event::DIFFERS_KEPT));
+            out.push_str(&format!("           (and {unlisted} more not listed; each compile lists at most {})\n", crate::objcache::event::DIFFERS_KEPT));
         }
     }
 
@@ -464,7 +461,7 @@ fn doctor(events: &[Event], mode: Option<crate::objcache::Mode>) -> String {
     }
     let new = events.iter().filter(|event| event.miss == Some(Miss::New) && summary::compiled(event) == Some(Compiled::New)).count();
     if new > 0 {
-        out.push_str(&format!("\n  {} ({}): the cache had no record of an object of that name (one stored by an older cactup has none)\n", "new".bold(), new));
+        out.push_str(&format!("\n  {} ({}): the cache had no record of an object of that name\n", "new".bold(), new));
     }
 
     let unrecorded = events
@@ -472,12 +469,12 @@ fn doctor(events: &[Event], mode: Option<crate::objcache::Mode>) -> String {
         .filter(|event| event.store.as_deref().is_some_and(|why| why.contains(crate::objcache::wrapper::UNIT_RECORD_NOT_WRITTEN)))
         .count();
     if unrecorded > 0 {
-        let (count, it, were) = match unrecorded {
-            1 => ("1 object was".to_owned(), "it", "its miss"),
-            n => (format!("{n} objects were"), "them", "their misses"),
+        let (count, were) = match unrecorded {
+            1 => ("1 object was".to_owned(), "its miss"),
+            n => (format!("{n} objects were"), "their misses"),
         };
         out.push_str(&format!(
-            "\n  {count} stored without the record of what made {it} (the build could not write {it}: see its event log), so later builds may call {were} new\n"
+            "\n  {count} stored without a unit record (see the build's event log); later builds may report {were} as new\n"
         ));
     }
 
@@ -488,10 +485,7 @@ fn doctor(events: &[Event], mode: Option<crate::objcache::Mode>) -> String {
         }
     }
     if !unnarrowed.is_empty() {
-        out.push_str(&format!(
-            "\n  {} (every file compared whole, definitions the unit does not use too):\n",
-            "compiles of which no file was narrowed".bold()
-        ));
+        out.push_str(&format!("\n  {}:\n", "compiles with no file narrowed".bold()));
         let mut unnarrowed: Vec<(&str, usize)> = unnarrowed.into_iter().collect();
         unnarrowed.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
         for (why, count) in unnarrowed {
@@ -550,12 +544,12 @@ fn environment_findings(findings: &[crate::objcache::doctor::Finding]) -> String
     let mut out = String::new();
     // All clear only where everything was checked.
     if !findings.iter().any(|finding| matches!(finding.severity, Severity::KeepsOut | Severity::Unchecked)) {
-        out.push_str(&format!("  {}\n", "nothing in it keeps the build cache out of a compile".green()));
+        out.push_str(&format!("  {}\n", "nothing keeps the build cache out of a compile".green()));
     }
     for (severity, heading) in [
         (Severity::Unchecked, "not checked"),
         (Severity::KeepsOut, "keeps the build cache out"),
-        (Severity::Costs, "costs objects shared, or time"),
+        (Severity::Costs, "costs sharing or time"),
         (Severity::Note, "worth knowing"),
     ] {
         let these: Vec<_> = findings.iter().filter(|finding| finding.severity == severity).collect();
@@ -581,7 +575,7 @@ fn kept_out_hint(why: &str) -> Option<&'static str> {
 /// The installation registered under `alias`.
 fn named_installation(ctx: &Ctx, alias: &str) -> Res<Installation> {
     let db = ctx.db.read()?;
-    let entry = db.installations.get(alias).ok_or_else(|| anyhow!("no installation named \"{alias}\" (see `cactup list`)"))?;
+    let entry = db.installations.get(alias).ok_or_else(|| anyhow!("No installation named \"{alias}\" (see `cactup list`)"))?;
     Ok(Installation::new(alias, &entry.path))
 }
 
@@ -605,13 +599,13 @@ impl Recorded {
     fn open(installation: &Installation, name: &str, attempt: Option<u32>, not: Option<u32>, mode: &str) -> Res<Self> {
         let config_dir = installation.cactus_root().join("configs").join(name);
         if !config_dir.is_dir() {
-            bail!("no config named \"{name}\" in installation {} (see `cactup config list`)", installation.alias);
+            bail!("No config named \"{name}\" in installation {} (see `cactup config list`)", installation.alias);
         }
         let log = |id: u32| events_path(&BuildAttempt::attempt_dir(&config_dir, id).join("cc"));
         let attempt = match attempt {
             Some(id) if log(id).is_file() => id,
             Some(id) => bail!(
-                "build attempt {id:04} of config \"{name}\" logged no compiles: it was not built with the \
+                "Build attempt {id:04} of config \"{name}\" logged no compiles: it was not built with the \
                  build-cache knob on, or nothing needed compiling"
             ),
             None => {
@@ -629,8 +623,8 @@ impl Recorded {
         let (events, unreadable) = event::read(&log(attempt))?;
         if events.is_empty() && unreadable > 0 {
             bail!(
-                "build attempt {attempt:04} of config \"{name}\" recorded its compiles in a form this cactup cannot \
-                 read (another version wrote it); build it again with `cactup -K build-cache={mode} build {name}`"
+                "The compile log of build attempt {attempt:04} of config \"{name}\" is in an unknown format; \
+                 rebuild with `cactup -K build-cache={mode} build {name}`"
             );
         }
         let cc_dir = BuildAttempt::attempt_dir(&config_dir, attempt).join("cc");
@@ -729,7 +723,7 @@ fn summary(events: &[Event]) -> String {
     }
     let unstable = keyed.iter().filter(|e| e.stable == Some(false)).count();
     if unstable > 0 {
-        out.push_str(&format!("  key no longer held after the compile (an input changed meanwhile): {unstable}\n"));
+        out.push_str(&format!("  inputs changed during the compile: {unstable}\n"));
     }
     // A compile left to the shell has no status on record at all.
     let failed = events.iter().filter(|e| e.exit.is_some_and(|code| code != 0) || e.signal.is_some()).count();
@@ -844,7 +838,7 @@ fn comparison(ours: &[Event], theirs: &[Event], long: bool) -> String {
                     match differing.as_slice() {
                         // The same key, but the other build would not have
                         // stored it.
-                        [] => "not stored by the other build (it failed there, or its key did not hold)".to_owned(),
+                        [] => "not stored by the other build".to_owned(),
                         differing => format!("differs in: {}", differing.join(", ")),
                     }
                 }
@@ -907,7 +901,7 @@ mod tests {
         let said = doctor(&events, Some(crate::objcache::Mode::Serve));
         assert!(said.starts_with("  1 of 7 objects reused; 6 compiled: 2 new, 2 with other sources, 1 built otherwise, 1 kept out\n"), "{said}");
         assert!(said.contains("kept out (1):\n        1  nvcc compiles without --objdir-as-tempdir are not the same twice\n           B/f.cu.o\n           give nvcc --objdir-as-tempdir"), "{said}");
-        assert!(said.contains(&format!("        2  {header}\n        1  the preprocessed text\n           (and 3 differences the compiles did not list")), "{said}");
+        assert!(said.contains(&format!("        2  {header}\n        1  the preprocessed text\n           (and 3 more not listed")), "{said}");
         assert!(said.contains("built otherwise (1), by what differed from the closest:\n        1  the flags\n           A/e.c.o\n"), "{said}");
         assert!(said.contains("        1  Fortran (its files are keyed whole)\n"), "{said}");
 
@@ -1022,7 +1016,7 @@ mod tests {
         assert!(text.contains("Fortran       2 compiles,      0 keyed,     1.0 s compiling (20% of the build's)"), "{text}");
         assert!(text.contains("compiling 5.0 s; keying 0.0 s (1%)"), "{text}");
         assert!(text.contains("preprocessed text keyed: 2.0 MB; objects written: 2.0 MB"), "{text}");
-        assert!(!text.contains("no longer held") && !text.contains("failed"), "{text}");
+        assert!(!text.contains("inputs changed") && !text.contains("failed"), "{text}");
         assert!(!text.contains("found in the cache"), "a recording build serves nothing: {text}");
 
         // A serving build, and an auditing one.
@@ -1063,7 +1057,7 @@ mod tests {
             "     1  differs in: preprocessed text, files read\n",
             "     1  differs in: arguments\n",
             "     1  not compiled in the other build\n",
-            "     1  not stored by the other build (it failed there, or its key did not hold)\n",
+            "     1  not stored by the other build\n",
             "    T/edited.c.o: differs in: preprocessed text, files read\n",
             "    T/new.c.o: not compiled in the other build\n",
         ] {
@@ -1098,8 +1092,8 @@ mod tests {
         assert_eq!(Recorded::open(&installation, "sim", Some(1), None, "record").unwrap().attempt, 1);
 
         let err = |attempt, not| Recorded::open(&installation, "sim", attempt, not, "serve").err().unwrap().to_string();
-        assert!(err(Some(3), None).contains("build attempt 0003 of config \"sim\" logged no compiles"));
-        assert!(Recorded::open(&installation, "nope", None, None, "record").err().unwrap().to_string().contains("no config named \"nope\""));
+        assert!(err(Some(3), None).contains("Build attempt 0003 of config \"sim\" logged no compiles"));
+        assert!(Recorded::open(&installation, "nope", None, None, "record").err().unwrap().to_string().contains("No config named \"nope\""));
         std::fs::remove_file(log_path(&config_dir, 1)).unwrap();
         assert!(err(None, Some(2)).contains("no other build of config \"sim\""), "{}", err(None, Some(2)));
         assert!(err(None, Some(2)).contains("-K build-cache=serve"), "{}", err(None, Some(2)));
@@ -1118,6 +1112,6 @@ mod tests {
         assert_eq!((partly.events.len(), partly.unreadable), (2, 1));
         assert!(partly.unreadable_note("that").contains("1 line of that build's log cannot be read and is not counted"));
         append(3, "{\"compiler\":\"gcc\",\"some-older-format\":true}");
-        assert!(err(Some(3), None).contains("in a form this cactup cannot read"), "{}", err(Some(3), None));
+        assert!(err(Some(3), None).contains("is in an unknown format"), "{}", err(Some(3), None));
     }
 }

@@ -67,7 +67,7 @@ impl AutoUpdate {
     pub fn parse(s: &str) -> Res<Self> {
         match Self::ALL.into_iter().find(|mode| mode.name() == s) {
             Some(mode) => Ok(mode),
-            None => bail!("invalid autoupdate value \"{s}\" (valid: auto, notify, off)"),
+            None => bail!("Invalid autoupdate value \"{s}\" (valid: auto, notify, off)"),
         }
     }
 }
@@ -95,15 +95,15 @@ pub fn validate_update_url(value: &str) -> Res<String> {
         .as_ref()
         .is_some_and(|parsed| parsed.query().is_some() || parsed.fragment().is_some())
     {
-        bail!("invalid update-url \"{value}\": update-url must not carry a query or fragment");
+        bail!("Invalid update-url \"{value}\": update-url must not carry a query or fragment");
     }
     match parsed {
         Some(parsed) if is_trusted_url(&parsed) => Ok(url.to_owned()),
         Some(parsed) if parsed.scheme() == "http" => bail!(
-            "invalid update-url \"{value}\": https is required (plain http:// is accepted only for a \
-             loopback test server: 127.0.0.1, localhost or [::1])"
+            "Invalid update-url \"{value}\": https is required; http:// is allowed only for a \
+             loopback host (127.0.0.1, localhost, [::1])"
         ),
-        _ => bail!("invalid update-url \"{value}\": expected an https:// URL"),
+        _ => bail!("Invalid update-url \"{value}\": expected an https:// URL"),
     }
 }
 
@@ -159,7 +159,7 @@ fn download_client() -> &'static reqwest::blocking::Client {
 pub fn validate_mdb_url(value: &str) -> Res<String> {
     let url = value.trim();
     if url.is_empty() {
-        bail!("mdb-url cannot be empty (`cactup knob delete mdb-url` restores the default)");
+        bail!("mdb-url cannot be empty; `cactup knob delete mdb-url` restores the default");
     }
     Ok(url.to_owned())
 }
@@ -280,7 +280,7 @@ fn parse_date(s: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
 /// is not one) is an error.
 pub fn decide(latest: &Latest, me: &Stamp, target: &str) -> Res<Decision> {
     if !is_build_id(&latest.build) {
-        bail!("the update site publishes an invalid build id \"{}\"", latest.build);
+        bail!("The update site publishes an invalid build id \"{}\"", latest.build);
     }
     let order = match (parse_date(&latest.date), parse_date(me.date)) {
         (Some(published), Some(mine)) => Some(published.cmp(&mine)),
@@ -298,10 +298,10 @@ pub fn decide(latest: &Latest, me: &Stamp, target: &str) -> Res<Decision> {
     };
     let path = Path::new(&entry.path);
     if entry.path.is_empty() || !path.components().all(|c| matches!(c, Component::Normal(_))) {
-        bail!("the update site publishes an invalid path \"{}\" for {target}", entry.path);
+        bail!("The update site publishes an invalid path \"{}\" for {target}", entry.path);
     }
     if entry.sha256.len() != 64 || !entry.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-        bail!("the update site publishes an invalid checksum \"{}\" for {target}", entry.sha256);
+        bail!("The update site publishes an invalid checksum \"{}\" for {target}", entry.sha256);
     }
     Ok(Decision::Newer(entry.clone()))
 }
@@ -354,11 +354,11 @@ pub fn check(base: &str) -> Res<Latest> {
             Ok(result) => break result,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if gix::interrupt::is_triggered() {
-                    break Err(anyhow!("interrupted"));
+                    break Err(anyhow!("Interrupted"));
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                break Err(anyhow!("the update check stopped unexpectedly"));
+                break Err(anyhow!("The update check stopped unexpectedly"));
             }
         }
     };
@@ -389,15 +389,14 @@ pub fn installability(exe: &Path, bin_dir: &Path) -> Installability {
         Ok(exe) => exe,
         Err(e) => {
             return Installability::NotUpdatable(format!(
-                "cannot locate the running cactup ({}: {e})",
+                "cannot locate the running cactup '{}': {e}",
                 exe.display()
             ));
         }
     };
     let not_ours = || {
         Installability::NotUpdatable(format!(
-            "it runs from {}, not from {}, where cactup-init.sh installs; update it the way it \
-             was installed",
+            "it runs from '{}', not from '{}'; update it the way it was installed",
             exe.display(),
             bin_dir.display()
         ))
@@ -437,7 +436,7 @@ fn is_permission_error(e: &anyhow::Error) -> bool {
 
 fn cannot_write(bin_dir: &Path, e: &anyhow::Error) -> Applied {
     Applied::NotUpdatable(format!(
-        "{} is not writable ({}); ask whoever installed cactup there to update it",
+        "'{}' is not writable ({}); ask whoever installed cactup there to update it",
         bin_dir.display(),
         e.root_cause()
     ))
@@ -502,7 +501,7 @@ fn apply_with(
             if is_permission_error(&e) {
                 return Ok(cannot_write(bin_dir, &e));
             }
-            return Err(e.context(format!("Failed to create a temp file in {}", bin_dir.display())));
+            return Err(e.context(format!("Failed to create a temp file in '{}'", bin_dir.display())));
         }
     };
     line.phase(format!("downloading {}", latest.build));
@@ -531,7 +530,7 @@ fn apply_with(
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&download, fs::Permissions::from_mode(0o755))
-            .with_context(|| format!("Failed to make {} executable", download.display()))?;
+            .with_context(|| format!("Failed to make '{}' executable", download.display()))?;
     }
     answers_version(&download, &latest.build)
         .with_context(|| format!("The downloaded cactup {} does not run here", latest.build))?;
@@ -548,17 +547,17 @@ fn apply_with(
     };
 
     download.persist(&versioned).with_context(|| {
-        format!("Failed to move the new cactup into place at {}", versioned.display())
+        format!("Failed to move the new cactup into place at '{}'", versioned.display())
     })?;
     // A fresh symlink renamed over `bin/cactup`: atomic, and harmless to the
     // old binary, which keeps running from its own inode.
     let fresh = tempfile::Builder::new()
         .prefix(".cactup-link.")
         .make_in(bin_dir, |path| std::os::unix::fs::symlink(&name, path))
-        .with_context(|| format!("Failed to create a symlink in {}", bin_dir.display()))?;
+        .with_context(|| format!("Failed to create a symlink in '{}'", bin_dir.display()))?;
     fresh
         .persist(&link)
-        .with_context(|| format!("Failed to point {} at {name}", link.display()))?;
+        .with_context(|| format!("Failed to point '{}' at {name}", link.display()))?;
 
     // Best-effort bookkeeping for `--prune`: the update itself is done, and a
     // missing stamp only means a build is kept longer.
@@ -585,13 +584,13 @@ fn is_not_found(e: &anyhow::Error) -> bool {
 
 /// The lowercase hex SHA-256 of the file at `path`.
 fn sha256_hex(path: &Path) -> Res<String> {
-    let mut file = fs::File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+    let mut file = fs::File::open(path).with_context(|| format!("Failed to open '{}'", path.display()))?;
     let mut context = aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA256);
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         let n = file
             .read(&mut buf)
-            .with_context(|| format!("Failed to read {}", path.display()))?;
+            .with_context(|| format!("Failed to read '{}'", path.display()))?;
         if n == 0 {
             break;
         }
@@ -622,7 +621,7 @@ fn answers_version(path: &Path, build: &str) -> Res<()> {
                 attempts += 1;
                 std::thread::sleep(Duration::from_millis(50));
             }
-            other => break other.with_context(|| format!("Failed to run {}", path.display()))?,
+            other => break other.with_context(|| format!("Failed to run '{}'", path.display()))?,
         }
     };
     let started = Instant::now();
@@ -634,7 +633,7 @@ fn answers_version(path: &Path, build: &str) -> Res<()> {
             let _ = child.kill();
             let _ = child.wait();
             if gix::interrupt::is_triggered() {
-                bail!("interrupted");
+                bail!("Interrupted");
             }
             bail!("`--version` did not answer within {} s", VERSION_TIMEOUT.as_secs());
         }
@@ -662,7 +661,7 @@ pub fn prune_binaries(bin_dir: &Path, exe: &Path) -> Res<Vec<PathBuf>> {
         return Ok(Vec::new());
     }
     let Some(_lock) = LinkLock::try_acquire(&bin_dir.join(UPDATE_LOCK))? else {
-        bail!("another cactup is updating in {} right now; try again in a moment", bin_dir.display());
+        bail!("Another cactup is updating in '{}' right now; try again in a moment", bin_dir.display());
     };
     let current = fs::read_link(bin_dir.join("cactup"))
         .ok()
@@ -671,12 +670,12 @@ pub fn prune_binaries(bin_dir: &Path, exe: &Path) -> Res<Vec<PathBuf>> {
 
     let mut removed = Vec::new();
     let entries =
-        fs::read_dir(bin_dir).with_context(|| format!("Failed to list {}", bin_dir.display()))?;
+        fs::read_dir(bin_dir).with_context(|| format!("Failed to list '{}'", bin_dir.display()))?;
     for entry in entries {
         if gix::interrupt::is_triggered() {
-            bail!("interrupted");
+            bail!("Interrupted");
         }
-        let entry = entry.with_context(|| format!("Failed to list {}", bin_dir.display()))?;
+        let entry = entry.with_context(|| format!("Failed to list '{}'", bin_dir.display()))?;
         let file_name = entry.file_name();
         let Some(binary) = file_name.to_str().and_then(|n| n.strip_suffix(".retired")) else { continue };
         if build_of(binary).is_none() || current.as_deref() == Some(binary) {
@@ -693,7 +692,7 @@ pub fn prune_binaries(bin_dir: &Path, exe: &Path) -> Res<Vec<PathBuf>> {
         match fs::remove_file(&path) {
             Ok(()) => removed.push(path),
             Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => return Err(e).with_context(|| format!("Failed to remove {}", path.display())),
+            Err(e) => return Err(e).with_context(|| format!("Failed to remove '{}'", path.display())),
         }
         let _ = fs::remove_file(&stamp);
     }
@@ -793,7 +792,7 @@ pub fn maybe_auto_update(ctx: &Ctx) {
     };
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
-        Err(e) => return not_updatable(&format!("cannot locate the running cactup ({e})")),
+        Err(e) => return not_updatable(&format!("cannot locate the running cactup: {e}")),
     };
     if let Installability::NotUpdatable(reason) = installability(&exe, &bin_dir) {
         return not_updatable(&reason);
@@ -825,7 +824,7 @@ pub fn maybe_auto_update(ctx: &Ctx) {
     eprintln!(
         "{}",
         format!(
-            "Warning: could not start the updated cactup at {}: {e}; carrying on with this one",
+            "Warning: could not start the updated cactup at '{}': {e}; continuing with this one",
             path.display()
         )
         .yellow()

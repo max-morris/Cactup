@@ -46,7 +46,7 @@ pub static CACTUP_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
             use colored::Colorize;
             eprintln!(
                 "{}",
-                format!("Warning: ignoring CACTUP_HOME={} (not an absolute path)", home.display())
+                format!("Warning: ignoring CACTUP_HOME='{}': not an absolute path", home.display())
                     .yellow()
             );
         }
@@ -144,7 +144,7 @@ fn main() -> Res<()> {
         drop(span);
         if gix::interrupt::is_triggered() {
             timing::report();
-            anyhow::bail!("interrupted");
+            anyhow::bail!("Interrupted");
         }
     }
     // §17: a binary pinned to an older MDB generation keeps working on the

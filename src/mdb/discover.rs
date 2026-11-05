@@ -43,12 +43,12 @@ pub fn short_name(hostname: &str) -> &str {
 /// (§4.3). There is no comment syntax — a `#` would be part of the regex.
 pub fn load_regexp(path: &Path) -> Res<Regex> {
     let text =
-        std::fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+        std::fs::read_to_string(path).with_context(|| format!("Failed to read '{}'", path.display()))?;
     let pattern = text.trim();
     if pattern.is_empty() {
-        bail!("{} is empty", path.display());
+        bail!("'{}' is empty", path.display());
     }
-    Regex::new(pattern).with_context(|| format!("{} is not a valid regex", path.display()))
+    Regex::new(pattern).with_context(|| format!("'{}' is not a valid regex", path.display()))
 }
 
 /// Does a `hostname.regexp` pattern claim `hostname`? Tested against the name
@@ -128,14 +128,14 @@ for i, path in enumerate(sys.argv[2:]):
         if gix::interrupt::is_triggered() {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("interrupted");
+            bail!("Interrupted");
         }
         std::thread::sleep(Duration::from_millis(20));
     };
     let stdout = stdout.join().unwrap_or_default();
     let stderr = stderr.join().unwrap_or_default();
     if gix::interrupt::is_triggered() {
-        bail!("interrupted");
+        bail!("Interrupted");
     }
     if !status.success() {
         bail!(
@@ -152,7 +152,7 @@ for i, path in enumerate(sys.argv[2:]):
             "1" => Ok(true),
             "0" => Ok(false),
             other => Err(anyhow::anyhow!(
-                "{} raised while evaluating is_machine({hostname:?}): {}",
+                "'{}' raised while evaluating is_machine({hostname:?}): {}",
                 scripts[index.parse::<usize>().unwrap_or(0)].display(),
                 other.strip_prefix('E').unwrap_or(other)
             )),
@@ -162,7 +162,7 @@ for i, path in enumerate(sys.argv[2:]):
         .into_iter()
         .zip(scripts)
         .map(|(r, path)| {
-            r.unwrap_or_else(|| Err(anyhow::anyhow!("no verdict from python3 for {}", path.display())))
+            r.unwrap_or_else(|| Err(anyhow::anyhow!("No verdict from python3 for '{}'", path.display())))
         })
         .collect())
 }

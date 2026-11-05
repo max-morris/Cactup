@@ -415,7 +415,7 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
     // Its compiles are the same twice only with the module ID given
     // (decision 25).
     if compiler.family == Family::Nvcc && !compiler.takes_module_id {
-        return Err("this nvcc does not take the module ID it is given, and the one it makes differs from compile to compile".to_owned());
+        return Err("this nvcc ignores the given module ID and makes a different one for each compile".to_owned());
     }
     // Flags `nvcc` takes from the environment, which no reader here sees.
     if compiler.family == Family::Nvcc
@@ -434,7 +434,7 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
     let identified = watch.stamps();
     if let Some(flag) = compile.keyed.iter().find(|argument| compiler.multilib.iter().any(|flag| argument.as_bytes() == flag.as_bytes())) {
         return Err(format!(
-            "{} has the compiler use another of its sets of programs and libraries (a multilib), which the cache does not follow",
+            "{} selects another multilib, which the cache does not follow",
             flag.to_string_lossy()
         ));
     }
@@ -455,7 +455,7 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
     // converter modules; tried: one charset name, two converters or two
     // locales, two objects). Cactus asks for none.
     if compile.charset {
-        return Err("it converts character sets, with converters and locale data the cache does not follow".to_owned());
+        return Err("it converts character sets, which the cache does not follow".to_owned());
     }
     // For CUDA, what the host compiler does with them.
     let host_family = cuda_run.as_ref().map_or(compiler.family, |(_, host)| host.family);
@@ -685,14 +685,14 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             let file = compile.depend.iter().rposition(|flag| flag == "-MF").and_then(|at| compile.depend.get(at + 1));
             match (full, file) {
                 (true, Some(file)) => OwnReads::Theirs(PathBuf::from(file)),
-                _ => return Err("its dependency flags do not list every file it reads (-MMD leaves out system headers; without -MF the file has no name of its own)".to_owned()),
+                _ => return Err("its dependency flags do not list every file it reads (-MMD, or -MD without -MF)".to_owned()),
             }
         }
     };
     // This run's list: beside the dependency file it writes for the
     // compile, or in one of its own.
     let ours = match own_reads {
-        OwnReads::Ours(..) => Some(tempfile::Builder::new().prefix(".cactup-").suffix(".d").tempfile().map_err(|e| format!("cannot make a file for the preprocessor's list of what it reads: {e}"))?.into_temp_path()),
+        OwnReads::Ours(..) => Some(tempfile::Builder::new().prefix(".cactup-").suffix(".d").tempfile().map_err(|e| format!("cannot create the preprocessor's dependency file: {e}"))?.into_temp_path()),
         _ => None,
     };
     let mut flags: Vec<OsString> = depend.as_ref().map(|(_, flags)| flags.clone()).unwrap_or_default();
@@ -784,7 +784,7 @@ fn depend_flags(compile: &Compile) -> Res<Option<((tempfile::TempPath, PathBuf),
         .prefix(&format!(".{name}.cactup-"))
         .permissions(std::fs::Permissions::from_mode(0o666))
         .tempfile_in(dir)
-        .with_context(|| format!("Failed to create a temporary file in {}", dir.display()))?
+        .with_context(|| format!("Failed to create a temporary file in '{}'", dir.display()))?
         .into_temp_path();
     let mut flags = compile.depend.clone();
     flags[at + 1] = temp.as_os_str().to_owned();
@@ -1286,7 +1286,7 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("Failed to run {} as a preprocessor", compiler.path.display()))?;
+        .with_context(|| format!("Failed to run '{}' as a preprocessor", compiler.path.display()))?;
     PREPROCESSOR.store(child.id() as i32, Ordering::SeqCst);
     // Read aside, so that a preprocessor with much to say (warnings) does
     // not stop on a full pipe while its output is being read here.
@@ -1455,7 +1455,7 @@ pub(super) fn read_files(named: &Named, map: Option<&PathMap>, used: Option<&Use
                 whole.feed(b"no such file");
                 ("no such file".to_owned(), Taken::Absent, false)
             }
-            Err(e) => bail!("a file the compile reads cannot be read to key it (Failed to read {}: {e})", path.display()),
+            Err(e) => bail!("Failed to read '{}': {e}", path.display()),
         };
         files.feed(digest.as_bytes());
         let narrowed = matches!(taken, Taken::Narrowed(_) | Taken::NothingLeftOut(_));
@@ -1568,7 +1568,7 @@ pub(super) fn flags_from_elsewhere(family: Family, specs: Option<&Path>, said: &
     // of the compiler proper, so it has to have got as far as that.
     match family {
         Family::Clang => match said.lines().find_map(|line| line.strip_prefix("Configuration file: ")) {
-            Some(file) => Err(format!("the compiler reads a configuration file ({file}), which can add flags the cache does not see")),
+            Some(file) => Err(format!("the compiler reads a configuration file '{file}', which can add flags the cache does not see")),
             None if said.lines().any(|line| line.starts_with("InstalledDir: ")) && said.lines().any(runs_cc1) => Ok(()),
             None => Err("the compiler does not say whether it reads a configuration file".to_owned()),
         },
@@ -1582,7 +1582,7 @@ pub(super) fn flags_from_elsewhere(family: Family, specs: Option<&Path>, said: &
                 ([file], Some(_)) if accepted(file) => Ok(()),
                 ([], _) => Err("the compiler does not say whether it reads a specs file".to_owned()),
                 (files, _) => match files.iter().find(|file| !accepted(file)) {
-                    Some(file) => Err(format!("the compiler reads a specs file ({file}), which can add flags the cache does not see")),
+                    Some(file) => Err(format!("the compiler reads a specs file '{file}', which can add flags the cache does not see")),
                     None => Err("the compiler reads its specs file more than once".to_owned()),
                 },
             }
@@ -1845,7 +1845,7 @@ fn wording(path: &Path, fortran: bool) -> Res<Vec<u8>> {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("Failed to run {} to see how it words a warning", path.display()))?;
+        .with_context(|| format!("Failed to run '{}' to probe its warning format", path.display()))?;
     PREPROCESSOR.store(child.id() as i32, Ordering::SeqCst);
     if let Some(mut stdin) = child.stdin.take() {
         let _ = std::io::Write::write_all(&mut stdin, source.as_bytes());
@@ -1854,7 +1854,7 @@ fn wording(path: &Path, fortran: bool) -> Res<Vec<u8>> {
     PREPROCESSOR.store(0, Ordering::SeqCst);
     let out = out.context("Failed to wait for the compiler")?;
     if out.stderr.is_empty() {
-        bail!("{} said nothing of an unused variable, so how it words a warning is not known", path.display());
+        bail!("'{}' gave no warning for an unused variable, so its warning format is unknown", path.display());
     }
     Ok(out.stderr)
 }
@@ -2266,7 +2266,7 @@ pub(super) fn driver_led_elsewhere(name: &OsStr, fortran: bool, env: impl Fn(&st
     if fortran && bare && let Some(path) = env("PATH") {
         for entry in path.as_bytes().split(|b| *b == b':') {
             if !entry.starts_with(b"/") {
-                return Some("PATH has an entry that is not an absolute path (an empty one is the working directory) before the compiler".to_owned());
+                return Some("PATH has a relative or empty entry before the compiler".to_owned());
             }
             let candidate = Path::new(OsStr::from_bytes(entry)).join(name);
             if candidate.metadata().is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0) {
@@ -2282,7 +2282,7 @@ pub(super) fn driver_led_elsewhere(name: &OsStr, fortran: bool, env: impl Fn(&st
         }
     }
     if let Some(variable) = variables.into_iter().find(|variable| relative_entry(variable)) {
-        return Some(format!("{variable} has an entry that is not an absolute path (an empty one is the working directory)"));
+        return Some(format!("{variable} has a relative or empty entry"));
     }
     // A preloaded library named without a `/` is searched for, as any other
     // (one named through a token the loader expands is watched where the

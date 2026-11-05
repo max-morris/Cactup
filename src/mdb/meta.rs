@@ -855,7 +855,7 @@ impl Universe {
             // bare, exactly like every caller's no-universe branch.
             (None, None) => Ok(WrappedCommand::Shell(inner.to_owned())),
             // Rejected by Meta::validate.
-            (Some(_), Some(_)) => bail!("universe declares both wrapper-argv and wrapper"),
+            (Some(_), Some(_)) => bail!("Universe declares both wrapper-argv and wrapper"),
         }
     }
 }
@@ -927,9 +927,9 @@ impl ScriptTable {
             format!(" for configs built in universe \"{universe}\"")
         };
         if served.is_empty() {
-            bail!("no {what} serves queue \"{queue}\"{context}, nor any other queue");
+            bail!("No {what} serves queue \"{queue}\"{context}, nor any other queue");
         }
-        bail!("no {what} serves queue \"{queue}\"{context} (served: {}); pick one of those with -q", served.join(", "));
+        bail!("No {what} serves queue \"{queue}\"{context} (served: {}); pick one of those with -q", served.join(", "));
     }
 }
 
@@ -972,7 +972,7 @@ impl Meta {
     pub fn queue(&self, name: &str) -> Res<&Queue> {
         self.queues.get(name).ok_or_else(|| {
             anyhow!(
-                "no queue named \"{name}\" (known: {})",
+                "No queue named \"{name}\" (known: {})",
                 self.queues.keys().cloned().collect::<Vec<_>>().join(", ")
             )
         })
@@ -1020,7 +1020,7 @@ impl Meta {
             known.push(HOST_UNIVERSE);
         }
         Err(anyhow!(
-            "no universe named \"{name}\" on this machine (known: {})",
+            "No universe named \"{name}\" on this machine (known: {})",
             known.join(", ")
         ))
     }
@@ -1099,16 +1099,16 @@ impl Meta {
     /// errors; call before the Meta is used.
     pub fn validate(&self, machine: &str) -> Res<()> {
         self.validate_inner()
-            .with_context(|| format!("invalid meta.toml for machine \"{machine}\""))
+            .with_context(|| format!("Invalid meta.toml for machine \"{machine}\""))
     }
 
     fn validate_inner(&self) -> Res<()> {
         if self.queues.is_empty() {
-            bail!("no [queues.*] declared; every machine needs at least one queue");
+            bail!("No [queues.*] declared");
         }
         let defaults: Vec<_> = self.queues.iter().filter(|(_, q)| q.default).map(|(n, _)| n).collect();
         if defaults.len() > 1 {
-            bail!("more than one queue is marked default = true: {}", defaults.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
+            bail!("More than one queue is marked default = true: {}", defaults.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
         }
 
         // Queue build-universe gates (§4.4), mirroring the script-route lists:
@@ -1117,13 +1117,13 @@ impl Meta {
             if let Some(universes) = &queue.build_universes {
                 if universes.is_empty() {
                     bail!(
-                        "queue \"{name}\" declares an empty build-universes list; omit the key \
+                        "Queue \"{name}\" declares an empty build-universes list; omit the key \
                          to be compatible with all universes"
                     );
                 }
                 for u in universes {
                     if !self.is_known_universe(u) {
-                        bail!("queue \"{name}\" lists unknown build universe \"{u}\"");
+                        bail!("Queue \"{name}\" lists unknown build universe \"{u}\"");
                     }
                 }
             }
@@ -1135,10 +1135,7 @@ impl Meta {
         // Declaring one without the other is therefore always a mistake, and a
         // silent one: it would surface as a machine that submits nothing.
         if self.scheduler.blocking_submit.is_some() && self.scheduler.submit.is_none() {
-            bail!(
-                "[scheduler].blocking-submit is declared without [scheduler].submit; it is the \
-                 blocking flavor of that command, not a substitute for it"
-            );
+            bail!("[scheduler].blocking-submit is declared without [scheduler].submit");
         }
 
         // §10: the pattern is compiled per query with the job id put in, as
@@ -1152,25 +1149,24 @@ impl Meta {
 
         for kind in [ScriptKind::Submit, ScriptKind::Run, ScriptKind::BuildSubmit] {
             self.validate_script_kind(kind)
-                .with_context(|| format!("in [{}]", kind.table_name()))?;
+                .with_context(|| format!("In [{}]", kind.table_name()))?;
         }
 
         for (name, universe) in &self.universes {
             match (&universe.wrapper_argv, &universe.wrapper) {
-                (Some(_), Some(_)) => bail!("universe \"{name}\" defines both wrapper-argv and wrapper; pick one"), // §4.8
+                (Some(_), Some(_)) => bail!("Universe \"{name}\" defines both wrapper-argv and wrapper; pick one"), // §4.8
                 // Neither wrapper = identity universe (§4.8): legal, e.g. as a
                 // pure env-setup override carrier.
                 (None, None) => {}
                 (None, Some(t)) => {
                     if !t.contains("@COMMAND@") {
-                        bail!("universe \"{name}\"'s wrapper template does not contain @COMMAND@") // §4.8
+                        bail!("Universe \"{name}\"'s wrapper template does not contain @COMMAND@") // §4.8
                     }
                     if let Some(pos) = command_token_in_quotes(t) {
                         bail!(
-                            "universe \"{name}\"'s wrapper template puts @COMMAND@ inside a \
-                             quoted string (byte {pos}); wrap() supplies @COMMAND@ already \
-                             shell-quoted, so it must sit OUTSIDE the template's own quotes \
-                             — e.g. `bash -lc '… && '@COMMAND@`" // §4.8
+                            "Universe \"{name}\"'s wrapper template puts @COMMAND@ inside a \
+                             quoted string (byte {pos}); @COMMAND@ is already shell-quoted, so \
+                             place it outside the quotes, e.g. `bash -lc '… && '@COMMAND@`" // §4.8
                         )
                     }
                 }
@@ -1227,7 +1223,7 @@ impl Meta {
         for (name, entry) in &sv.routes {
             for queue in &entry.queues {
                 if !self.queues.contains_key(queue) {
-                    bail!("script \"{name}\" maps unknown queue \"{queue}\"");
+                    bail!("Script \"{name}\" maps unknown queue \"{queue}\"");
                 }
             }
             // A build job is never a test and takes its shape from [build],
@@ -1235,19 +1231,19 @@ impl Meta {
             if kind == ScriptKind::BuildSubmit && (entry.test || entry.tasks.is_some()) {
                 bail!(
                     "build-submit script \"{name}\" sets `test` or `tasks`, which a build job \
-                     never reads (its shape comes from [build])"
+                     never reads; set its shape in [build]"
                 );
             }
             if let Some(universes) = &entry.build_universes {
                 if universes.is_empty() {
                     bail!(
-                        "script \"{name}\" declares an empty build-universes list; omit the key \
+                        "Script \"{name}\" declares an empty build-universes list; omit the key \
                          to be compatible with all universes" // §4.4
                     );
                 }
                 for u in universes {
                     if !self.is_known_universe(u) {
-                        bail!("script \"{name}\" lists unknown build universe \"{u}\"");
+                        bail!("Script \"{name}\" lists unknown build universe \"{u}\"");
                     }
                 }
             }
@@ -1263,7 +1259,7 @@ impl Meta {
             let owes_coverage = !test && kind != ScriptKind::BuildSubmit;
             if partition.is_empty() {
                 if owes_coverage && !self.queues.is_empty() {
-                    bail!("no normal scripts declared");
+                    bail!("No normal scripts declared");
                 }
                 continue;
             }
@@ -1282,13 +1278,13 @@ impl Meta {
                         .collect();
                     if serving.len() > 1 {
                         bail!(
-                            "queue \"{queue}\" is mapped by more than one {label}script \
+                            "Queue \"{queue}\" is mapped by more than one {label}script \
                              compatible with universe \"{universe}\": {}",
                             serving.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
                         );
                     }
                     if owes_coverage && *universe == HOST_UNIVERSE && serving.is_empty() {
-                        bail!("queue \"{queue}\" is served by no script"); // §4.2
+                        bail!("Queue \"{queue}\" is served by no script"); // §4.2
                     }
                 }
             }
@@ -1327,7 +1323,7 @@ impl Meta {
         let field = path_fields(&mut paths)
             .into_iter()
             .find_map(|(name, field)| (name == key).then(|| field.take()))
-            .with_context(|| format!("no [paths] key \"{key}\""))?;
+            .with_context(|| format!("No [paths] key \"{key}\""))?;
         field.map(|value| resolve_path(key, &value)).transpose()
     }
 
@@ -1386,7 +1382,7 @@ pub fn fallback_home(key: &str) -> Option<std::path::PathBuf> {
 fn resolve_path(key: &str, value: &str) -> Res<String> {
     let mut vars = VarSet::new();
     vars.set("USER", super::whoami());
-    vars.substitute(value, Syntax::Plain).with_context(|| format!("in [paths].{key}"))
+    vars.substitute(value, Syntax::Plain).with_context(|| format!("In [paths].{key}"))
 }
 
 /// Knob validator (§5) for the path knobs, one per `[paths]` key: an absolute
@@ -1394,7 +1390,7 @@ fn resolve_path(key: &str, value: &str) -> Res<String> {
 pub fn validate_path_knob(key: &str, value: &str) -> Res<String> {
     let value = value.trim();
     if !std::path::Path::new(value).is_absolute() || value.contains(['\n', '\0']) {
-        bail!("invalid {key} \"{value}\": it must be an absolute path");
+        bail!("Invalid {key} '{value}': it must be an absolute path");
     }
     Ok(value.to_owned())
 }
@@ -1608,7 +1604,7 @@ mod tests {
         let meta = mike();
         let rs = meta.scripts(ScriptKind::Run);
         let err = format!("{:#}", rs.route("gpu", "host", true).unwrap_err());
-        assert!(err.contains("no test run script serves queue \"gpu\" (served: checkpt, single)"), "{err}");
+        assert!(err.contains("No test run script serves queue \"gpu\" (served: checkpt, single)"), "{err}");
 
         let mut meta = mike();
         meta.runscripts.routes.shift_remove("test-cpu");
@@ -1635,7 +1631,7 @@ mod tests {
         let meta: Meta = toml::from_str(&partial).unwrap();
         meta.validate("mike").unwrap();
         let err = format!("{:#}", meta.scripts(ScriptKind::BuildSubmit).route("single", "host", false).unwrap_err());
-        assert!(err.contains("no build-submit script serves queue \"single\" (served: gpu)"), "{err}");
+        assert!(err.contains("No build-submit script serves queue \"single\" (served: gpu)"), "{err}");
     }
 
     #[test]
@@ -1779,8 +1775,8 @@ mod tests {
         let meta: Meta = toml::from_str(&no_runscripts).unwrap();
         assert!(meta.runscripts.routes.is_empty(), "fixture edit missed the runscript table");
         let err = format!("{:#}", meta.validate("mike").unwrap_err());
-        assert!(err.contains("no normal scripts declared"), "unexpected error: {err}");
-        assert!(err.contains("in [runscripts]"), "unexpected error: {err}");
+        assert!(err.contains("No normal scripts declared"), "unexpected error: {err}");
+        assert!(err.contains("In [runscripts]"), "unexpected error: {err}");
     }
 
     /// `build submit` groundwork (not yet wired to a command): a machine that

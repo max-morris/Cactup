@@ -150,11 +150,8 @@ fn plan_link(pass: &LinkPass, component: &Component) -> crate::Res<LinkPlan> {
             // Lines 1593-1604: the repo IS the target — link the whole repo
             // dir (no subpath) under !NAME.
             let name = component.name.as_deref().ok_or_else(|| {
-                anyhow!(
-                    "component '{}' has !CHECKOUT = . but no !NAME to link it as \
-                     (GetComponents line 1596 uses !NAME as the symlink's basename here)",
-                    component.checkout
-                )
+                // GetComponents line 1596 uses !NAME as the symlink's basename here.
+                anyhow!("Component '{}' has !CHECKOUT = . but no !NAME", component.checkout)
             })?;
             (name.to_owned(), repo_base.clone())
         } else {
@@ -163,7 +160,7 @@ fn plan_link(pass: &LinkPass, component: &Component) -> crate::Res<LinkPlan> {
         };
 
     if link_name.is_empty() {
-        bail!("component '{}' resolves to an empty symlink name", component.checkout);
+        bail!("Component '{}' resolves to an empty symlink name", component.checkout);
     }
 
     Ok(LinkPlan {
@@ -186,7 +183,7 @@ pub fn link_component(install_root: &Path, root: &str, component: &Component) ->
 
 fn link_planned(plan: LinkPlan) -> crate::Res<LinkOutcome> {
     std::fs::create_dir_all(&plan.target_dir)
-        .with_context(|| format!("Failed to create {}", plan.target_dir.display()))?;
+        .with_context(|| format!("Failed to create '{}'", plan.target_dir.display()))?;
 
     match std::fs::symlink_metadata(&plan.link_path) {
         Err(_) => {
@@ -198,7 +195,7 @@ fn link_planned(plan: LinkPlan) -> crate::Res<LinkOutcome> {
                 return Ok(LinkOutcome::Blocked { existing: plan.link_path });
             }
             let raw = std::fs::read_link(&plan.link_path).with_context(|| {
-                format!("Failed to read existing symlink {}", plan.link_path.display())
+                format!("Failed to read existing symlink '{}'", plan.link_path.display())
             })?;
             let resolved_old = join_normalized(&plan.target_dir, &raw);
             if !resolved_old.starts_with(&plan.repos_dir) {
@@ -271,7 +268,7 @@ fn inspect_planned(plan: LinkPlan) -> crate::Res<LinkState> {
         return Ok(LinkState::Replaced { existing: plan.link_path });
     }
     let raw = std::fs::read_link(&plan.link_path)
-        .with_context(|| format!("Failed to read symlink {}", plan.link_path.display()))?;
+        .with_context(|| format!("Failed to read symlink '{}'", plan.link_path.display()))?;
     let resolved = join_normalized(&plan.target_dir, &raw);
     if !resolved.starts_with(&plan.repos_dir) {
         return Ok(LinkState::Foreign { target: resolved });
@@ -290,20 +287,20 @@ fn create_symlink(link_dir: &Path, absolute_target: &Path, link_path: &Path) -> 
     let rel = relative_from(absolute_target, link_dir);
     #[cfg(unix)]
     std::os::unix::fs::symlink(&rel, link_path)
-        .with_context(|| format!("Failed to symlink {} -> {}", link_path.display(), rel.display()))?;
+        .with_context(|| format!("Failed to symlink '{}' -> '{}'", link_path.display(), rel.display()))?;
     #[cfg(windows)]
     std::os::windows::fs::symlink_dir(&rel, link_path)
-        .with_context(|| format!("Failed to symlink {} -> {}", link_path.display(), rel.display()))?;
+        .with_context(|| format!("Failed to symlink '{}' -> '{}'", link_path.display(), rel.display()))?;
     Ok(())
 }
 
 fn remove_symlink(link_path: &Path) -> crate::Res<()> {
     #[cfg(unix)]
     std::fs::remove_file(link_path)
-        .with_context(|| format!("Failed to remove existing symlink {}", link_path.display()))?;
+        .with_context(|| format!("Failed to remove existing symlink '{}'", link_path.display()))?;
     #[cfg(windows)]
     std::fs::remove_dir(link_path) // dir symlinks on Windows are removed with remove_dir
-        .with_context(|| format!("Failed to remove existing symlink {}", link_path.display()))?;
+        .with_context(|| format!("Failed to remove existing symlink '{}'", link_path.display()))?;
     Ok(())
 }
 

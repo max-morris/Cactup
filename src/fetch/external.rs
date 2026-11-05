@@ -60,7 +60,7 @@ fn destination(install_root: &Path, component: &Component) -> PathBuf {
 }
 
 fn require_url(component: &Component) -> crate::Res<&str> {
-    component.url.as_deref().ok_or_else(|| anyhow!("component '{}' has no !URL", component.checkout))
+    component.url.as_deref().ok_or_else(|| anyhow!("Component '{}' has no !URL", component.checkout))
 }
 
 // --- svn: GetComponents handle_svn, checkout lines 1309-1336, update lines 1338-1402 ---
@@ -89,7 +89,7 @@ fn fetch_svn(install_root: &Path, component: &Component) -> crate::Res<()> {
         let url = svn_url(component)?.to_owned();
         let target_dir = install_root.join(&component.target);
         std::fs::create_dir_all(&target_dir)
-            .with_context(|| format!("Failed to create {}", target_dir.display()))?;
+            .with_context(|| format!("Failed to create '{}'", target_dir.display()))?;
         let (prog, args) = svn_checkout_args(&url, &dest);
         run_tool(prog, &args, Some(&target_dir), component)
     }
@@ -153,7 +153,7 @@ fn fetch_cvs(install_root: &Path, component: &Component) -> crate::Res<()> {
         let url = cvs_url(component)?;
         let target_dir = install_root.join(&component.target);
         std::fs::create_dir_all(&target_dir)
-            .with_context(|| format!("Failed to create {}", target_dir.display()))?;
+            .with_context(|| format!("Failed to create '{}'", target_dir.display()))?;
         let dir_name = component.name.as_deref().unwrap_or(&component.checkout);
         let (prog, args) = cvs_checkout_args(&url, component.branch.as_deref(), dir_name, &component.checkout);
         run_tool(prog, &args, Some(&target_dir), component)
@@ -199,7 +199,7 @@ fn fetch_hg(install_root: &Path, component: &Component) -> crate::Res<()> {
         let url = hg_url(component)?.to_owned();
         let target_dir = install_root.join(&component.target);
         std::fs::create_dir_all(&target_dir)
-            .with_context(|| format!("Failed to create {}", target_dir.display()))?;
+            .with_context(|| format!("Failed to create '{}'", target_dir.display()))?;
         let (prog, args) = hg_clone_args(&url, component.branch.as_deref(), &dest);
         run_tool(prog, &args, Some(&target_dir), component)
     }
@@ -250,7 +250,7 @@ fn fetch_darcs(install_root: &Path, component: &Component) -> crate::Res<()> {
         let url = darcs_url(component)?.to_owned();
         let target_dir = install_root.join(&component.target);
         std::fs::create_dir_all(&target_dir)
-            .with_context(|| format!("Failed to create {}", target_dir.display()))?;
+            .with_context(|| format!("Failed to create '{}'", target_dir.display()))?;
         let (prog, args) = darcs_clone_args(&url, component.branch.as_deref(), &dest);
         run_tool(prog, &args, Some(&target_dir), component)
     }
@@ -277,7 +277,7 @@ fn run_tool(program: &str, args: &[String], cwd: Option<&Path>, component: &Comp
             String::from_utf8_lossy(&out.stderr).trim(),
         ),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(
-            "{program} is not installed, but is needed to fetch '{}' — install {program} and try again",
+            "{program} is needed to fetch '{}' but is not installed",
             component.checkout,
         ),
         Err(e) => Err(e).with_context(|| format!("Failed to run {program} for '{}'", component.checkout)),

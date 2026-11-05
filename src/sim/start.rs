@@ -37,7 +37,7 @@ fn obtain_sim(
         (None, true) => Simulation::locate(inst, &args.sim),
         // §8.3
         (None, false) => bail!(
-            "no simulation named \"{}\" — pass a parfile to create it",
+            "No simulation named \"{}\"; pass a parfile to create it",
             args.sim
         ),
         (Some(par), false) => crate::sim::create(
@@ -56,7 +56,7 @@ fn obtain_sim(
         (Some(par), true) => {
             if !(args.overwrite || args.force) {
                 bail!(
-                    "simulation \"{}\" already exists but a parfile was given; \
+                    "Simulation \"{}\" already exists but a parfile was given; \
                      use --overwrite (or -f) to replace it",
                     args.sim
                 );
@@ -140,12 +140,9 @@ pub(crate) fn resolve_submit_universe<'m>(
 fn config_missing_error(cactus_root: &Path, machine: &Machine, config: &str) -> anyhow::Error {
     let config_dir = cactus_root.join("configs").join(config);
     if let Some(phrase) = build_cmd::in_flight_build(&config_dir, config, Some(machine)) {
-        return anyhow!(
-            "{phrase} — this simulation's config is being (re)built; wait for it \
-             (`cactup build log {config}` / `cactup build show {config}`)"
-        );
+        return anyhow!("{phrase}; wait for it to finish (see `cactup build show {config}`)");
     }
-    anyhow!("config \"{config}\" (which created this simulation) no longer exists")
+    anyhow!("Config \"{config}\" no longer exists")
 }
 
 /// Insert the phase's effective env-setup into a substituted `.sh` script
@@ -204,16 +201,16 @@ pub(crate) fn generate_script(
         vars.run_py_script(&script.path)
     } else {
         let template = fs::read_to_string(&script.path)
-            .with_context(|| format!("Failed to read {}", script.path.display()))?;
+            .with_context(|| format!("Failed to read '{}'", script.path.display()))?;
         let substituted = vars
             .substitute(&template, Syntax::Shell)
-            .with_context(|| format!("substituting {}", script.path.display()))?;
+            .with_context(|| format!("Substituting '{}'", script.path.display()))?;
         Ok(prepend_env(&substituted, &machine.meta.phase_env(universe, phase), kind))
     }
 }
 
 pub(crate) fn write_executable(path: &Path, content: &str) -> Res<()> {
-    fs::write(path, content).with_context(|| format!("Failed to write {}", path.display()))?;
+    fs::write(path, content).with_context(|| format!("Failed to write '{}'", path.display()))?;
     use std::os::unix::fs::PermissionsExt;
     let mut perms = fs::metadata(path)?.permissions();
     perms.set_mode(perms.mode() | 0o755);
@@ -233,9 +230,9 @@ fn check_parfile(sim: &Simulation, vars: &VarSet) -> Res<()> {
     }
     let master = sim.master_parfile();
     let template = fs::read_to_string(&master)
-        .with_context(|| format!("Failed to read parfile master copy {}", master.display()))?;
+        .with_context(|| format!("Failed to read parfile master copy '{}'", master.display()))?;
     vars.check(&template, Syntax::Parfile)
-        .with_context(|| format!("parfile {} cannot be substituted", master.display()))
+        .with_context(|| format!("Parfile '{}' cannot be substituted", master.display()))
 }
 
 /// Resolve the parfile into the restart (§6.2/§8.4): `.par` is
@@ -248,11 +245,11 @@ fn resolve_parfile(sim: &Simulation, restart_dir: &Path, vars: &VarSet) -> Res<P
         vars.run_py_script(&master)?
     } else {
         let template = fs::read_to_string(&master)
-            .with_context(|| format!("Failed to read parfile master copy {}", master.display()))?;
+            .with_context(|| format!("Failed to read parfile master copy '{}'", master.display()))?;
         vars.substitute(&template, Syntax::Parfile)
-            .with_context(|| format!("substituting parfile {}", master.display()))?
+            .with_context(|| format!("Substituting parfile '{}'", master.display()))?
     };
-    fs::write(&out, content).with_context(|| format!("Failed to write {}", out.display()))?;
+    fs::write(&out, content).with_context(|| format!("Failed to write '{}'", out.display()))?;
     Ok(out)
 }
 
@@ -325,16 +322,15 @@ fn submit_impl(
         if r.meta.foreground && r.meta.scheduler_job(&sched).is_none() {
             match LinkLock::is_held_live(&r.running_lock_path())? {
                 true => bail!(
-                    "restart {} of simulation \"{}\" runs in the foreground (pid {}), which the scheduler \
-                     knows nothing of and cannot chain a job behind: wait for it to end, or interrupt it \
-                     where it runs (Ctrl-C), then submit",
+                    "Restart {} of simulation \"{}\" runs in the foreground (pid {}) and cannot be \
+                     chained behind; wait for it to end or interrupt it (Ctrl-C), then submit",
                     restart::dir_name(active),
                     sim.name,
                     r.meta.job_id
                 ),
                 false => bail!(
-                    "restart {} of simulation \"{}\" ran in the foreground and is still active, though \
-                     nothing of it holds its lock: `cactup sim clean {}`, then submit",
+                    "Restart {} of simulation \"{}\" ran in the foreground and is still active, but \
+                     no run holds its lock; run `cactup sim clean {}`, then submit",
                     restart::dir_name(active),
                     sim.name,
                     sim.name
@@ -343,7 +339,7 @@ fn submit_impl(
         }
         if r.meta.job_id == NO_JOB_ID {
             bail!(
-                "restart {} is active but has no job and is not reapable yet; \
+                "Restart {} is active but has no job and is not reapable yet; \
                  try again shortly or `cactup sim stop {}`",
                 restart::dir_name(active),
                 sim.name
@@ -379,8 +375,8 @@ fn submit_impl(
                 match answer {
                     Some(AfterEnd::Listed(status)) => {
                         println!(
-                            "Restart {dir}'s job {job_id} is still listed by the scheduler after the \
-                             restart ended ({}); chaining the new submission behind it",
+                            "Restart {dir} has ended but the scheduler still lists its job {job_id} ({}); \
+                             chaining the new submission behind it",
                             crate::scheduler::listed_state_words(status)
                         );
                         true
@@ -388,14 +384,13 @@ fn submit_impl(
                     // Stopped by `-f`, but its run still ending: no chaining
                     // behind a job the scheduler may have forgotten.
                     Some(AfterEnd::Unanswered(_)) if LinkLock::is_held_live(&r.running_lock_path())? => bail!(
-                        "restart {dir} of simulation \"{}\" has recorded its end, but its run still holds \
-                         its lock (it is ending): wait for it, then submit",
+                        "Restart {dir} of simulation \"{}\" is still shutting down; wait for it, then submit",
                         sim.name
                     ),
                     _ if LinkLock::is_held_live(&r.running_lock_path())? => {
                         println!(
-                            "Restart {dir} has recorded its end, but its run still holds its lock (it is \
-                             ending); chaining the new submission behind its job {job_id}"
+                            "Restart {dir} is still shutting down; chaining the new submission behind its \
+                             job {job_id}"
                         );
                         true
                     }
@@ -404,14 +399,13 @@ fn submit_impl(
                         crate::sim::manage::clean_active(sim)?;
                         match answer {
                             Some(AfterEnd::Over(crate::scheduler::JobStatus::Unknown)) => println!(
-                                "Restart {dir} had ended and the scheduler does not know its job {job_id}: \
-                                 cleaned it"
+                                "Restart {dir} has ended and the scheduler no longer knows its job \
+                                 {job_id}; cleaned it"
                             ),
-                            Some(AfterEnd::Over(_)) => println!(
-                                "Restart {dir} had ended and the scheduler lists its job {job_id} as over: \
-                                 cleaned it"
-                            ),
-                            _ => println!("Restart {dir} had recorded its end: cleaned it"),
+                            Some(AfterEnd::Over(_)) => {
+                                println!("Restart {dir} and its job {job_id} have ended; cleaned it")
+                            }
+                            _ => println!("Restart {dir} has ended; cleaned it"),
                         }
                         false
                     }
@@ -434,8 +428,8 @@ fn submit_impl(
         match answer {
             Some(AfterEnd::Listed(status)) => {
                 println!(
-                    "Restart {dir}'s job {job_id} is still listed by the scheduler after the restart ended \
-                     ({}); chaining the new submission behind it",
+                    "Restart {dir} has ended but the scheduler still lists its job {job_id} ({}); \
+                     chaining the new submission behind it",
                     crate::scheduler::listed_state_words(status)
                 );
                 prev_job = Some(ended.meta.job_id.clone());
@@ -480,7 +474,7 @@ fn submit_impl(
     if segments > 1 {
         // §8.8
         println!(
-            "Total walltime {} exceeds the {} ceiling of queue \"{}\": pre-submitting {} chained jobs",
+            "Total walltime {} exceeds the {} limit of queue \"{}\"; submitting {} chained jobs",
             topo.total_wall.canonical(),
             ceiling.canonical(),
             topo.queue,
@@ -523,7 +517,7 @@ fn submit_impl(
         // leaving nothing behind, not the queued job hours from now.
         check_parfile(sim, &vset)?;
         fs::create_dir_all(rdir.join(".cactup"))
-            .with_context(|| format!("Failed to create {}", rdir.display()))?;
+            .with_context(|| format!("Failed to create '{}'", rdir.display()))?;
 
         // Submit-phase artifact: same vars, submit-phase ENV_SETUP under the
         // submit universe (§6.1).
@@ -577,7 +571,7 @@ fn submit_impl(
 
         let submitted = sched
             .submit(&submit_vars, submit_uni.as_ref().map(|(n, u)| (n.as_str(), *u)))
-            .with_context(|| format!("submitting restart {}", restart::dir_name(id)))?;
+            .with_context(|| format!("Submitting restart {}", restart::dir_name(id)))?;
         r.meta.set_job(&submitted);
         let job_id = submitted.id;
         r.meta.status = None;
@@ -632,7 +626,7 @@ fn refuse_beside_listed(sim: &Simulation, sched: &Scheduler, force: bool) -> Res
     let (dir, job_id, name) = (restart::dir_name(ended.id), &ended.meta.job_id, &sim.name);
     match answer {
         Some(AfterEnd::Listed(status)) => bail!(
-            "restart {dir} of simulation \"{name}\" ended, but the scheduler still lists its job {job_id} {}",
+            "Restart {dir} of simulation \"{name}\" ended, but the scheduler still lists its job {job_id} {}",
             crate::scheduler::listed_after_end(status, &format!("cactup sim stop {name}"))
         ),
         Some(AfterEnd::Unanswered(failed)) if !force => {
@@ -713,7 +707,7 @@ fn run_interactive(
     }
     if let Some(active) = active {
         bail!(
-            "simulation \"{}\" already has an active restart ({}); wait for it, or \
+            "Simulation \"{}\" already has an active restart ({}); wait for it, or \
              `cactup sim stop {}` first",
             sim.name,
             restart::dir_name(active),
@@ -771,7 +765,7 @@ fn run_interactive(
     // restart directory exists.
     check_parfile(sim, &vset)?;
     fs::create_dir_all(rdir.join(".cactup"))
-        .with_context(|| format!("Failed to create {}", rdir.display()))?;
+        .with_context(|| format!("Failed to create '{}'", rdir.display()))?;
 
     let run_script = generate_script(machine, ScriptKind::Run, run_script_name, &vset, Phase::Run, run_uni_name)?;
     write_executable(&rdir.join(".cactup").join("run-script"), &run_script)?;
@@ -936,7 +930,7 @@ fn execute_restart(sim: &Simulation, r: &mut Restart, tee: bool) -> Res<()> {
 
     let parfile = resolve_parfile(sim, &r.dir, &vset)?;
     let workdir = restart::workdir(sim, r.id);
-    fs::create_dir_all(&workdir).with_context(|| format!("Failed to create {}", workdir.display()))?;
+    fs::create_dir_all(&workdir).with_context(|| format!("Failed to create '{}'", workdir.display()))?;
     // TERMINATE is deliberately NOT created here. It is the running Cactus
     // job's file (TerminationTrigger's create_termination_file), and `sim stop`
     // treats its existence as the evidence that this run is actually watching
@@ -982,7 +976,7 @@ fn execute_restart(sim: &Simulation, r: &mut Restart, tee: bool) -> Res<()> {
         }
         Ok(st) => {
             sim.log("run", &format!("{} failed ({st})", restart::dir_name(r.id)));
-            bail!("the run-script exited unsuccessfully ({st})");
+            bail!("The run-script exited unsuccessfully ({st})");
         }
         Err(e) => {
             sim.log("run", &format!("{} failed to start: {e:#}", restart::dir_name(r.id)));
@@ -1072,8 +1066,8 @@ pub(crate) fn spawn_and_wait(
     crate::par::join_with_deadline(
         copiers,
         std::time::Duration::from_secs(2),
-        "note: a background process from the run-script still holds the output pipe; \
-         not waiting for it (its further output is not captured)",
+        "note: a background process of the run-script still holds the output pipe; \
+         its further output is not captured",
     );
     Ok(status)
 }

@@ -321,7 +321,7 @@ impl BuildAttempt {
         let mut ids = Vec::new();
         let entries = match fs::read_dir(&dir) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ids),
-            other => other.with_context(|| format!("Failed to read {}", dir.display()))?,
+            other => other.with_context(|| format!("Failed to read '{}'", dir.display()))?,
         };
         for entry in entries {
             let entry = entry?;
@@ -348,7 +348,7 @@ impl BuildAttempt {
             None => 0,
         };
         if next > 9999 {
-            bail!("maximum number of build attempts reached");
+            bail!("Maximum number of build attempts reached");
         }
         Ok(next)
     }
@@ -366,9 +366,9 @@ impl BuildAttempt {
     fn read_meta(dir: &Path) -> Res<BuildMeta> {
         let path = Self::meta_path(dir);
         let text = fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read {}", path.display()))?;
+            .with_context(|| format!("Failed to read '{}'", path.display()))?;
         let mut table: toml::Table =
-            toml::from_str(&text).with_context(|| format!("Failed to parse {}", path.display()))?;
+            toml::from_str(&text).with_context(|| format!("Failed to parse '{}'", path.display()))?;
         // An attempt recorded before the optionlist "variant" was renamed
         // "flavor" (config record schema 2): its embedded `config-meta` is
         // upgraded by `ConfigMeta::deserialize_upgrading`; this is the same
@@ -379,10 +379,10 @@ impl BuildAttempt {
         }
         let meta: BuildMeta = toml::Value::Table(table)
             .try_into()
-            .with_context(|| format!("Failed to parse {}", path.display()))?;
+            .with_context(|| format!("Failed to parse '{}'", path.display()))?;
         if meta.schema > SCHEMA {
             bail!(
-                "{} has schema {} but this cactup understands at most schema {SCHEMA}; \
+                "'{}' has schema {} but this cactup understands at most schema {SCHEMA}; \
                  please upgrade cactup",
                 path.display(),
                 meta.schema
@@ -423,7 +423,7 @@ impl BuildAttempt {
 
     /// Create a fresh attempt directory and write its metadata.
     pub fn create(dir: PathBuf, meta: BuildMeta) -> Res<BuildAttempt> {
-        fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+        fs::create_dir_all(&dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
         let attempt = BuildAttempt { id: meta.attempt_id, dir, meta };
         attempt.store_meta()?;
         Ok(attempt)

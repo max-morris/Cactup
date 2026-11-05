@@ -124,9 +124,9 @@ pub fn resolve_topology(
         .or_else(|| machine.meta.default_queue(cfg_universe).map(str::to_owned))
         .ok_or_else(|| match cfg_universe {
             Some(u) => anyhow!(
-                "no queue given (-q), no usable `queue` knob, and machine \"{m}\" has no default queue compatible with build universe \"{u}\""
+                "No queue given (-q), no usable `queue` knob, and machine \"{m}\" has no default queue compatible with build universe \"{u}\""
             ),
-            None => anyhow!("no queue given (-q) and machine \"{m}\" has no default queue"),
+            None => anyhow!("No queue given (-q) and machine \"{m}\" has no default queue"),
         })?;
     if let (Some(k), None, Some(f)) = (skipped_knob, &flags.queue, fit) {
         eprintln!(
@@ -147,8 +147,8 @@ pub fn resolve_topology(
     if flags.gpus_per_task.is_some() && !gpu {
         // §8.5
         bail!(
-            "--gpus-per-task is only meaningful on a GPU run, but queue \"{queue}\" is not \
-             GPU-flagged and --gpu was not given"
+            "--gpus-per-task needs a GPU run, but queue \"{queue}\" is not a GPU queue and \
+             --gpu was not given"
         );
     }
 
@@ -254,7 +254,7 @@ fn check_binary_fit(
     // --force-queue escape (unlike the compatible-queues/GPU guards below).
     if !queue_def.compatible_with(cfg_universe) {
         bail!(
-            "queue \"{queue}\" is not compatible with build universe \"{cfg_universe}\" \
+            "Queue \"{queue}\" is not compatible with build universe \"{cfg_universe}\" \
              (build-universes = [{}])",
             queue_def.build_universes.as_deref().unwrap_or_default().join(", ")
         );
@@ -264,7 +264,7 @@ fn check_binary_fit(
     let allowed = &fit.runs_on.queues;
     if !allowed.is_empty() && !allowed.iter().any(|q| q == queue) && !force_queue {
         bail!(
-            "config \"{}\" is only compatible with queue(s) {} (not \"{queue}\"); \
+            "Config \"{}\" is only compatible with queue(s) {} (not \"{queue}\"); \
              use --force-queue to override",
             fit.label,
             allowed.join(", ")
@@ -279,15 +279,16 @@ fn check_binary_fit(
     if fit.runs_on.gpu && !gpu && !force_queue {
         // §8.5
         bail!(
-            "config \"{}\" was built with GPU support but this run is non-GPU (queue \"{queue}\"); \
+            "Config \"{}\" was built with GPU support but this run is non-GPU (queue \"{queue}\"); \
              use --force-queue to override",
             fit.label,
         );
     }
     if !fit.runs_on.gpu && gpu && machine.meta.queues.values().any(|q| !q.gpu) {
+        // D12
         eprintln!(
             "{} config \"{}\" was built without GPU support but queue \"{queue}\" is GPU-flagged; \
-             this machine also has non-GPU queue(s) (D12)",
+             this machine also has non-GPU queues",
             "note:".yellow(),
             fit.label,
         );
@@ -357,7 +358,7 @@ fn check_gpus_per_node(per_task: u32, tpn: u32, hw: &Hardware, queue: &str) -> R
             };
             // §8.5
             bail!(
-                "this layout needs {needed} GPUs per node ({per_task} per task × {tpn} tasks/node) \
+                "This layout needs {needed} GPUs per node ({per_task} per task × {tpn} tasks/node) \
                  but queue \"{queue}\" has {max}; {fix}"
             );
         }

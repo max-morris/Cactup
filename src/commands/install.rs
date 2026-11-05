@@ -42,7 +42,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         Some(path) => {
             let expanded = shell::expand_path(&p2s(path.clone())?);
             let content = fs::read_to_string(&expanded)
-                .with_context(|| format!("Failed to read thornlist {expanded}"))?;
+                .with_context(|| format!("Failed to read thornlist '{expanded}'"))?;
             // Carry the *expanded*, absolute path onward: it is what the alias
             // default, the success message, and the recorded provenance all
             // want, and a `~`-relative or cwd-relative path would be
@@ -102,7 +102,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
                         // where an interactive user decides — the flag help
                         // and `cactup releases` are the only other places
                         // that say so.
-                        "Which release do you want to install? (\"master\" installs the manifest's master tip)",
+                        "Which release do you want to install (or \"master\")?",
                         release_default.as_deref().unwrap_or(manifest::MASTER),
                     )?;
                     match manifest::resolve_release(repo, releases, &release_sel)? {
@@ -131,19 +131,19 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         InstallSource::Custom { content, .. } => content.clone().into_bytes(),
     };
     let thorn_list_text =
-        String::from_utf8(thorn_list.clone()).with_context(|| "the source thornlist is not UTF-8")?;
+        String::from_utf8(thorn_list.clone()).with_context(|| "The source thornlist is not UTF-8")?;
     let list = crate::thornlist::parse(&thorn_list_text)
         .with_context(|| "Failed to parse the source thornlist")?;
     for w in list.warnings() {
-        println!("{}", format!("thornlist warning: {w}").yellow());
+        println!("{}", format!("Thornlist warning: {w}").yellow());
     }
     let root = list.root().to_owned();
     validate_root_dir(&root)?;
 
-    let (alias_default, alias_default_source) = match &source {
-        InstallSource::Release(release) => (release.name.clone(), "the release name"),
+    let alias_default = match &source {
+        InstallSource::Release(release) => release.name.clone(),
         InstallSource::Custom { path, .. } => {
-            (path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), "the thornlist file name")
+            path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
         }
     };
 
@@ -158,16 +158,16 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         }
         Some(alias) => alias,
         None if silent && !valid_alias(&alias_default) => {
-            println!("{}", format!("{} (derived from {}) is not a valid alias: use only letters, digits, '-', '_', and '.'. Please choose one by passing {}.", alias_default.bold(), alias_default_source, "--alias".bold()).bright_red());
+            println!("{}", format!("The default alias {} is not valid: use only letters, digits, '-', '_', and '.'. Pass {} to choose one.", alias_default.bold(), "--alias".bold()).bright_red());
             return Ok(());
         }
         None if silent && database.installations.contains_key(&alias_default) => {
-            println!("{}", format!("An installation with the alias {} (derived from {}) already exists. Please choose a different alias by passing {}.", alias_default.bold(), alias_default_source, "--alias".bold()).bright_red());
+            println!("{}", format!("An installation with the default alias {} already exists. Pass {} to choose another.", alias_default.bold(), "--alias".bold()).bright_red());
             return Ok(());
         }
         None if silent => alias_default.clone(),
         None => loop {
-            let alias_sel = prompt_with_default("What should the installation's alias be? This unique name will be used to identify the installation in the future.", &alias_default)?;
+            let alias_sel = prompt_with_default("What should the installation's alias be?", &alias_default)?;
             if database.installations.contains_key(&alias_sel) {
                 println!("{}", format!("An installation with the alias {} already exists. Please choose another.", alias_sel.bold()).bright_red());
             } else if !valid_alias(&alias_sel) {
@@ -281,18 +281,18 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
 
     let install_dir = Path::new(&install_prefix);
     fs::create_dir_all(install_dir)
-       .with_context(|| format!("Failed to create installation directory {}", install_dir.display()))?;
+       .with_context(|| format!("Failed to create installation directory '{}'", install_dir.display()))?;
 
     // Resolve to an absolute path. A symlink stores its target verbatim, so a
     // relative `install_prefix` would otherwise yield a target interpreted
     // relative to the *link's* directory, producing a dangling/wrong symlink.
     let install_dir = fs::canonicalize(install_dir)
-       .with_context(|| format!("Failed to resolve installation directory {}", install_dir.display()))?;
+       .with_context(|| format!("Failed to resolve installation directory '{}'", install_dir.display()))?;
 
     // The pristine as-fetched copy (§3.2): the baseline `installation
     // refetch`'s hand-edit guard compares against.
     fs::write(install_dir.join(crate::installation::SOURCE_THORNLIST), &thorn_list).with_context(|| {
-        format!("Failed to write {} to {}", crate::installation::SOURCE_THORNLIST, install_dir.display())
+        format!("Failed to write {} to '{}'", crate::installation::SOURCE_THORNLIST, install_dir.display())
     })?;
 
     // --- Native component fetch (§3.2; GetComponents is gone) ---
@@ -313,15 +313,14 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     if !plan.skipped.is_empty() {
         let repos_dir = crate::installation::cactus_root_of(&install_dir, &root).join("repos");
         let mut message = format!(
-            "{} repo(s) in {} have local changes or an incomplete checkout, so this install \
-             would not fetch them:",
+            "{} repo(s) in '{}' have local changes or an incomplete checkout:",
             plan.skipped.len(),
             repos_dir.display()
         );
         for s in &plan.skipped {
             message.push_str(&format!("\n  {}: {}", s.repo, s.reason.describe()));
         }
-        message.push_str("\nDelete them (or the whole installation directory) and install again.");
+        message.push_str("\nDelete them or the installation directory, then install again.");
         bail!(message);
     }
 
@@ -332,7 +331,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         // Running the same install again picks up where this one stopped; a
         // repo cut short mid-checkout is then named, for deleting first.
         bail!(
-            "interrupted; the installation at {} is incomplete and was not registered \
+            "Interrupted; the installation at '{}' is incomplete and was not registered \
              (run the same install again to finish it)",
             install_dir.display()
         );
@@ -341,7 +340,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         for f in &report.failures {
             println!("{}", format!("  {}: {}", f.what, f.error).bright_red());
         }
-        return Err(anyhow!("component fetch failed for {} item(s)", report.failures.len()));
+        return Err(anyhow!("Component fetch failed for {} item(s)", report.failures.len()));
     }
     crate::fetch::FetchState::record(&install_dir, &report.records())?;
 
@@ -350,14 +349,14 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     // is ours); build.rs::resolve_thornlist depends on it being here.
     let live_dir = crate::installation::cactus_root_of(&install_dir, &root).join("thornlists");
     fs::create_dir_all(&live_dir)
-        .with_context(|| format!("Failed to create {}", live_dir.display()))?;
+        .with_context(|| format!("Failed to create '{}'", live_dir.display()))?;
     fs::write(live_dir.join(crate::installation::LIVE_THORNLIST), &thorn_list).with_context(|| {
-        format!("Failed to write {}", live_dir.join(crate::installation::LIVE_THORNLIST).display())
+        format!("Failed to write '{}'", live_dir.join(crate::installation::LIVE_THORNLIST).display())
     })?;
 
     if do_symlink {
         fs::create_dir_all(Path::new(&symlink_prefix))
-           .with_context(|| format!("Failed to create symlink prefix {}", symlink_prefix))?;
+           .with_context(|| format!("Failed to create symlink prefix '{}'", symlink_prefix))?;
         let link_path = Path::new(&symlink_prefix).join(&symlink_name);
         let target = crate::installation::cactus_root_of(&install_dir, &root);
 
@@ -366,14 +365,14 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
             Ok(meta) if meta.file_type().is_symlink() => {
                 #[cfg(unix)]
                 fs::remove_file(&link_path)
-                   .with_context(|| format!("Failed to remove existing symlink {}", link_path.display()))?;
+                   .with_context(|| format!("Failed to remove existing symlink '{}'", link_path.display()))?;
                 #[cfg(windows)]
                 fs::remove_dir(&link_path) // dir symlinks on Windows are removed with remove_dir
-                   .with_context(|| format!("Failed to remove existing symlink {}", link_path.display()))?;
+                   .with_context(|| format!("Failed to remove existing symlink '{}'", link_path.display()))?;
             }
             Ok(_) => {
                 return Err(anyhow!(
-                    "Refusing to overwrite existing path {} (not a symlink)",
+                    "Refusing to overwrite '{}': it is not a symlink",
                     link_path.display()
                 ));
             }
@@ -382,10 +381,10 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
 
         #[cfg(unix)]
         std::os::unix::fs::symlink(&target, &link_path)
-                          .with_context(|| format!("Failed to symlink {} -> {}", link_path.display(), target.display()))?;
+                          .with_context(|| format!("Failed to symlink '{}' -> '{}'", link_path.display(), target.display()))?;
         #[cfg(windows)]
         std::os::windows::fs::symlink_dir(&target, &link_path)
-                             .with_context(|| format!("Failed to symlink {} -> {}", link_path.display(), target.display()))?;
+                             .with_context(|| format!("Failed to symlink '{}' -> '{}'", link_path.display(), target.display()))?;
     }
 
     // Fix sim-home/test-home into installation.toml now, from the machine's
@@ -407,8 +406,8 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     let became_active = ctx.db.update(|database| {
         if database.installations.contains_key(&alias) {
             bail!(
-                "an installation named {alias} appeared while this install ran; \
-                 the new installation at {} was NOT registered",
+                "An installation named {alias} appeared while this install ran; \
+                 the new installation at '{}' was NOT registered",
                 install_dir.display()
             );
         }
@@ -432,18 +431,18 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     let installed_root = crate::installation::cactus_root_of(&install_dir, &root);
     match &source {
         InstallSource::Release(release) => {
-            println!("{}", format!("Success! Installed release {} into {}", release.describe(), installed_root.display()).bold().bright_green());
+            println!("{}", format!("Success! Installed release {} into '{}'", release.describe(), installed_root.display()).bold().bright_green());
         }
         InstallSource::Custom { path, .. } => {
-            println!("{}", format!("Success! Installed custom thornlist {} into {}", path.display(), installed_root.display()).bold().bright_green());
+            println!("{}", format!("Success! Installed custom thornlist '{}' into '{}'", path.display(), installed_root.display()).bold().bright_green());
         }
     }
     if do_symlink {
-        println!("{}", format!("Created a symlink at {}/{}", symlink_prefix, symlink_name).bold().bright_green());
+        println!("{}", format!("Created a symlink at '{}/{}'", symlink_prefix, symlink_name).bold().bright_green());
     }
 
     if !became_active {
-        println!("Another installation is already active. To switch to this installation, run `{}`", format!("cactup use {}", alias).bold());
+        println!("Another installation is active; run `{}` to switch to this one.", format!("cactup use {}", alias).bold());
     }
 
     Ok(())
@@ -454,7 +453,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
 /// has only seen tags has no way to know it is accepted.
 fn invalid_release(selector: &str) -> String {
     format!(
-        "{} is not a valid release. Pass a release from `cactup releases`, or {} for the tip of the manifest's master branch.",
+        "{} is not a valid release; pass one from `cactup releases`, or {}.",
         selector.bold(),
         manifest::MASTER.bold()
     ).bright_red().to_string()

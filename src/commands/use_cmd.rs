@@ -33,7 +33,7 @@ pub fn dispatch(ctx: &Ctx, alias: String) -> Res<()> {
     if meta.sim_home.is_none() || meta.test_home.is_none() {
         let machine = machine::resolve(ctx)?;
         inst.ensure_meta(&machine, &ctx.db.read()?, None)?;
-        println!("Recorded this installation's sim-home/test-home (from machine {}).", machine.name.bold());
+        println!("Recorded this installation's sim-home and test-home.");
     }
     Ok(())
 }
