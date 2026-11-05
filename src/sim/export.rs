@@ -42,6 +42,9 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
     })?;
     let list = thornlist::parse(&source_text)
         .context("Export needs the thornlist as a GetComponents (CRL) list, with any !INCLUDE spliced in")?;
+    let parfile = parfile_at(&sim.cactup_dir().join("par").join(&sim.meta.parfile))?;
+    let (source_text, list) =
+        if args.trim { trimmed(source_text, &list, &sim.meta.sourcedir, &parfile)? } else { (source_text, list) };
 
     // The pins, and the checks that decide whether anyone else could fetch them.
     let fetched = FetchState::read(&inst.root)?;
@@ -49,7 +52,6 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
     let checks = check_repos(&sim.meta.sourcedir.join("repos"), &repos, fetched.as_ref())?;
     refuse_unfetchable(&repos, &checks, args.allow_dirty, args.allow_unpushed, "when the binary was built")?;
 
-    let parfile = parfile_at(&sim.cactup_dir().join("par").join(&sim.meta.parfile))?;
     let processed = std::fs::read_to_string(cfg_dir.join(build::THORNLIST_PROCESSED)).unwrap_or_default();
     let provenance = provenance(&sim, &config, &list, &processed);
     let fallback_summary = format!("{} on {}", super::parfile_stem(&parfile.filename), sim.meta.machine);
@@ -68,6 +70,25 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
             provenance,
         },
     )
+}
+
+/// `text` (parsed as `list`) trimmed to what `parfile` needs, read from the
+/// thorns under `cactus_root`, and the trimmed list parsed.
+fn trimmed(
+    text: String,
+    list: &thornlist::Thornlist,
+    cactus_root: &Path,
+    parfile: &Parfile,
+) -> Res<(String, thornlist::Thornlist)> {
+    if parfile.kind != ParfileKind::Par {
+        bail!("--trim reads the parfile's ActiveThorns, which a .py parfile only produces when it runs");
+    }
+    let keep = super::trim::needed(list, cactus_root, &parfile.text)?;
+    let trimmed = super::trim::trim_text(&text, list, &keep)?;
+    let parsed = thornlist::parse(&trimmed).context("The trimmed thornlist does not parse")?;
+    let before = list.components().len();
+    println!("Trimmed the thornlist from {before} to {} component(s).", parsed.components().len());
+    Ok((trimmed, parsed))
 }
 
 /// What a `.sim` is made of before its descriptive fields are settled.
@@ -209,13 +230,18 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
         format!("'{}' is not a GetComponents (CRL) list (with any !INCLUDE spliced in)", args.thornlist.display())
     })?;
 
-    let (repos, published) = if ctx.globals.installation.is_some() {
+    if args.trim && ctx.globals.installation.is_none() {
+        bail!("--trim reads the thorns' .ccl files, so it needs an installation that has them: pass -I");
+    }
+    let (repos, published, text, list) = if ctx.globals.installation.is_some() {
         let inst = Installation::resolve(ctx)?;
+        let (text, list) =
+            if args.trim { trimmed(text, &list, &inst.cactus_root(), &parfile)? } else { (text, list) };
         let repos_dir = inst.cactus_root().join("repos");
         let states = installed_states(&repos_dir, &list)?;
         let repos = repo_pins(&list, |repo| states.get(repo).cloned());
         let published = check_repos(&repos_dir, &repos, FetchState::read(&inst.root)?.as_ref())?;
-        (repos, published)
+        (repos, published, text, list)
     } else {
         let tips = remote_tips(&list)?;
         let repos = repo_pins(&list, |repo| tips.get(repo).map(ToString::to_string));
@@ -227,7 +253,7 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
         );
         // Each commit is a remote tip by construction.
         let published = vec![true; repos.len()];
-        (repos, published)
+        (repos, published, text, list)
     };
     refuse_unfetchable(&repos, &published, args.allow_dirty, args.allow_unpushed, "in the installation")?;
 

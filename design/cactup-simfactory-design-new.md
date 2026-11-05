@@ -4196,6 +4196,22 @@ remote today (`git ls-remote`, no fetch), and the output says so; a remote
 that cannot be asked fails the whole pack, and a repo the list already pins
 keeps its pin. A packed file has no run hints and no build provenance.
 
+**`--trim`** (export, and pack with `-I`) cuts the thornlist down to what the
+parfile needs: the thorns its `ActiveThorns` statements name (every statement,
+the key case-insensitive, names compared case-insensitively), closed under
+their `.ccl` facts as the shared crate's CCL scanner reads them from the
+installed tree — every provider of a `REQUIRES`d capability (which one a build
+settles on is not ours to guess), `REQUIRES THORNS`, and the implementers of
+an `INHERITS`/`FRIEND` implementation or providers of a `REQUIRES FUNCTION`
+only when no kept thorn already offers it. The flesh and every component that
+is not an arrangement thorn stay, as does a thorn whose `interface.ccl` cannot
+be read. A trimmed thorn is not deleted: it moves out of its `!CHECKOUT` into
+a `#DISABLED Arrangement/Thorn` line, so it is neither fetched nor built but
+stays one edit from coming back; the result is parsed back and must name
+exactly the kept checkouts, and the pins follow the trimmed list. A thorn the
+parfile activates that the list lacks is an error; a `.py` parfile cannot be
+trimmed.
+
 `cactup sim unpack <file.sim> [--dir D] [-f]` goes the other way, for whoever
 works with loose files: it writes the thornlist and the parfile under the
 names they carried, the thornlist with every pinned repo pinned by

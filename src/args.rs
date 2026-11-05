@@ -915,6 +915,9 @@ pub(crate) struct SimExportArgs {
     pub file: Option<PathBuf>,
     #[command(flatten)]
     pub describe: SimDescribeArgs,
+    /// Reduce the thornlist to the thorns the parfile activates plus what they require; the rest become #DISABLED lines.
+    #[clap(long)]
+    pub trim: bool,
     /// Export even though some sources had uncommitted changes when the binary was built; they are marked dirty.
     #[clap(long)]
     pub allow_dirty: bool,
@@ -935,6 +938,9 @@ pub(crate) struct SimPackArgs {
     pub file: Option<PathBuf>,
     #[command(flatten)]
     pub describe: SimDescribeArgs,
+    /// Reduce the thornlist to the thorns the parfile activates plus what they require; the rest become #DISABLED lines.
+    #[clap(long)]
+    pub trim: bool,
     /// Pack even though some repos in the installation have uncommitted changes; they are marked dirty.
     #[clap(long)]
     pub allow_dirty: bool,

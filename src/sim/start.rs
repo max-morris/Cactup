@@ -1763,6 +1763,7 @@ mod tests {
             },
             allow_dirty: false,
             allow_unpushed: false,
+            trim: false,
         }
     }
 
@@ -1915,6 +1916,7 @@ mod tests {
             describe: crate::args::SimDescribeArgs { force: true, yes: true, ..Default::default() },
             allow_dirty: false,
             allow_unpushed: false,
+            trim: false,
         };
         crate::sim::export::pack(&ctx, args(&th)).unwrap();
         let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
