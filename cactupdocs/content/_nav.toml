@@ -40,6 +40,10 @@ title = "User Guide"
   title = "Test Suites"
   file = "users/test-suites.md"
 
+  [[sections.pages]]
+  title = "Sharing Simulations"
+  file = "users/sharing-simulations.md"
+
 [[sections]]
 title = "Cluster Authors"
 
