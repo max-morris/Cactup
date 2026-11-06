@@ -4234,6 +4234,23 @@ names the knob inputs the parfile needs. The DB records the file as a third
 kind of install-time provenance, `simfile`, beside `release` and `thornlist`;
 `show`, `list` and `config show` name it.
 
+`cactup import <file.sim>` reproduces a `.sim` in one step: `install
+--simfile` under the file's name (or `--alias`), `cactup build` of a config of
+that name — in the foreground, or, on a machine that queues builds, submitted
+and blocked on (§7.9) — then `sim create` from the file's parfile, and with
+`--submit`/`--run` the simulation started, its topology the file's run hints
+unless `-T`/`-c`/`-w`/`-q` say otherwise. Without either it prints the submit
+command. The parfile's knob inputs are settled **first**, before anything
+long runs: `--input KNOB=VALUE`, else a download of the input's URL into
+`~/.cactup/inputs/<sha256>/<file name>` (shared by every simulation needing
+the same bytes; checked against the recorded hash, and said so when there is
+none), else a prompt offering the user's global value. The values become the
+simulation's own knobs (§5.1) — a global knob is never changed — and an input
+left to an existing global knob records nothing. An input with no value at all
+fails the import before the install. The chained steps are parsed from
+ordinary command lines, so each gets exactly the defaults the typed command
+would; all network I/O happens here, never on a compute node (D11).
+
 `cactup sim unpack <file.sim> [--dir D] [-f]` goes the other way, for whoever
 works with loose files: it writes the thornlist and the parfile under the
 names they carried, the thornlist with every pinned repo pinned by

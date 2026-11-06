@@ -6,6 +6,7 @@ pub mod build;
 pub mod cache;
 pub mod config;
 pub mod delta;
+pub mod import;
 pub mod install;
 pub mod installation;
 pub mod knob;

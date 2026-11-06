@@ -253,7 +253,7 @@ pub(crate) struct Args {
     pub command: Commands,
 }
 
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, Clone)]
 pub(crate) struct GlobalOpts {
     #[clap(short, long, global = true)]
     pub verbose: bool,
@@ -312,6 +312,9 @@ pub(crate) enum Commands {
     },
     /// Install an Einstein Toolkit release
     Install(InstallArgs),
+    // §8.9
+    /// Reproduce a .sim file: install its sources, build them, create the simulation, and optionally submit or run it
+    Import(ImportArgs),
     // §3.1
     /// Remove an installation
     Uninstall {
@@ -904,6 +907,56 @@ pub(crate) enum ConfigCommand {
         /// Config to inspect (default: the active config).
         name: Option<String>,
     },
+}
+
+/// `cactup import`.
+// §8.9
+#[derive(clap::Args, Debug)]
+pub(crate) struct ImportArgs {
+    /// The .sim file.
+    pub simfile: PathBuf,
+    /// Alias of the new installation (default: the .sim's name).
+    #[clap(short, long)]
+    pub alias: Option<String>,
+    /// Name of the config to build (default: the .sim's name).
+    #[clap(long, value_name = "NAME")]
+    pub config: Option<String>,
+    /// Name of the simulation (default: the .sim's name).
+    #[clap(long, value_name = "NAME")]
+    pub sim: Option<String>,
+    /// Optionlist flavor to build with, when the machine has several and none is the default.
+    #[clap(long, value_name = "FLAVOR")]
+    pub flavor: Option<String>,
+    /// A value for one of the parfile's knob inputs; repeat for several. Stored with the simulation, never as a global knob.
+    #[clap(long = "input", value_name = "KNOB=VALUE")]
+    pub inputs: Vec<String>,
+    /// Submit the simulation once it is created.
+    #[clap(long, conflicts_with = "run")]
+    pub submit: bool,
+    /// Run the simulation in the foreground once it is created.
+    #[clap(long)]
+    pub run: bool,
+    /// Total tasks (MPI ranks) for --submit/--run (default: the .sim's suggestion).
+    #[clap(short = 'T', long, value_name = "N")]
+    pub tasks: Option<u32>,
+    /// CPUs per task for --submit/--run (default: the .sim's suggestion).
+    #[clap(short, long, value_name = "N")]
+    pub cpus: Option<u32>,
+    /// Wall time for --submit/--run (default: the .sim's suggestion).
+    #[clap(short, long, value_name = "(DD-)?HH:MM:SS")]
+    pub wall_time: Option<String>,
+    /// Queue for --submit.
+    #[clap(short, long, value_name = "QUEUE")]
+    pub queue: Option<String>,
+    /// The prefix to install to.
+    #[clap(long)]
+    pub install_prefix: Option<String>,
+    /// Skip creating the installation's symlink.
+    #[clap(long)]
+    pub no_symlink: bool,
+    /// Take every default without asking.
+    #[clap(short, long)]
+    pub yes: bool,
 }
 
 /// `cactup sim export`. Every field the .sim carries has a default; on a

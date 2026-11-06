@@ -188,6 +188,7 @@ fn main() -> Res<()> {
         Commands::Show => commands::show::dispatch(&ctx),
         Commands::Use { alias } => commands::use_cmd::dispatch(&ctx, alias),
         Commands::Install(install) => commands::install::dispatch(&ctx, install),
+        Commands::Import(import) => commands::import::dispatch(&ctx, import),
         Commands::Uninstall { alias, force } => commands::uninstall::dispatch(&ctx, alias, force),
         Commands::Installation(cmd) | Commands::Inst(cmd) => commands::installation::dispatch(&ctx, cmd),
         Commands::Config(cmd) => commands::config::dispatch(&ctx, cmd),

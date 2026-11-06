@@ -67,6 +67,16 @@ fn auto(ctx: &Ctx, start: BuildStartArgs) -> Res<()> {
     }
 }
 
+/// `cactup build` for a caller that needs the binary before it can go on
+/// (`cactup import`, §8.9): exactly the bare command, except that a build
+/// the machine sends to the queue is blocked on (`--block`) instead of left
+/// running, and one in the foreground simply runs.
+pub(crate) fn build_to_completion(ctx: &Ctx, mut start: BuildStartArgs) -> Res<()> {
+    let machine = machine::resolve(ctx)?;
+    start.block = choose_submit(&machine, &start.opts)?;
+    auto(ctx, start)
+}
+
 /// Why `--block` has nothing to wait for on a build that is about to run in
 /// the foreground (§7.9). These are exactly the three ways `choose_submit`
 /// says "run", said back to the user: "this build is not going to the queue"

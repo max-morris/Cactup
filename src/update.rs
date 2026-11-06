@@ -583,7 +583,7 @@ fn is_not_found(e: &anyhow::Error) -> bool {
 }
 
 /// The lowercase hex SHA-256 of the file at `path`.
-fn sha256_hex(path: &Path) -> Res<String> {
+pub(crate) fn sha256_hex(path: &Path) -> Res<String> {
     let mut file = fs::File::open(path).with_context(|| format!("Failed to open '{}'", path.display()))?;
     let mut context = aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA256);
     let mut buf = vec![0u8; 64 * 1024];

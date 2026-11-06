@@ -444,6 +444,7 @@ const UNLOCKED_READ_ATTEMPTS: u32 = 3;
 
 /// Handle to the on-disk global DB. Cheap to construct; owns no lock. All
 /// access goes through [`Db::read`] / [`Db::update`].
+#[derive(Clone)]
 pub struct Db {
     path: PathBuf,
     lock_path: PathBuf,
