@@ -114,8 +114,10 @@ fn live_thornlist_source(entry: &crate::database::CactusInstallation) -> String 
     } else {
         (entry.release.as_deref(), entry.thornlist.as_deref())
     };
+    let simfile = entry.simfile.as_deref().filter(|_| entry.current_release.is_none() && entry.current_thornlist.is_none());
     let mut source = match (release, from_list) {
         (Some(release), _) => format!("release {release}"),
+        (None, _) if let Some(simfile) = simfile => format!("from the .sim file {simfile}"),
         (None, Some(list)) => format!("custom, from {list}"),
         (None, None) => "custom installation".to_owned(),
     };
@@ -330,6 +332,7 @@ mod tests {
                 release: release.map(str::to_owned),
                 path: "/inst".into(),
                 thornlist: thornlist.map(str::to_owned),
+                simfile: None,
                 current_release: current_release.map(str::to_owned),
                 current_thornlist: current_thornlist.map(str::to_owned),
                 unfetched_repos: Default::default(),
@@ -368,6 +371,7 @@ mod tests {
             release: Some("ET_2026_05".into()),
             path: "/inst".into(),
             thornlist: None,
+            simfile: None,
             current_release: None,
             current_thornlist: None,
             unfetched_repos: Default::default(),

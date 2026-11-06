@@ -189,6 +189,9 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     println!();
     match (&entry.release, &entry.thornlist) {
         (Some(release), _) => println!("  release:      {release}"),
+        (None, _) if let Some(simfile) = &entry.simfile => {
+            println!("  release:      (installed from the .sim file {simfile})")
+        }
         // A custom installation is identified by the thornlist it was built
         // from — that is the only thing distinguishing it from any other.
         (None, Some(thornlist)) => {
@@ -252,6 +255,7 @@ mod tests {
             release: Some("ET_2026_05".into()),
             path: "/inst".into(),
             thornlist: None,
+            simfile: None,
             current_release: None,
             current_thornlist: None,
             unfetched_repos,

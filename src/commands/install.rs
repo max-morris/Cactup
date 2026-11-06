@@ -17,12 +17,17 @@ use std::path::{Path, PathBuf};
 enum InstallSource<'repo> {
     Release(manifest::Release<'repo>),
     Custom { path: PathBuf, content: String },
+    /// A `.sim` file (§8.9): `content` is its thornlist with every pinned
+    /// repo pinned by `!REPO_COMMIT`, so the ordinary fetch checks each out
+    /// at exactly its commit and a refetch never moves it.
+    SimFile { path: PathBuf, sim: Box<cactup_ecosystem_common::sim::SimFile>, content: String },
 }
 
 pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     let InstallArgs {
         release,
         thornlist,
+        simfile,
         alias,
         silent,
         install_prefix,
@@ -31,7 +36,8 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         symlink_name,
     } = args;
 
-    let custom = thornlist.is_some();
+    let custom = thornlist.is_some() || simfile.is_some();
+    let sim_source = simfile.as_deref().map(sim_install_source).transpose()?;
 
     let home_dir = std::env::home_dir().ok_or(anyhow!("Failed to determine home directory"))?;
     let cactup_root = &crate::CACTUP_ROOT;
@@ -78,9 +84,10 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
 
     let symlink_prefix_default = home_dir.as_path();
 
-    let source = match custom_thornlist {
-        Some((path, content)) => InstallSource::Custom { path, content },
-        None => {
+    let source = match (custom_thornlist, sim_source) {
+        (_, Some(source)) => source,
+        (Some((path, content)), None) => InstallSource::Custom { path, content },
+        (None, None) => {
             let repo = repo.as_ref().unwrap();
             let releases = releases.as_ref().unwrap();
             // The default is always the newest *release*: master is newer, but
@@ -128,7 +135,9 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
             release.read_file("einsteintoolkit.th")
                    .with_context(|| format!("Failed to read einsteintoolkit.th from {}", release.describe()))?
         }
-        InstallSource::Custom { content, .. } => content.clone().into_bytes(),
+        InstallSource::Custom { content, .. } | InstallSource::SimFile { content, .. } => {
+            content.clone().into_bytes()
+        }
     };
     let thorn_list_text =
         String::from_utf8(thorn_list.clone()).with_context(|| "The source thornlist is not UTF-8")?;
@@ -139,12 +148,22 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     }
     let root = list.root().to_owned();
     validate_root_dir(&root)?;
+    if let InstallSource::SimFile { sim, path, .. } = &source
+        && sim.sim.root != root
+    {
+        bail!(
+            "'{}' says its source tree is {}, but its thornlist's !DEFINE ROOT is {root}",
+            path.display(),
+            sim.sim.root
+        );
+    }
 
     let alias_default = match &source {
         InstallSource::Release(release) => release.name.clone(),
         InstallSource::Custom { path, .. } => {
             path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
         }
+        InstallSource::SimFile { sim, .. } => sim.sim.name.clone(),
     };
 
     let alias = match alias {
@@ -394,13 +413,17 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
 
     let release_name = match &source {
         InstallSource::Release(release) => Some(release.name.clone()),
-        InstallSource::Custom { .. } => None,
+        InstallSource::Custom { .. } | InstallSource::SimFile { .. } => None,
     };
     // A custom installation has no release name to show, so record the
     // thornlist it came from and let `show`/`list` name that instead.
     let source_thornlist = match &source {
-        InstallSource::Release(_) => None,
+        InstallSource::Release(_) | InstallSource::SimFile { .. } => None,
         InstallSource::Custom { path, .. } => Some(path.display().to_string()),
+    };
+    let source_simfile = match &source {
+        InstallSource::SimFile { path, .. } => Some(path.display().to_string()),
+        _ => None,
     };
 
     let became_active = ctx.db.update(|database| {
@@ -416,6 +439,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
             release: release_name.clone(),
             path: install_dir.to_string_lossy().to_string(),
             thornlist: source_thornlist.clone(),
+            simfile: source_simfile.clone(),
             current_release: None,
             current_thornlist: None,
             unfetched_repos: Default::default(),
@@ -435,6 +459,13 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         }
         InstallSource::Custom { path, .. } => {
             println!("{}", format!("Success! Installed custom thornlist '{}' into '{}'", path.display(), installed_root.display()).bold().bright_green());
+        }
+        InstallSource::SimFile { path, sim, .. } => {
+            println!("{}", format!("Success! Installed the sources of '{}' into '{}'", path.display(), installed_root.display()).bold().bright_green());
+            for input in &sim.inputs {
+                let what = input.description.as_deref().map(|d| format!(": {d}")).unwrap_or_default();
+                println!("Its parfile needs knob {}{what}", input.knob.bold());
+            }
         }
     }
     if do_symlink {
@@ -476,9 +507,46 @@ fn valid_alias(alias: &str) -> bool {
         && alias.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+/// Read a `.sim` file for `install --simfile` (§8.9): its thornlist pinned by
+/// `!REPO_COMMIT` to every commit it records, and a word on what it does not
+/// pin — repos it leaves on their branch, sources that were dirty when it was
+/// exported (their edits are not in the file), tarballs whose recorded hash
+/// nothing checks yet.
+fn sim_install_source(path: &Path) -> Res<InstallSource<'static>> {
+    use cactup_ecosystem_common::sim::SimFile;
+    let expanded = PathBuf::from(shell::expand_path(&p2s(path.to_owned())?));
+    let text = fs::read_to_string(&expanded).with_context(|| format!("Failed to read '{}'", expanded.display()))?;
+    let sim = SimFile::from_toml(&text).map_err(|e| anyhow!("'{}': {e}", expanded.display()))?;
+    let pins = sim.repos.iter().filter_map(|r| Some((r.name.clone(), r.commit.clone()?))).collect();
+    let content = crate::thornlist::pin_text(&sim.thornlist.text, &pins)
+        .with_context(|| format!("Failed to pin the thornlist in '{}'", expanded.display()))?;
+    let names = |pred: &dyn Fn(&cactup_ecosystem_common::sim::RepoPin) -> bool| -> Vec<&str> {
+        sim.repos.iter().filter(|r| pred(r)).map(|r| r.name.as_str()).collect()
+    };
+    let unpinned = names(&|r| r.commit.is_none() && r.sha256.is_none());
+    if !unpinned.is_empty() {
+        println!("{}", format!("Not pinned, so they follow their branch: {}", unpinned.join(", ")).yellow());
+    }
+    let dirty = names(&|r| r.dirty);
+    if !dirty.is_empty() {
+        println!(
+            "{}",
+            format!("Had uncommitted changes when exported, which the file does not carry: {}", dirty.join(", "))
+                .yellow()
+        );
+    }
+    let hashed = names(&|r| r.sha256.is_some());
+    if !hashed.is_empty() {
+        println!("{}", format!("Downloaded without checking their recorded hash: {}", hashed.join(", ")).yellow());
+    }
+    let resolved = fs::canonicalize(&expanded).unwrap_or(expanded);
+    Ok(InstallSource::SimFile { path: resolved, sim: Box::new(sim), content })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{default_symlink_name, valid_alias};
+    use super::{default_symlink_name, sim_install_source, valid_alias, InstallSource};
+    use std::fs;
 
     #[test]
     fn alias_validation() {
@@ -502,5 +570,68 @@ mod tests {
         // `validate_root_dir` rejects "." before this is ever called in
         // practice, but the fallback is a safety net worth pinning anyway.
         assert_eq!(default_symlink_name(".", "et-dev"), "et-dev");
+    }
+
+
+    /// `install --simfile` (§8.9): the `.sim`'s thornlist, pinned to its
+    /// recorded commits, is what the fetch reads, so each repo lands at its
+    /// pin — not the branch tip it has moved on to since.
+    #[test]
+    fn a_simfile_installs_each_repo_at_its_pinned_commit() {
+        use cactup_ecosystem_common::sim::{Parfile, ParfileKind, RepoPin, SimFile, SimMeta, ThornlistText};
+        let tmp = tempfile::tempdir().unwrap();
+        let upstream = tmp.path().join("upstream/carpetx");
+        crate::fetch::git::testrepo::init(&upstream);
+        let pinned = crate::fetch::git::testrepo::commit_tree(&upstream, &[("Makefile", "v1\n", false)]);
+        crate::fetch::git::testrepo::commit_tree(&upstream, &[("Makefile", "v2\n", false)]);
+        let (branch, _) = crate::fetch::git::head_of(&upstream).unwrap();
+        let url = upstream.to_string_lossy().into_owned();
+        let sim = SimFile {
+            format: cactup_ecosystem_common::SIM_FORMAT,
+            sim: SimMeta {
+                name: "bhns".into(),
+                summary: None,
+                description: None,
+                authors: vec![],
+                license: None,
+                cactarium: None,
+                root: "Cactus".into(),
+            },
+            thornlist: ThornlistText {
+                filename: "bhns.th".into(),
+                text: format!(
+                    "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!TARGET = $ROOT\n!TYPE = git\n!URL = {url}\n\
+                     !REPO_BRANCH = {branch}\n!NAME = carpetx\n!CHECKOUT = Makefile\n"
+                ),
+                untracked: vec![],
+            },
+            parfile: Parfile { filename: "bhns.par".into(), kind: ParfileKind::Par, vars: vec![], text: "x\n".into() },
+            inputs: vec![],
+            repos: vec![RepoPin {
+                name: "carpetx".into(),
+                url: url.clone(),
+                git_ref: Some(branch.clone()),
+                commit: Some(pinned.to_string()),
+                sha256: None,
+                cactarium: None,
+                dirty: false,
+            }],
+            run: None,
+            provenance: None,
+        };
+        let file = tmp.path().join("bhns.sim");
+        fs::write(&file, sim.to_toml().unwrap()).unwrap();
+
+        let InstallSource::SimFile { content, .. } = sim_install_source(&file).unwrap() else { panic!("a .sim source") };
+        let list = crate::thornlist::parse(&content).unwrap();
+        assert_eq!(list.components()[0].commit.as_deref(), Some(pinned.to_string().as_str()));
+        let root = tmp.path().join("install");
+        let mut progress = prodash::tree::Root::new().add_child("test plan");
+        let plan = crate::fetch::plan(&list, &root, &mut progress).unwrap();
+        let report = crate::fetch::execute(&plan, &root).unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        let repo = root.join("Cactus/repos/carpetx");
+        assert_eq!(crate::fetch::git::head_of(&repo).unwrap().1, pinned);
+        assert_eq!(fs::read_to_string(repo.join("Makefile")).unwrap(), "v1\n");
     }
 }

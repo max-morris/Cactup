@@ -186,6 +186,11 @@ pub struct CactusInstallation {
     /// recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thornlist: Option<String>,
+    /// For an installation made from a `.sim` file (`install --simfile`,
+    /// §8.9): the file it was made from — the third kind of install-time
+    /// provenance, beside a release and a custom thornlist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simfile: Option<String>,
     /// What the tree is on *now*, when an `installation refetch` with an
     /// explicit source moved it away from its install-time provenance
     /// (§2.1). `release`/`thornlist` above are never rewritten — they record
@@ -720,6 +725,7 @@ mod tests {
                     release: None,
                     path: "/x".to_owned(),
                     thornlist: Some("/home/u/lists/mine.th".to_owned()),
+                    simfile: None,
                     current_release: None,
                     current_thornlist: None,
                     unfetched_repos: IndexMap::new(),
@@ -773,6 +779,7 @@ mod tests {
                     release: Some("ET_2026_05".to_owned()),
                     path: "/x".to_owned(),
                     thornlist: None,
+                    simfile: None,
                     current_release: None,
                     current_thornlist: None,
                     unfetched_repos: unfetched,
@@ -810,6 +817,7 @@ mod tests {
                     release: Some("ET_2026_05".to_owned()),
                     path: "/y".to_owned(),
                     thornlist: None,
+                    simfile: None,
                     current_release: None,
                     current_thornlist: None,
                     unfetched_repos: IndexMap::new(),

@@ -16,6 +16,9 @@ pub fn dispatch(ctx: &Ctx) -> Res<()> {
         print!("- {}", installation.alias.bold());
         match (&installation.release, &installation.thornlist) {
             (Some(release), _) => print!(" (release {})", release.bold()),
+            (None, _) if let Some(simfile) = &installation.simfile => {
+                print!(" (from {})", format!("'{simfile}'").bold())
+            }
             // Symmetric with the release case: name what it was built from.
             (None, Some(thornlist)) => print!(" (custom thornlist {})", format!("'{thornlist}'").bold()),
             (None, None) => print!(" (custom)"),

@@ -4212,6 +4212,18 @@ exactly the kept checkouts, and the pins follow the trimmed list. A thorn the
 parfile activates that the list lacks is an error; a `.py` parfile cannot be
 trimmed.
 
+`cactup install --simfile <file.sim>` makes an installation of exactly the
+sources a `.sim` records: its live and pristine thornlists (§3.2) are the
+file's thornlist pinned by `!REPO_COMMIT` to every commit it records, so the
+ordinary fetch checks each repo out at its pin and a later refetch never moves
+it. The file's `root` must match the list's `!DEFINE ROOT`; the alias defaults
+to the file's name. It says which repos the file leaves unpinned (they follow
+their branch), which were dirty at export (their edits are not in the file),
+and which tarballs it downloads without checking the recorded hash, and it
+names the knob inputs the parfile needs. The DB records the file as a third
+kind of install-time provenance, `simfile`, beside `release` and `thornlist`;
+`show`, `list` and `config show` name it.
+
 `cactup sim unpack <file.sim> [--dir D] [-f]` goes the other way, for whoever
 works with loose files: it writes the thornlist and the parfile under the
 names they carried, the thornlist with every pinned repo pinned by

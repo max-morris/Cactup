@@ -530,6 +530,9 @@ pub(crate) struct InstallArgs {
     pub release: Option<String>,
     #[clap(long, value_name = "PATH", conflicts_with = "release", help = "Install from this thornlist file instead of a release.")]
     pub thornlist: Option<PathBuf>,
+    // §8.9
+    #[clap(long, value_name = "FILE", conflicts_with_all = ["release", "thornlist"], help = "Install the sources a .sim file records, each repo at its pinned commit.")]
+    pub simfile: Option<PathBuf>,
     #[clap(short, long, help = "The unique name of the installation (default: the release name).")]
     pub alias: Option<String>,
     #[clap(short, long, help = "Assume default answers to all unspecified flags instead of prompting.")]
