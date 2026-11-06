@@ -19,6 +19,7 @@ pub fn dispatch(ctx: &Ctx) -> Res<()> {
             (None, _) if let Some(simfile) = &installation.simfile => {
                 print!(" (from {})", format!("'{simfile}'").bold())
             }
+            (None, _) if let Some(stack) = &installation.stack => print!(" (stack {})", stack.bold()),
             // Symmetric with the release case: name what it was built from.
             (None, Some(thornlist)) => print!(" (custom thornlist {})", format!("'{thornlist}'").bold()),
             (None, None) => print!(" (custom)"),

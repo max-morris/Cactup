@@ -21,6 +21,10 @@ enum InstallSource<'repo> {
     /// repo pinned by `!REPO_COMMIT`, so the ordinary fetch checks each out
     /// at exactly its commit and a refetch never moves it.
     SimFile { path: PathBuf, sim: Box<cactup_ecosystem_common::sim::SimFile>, content: String },
+    /// A Cactarium stack release (§8.10): `content` is its thornlist with
+    /// every repo the release pins pinned by `!REPO_COMMIT`; `slug` is the
+    /// exact release (`owner/stack@version`, or the unpinned `@head`/`@master`).
+    Stack { slug: String, content: String },
 }
 
 pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
@@ -36,8 +40,14 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         symlink_name,
     } = args;
 
-    let custom = thornlist.is_some() || simfile.is_some();
-    let sim_source = simfile.as_deref().map(sim_install_source).transpose()?;
+    // `owner/stack[@…]` names a Cactarium stack, never a manifest release
+    // (those have no `/`).
+    let stack_source = match release.as_deref() {
+        Some(req) if req.contains('/') => Some(stack_install_source(ctx, req)?),
+        _ => None,
+    };
+    let custom = thornlist.is_some() || simfile.is_some() || stack_source.is_some();
+    let sim_source = simfile.as_deref().map(sim_install_source).transpose()?.or(stack_source);
 
     let home_dir = std::env::home_dir().ok_or(anyhow!("Failed to determine home directory"))?;
     let cactup_root = &crate::CACTUP_ROOT;
@@ -135,9 +145,9 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
             release.read_file("einsteintoolkit.th")
                    .with_context(|| format!("Failed to read einsteintoolkit.th from {}", release.describe()))?
         }
-        InstallSource::Custom { content, .. } | InstallSource::SimFile { content, .. } => {
-            content.clone().into_bytes()
-        }
+        InstallSource::Custom { content, .. }
+        | InstallSource::SimFile { content, .. }
+        | InstallSource::Stack { content, .. } => content.clone().into_bytes(),
     };
     let thorn_list_text =
         String::from_utf8(thorn_list.clone()).with_context(|| "The source thornlist is not UTF-8")?;
@@ -164,6 +174,10 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
             path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
         }
         InstallSource::SimFile { sim, .. } => sim.sim.name.clone(),
+        // `owner/stack@1.2.0` → `stack-1.2.0`, a valid alias.
+        InstallSource::Stack { slug, .. } => {
+            slug.rsplit('/').next().unwrap_or(slug).replace('@', "-").replace(':', "-")
+        }
     };
 
     let alias = match alias {
@@ -413,13 +427,17 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
 
     let release_name = match &source {
         InstallSource::Release(release) => Some(release.name.clone()),
-        InstallSource::Custom { .. } | InstallSource::SimFile { .. } => None,
+        InstallSource::Custom { .. } | InstallSource::SimFile { .. } | InstallSource::Stack { .. } => None,
     };
     // A custom installation has no release name to show, so record the
     // thornlist it came from and let `show`/`list` name that instead.
     let source_thornlist = match &source {
-        InstallSource::Release(_) | InstallSource::SimFile { .. } => None,
+        InstallSource::Release(_) | InstallSource::SimFile { .. } | InstallSource::Stack { .. } => None,
         InstallSource::Custom { path, .. } => Some(path.display().to_string()),
+    };
+    let source_stack = match &source {
+        InstallSource::Stack { slug, .. } => Some(slug.clone()),
+        _ => None,
     };
     let source_simfile = match &source {
         InstallSource::SimFile { path, .. } => Some(path.display().to_string()),
@@ -440,6 +458,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
             path: install_dir.to_string_lossy().to_string(),
             thornlist: source_thornlist.clone(),
             simfile: source_simfile.clone(),
+            stack: source_stack.clone(),
             current_release: None,
             current_thornlist: None,
             unfetched_repos: Default::default(),
@@ -459,6 +478,9 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         }
         InstallSource::Custom { path, .. } => {
             println!("{}", format!("Success! Installed custom thornlist '{}' into '{}'", path.display(), installed_root.display()).bold().bright_green());
+        }
+        InstallSource::Stack { slug, .. } => {
+            println!("{}", format!("Success! Installed stack {slug} into '{}'", installed_root.display()).bold().bright_green());
         }
         InstallSource::SimFile { path, sim, .. } => {
             println!("{}", format!("Success! Installed the sources of '{}' into '{}'", path.display(), installed_root.display()).bold().bright_green());
@@ -505,6 +527,38 @@ fn valid_alias(alias: &str) -> bool {
         && alias != "."
         && alias != ".."
         && alias.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Resolve `req` (`owner/stack[@range|version|head|master]`) on the
+/// Cactarium (§8.10) to one release, fetched with its pins and pinned into
+/// its thornlist. A range is resolved once, here: the installation records
+/// the exact release, and moving to another is an explicit refetch.
+fn stack_install_source(ctx: &Ctx, req: &str) -> Res<InstallSource<'static>> {
+    use cactup_ecosystem_common::slug::Slug;
+    let slug: Slug = req.parse().map_err(|e| anyhow!("\"{req}\" is not a stack (owner/name[@version]): {e}"))?;
+    let client = crate::cactarium::Client::new(&ctx.db.read()?);
+    let version = match slug.tip() {
+        Some(_) => slug.at.clone().expect("a tip is an @ form"),
+        None => {
+            let resolved = client.resolve(req)?;
+            if resolved.kind != "stack" {
+                bail!("{} is a {}, not a stack", resolved.slug, resolved.kind);
+            }
+            resolved.version.version
+        }
+    };
+    let (stack, unpinned) = client.stack_release(slug.owner.as_str(), slug.name.as_str(), &version)?;
+    let pins = stack.repos.iter().filter_map(|r| Some((r.name.clone(), r.commit.clone()?))).collect();
+    let content = crate::thornlist::pin_text(&stack.thornlist.text, &pins)
+        .with_context(|| format!("Failed to pin stack {}", stack.stack))?;
+    if unpinned {
+        println!(
+            "{}",
+            format!("{} is not a release: its repos follow their branches, so the installation is not reproducible", stack.stack)
+                .yellow()
+        );
+    }
+    Ok(InstallSource::Stack { slug: stack.stack.to_string(), content })
 }
 
 /// Read a `.sim` file for `install --simfile` (§8.9): its thornlist pinned by

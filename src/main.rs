@@ -1,6 +1,7 @@
 mod args;
 mod build;
 mod build_info;
+mod cactarium;
 mod commands;
 mod database;
 mod fetch;
@@ -189,6 +190,7 @@ fn main() -> Res<()> {
         Commands::Use { alias } => commands::use_cmd::dispatch(&ctx, alias),
         Commands::Install(install) => commands::install::dispatch(&ctx, install),
         Commands::Import(import) => commands::import::dispatch(&ctx, import),
+        Commands::Login { token } => commands::import::login(&ctx, token),
         Commands::Uninstall { alias, force } => commands::uninstall::dispatch(&ctx, alias, force),
         Commands::Installation(cmd) | Commands::Inst(cmd) => commands::installation::dispatch(&ctx, cmd),
         Commands::Config(cmd) => commands::config::dispatch(&ctx, cmd),

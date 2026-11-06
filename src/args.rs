@@ -315,6 +315,13 @@ pub(crate) enum Commands {
     // §8.9
     /// Reproduce a .sim file: install its sources, build them, create the simulation, and optionally submit or run it
     Import(ImportArgs),
+    // §8.10
+    /// Store an API token for the Cactarium (create one on its settings page)
+    Login {
+        /// The token (default: asked for).
+        #[clap(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
     // §3.1
     /// Remove an installation
     Uninstall {
@@ -913,7 +920,7 @@ pub(crate) enum ConfigCommand {
 // §8.9
 #[derive(clap::Args, Debug)]
 pub(crate) struct ImportArgs {
-    /// The .sim file.
+    /// The .sim file, or a sim published on the Cactarium (owner/name, or owner/name@N for one version).
     pub simfile: PathBuf,
     /// Alias of the new installation (default: the .sim's name).
     #[clap(short, long)]
@@ -1077,6 +1084,14 @@ pub(crate) enum SimCommand {
     // §8.9
     /// Make a .sim file from a thornlist and a parfile, pinning each repo to what an installation fetched (-I) or to each branch's tip today
     Pack(SimPackArgs),
+    // §8.10
+    /// Publish a .sim file to the Cactarium as the next version of owner/name
+    Publish {
+        /// The .sim file; it must be fully specified.
+        file: PathBuf,
+        /// Where to publish it: owner/name.
+        target: String,
+    },
     // §8.9
     /// Unpack a .sim file into a thornlist (its pins as !REPO_COMMIT) and a parfile
     Unpack {

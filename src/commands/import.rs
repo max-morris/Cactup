@@ -21,8 +21,14 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 pub fn dispatch(ctx: &Ctx, args: ImportArgs) -> Res<()> {
-    let path = std::fs::canonicalize(&args.simfile)
-        .with_context(|| format!("Failed to find '{}'", args.simfile.display()))?;
+    let path = match std::fs::canonicalize(&args.simfile) {
+        Ok(path) => path,
+        // Not a file: a published sim, `owner/name[@N]`.
+        Err(_) if args.simfile.to_string_lossy().contains('/') && !args.simfile.to_string_lossy().contains(".sim") => {
+            download_published(ctx, &args.simfile.to_string_lossy())?
+        }
+        Err(e) => return Err(e).with_context(|| format!("Failed to find '{}'", args.simfile.display())),
+    };
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read '{}'", path.display()))?;
     let sim_file = SimFile::from_toml(&text).map_err(|e| anyhow!("'{}': {e}", path.display()))?;
@@ -117,6 +123,79 @@ pub fn dispatch(ctx: &Ctx, args: ImportArgs) -> Res<()> {
         println!("Imported. To submit it with the file's suggested shape: {}", command.bold());
         Ok(())
     }
+}
+
+/// Download published sim `req` (`owner/name`, the newest version, or
+/// `owner/name@N`) from the Cactarium (§8.10) to
+/// `~/.cactup/simfiles/<owner>/<name>/<N>.sim`, checked against the hash
+/// the registry sends.
+fn download_published(ctx: &Ctx, req: &str) -> Res<PathBuf> {
+    use cactup_ecosystem_common::slug::Slug;
+    let slug: Slug = req.parse().map_err(|e| anyhow!("\"{req}\" is neither a file nor a sim (owner/name[@N]): {e}"))?;
+    let client = crate::cactarium::Client::new(&ctx.db.read()?);
+    let number = match slug.number().map_err(|e| anyhow!("{e}"))? {
+        Some(n) => n,
+        None => {
+            let resolved = client.resolve(req)?;
+            if resolved.kind != "sim" {
+                bail!("{} is a {}, not a sim", resolved.slug, resolved.kind);
+            }
+            resolved.version.version.parse().map_err(|_| anyhow!("The Cactarium named sim version \"{}\"", resolved.version.version))?
+        }
+    };
+    let (owner, name) = (slug.owner.as_str(), slug.name.as_str());
+    let dest = crate::CACTUP_ROOT.join("simfiles").join(owner).join(name).join(format!("{number}.sim"));
+    if !dest.is_file() {
+        client.download_sim(owner, name, number, &dest)?;
+        println!("Downloaded {owner}/{name}@{number} from {}", client.base());
+    }
+    Ok(dest)
+}
+
+/// `cactup login` (§8.10): store a token for the Cactarium this cactup
+/// talks to, in `~/.cactup/credentials` (owner-only), never as a knob.
+pub fn login(ctx: &Ctx, token: Option<String>) -> Res<()> {
+    let client = crate::cactarium::Client::new(&ctx.db.read()?);
+    let token = match token {
+        Some(token) => token,
+        None => {
+            println!("Create a token at {}/settings, then paste it here.", client.base());
+            super::prompt_with_default("Token", "")?
+        }
+    };
+    let token = token.trim();
+    if token.is_empty() {
+        bail!("No token given");
+    }
+    let path = crate::cactarium::credentials_path();
+    crate::cactarium::store_token(&path, client.base(), token)?;
+    println!("Stored the token for {} in '{}'", client.base(), path.display());
+    Ok(())
+}
+
+/// `cactup sim publish <file.sim> <owner/name>` (§8.10): only a fully
+/// specified file — every repo pinned, nothing dirty or untracked — since
+/// the registry's promise is that anyone can reproduce it.
+pub fn publish(ctx: &Ctx, file: &std::path::Path, target: &str) -> Res<()> {
+    use cactup_ecosystem_common::slug::Slug;
+    let slug: Slug = target.parse().map_err(|e| anyhow!("\"{target}\" is not owner/name: {e}"))?;
+    if slug.at.is_some() || slug.thorn.is_some() {
+        bail!("Publish to owner/name; the Cactarium numbers the version");
+    }
+    let text = std::fs::read_to_string(file).with_context(|| format!("Failed to read '{}'", file.display()))?;
+    let sim = SimFile::from_toml(&text).map_err(|e| anyhow!("'{}': {e}", file.display()))?;
+    let missing = sim.unspecified();
+    if !missing.is_empty() {
+        let what: Vec<String> = missing.iter().map(ToString::to_string).collect();
+        bail!("'{}' is not fully specified, so it cannot be published: {}", file.display(), what.join("; "));
+    }
+    let client = crate::cactarium::Client::new(&ctx.db.read()?);
+    let published = client.publish_sim(slug.owner.as_str(), slug.name.as_str(), text.into_bytes())?;
+    println!("Published {} ({}): {}", published.slug.bold(), published.visibility, published.url);
+    for warning in &published.warnings {
+        println!("{}", warning.yellow());
+    }
+    Ok(())
 }
 
 /// The knob values for the parfile's inputs (§5.1): from `--input`, else a

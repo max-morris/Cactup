@@ -191,6 +191,11 @@ pub struct CactusInstallation {
     /// provenance, beside a release and a custom thornlist.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub simfile: Option<String>,
+    /// For an installation made from a Cactarium stack release (`install
+    /// owner/stack@version`, §8.10): the exact release, as `owner/stack@v`
+    /// (or `@head`/`@master` for the unpinned forms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<String>,
     /// What the tree is on *now*, when an `installation refetch` with an
     /// explicit source moved it away from its install-time provenance
     /// (§2.1). `release`/`thornlist` above are never rewritten — they record
@@ -727,6 +732,7 @@ mod tests {
                     path: "/x".to_owned(),
                     thornlist: Some("/home/u/lists/mine.th".to_owned()),
                     simfile: None,
+                    stack: None,
                     current_release: None,
                     current_thornlist: None,
                     unfetched_repos: IndexMap::new(),
@@ -781,6 +787,7 @@ mod tests {
                     path: "/x".to_owned(),
                     thornlist: None,
                     simfile: None,
+                    stack: None,
                     current_release: None,
                     current_thornlist: None,
                     unfetched_repos: unfetched,
@@ -819,6 +826,7 @@ mod tests {
                     path: "/y".to_owned(),
                     thornlist: None,
                     simfile: None,
+                    stack: None,
                     current_release: None,
                     current_thornlist: None,
                     unfetched_repos: IndexMap::new(),

@@ -4260,6 +4260,38 @@ into one copy per repo; everything else stays byte for byte, and the result
 is parsed back to prove it names the same checkouts with exactly those pins).
 It names the repos left unpinned and the knob inputs the parfile needs.
 
+### 8.10 The Cactarium registry
+
+The Cactarium (a registry of thorn packages, stacks and `.sim` files) is
+reached over its HTTP API, whose request and response shapes are the shared
+crate's `api` module — the structs the server itself serves — so the two
+sides cannot drift apart silently. `src/cactarium.rs` is only transport:
+
+- **Where:** `CACTARIUM_URL`, else the `cactarium-url` knob, else
+  `https://cactarium.cct.lsu.edu`.
+- **Generations:** every request says the API generation cactup speaks; an
+  answer from a newer generation is refused with "run `cactup update`".
+- **Errors:** an error body's `message` is printed as the server wrote it.
+- **Tokens:** `cactup login [--token T]` stores one per registry in
+  `~/.cactup/credentials`, written owner-only; `CACTARIUM_TOKEN` overrides.
+  Never a knob: knob values are frozen into every restart's metadata (§5.1),
+  and a token there would travel with every simulation.
+
+What uses it, all on the login node (D11):
+
+- `cactup install owner/stack[@range|version|head|master]` — a `/` tells a
+  stack from a manifest release. A range resolves once (`/resolve`) to an
+  exact release; its frozen thornlist is pinned (`crl::pin_text`) and installed
+  like `--simfile`, and the DB records the release as `stack` provenance.
+  `@head`/`@master` are installed unpinned, and said not to be reproducible.
+- `cactup import owner/name[@N]` downloads the published sim (the newest
+  version without `@N`) to `~/.cactup/simfiles/<owner>/<name>/<N>.sim`,
+  checked against the registry's `x-sha256`, then imports it as a file.
+- `cactup sim publish <file.sim> <owner/name>` uploads a fully specified file
+  (anything else is refused locally, naming what is unspecified) as the next
+  version; the registry numbers it and says whether it is public or pending
+  review.
+
 ---
 
 ## 9. ON-DISK LAYOUT — the binding compatibility contract
