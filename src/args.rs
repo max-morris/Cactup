@@ -327,6 +327,15 @@ pub(crate) enum Commands {
         #[clap(short, long)]
         force: bool,
     },
+    // §8.11
+    /// Remove a package `cactup add` added, restoring any repo it replaced
+    Remove {
+        /// The package: owner/name.
+        package: String,
+        /// Remove even though the live thornlist has hand edits, which are overwritten.
+        #[clap(short, long)]
+        force: bool,
+    },
     // §8.10
     /// Work with Cactarium stacks
     #[clap(subcommand)]

@@ -4324,6 +4324,11 @@ its ThornList and skips `!` lines, §7.5). So:
 - only the added repo is fetched by `add`; nothing else in the installation
   moves.
 
+`cactup remove owner/name [-f]` undoes an add: the record goes, the live list
+is recomposed without it, and only the base repos it replaced are fetched again
+— back to the base's pins. The package's own repo stays on disk, unlisted, for
+`inst refetch --prune` to remove.
+
 **Collisions.** A package whose repository the base already has (same derived
 name or same normalized URL), or that checks out a thorn the base already
 checks out, is refused unless `--replace`, which records the base repos it

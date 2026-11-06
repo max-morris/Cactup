@@ -160,3 +160,6 @@ by cactup; only its repository is fetched. If your thornlist already has that
 repository (or one of its thorns), pass `--replace` to use the package in its
 place. Packages you add survive moving the installation to a newer stack
 release. Rebuild a config to compile them.
+
+`cactup remove max/carpetx` takes a package out again, putting back any
+repository it replaced at the commit the base names.

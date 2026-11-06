@@ -236,6 +236,80 @@ pub fn dispatch(ctx: &Ctx, package: &str, replace: bool, force: bool) -> Res<()>
     Ok(())
 }
 
+/// `cactup remove owner/name` (§8.11): undo an add. The package's record
+/// goes, the live list is recomposed without it, and only the repos it
+/// touched are fetched again — its own (left on disk, now unlisted; `inst
+/// refetch --prune` removes it) and any base repo it replaced, which goes
+/// back to the base's pin.
+pub fn remove(ctx: &Ctx, package: &str, force: bool) -> Res<()> {
+    let slug: Slug = package.parse().map_err(|e| anyhow!("\"{package}\" is not a package (owner/name): {e}"))?;
+    if slug.at.is_some() || slug.thorn.is_some() {
+        bail!("Name the package as owner/name; remove takes the whole package");
+    }
+    let entry = format!("{}/{}", slug.owner, slug.name);
+    let inst = Installation::resolve(ctx)?;
+    let locked = inst.locked()?;
+    let mut meta = locked.meta()?;
+    let Some(i) = meta.added.iter().position(|a| a.package == entry) else {
+        let added: Vec<&str> = meta.added.iter().map(|a| a.package.as_str()).collect();
+        bail!(
+            "{entry} was not added to this installation (added: {})",
+            if added.is_empty() { "nothing".to_owned() } else { added.join(", ") }
+        );
+    };
+    let pristine = std::fs::read_to_string(inst.source_thornlist_to_read())
+        .context("This installation has no pristine thornlist")?;
+    let live_path = inst.live_thornlist();
+    let live = std::fs::read_to_string(inst.live_thornlist_to_read()).unwrap_or_default();
+    let edits = super::refetch::component_divergence(&live, &compose(&pristine, &meta.added)?);
+    if !edits.is_empty() && !force {
+        bail!(
+            "'{}' has hand edits, which removing would overwrite:\n  {}\nPass -f to discard them",
+            live_path.display(),
+            edits.join("\n  ")
+        );
+    }
+    let removed = meta.added.remove(i);
+    let composed = compose(&pristine, &meta.added)?;
+
+    // The replaced base repos go back to what the base pins.
+    let touched: BTreeSet<&str> = removed.replaces.iter().map(String::as_str).collect();
+    if !touched.is_empty() {
+        let list = thornlist::parse(&composed)?;
+        let (progress, renderer) = crate::manifest::setup_prodash();
+        let mut classify = progress.add_child("classify repos");
+        let mut plan = crate::fetch::plan(&list, &inst.root, &mut classify)?;
+        drop(classify);
+        renderer.shutdown_and_wait();
+        if let Some(skipped) = plan.skipped.iter().find(|s| touched.contains(s.repo.as_str())) {
+            bail!("Repo {} has {}; it was left alone, and {entry} is still added", skipped.repo, skipped.reason.describe());
+        }
+        plan.git.retain(|g| touched.contains(g.repo.as_str()));
+        plan.links.retain(|c| touched.contains(c.repo.as_str()));
+        plan.downloads.clear();
+        plan.external.clear();
+        plan.skipped.clear();
+        let report = crate::fetch::execute(&plan, &inst.root)?;
+        if !report.failures.is_empty() {
+            let why: Vec<String> = report.failures.iter().map(|f| format!("{}: {}", f.what, f.error)).collect();
+            bail!("Failed to restore {}:\n  {}", removed.replaces.join(", "), why.join("\n  "));
+        }
+        crate::fetch::FetchState::record(&inst.root, &report.records())?;
+    }
+    std::fs::write(&live_path, &composed).with_context(|| format!("Failed to write '{}'", live_path.display()))?;
+    locked.set_meta(&meta)?;
+    drop(locked);
+
+    println!("Removed {} from the thornlist.", removed.package.bold());
+    if touched.is_empty() {
+        println!("Its repo {} stays on disk; `cactup inst refetch --prune` removes it.", removed.repo);
+    } else {
+        println!("Restored {} to the base's commit.", removed.replaces.join(", "));
+    }
+    println!("Rebuild configs that compiled its thorns, e.g. `{}`.", "cactup build <config>".bold());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
