@@ -66,6 +66,11 @@ pub struct SimulationMeta {
     pub parfile: String,
     /// Installation alias (needed by the compute-node re-invocation, §8.3).
     pub alias: String,
+    /// The simulation's own knob values (§5.1): what `cactup import` set for
+    /// the inputs a `.sim`'s parfile needs (§8.9). They outrank the global
+    /// knobs and are outranked by `-K`.
+    #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
+    pub knobs: indexmap::IndexMap<String, String>,
 }
 
 impl Default for SimulationMeta {
@@ -85,6 +90,7 @@ impl Default for SimulationMeta {
             thornlist: String::new(),
             parfile: String::new(),
             alias: String::new(),
+            knobs: Default::default(),
         }
     }
 }
@@ -187,6 +193,44 @@ impl Simulation {
             &self.cactup_dir().join("sim.lock"),
             std::time::Duration::from_secs(crate::lock::HANDOFF_WAIT_SECS),
         )
+    }
+
+    /// The knob values a restart of this simulation freezes (§5.1): the
+    /// global knobs, then the simulation's own over them, then `-K` over
+    /// both (`db`'s snapshot already carries `-K`, so a knob it names keeps
+    /// that value). A stored global value the simulation's own contradicts
+    /// is warned about, since the simulation's silently wins.
+    pub fn knob_snapshot(&self, db: &crate::database::Database) -> indexmap::IndexMap<String, String> {
+        let mut snapshot = db.knob_snapshot();
+        let overrides = crate::database::knob_overrides();
+        for (name, value) in &self.meta.knobs {
+            if overrides.contains_key(name) {
+                continue;
+            }
+            if let Some(global) = db.knob(name).filter(|g| *g != value) {
+                eprintln!(
+                    "{}",
+                    format!(
+                        "Knob {name} is \"{global}\" globally but \"{value}\" for simulation {}; using the \
+                         simulation's (pass -K {name}=… to choose)",
+                        self.name
+                    )
+                    .yellow()
+                );
+            }
+            let rendered = match crate::database::knob_spec(name) {
+                Some(spec) => (spec.render)(value),
+                None => value.clone(),
+            };
+            snapshot.insert(name.clone(), rendered);
+        }
+        snapshot
+    }
+
+    /// Set the simulation's own knob values (see [`Self::knob_snapshot`]).
+    pub fn set_knobs(&mut self, knobs: indexmap::IndexMap<String, String>) -> Res<()> {
+        self.meta.knobs = knobs;
+        self.store_meta()
     }
 
     fn store_meta(&self) -> Res<()> {
@@ -414,6 +458,7 @@ pub fn create(
         thornlist,
         parfile: par_basename,
         alias: inst.alias.clone(),
+        knobs: Default::default(),
     };
     let sim = Simulation { name: name.to_owned(), dir: dir.clone(), meta };
     sim.store_meta()?;

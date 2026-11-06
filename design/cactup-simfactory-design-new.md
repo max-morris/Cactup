@@ -2018,6 +2018,16 @@ and **frozen** into the corresponding metadata — `restart.toml`, `build.toml`,
 `test.toml` `[knobs]` tables (§9.3) — so the compute node resolves
 `@KNOB(…)@` from disk and never opens the DB (D11).
 
+**A simulation's own knobs.** `simulation.toml` may carry a `[knobs]` table:
+values that belong to that simulation rather than to the user — what
+`cactup import` sets for the inputs a `.sim`'s parfile needs (§8.9), such as
+`kadath-initial-data`. A restart of the simulation freezes the global snapshot
+with these laid over it, and the `-K` overlay over both (a knob `-K` names
+keeps its `-K` value): `-K` > the simulation's knobs > the global knobs. Import
+never changes a global knob. When a stored global value contradicts the
+simulation's, submit and run warn, naming the `-K` that would choose
+otherwise. `sim show` lists them.
+
 ### 5.2 No `defs.ini` / `defs.local.ini`
 
 simfactory's two-file config DB and its merge/layering engine

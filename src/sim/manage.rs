@@ -1128,6 +1128,10 @@ fn show_one(inst: &Installation, sched: &Scheduler, name: &str, long: bool) -> R
     println!("  machine:       {}", sim.meta.machine);
     println!("  parfile:       {}", sim.meta.parfile);
     println!("  simulation-id: {}", sim.meta.simulation_id);
+    // Its own knob values (§5.1), which outrank the global ones.
+    for (knob, value) in &sim.meta.knobs {
+        println!("  knob:          {knob} = {value}");
+    }
     if long {
         // Build provenance snapshotted into `.cactup/cfg/` at create time
         // (§8.2): what this sim's frozen binary was compiled from, which

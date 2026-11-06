@@ -509,9 +509,10 @@ fn submit_impl(
             debug: false,
             scratch_home: &scratch_home,
         })?;
-        // The effective knobs, `-K` overlay included, frozen with the vars so the
-        // compute node resolves @KNOB(…)@ without the DB (§5, D11).
-        vset.set_knobs(db.knob_snapshot());
+        // The effective knobs — global, then the simulation's own, then the
+        // `-K` overlay — frozen with the vars so the compute node resolves
+        // @KNOB(…)@ without the DB (§5, D11).
+        vset.set_knobs(sim.knob_snapshot(db));
         // Before the restart dir exists: a parfile that cannot substitute
         // (a required knob unset, a typo'd token) fails the submit here,
         // leaving nothing behind, not the queued job hours from now.
@@ -760,7 +761,7 @@ fn run_interactive(
         debug: args.debug,
         scratch_home: &scratch_home,
     })?;
-    vset.set_knobs(db.knob_snapshot());
+    vset.set_knobs(sim.knob_snapshot(db));
     // As in submit: a parfile that cannot substitute fails before any
     // restart directory exists.
     check_parfile(sim, &vset)?;
@@ -1933,5 +1934,36 @@ mod tests {
         fs::write(&bad, format!("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{}", section(&url, "no-such-branch", "", "CarpetX/Loop"))).unwrap();
         let err = format!("{:#}", crate::sim::export::pack(&ctx, args(&bad)).unwrap_err());
         assert!(err.contains("carpetx") && err.contains("no-such-branch"), "{err}");
+    }
+
+
+    /// §5.1: a simulation's own knob values outrank the global ones in what
+    /// its restarts freeze — the parfile's input is the simulation's, set by
+    /// `cactup import` — while the global knob itself is left alone.
+    #[test]
+    fn a_simulations_own_knobs_outrank_the_global_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        let parfile = tmp.path().join("bbh.par");
+        fs::write(&parfile, "K::f = \"@KNOB(kadath-initial-data)@\"\n").unwrap();
+        let mut sim = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
+        ctx.db
+            .update(|db| {
+                db.set_knob("kadath-initial-data", "/global/id.info".to_owned());
+                Ok(())
+            })
+            .unwrap();
+        sim.set_knobs([("kadath-initial-data".to_owned(), "/sim/id.info".to_owned())].into_iter().collect()).unwrap();
+        let sim = crate::sim::Simulation::open("bbh", &sim.dir).unwrap();
+        assert_eq!(sim.meta.knobs["kadath-initial-data"], "/sim/id.info", "stored with the simulation");
+
+        let db = ctx.db.read().unwrap();
+        submit_impl(&inst, &machine, &db, &sim, &start_args("bbh", "1:00:00"), false, Some("testhost")).unwrap();
+        let id = *restart::list_ids(&sim.dir).unwrap().last().unwrap();
+        let r = Restart::load(&sim.dir, id).unwrap();
+        assert_eq!(r.meta.knobs["kadath-initial-data"], "/sim/id.info");
+        assert_eq!(ctx.db.read().unwrap().knob("kadath-initial-data"), Some("/global/id.info"), "the global knob is untouched");
     }
 }
