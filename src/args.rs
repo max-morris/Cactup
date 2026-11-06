@@ -316,6 +316,10 @@ pub(crate) enum Commands {
     /// Reproduce a .sim file: install its sources, build them, create the simulation, and optionally submit or run it
     Import(ImportArgs),
     // §8.10
+    /// Work with Cactarium stacks
+    #[clap(subcommand)]
+    Stack(StackCommand),
+    // §8.10
     /// Store an API token for the Cactarium (create one on its settings page)
     Login {
         /// The token (default: asked for).
@@ -913,6 +917,24 @@ pub(crate) enum ConfigCommand {
     Delta {
         /// Config to inspect (default: the active config).
         name: Option<String>,
+    },
+}
+
+// §8.10
+#[derive(Subcommand, Debug)]
+pub(crate) enum StackCommand {
+    /// Cut a release of a stack on the Cactarium from its definition (cactarium-stack.toml)
+    Publish {
+        /// The stack definition, a cactarium-stack.toml.
+        definition: PathBuf,
+        /// The stack: owner/name.
+        target: String,
+        /// The release's version: X.Y.Z, or track:X.Y.Z.
+        #[clap(long, value_name = "VERSION")]
+        version: String,
+        /// The stack's own thornlist, when its definition is a flat list.
+        #[clap(long, value_name = "PATH")]
+        thornlist: Option<PathBuf>,
     },
 }
 

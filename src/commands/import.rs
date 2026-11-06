@@ -198,6 +198,39 @@ pub fn publish(ctx: &Ctx, file: &std::path::Path, target: &str) -> Res<()> {
     Ok(())
 }
 
+/// `cactup stack publish` (§8.10): cut release `version` of stack
+/// `owner/name` from its definition (and its own thornlist, for a flat
+/// stack). The registry resolves and freezes it; a release never changes,
+/// so publishing an existing version again is refused there.
+pub fn publish_stack(
+    ctx: &Ctx,
+    definition: &std::path::Path,
+    target: &str,
+    version: &str,
+    thornlist: Option<&std::path::Path>,
+) -> Res<()> {
+    use cactup_ecosystem_common::slug::Slug;
+    let slug: Slug = target.parse().map_err(|e| anyhow!("\"{target}\" is not owner/name: {e}"))?;
+    if slug.at.is_some() || slug.thorn.is_some() {
+        bail!("Name the stack as owner/name, and its version with --version");
+    }
+    let read = |path: &std::path::Path| {
+        std::fs::read_to_string(path).with_context(|| format!("Failed to read '{}'", path.display()))
+    };
+    let request = cactup_ecosystem_common::api::ReleaseRequest {
+        definition: read(definition)?,
+        thornlist: thornlist.map(read).transpose()?,
+        version: version.to_owned(),
+    };
+    let client = crate::cactarium::Client::new(&ctx.db.read()?);
+    let published = client.publish_stack(slug.owner.as_str(), slug.name.as_str(), &request)?;
+    println!("Published {} ({}): {}", published.slug.bold(), published.visibility, published.url);
+    for warning in &published.warnings {
+        println!("{}", warning.yellow());
+    }
+    Ok(())
+}
+
 /// The knob values for the parfile's inputs (§5.1): from `--input`, else a
 /// download of the input's URL, else asked for. An input left empty while
 /// the user's global knob has a value takes the global value at submit (the

@@ -4291,6 +4291,10 @@ What uses it, all on the login node (D11):
   (anything else is refused locally, naming what is unspecified) as the next
   version; the registry numbers it and says whether it is public or pending
   review.
+- `cactup stack publish <cactarium-stack.toml> <owner/name> --version V
+  [--thornlist F]` cuts a release from a stack definition (a recipe, or a flat
+  list with `--thornlist`); the registry resolves and freezes it, and refuses
+  a version that exists — releases never change.
 
 ---
 
