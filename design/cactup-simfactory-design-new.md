@@ -4160,7 +4160,10 @@ table beside them.
 
 Everything comes from what the simulation froze at create (§8.2 step 6), never
 from the installation as it is now: the **source** thornlist snapshot (which
-must be a CRL list; `!INCLUDE` is not spliced yet), and the config record,
+must be a CRL list; its `!INCLUDE`s are spliced in by the parser's own
+splicer, `crl::splice_includes`, resolved against the directory of the list the
+config recorded — and `sim pack` against the given list's — so a `.sim`
+carries the whole list), and the config record,
 whose `sources` map gives each git repo's pin — the commit the binary was
 built from. A simulation created before the record was frozen falls back to
 the config's own record only while that still describes the same `build-id`.

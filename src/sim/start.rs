@@ -1929,6 +1929,21 @@ mod tests {
         assert_eq!(commit("other"), old.to_string(), "a pin the list sets is kept");
         assert!(file.run.is_none());
 
+        // An !INCLUDE is spliced in: the .sim carries the whole list.
+        let part = tmp.path().join("other.part");
+        fs::write(&part, section(&other_url, &branch, &format!("!REPO_COMMIT = {old}\n"), "Other/Thorn")).unwrap();
+        let including = tmp.path().join("including.th");
+        fs::write(
+            &including,
+            format!("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{}!INCLUDE = other.part\n", section(&url, &branch, "", "CarpetX/Loop")),
+        )
+        .unwrap();
+        crate::sim::export::pack(&ctx, args(&including)).unwrap();
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(!file.thornlist.text.contains("!INCLUDE"), "{}", file.thornlist.text);
+        assert!(file.thornlist.text.contains("Other/Thorn"));
+        assert!(file.is_fully_specified(), "{:?}", file.unspecified());
+
         // A branch the remote does not have fails the pack.
         let bad = tmp.path().join("bad.th");
         fs::write(&bad, format!("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{}", section(&url, "no-such-branch", "", "CarpetX/Loop"))).unwrap();

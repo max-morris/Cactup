@@ -40,8 +40,14 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
     let source_text = std::fs::read_to_string(cfg_dir.join(build::THORNLIST_SNAPSHOT)).with_context(|| {
         format!("Simulation \"{}\" has no copy of the thornlist it was built from", sim.name)
     })?;
+    // `!INCLUDE`s spliced in, resolved where the list the config was built
+    // from lives: a `.sim` carries the whole list, verbatim otherwise.
+    let recorded = Path::new(&config.thornlist);
+    let list_path =
+        if recorded.is_absolute() { recorded.to_owned() } else { sim.meta.sourcedir.join(recorded) };
+    let source_text = splice(&source_text, &list_path)?;
     let list = thornlist::parse(&source_text)
-        .context("Export needs the thornlist as a GetComponents (CRL) list, with any !INCLUDE spliced in")?;
+        .context("Export needs the thornlist as a GetComponents (CRL) list")?;
     let parfile = parfile_at(&sim.cactup_dir().join("par").join(&sim.meta.parfile))?;
     let (source_text, list) =
         if args.trim { trimmed(source_text, &list, &sim.meta.sourcedir, &parfile)? } else { (source_text, list) };
@@ -70,6 +76,18 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
             provenance,
         },
     )
+}
+
+/// `text` with its `!INCLUDE`s spliced in by the parser's own splicer
+/// (local paths, against the directory of `path`, the file `text` came
+/// from; a URL is an error), so a `.sim` carries the whole list. A list
+/// without one comes back unchanged.
+fn splice(text: &str, path: &Path) -> Res<String> {
+    if !text.lines().any(|l| l.trim_start().starts_with("!INCLUDE")) {
+        return Ok(text.to_owned());
+    }
+    cactup_ecosystem_common::crl::splice_includes(text, path.parent())
+        .with_context(|| format!("Failed to splice the !INCLUDEs of '{}'", path.display()))
 }
 
 /// `text` (parsed as `list`) trimmed to what `parfile` needs, read from the
@@ -226,9 +244,9 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
     refuse_overwrite(&file, &args.describe)?;
     let text = std::fs::read_to_string(&args.thornlist)
         .with_context(|| format!("Failed to read '{}'", args.thornlist.display()))?;
-    let list = thornlist::parse(&text).with_context(|| {
-        format!("'{}' is not a GetComponents (CRL) list (with any !INCLUDE spliced in)", args.thornlist.display())
-    })?;
+    let text = splice(&text, &args.thornlist)?;
+    let list = thornlist::parse(&text)
+        .with_context(|| format!("'{}' is not a GetComponents (CRL) list", args.thornlist.display()))?;
 
     if args.trim && ctx.globals.installation.is_none() {
         bail!("--trim reads the thorns' .ccl files, so it needs an installation that has them: pass -I");
