@@ -173,6 +173,14 @@ pub fn trim_text(text: &str, list: &Thornlist, keep: &BTreeSet<String>) -> Res<S
         .filter(|c| is_arrangement_thorn(list, c) && !keep.contains(&c.checkout))
         .map(|c| c.checkout.as_str())
         .collect();
+    drop_checkouts(text, list, &drop, true)
+}
+
+/// `text` (parsed as `list`) with the checkouts in `drop` taken out of their
+/// `!CHECKOUT`s — written as `#DISABLED` lines when `disable`, else gone —
+/// and everything else byte for byte. Parsed back, it must name exactly the
+/// other checkouts.
+pub fn drop_checkouts(text: &str, list: &Thornlist, drop: &BTreeSet<&str>, disable: bool) -> Res<String> {
     if drop.is_empty() {
         return Ok(text.to_owned());
     }
@@ -221,7 +229,7 @@ pub fn trim_text(text: &str, list: &Thornlist, keep: &BTreeSet<String>) -> Res<S
         for k in &kept {
             out.push_str(&format!("{k}\n"));
         }
-        for d in dropped {
+        for d in dropped.into_iter().filter(|_| disable) {
             out.push_str(&format!("#DISABLED {d}\n"));
         }
         out.push_str(&trailing);
@@ -233,7 +241,7 @@ pub fn trim_text(text: &str, list: &Thornlist, keep: &BTreeSet<String>) -> Res<S
     let names = |l: &Thornlist| -> BTreeSet<String> { l.components().iter().map(|c| c.checkout.clone()).collect() };
     let want: BTreeSet<String> = names(list).into_iter().filter(|c| !drop.contains(c.as_str())).collect();
     if names(&trimmed) != want {
-        bail!("Trimming changed more than the thorns it dropped (a bug in trimming this list)");
+        bail!("Dropping checkouts changed more than those checkouts (a bug in rewriting this list)");
     }
     Ok(out)
 }

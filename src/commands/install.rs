@@ -534,31 +534,15 @@ fn valid_alias(alias: &str) -> bool {
 /// its thornlist. A range is resolved once, here: the installation records
 /// the exact release, and moving to another is an explicit refetch.
 fn stack_install_source(ctx: &Ctx, req: &str) -> Res<InstallSource<'static>> {
-    use cactup_ecosystem_common::slug::Slug;
-    let slug: Slug = req.parse().map_err(|e| anyhow!("\"{req}\" is not a stack (owner/name[@version]): {e}"))?;
-    let client = crate::cactarium::Client::new(&ctx.db.read()?);
-    let version = match slug.tip() {
-        Some(_) => slug.at.clone().expect("a tip is an @ form"),
-        None => {
-            let resolved = client.resolve(req)?;
-            if resolved.kind != "stack" {
-                bail!("{} is a {}, not a stack", resolved.slug, resolved.kind);
-            }
-            resolved.version.version
-        }
-    };
-    let (stack, unpinned) = client.stack_release(slug.owner.as_str(), slug.name.as_str(), &version)?;
-    let pins = stack.repos.iter().filter_map(|r| Some((r.name.clone(), r.commit.clone()?))).collect();
-    let content = crate::thornlist::pin_text(&stack.thornlist.text, &pins)
-        .with_context(|| format!("Failed to pin stack {}", stack.stack))?;
+    let (slug, content, unpinned) = crate::cactarium::stack_release_text(&ctx.db.read()?, req)?;
     if unpinned {
         println!(
             "{}",
-            format!("{} is not a release: its repos follow their branches, so the installation is not reproducible", stack.stack)
+            format!("{slug} is not a release: its repos follow their branches, so the installation is not reproducible")
                 .yellow()
         );
     }
-    Ok(InstallSource::Stack { slug: stack.stack.to_string(), content })
+    Ok(InstallSource::Stack { slug, content })
 }
 
 /// Read a `.sim` file for `install --simfile` (§8.9): its thornlist pinned by

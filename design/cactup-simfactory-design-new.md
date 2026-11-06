@@ -4296,6 +4296,42 @@ What uses it, all on the login node (D11):
   list with `--thornlist`); the registry resolves and freezes it, and refuses
   a version that exists — releases never change.
 
+### 8.11 `cactup add`: Cactarium packages on top of a base
+
+`cactup add owner/name[/Thorn][@version|@track:range] [--replace] [-f]` puts a
+package's thorns into the active installation at the commit the registry froze
+for the resolved version (a tag is only a label; a moved tag never moves an
+install). `owner/name/Thorn` adds one thorn; a later add of the same package
+updates it, adding a named thorn to those already enabled.
+
+**The model.** `installation.toml` records each added package under
+`[[added]]` (package, exact version, tag, commit, URL, repo name, the
+checkouts with their directories in the repo, and the base repos it
+`replaces`). The pristine thornlist (§3.2) stays the **base** — what was
+installed, a stack release say — and the live thornlist is always
+`compose(base, added)`: the base byte for byte, then one cactup-managed block
+(opened by a `# Added by \`cactup add\`` line) of generated sections, each
+pinned by `!REPO_COMMIT` with one checkout per line (Cactus reads the list as
+its ThornList and skips `!` lines, §7.5). So:
+
+- refetch's hand-edit guard compares the live list against that composition,
+  not against the bare base, and an add never reads as a hand edit; `add`
+  itself refuses to overwrite real hand edits unless `-f`;
+- an explicit refetch source is a new base: the added packages are composed
+  onto it before it is planned, fetched and written live — which is how
+  `cactup inst refetch --release owner/stack@range` upgrades a stack
+  installation and keeps everything added to it;
+- only the added repo is fetched by `add`; nothing else in the installation
+  moves.
+
+**Collisions.** A package whose repository the base already has (same derived
+name or same normalized URL), or that checks out a thorn the base already
+checks out, is refused unless `--replace`, which records the base repos it
+stands in for. Composition then drops those repos' checkouts of the claimed
+thorns from the base by parsed component (the same rewrite `--trim` uses,
+without the `#DISABLED` lines), and the composed list must still parse, so two
+sources can never silently claim one checkout.
+
 ---
 
 ## 9. ON-DISK LAYOUT — the binding compatibility contract

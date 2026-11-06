@@ -315,6 +315,18 @@ pub(crate) enum Commands {
     // §8.9
     /// Reproduce a .sim file: install its sources, build them, create the simulation, and optionally submit or run it
     Import(ImportArgs),
+    // §8.11
+    /// Add a Cactarium package's thorns to the active installation, at the commit the registry froze for the version
+    Add {
+        /// The package: owner/name, owner/name/Thorn for one thorn, with @version or @track:range to choose.
+        package: String,
+        /// Use the package in place of a repo the installation's thornlist already has.
+        #[clap(long)]
+        replace: bool,
+        /// Add even though the live thornlist has hand edits, which are overwritten.
+        #[clap(short, long)]
+        force: bool,
+    },
     // §8.10
     /// Work with Cactarium stacks
     #[clap(subcommand)]

@@ -191,6 +191,7 @@ fn main() -> Res<()> {
         Commands::Install(install) => commands::install::dispatch(&ctx, install),
         Commands::Import(import) => commands::import::dispatch(&ctx, import),
         Commands::Login { token } => commands::import::login(&ctx, token),
+        Commands::Add { package, replace, force } => commands::add::dispatch(&ctx, &package, replace, force),
         Commands::Stack(crate::args::StackCommand::Publish { definition, target, version, thornlist }) => {
             commands::import::publish_stack(&ctx, &definition, &target, &version, thornlist.as_deref())
         }

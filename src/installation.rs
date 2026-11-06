@@ -49,6 +49,42 @@ pub struct InstallationMeta {
     /// missing value means the historical default, `Cactus`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_dir: Option<String>,
+    /// Cactarium packages `cactup add` put on top of the base thornlist
+    /// (§8.11). The live thornlist is the pristine base with these composed
+    /// onto it, so a refetch of a new base (a stack upgrade) re-applies them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added: Vec<AddedPackage>,
+}
+
+/// One package `cactup add` added (§8.11), frozen at the commit the registry
+/// served for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AddedPackage {
+    /// `owner/name`.
+    pub package: String,
+    /// The exact version, `[track:]X.Y.Z`.
+    pub version: String,
+    /// The tag the version was cut from: a label; `commit` is what is fetched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    pub commit: String,
+    pub url: String,
+    /// The repo's name in the thornlist (its URL's basename).
+    pub repo: String,
+    /// The checkouts enabled, each `Arrangement/Thorn` with its directory in the repo.
+    pub thorns: Vec<AddedThorn>,
+    /// Base repos this package stands in for (`--replace`): their checkouts
+    /// are dropped from the composed list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replaces: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AddedThorn {
+    pub checkout: String,
+    pub repo_path: String,
 }
 
 impl Default for InstallationMeta {
@@ -59,6 +95,7 @@ impl Default for InstallationMeta {
             sim_home: None,
             test_home: None,
             root_dir: None,
+            added: Vec::new(),
         }
     }
 }

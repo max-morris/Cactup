@@ -150,6 +150,32 @@ impl Client {
     }
 }
 
+/// A stack release for `req` (`owner/stack[@range|version|head|master]`):
+/// a range resolved once to the exact release, and that release's thornlist
+/// with every repo it pins pinned by `!REPO_COMMIT`. Returns the exact slug
+/// (`owner/stack@1.2.0`, or the `@head`/`@master` form), the pinned text,
+/// and whether the registry marked it unpinned.
+pub fn stack_release_text(db: &Database, req: &str) -> Res<(String, String, bool)> {
+    use cactup_ecosystem_common::slug::Slug;
+    let slug: Slug = req.parse().map_err(|e| anyhow!("\"{req}\" is not a stack (owner/name[@version]): {e}"))?;
+    let client = Client::new(db);
+    let version = match slug.tip() {
+        Some(_) => slug.at.clone().expect("a tip is an @ form"),
+        None => {
+            let resolved = client.resolve(req)?;
+            if resolved.kind != "stack" {
+                bail!("{} is a {}, not a stack", resolved.slug, resolved.kind);
+            }
+            resolved.version.version
+        }
+    };
+    let (stack, unpinned) = client.stack_release(slug.owner.as_str(), slug.name.as_str(), &version)?;
+    let pins = stack.repos.iter().filter_map(|r| Some((r.name.clone(), r.commit.clone()?))).collect();
+    let text = crate::thornlist::pin_text(&stack.thornlist.text, &pins)
+        .with_context(|| format!("Failed to pin stack {}", stack.stack))?;
+    Ok((stack.stack.to_string(), text, unpinned))
+}
+
 fn json<T: DeserializeOwned>(response: reqwest::blocking::Response) -> Res<T> {
     let url = response.url().to_string();
     let text = response.text().with_context(|| format!("Failed to read the answer from {url}"))?;

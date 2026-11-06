@@ -2,6 +2,7 @@
 //! `pub fn dispatch(ctx: &Ctx, …) -> Res<()>`; main.rs routes the parsed
 //! subcommand to it.
 
+pub mod add;
 pub mod build;
 pub mod cache;
 pub mod config;

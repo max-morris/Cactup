@@ -49,6 +49,7 @@ impl Source {
 
     fn describe(&self) -> String {
         match self {
+            Source::Release { described, .. } if described.starts_with("stack ") => described.clone(),
             Source::Release { described, .. } => format!("release {described}"),
             Source::File { path, .. } => format!("thornlist '{}'", path.display()),
             Source::Live { path, .. } => format!("live thornlist '{}'", path.display()),
@@ -97,7 +98,16 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
         Source::File { path, .. } | Source::Live { path, .. } => path.parent().map(Path::to_path_buf),
         Source::Release { .. } => None,
     };
-    let list = thornlist::parse_with_base(source.bytes(), include_base.as_deref())
+    // An explicit source is a new base: the packages `cactup add` put on the
+    // old one are composed onto it (§8.11), and that is what is fetched and
+    // becomes the live list. The live list itself already carries them.
+    let composed = if source.is_explicit() {
+        super::add::compose(source.bytes(), &inst.meta()?.added)
+            .with_context(|| format!("Failed to add this installation's added packages to {}", source.describe()))?
+    } else {
+        source.bytes().to_owned()
+    };
+    let list = thornlist::parse_with_base(&composed, include_base.as_deref())
         .with_context(|| format!("Failed to parse {}", source.describe()))?;
     for w in list.warnings() {
         println!("{}", format!("Thornlist warning: {w}").yellow());
@@ -133,7 +143,9 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     let live_read = inst.live_thornlist_to_read();
     let pristine_path = inst.source_thornlist();
     let pristine_read = inst.source_thornlist_to_read();
-    let divergence = if source.is_explicit() { live_divergence(&live_read, &pristine_read)? } else { Vec::new() };
+    let added = inst.meta()?.added;
+    let divergence =
+        if source.is_explicit() { live_divergence(&live_read, &pristine_read, &added)? } else { Vec::new() };
     if !divergence.is_empty() && !replace_thornlist && !args.dry_run {
         println!(
             "{}",
@@ -341,7 +353,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     if fetch_ok || had_work {
         if source.is_explicit() {
             snapshot_live(&inst, &live_read)?;
-            fs::write(&live_path, source.bytes())
+            fs::write(&live_path, &composed)
                 .with_context(|| format!("Failed to write '{}'", live_path.display()))?;
             // Writing the current name beside a pre-rename copy would leave two
             // thornlists where reads only ever consult one — exactly the
@@ -477,6 +489,16 @@ fn check_root_unchanged(list_root: &str, recorded: &str) -> Res<()> {
 /// live `Cactus/thornlists/installation-default.th` (falling back to the
 /// pristine root copy on very old trees).
 fn resolve_source(ctx: &Ctx, inst: &Installation, args: &RefetchArgs) -> Res<Source> {
+    // `owner/stack@…`: a Cactarium stack release (§8.10) — the way an
+    // installation of one moves to another release, its added packages
+    // composed back on.
+    if let Some(selector) = args.release.as_deref().filter(|s| s.contains('/')) {
+        let (slug, bytes, unpinned) = crate::cactarium::stack_release_text(&ctx.db.read()?, selector)?;
+        if unpinned {
+            println!("{}", format!("{slug} is not a release: its repos follow their branches").yellow());
+        }
+        return Ok(Source::Release { name: slug.clone(), described: format!("stack {slug}"), bytes });
+    }
     if let Some(selector) = &args.release {
         let repo = manifest::ensure_manifest_repo(&crate::CACTUP_ROOT, &ctx.globals.manifest_url)?;
         let releases = manifest::get_releases(&repo)?;
@@ -511,14 +533,26 @@ fn resolve_source(ctx: &Ctx, inst: &Installation, args: &RefetchArgs) -> Res<Sou
 /// sets and #DISABLED sets. Empty = no hand edits (or nothing to compare —
 /// a missing/unparsable pristine copy can't witness an edit; the refetch
 /// will write one, arming the guard for next time).
-fn live_divergence(live: &Path, pristine: &Path) -> Res<Vec<String>> {
+///
+/// The pristine copy is the base; what the live copy should be is that base
+/// with the packages `cactup add` put on it composed back on (§8.11), so an
+/// add never reads as a hand edit.
+fn live_divergence(live: &Path, pristine: &Path, added: &[crate::installation::AddedPackage]) -> Res<Vec<String>> {
     let (Ok(live_src), Ok(pristine_src)) = (fs::read_to_string(live), fs::read_to_string(pristine))
     else {
         return Ok(Vec::new());
     };
-    let (Ok(live_list), Ok(pristine_list)) = (thornlist::parse(&live_src), thornlist::parse(&pristine_src))
+    let Ok(expected) = super::add::compose(&pristine_src, added) else { return Ok(Vec::new()) };
+    Ok(component_divergence(&live_src, &expected))
+}
+
+/// How thornlist `live` differs from `expected` as parsed component sets and
+/// `#DISABLED` sets (not text), one line per difference. Either one not
+/// parsing is no witness of an edit: empty.
+pub(crate) fn component_divergence(live_src: &str, expected_src: &str) -> Vec<String> {
+    let (Ok(live_list), Ok(pristine_list)) = (thornlist::parse(live_src), thornlist::parse(expected_src))
     else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
 
     let key = |c: &crate::thornlist::Component| format!("{}/{} <- {}", c.target, c.checkout, c.url.as_deref().unwrap_or(""));
@@ -537,7 +571,7 @@ fn live_divergence(live: &Path, pristine: &Path) -> Res<Vec<String>> {
     for d in live_disabled.symmetric_difference(&pristine_disabled) {
         out.push(format!("#DISABLED toggled: {d}"));
     }
-    Ok(out)
+    out
 }
 
 /// Split every raw `--overwrite` value on whitespace or commas (so
@@ -1025,6 +1059,12 @@ fn print_dry_run(
         let branch = item.branch.as_deref().unwrap_or("<default branch>");
         let target = match (&item.action, item.commit) {
             (GitAction::Clone, Some(commit)) => format!("clone, pinned at {commit}"),
+            // Already there: a pinned repo is never moved, and this run will not touch it.
+            (GitAction::Pin, Some(commit))
+                if fetch::git::head_of(&item.dir).is_ok_and(|(_, head)| head == commit) =>
+            {
+                format!("stays pinned at {commit}")
+            }
             (GitAction::Pin, Some(commit)) => format!("check out pinned commit {commit}"),
             (GitAction::Clone, None) => format!("clone {branch}"),
             (GitAction::Update, _) => format!("fetch + fast-forward {branch}"),
