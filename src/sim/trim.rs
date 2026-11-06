@@ -53,8 +53,8 @@ fn thorn_facts(list: &Thornlist, cactus_root: &Path) -> Res<BTreeMap<String, (St
     let read = crate::par::parallel_map(&thorns, |c| {
         let current = item.lock().expect("trim progress poisoned").add_child(c.checkout.clone());
         let dir = cactus_root.join("arrangements").join(&c.checkout);
-        let facts = std::fs::read_to_string(dir.join("interface.ccl")).ok().map(|interface| {
-            let configuration = std::fs::read_to_string(dir.join("configuration.ccl")).ok();
+        let facts = read_ccl(&dir.join("interface.ccl")).map(|interface| {
+            let configuration = read_ccl(&dir.join("configuration.ccl"));
             ThornFacts::scan(&interface, configuration.as_deref())
         });
         drop(current);
@@ -66,6 +66,18 @@ fn thorn_facts(list: &Thornlist, cactus_root: &Path) -> Res<BTreeMap<String, (St
         renderer.shutdown_and_wait();
     }
     Ok(thorns.iter().zip(read?).map(|(c, facts)| (c.checkout.clone(), (thorn_name(&c.checkout), facts))).collect())
+}
+
+/// A `.ccl` file's text, read only when it is a regular file of sane size —
+/// the shared crate's rule for its own tree scan: a `.ccl` that is a symlink
+/// could read anything (or `/dev/zero`, forever), and none is a megabyte.
+/// The thorn's directory itself may be a link, as every fetched one is.
+fn read_ccl(path: &Path) -> Option<String> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_file() || meta.len() > cactup_ecosystem_common::ccl::MAX_CCL_BYTES as u64 {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
 }
 
 fn is_arrangement_thorn(list: &Thornlist, c: &Component) -> bool {
