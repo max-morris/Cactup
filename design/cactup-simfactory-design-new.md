@@ -4185,8 +4185,11 @@ the config's own record only while that still describes the same `build-id`.
 - **Inputs.** Every required `@KNOB(name)@` in a `.par` that is not a
   standard knob (§5) becomes an `[[input]]`: something the simulation needs
   from outside the source tree. `vars` lists the `@VAR@`s used. Both come
-  from the substitution lexer itself (`VarSet::references`), so comments and
-  `@@` are skipped exactly as at submit. A `.py` parfile has neither.
+  from the shared crate's parfile lexer (`par::references`), which lexes as
+  substitution does — comments (`par::comment_spans`) and `@@` skipped — and
+  which the Cactarium's review uses too, so the registry flags exactly what
+  export declares. A `.py` parfile has neither. The absolute-path warning
+  looks only outside comments, likewise.
 - **Run hints** (`tasks`, `cpus-per-task`, `gpus-per-task`, `walltime`) come
   from the latest restart; machine-shaped settings stay out.
 - **Provenance**: exporter version and time, machine, flavor or optionlist,

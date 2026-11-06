@@ -15,7 +15,6 @@ use crate::commands::Ctx;
 use crate::database::KNOWN_KNOBS;
 use crate::fetch::{self, FetchState};
 use crate::installation::Installation;
-use crate::template::{Syntax, VarSet};
 use crate::thornlist::{self, ComponentType};
 use crate::Res;
 use anyhow::{anyhow, bail, Context};
@@ -506,7 +505,7 @@ fn parfile_at(path: &Path) -> Res<Parfile> {
     // A `.py` parfile reads its variables through the preamble (§6.1), not
     // through `@…@` tokens, so there is nothing to scan.
     let vars = match kind {
-        ParfileKind::Par => VarSet::references(&text, Syntax::Parfile)?.vars,
+        ParfileKind::Par => cactup_ecosystem_common::par::references(&text)?.vars,
         ParfileKind::Py => Vec::new(),
     };
     Ok(Parfile { filename, kind, vars, text })
@@ -519,7 +518,7 @@ fn inputs(parfile: &Parfile) -> Vec<Input> {
     if parfile.kind != ParfileKind::Par {
         return Vec::new();
     }
-    let Ok(refs) = VarSet::references(&parfile.text, Syntax::Parfile) else { return Vec::new() };
+    let Ok(refs) = cactup_ecosystem_common::par::references(&parfile.text) else { return Vec::new() };
     refs.knobs
         .into_iter()
         .filter(|k| !k.optional && !KNOWN_KNOBS.iter().any(|s| s.name == k.name))
@@ -534,9 +533,13 @@ fn warn_about_paths(parfile: &Parfile) {
     if parfile.kind != ParfileKind::Par {
         return;
     }
-    for (n, line) in parfile.text.lines().enumerate() {
-        let code = line.split('#').next().unwrap_or("");
-        for (i, quoted) in code.split('"').enumerate() {
+    // Code only: the registry's check skips comments the same way.
+    let mut code = parfile.text.clone();
+    for span in cactup_ecosystem_common::par::comment_spans(&parfile.text) {
+        code.replace_range(span.clone(), &" ".repeat(span.len()));
+    }
+    for (n, line) in code.lines().enumerate() {
+        for (i, quoted) in line.split('"').enumerate() {
             if i % 2 == 1 && quoted.starts_with('/') && quoted != "/dev/null" && !quoted.starts_with("/dev/") {
                 println!(
                     "{}",
