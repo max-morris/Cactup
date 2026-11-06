@@ -212,12 +212,14 @@ pub fn trim_text(text: &str, list: &Thornlist, keep: &BTreeSet<String>) -> Res<S
             .filter(|l| l.trim().is_empty() || l.trim_start().starts_with('#'))
             .collect();
         out.push_str(&text[done..*start]);
-        if kept.is_empty() {
-            // No checkout left: the section would fetch nothing. Keep its
-            // directives (harmless) but record the thorns as disabled.
-            out.push_str("!CHECKOUT =\n");
-        } else {
-            out.push_str(&format!("!CHECKOUT = {}\n", kept.join(" ")));
+        // One checkout per line, never on the `!CHECKOUT` line itself: Cactus
+        // reads the same file as its ThornList, skipping every `!` line and
+        // squeezing the spaces out of the rest (lib/sbin/MakeUtils.pl,
+        // ReadThornlist), so a thorn sharing a line is never built. (No
+        // checkout left: the section fetches nothing, which is harmless.)
+        out.push_str("!CHECKOUT =\n");
+        for k in &kept {
+            out.push_str(&format!("{k}\n"));
         }
         for d in dropped {
             out.push_str(&format!("#DISABLED {d}\n"));
@@ -296,6 +298,9 @@ mod tests {
         assert_eq!(checkouts, ["Makefile", "A/Main", "A/Driver", "A/Helper", "A/Solver", "Lib/HDF5", "Lib/HDF5Alt"]);
         assert_eq!(parsed.disabled_thorns(), ["A/OtherDriver", "B/Unused", "B/AlsoUnused"]);
         assert!(trimmed.contains("# unrelated\n!TARGET"), "comments stay: {trimmed}");
+        // Cactus reads this file as its ThornList and skips `!` lines, so no
+        // kept thorn may sit on a `!CHECKOUT` line, and each needs its own.
+        assert!(trimmed.contains("!CHECKOUT =\nA/Main\nA/Driver\nA/Helper\nA/Solver\n"), "{trimmed}");
 
         // A thorn the parfile activates that the list lacks is an error.
         let err = format!("{:#}", needed(&list, &cactus, "ActiveThorns = \"Main Nope\"\n").unwrap_err());
