@@ -753,7 +753,10 @@ diverge in two independent ways.**
 
 1. **Per repo**, from a git status walk of `<root-dir>/repos/<repo>`: a moved
    HEAD, a changed branch, modified tracked files, untracked files (which never
-   affect a build but do block `--prune`), a repo the fetch recorded that is no
+   affect a build but do block `--prune`; a path the thornlist itself checks
+   another component out into — a `!TARGET` that resolves, through the
+   arrangement links, to inside this repo, as pretty-bhns puts FUKA inside
+   KadathThorn — is that component's, not an untracked file here), a repo the fetch recorded that is no
    longer on disk, and a repo directory that **cannot be inspected as a git
    repo at all** — most often because someone replaced the checkout with a
    hand-built variant that has no `.git/`.

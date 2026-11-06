@@ -28,6 +28,46 @@ use std::path::Path;
 /// prints all of them.
 const PATHS_SHOWN: usize = 6;
 
+/// Per repo, the paths inside it (repo-relative) that the thornlist checks a
+/// *different* component out into: a component whose `!TARGET` directory,
+/// resolved on disk under `install_root`, lies inside `<root>/repos/<repo>/`.
+/// Resolved, not read lexically: such targets reach the repo through an
+/// arrangement link (`$ARR/Fuka/KadathThorn/src/fuka/../../../../repos/…`
+/// only lands in `repos/` once `KadathThorn` is followed). Each distinct
+/// target is resolved once.
+fn nested_checkouts(
+    list: &crate::thornlist::Thornlist,
+    install_root: &std::path::Path,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut nested: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    let Ok(repos) = std::fs::canonicalize(install_root.join(list.root()).join("repos")) else { return nested };
+    let mut resolved: std::collections::BTreeMap<&str, Option<(String, String)>> = Default::default();
+    for c in list.components() {
+        let inside = resolved.entry(c.target.as_str()).or_insert_with(|| {
+            let dir = std::fs::canonicalize(install_root.join(&c.target)).ok()?;
+            let rest = dir.strip_prefix(&repos).ok()?;
+            let mut parts = rest.components().map(|p| p.as_os_str().to_string_lossy().into_owned());
+            let repo = parts.next()?;
+            Some((repo, parts.collect::<Vec<_>>().join("/")))
+        });
+        if let Some((repo, rel)) = inside
+            && *repo != c.repo
+        {
+            let path = if rel.is_empty() { c.checkout.clone() } else { format!("{rel}/{}", c.checkout) };
+            nested.entry(repo.clone()).or_default().push(path);
+        }
+    }
+    nested
+}
+
+/// Whether untracked path `untracked` (a file, or a directory with a
+/// trailing `/` when git reports it whole) is one of `owned` or only leads to
+/// them.
+fn is_owned_elsewhere(untracked: &str, owned: &[String]) -> bool {
+    let u = untracked.trim_end_matches('/');
+    owned.iter().any(|o| o == u || o.starts_with(&format!("{u}/")) || u.starts_with(&format!("{o}/")))
+}
+
 /// `cactup installation delta [ALIAS]` — divergence from the last fetch.
 pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     let inst = match alias {
@@ -118,10 +158,15 @@ pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     let diffs = diffs?;
     let states = states?;
 
+    // Paths inside one repo that the thornlist checks another component out
+    // into (a `!TARGET` reaching into `repos/<repo>/…`, as pretty-bhns puts
+    // FUKA inside KadathThorn): they are untracked there by design.
+    let nested = nested_checkouts(&list, &inst.root);
+
     let mut clean = 0usize;
     let mut reported = 0usize;
     for (repo, diff) in names.iter().zip(diffs) {
-        let diff = match diff {
+        let mut diff = match diff {
             None => {
                 if recorded.contains_key(repo) {
                     reported += 1;
@@ -136,6 +181,9 @@ pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
             }
             Some(Ok(diff)) => diff,
         };
+        if let Some(owned) = nested.get(repo.as_str()) {
+            diff.untracked.retain(|u| !is_owned_elsewhere(u, owned));
+        }
         let record = recorded.get(repo);
         let moved = record.is_some_and(|r| r.head != diff.head.to_string());
         // A pinned repo sits detached at its pin, and its recorded branch is
@@ -625,6 +673,31 @@ fn read_live_thornlist(inst: &Installation) -> Res<crate::thornlist::Thornlist> 
 
 #[cfg(test)]
 mod tests {
+    /// pretty-bhns checks FUKA out inside KadathThorn through a `!TARGET`
+    /// that walks back into `repos/` via KadathThorn's arrangement link;
+    /// KadathThorn's `src/fuka/` is FUKA's, not an untracked file of its own.
+    #[test]
+    fn a_component_checked_out_inside_another_repo_is_not_its_untracked_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = tmp.path().join("Cactus");
+        std::fs::create_dir_all(cactus.join("repos/KadathThorn/src/fuka")).unwrap();
+        std::fs::create_dir_all(cactus.join("arrangements/Fuka")).unwrap();
+        std::os::unix::fs::symlink("../../repos/KadathThorn", cactus.join("arrangements/Fuka/KadathThorn")).unwrap();
+        let list = crate::thornlist::parse(
+            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!DEFINE ARR = $ROOT/arrangements\n\
+             !TARGET = $ARR/Fuka/KadathThorn/src/fuka/../../../../repos/KadathThorn/src/fuka\n!TYPE = git\n\
+             !URL = https://x/fuka\n!CHECKOUT = Cmake src\n\n\
+             !TARGET = $ARR\n!TYPE = git\n!URL = https://x/KadathThorn.git\n!REPO_PATH = ../$2\n!CHECKOUT =\nFuka/KadathThorn\n",
+        )
+        .unwrap();
+        let nested = super::nested_checkouts(&list, tmp.path());
+        assert_eq!(nested["KadathThorn"], ["src/fuka/Cmake", "src/fuka/src"]);
+        assert_eq!(nested.len(), 1, "the arrangement link itself is not nested: {nested:?}");
+        assert!(super::is_owned_elsewhere("src/fuka/", &nested["KadathThorn"]));
+        assert!(super::is_owned_elsewhere("src/fuka/Cmake", &nested["KadathThorn"]));
+        assert!(!super::is_owned_elsewhere("src/mine.txt", &nested["KadathThorn"]));
+    }
+
     use super::*;
 
     fn map(pairs: &[(&str, &str)]) -> ThornMap {
