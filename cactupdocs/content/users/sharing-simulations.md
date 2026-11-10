@@ -182,7 +182,8 @@ release. Rebuild a config to compile them.
 repository it replaced at the commit the base names.
 
 `cactup inst show` lists the packages you added, each with where to report
-problems with it (the package's contact, else its repository). If a build
+problems with it (the package's contact, else its repository), and for an
+installation of a stack, the same for the stack. If a build
 fails in a thorn you added, cactup says which package it came from and the
 same address.
 

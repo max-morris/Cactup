@@ -12,7 +12,7 @@ use crate::Res;
 use anyhow::{anyhow, bail, Context};
 use cactup_ecosystem_common::api::{
     ErrorBody, PackageVersions, Published, Refreshed, Resolved, API_GENERATION, API_GENERATION_HEADER, API_PREFIX,
-    SHA256_HEADER, UNPINNED_HEADER,
+    CONTACT_HEADER, SHA256_HEADER, UNPINNED_HEADER,
 };
 use cactup_ecosystem_common::stack::FrozenStack;
 use serde::de::DeserializeOwned;
@@ -61,12 +61,19 @@ impl Client {
     }
 
     /// A stack release (`version` exact, or `head`/`master`): its thornlist
-    /// and pins, and whether the server marked it unpinned.
-    pub fn stack_release(&self, owner: &str, name: &str, version: &str) -> Res<(FrozenStack, bool)> {
+    /// and pins, whether the server marked it unpinned, and where to report
+    /// problems with it (its declared contact, else its repo).
+    pub fn stack_release(&self, owner: &str, name: &str, version: &str) -> Res<(FrozenStack, bool, Option<String>)> {
         let url = self.url(&format!("/stacks/{owner}/{name}/releases/{version}"));
         let response = self.send(crate::fetch::download::client().get(&url))?;
         let unpinned = response.headers().get(UNPINNED_HEADER).is_some_and(|v| v.as_bytes() == b"true");
-        Ok((json(response)?, unpinned))
+        let contact = response
+            .headers()
+            .get(CONTACT_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .filter(|c| !c.is_empty())
+            .map(str::to_owned);
+        Ok((json(response)?, unpinned, contact))
     }
 
     pub fn package_versions(&self, owner: &str, name: &str) -> Res<PackageVersions> {
@@ -168,10 +175,20 @@ impl Client {
 
 /// A stack release for `req` (`owner/stack[@range|version|head|master]`):
 /// a range resolved once to the exact release, and that release's thornlist
-/// with every repo it pins pinned by `!REPO_COMMIT`. Returns the exact slug
-/// (`owner/stack@1.2.0`, or the `@head`/`@master` form), the pinned text,
-/// and whether the registry marked it unpinned.
-pub fn stack_release_text(db: &Database, req: &str) -> Res<(String, String, bool)> {
+/// with every repo it pins pinned by `!REPO_COMMIT`.
+pub struct StackRelease {
+    /// The exact slug: `owner/stack@1.2.0`, or the `@head`/`@master` form.
+    pub slug: String,
+    /// The thornlist, pinned.
+    pub text: String,
+    /// The registry marked it unpinned (`@head`/`@master`).
+    pub unpinned: bool,
+    /// Where to report problems with the stack.
+    pub contact: Option<String>,
+}
+
+/// See [`StackRelease`].
+pub fn stack_release_text(db: &Database, req: &str) -> Res<StackRelease> {
     use cactup_ecosystem_common::slug::Slug;
     let slug: Slug = req.parse().map_err(|e| anyhow!("\"{req}\" is not a stack (owner/name[@version]): {e}"))?;
     let client = Client::new(db);
@@ -185,11 +202,11 @@ pub fn stack_release_text(db: &Database, req: &str) -> Res<(String, String, bool
             resolved.version.version
         }
     };
-    let (stack, unpinned) = client.stack_release(slug.owner.as_str(), slug.name.as_str(), &version)?;
+    let (stack, unpinned, contact) = client.stack_release(slug.owner.as_str(), slug.name.as_str(), &version)?;
     let pins = stack.repos.iter().filter_map(|r| Some((r.name.clone(), r.commit.clone()?))).collect();
     let text = crate::thornlist::pin_text(&stack.thornlist.text, &pins)
         .with_context(|| format!("Failed to pin stack {}", stack.stack))?;
-    Ok((stack.stack.to_string(), text, unpinned))
+    Ok(StackRelease { slug: stack.stack.to_string(), text, unpinned, contact })
 }
 
 fn json<T: DeserializeOwned>(response: reqwest::blocking::Response) -> Res<T> {

@@ -28,7 +28,7 @@ pub fn dispatch(ctx: &Ctx) -> Res<()> {
         // install-time provenance (§2.1). Shown only when it actually
         // differs — refetching the same release back is not news.
         match (&installation.current_release, &installation.current_thornlist) {
-            (Some(current), _) if Some(current) != installation.release.as_ref() => {
+            (Some(current), _) if Some(current) != installation.release.as_ref() && Some(current) != installation.stack.as_ref() => {
                 print!(", now on {}", current.bold())
             }
             (None, Some(current)) if Some(current) != installation.thornlist.as_ref() => {

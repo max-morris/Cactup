@@ -204,13 +204,17 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     // tree below (§2.1 current-release / current-thornlist). Shown only
     // when it actually differs.
     match (&entry.current_release, &entry.current_thornlist) {
-        (Some(current), _) if Some(current) != entry.release.as_ref() => {
+        (Some(current), _) if Some(current) != entry.release.as_ref() && Some(current) != entry.stack.as_ref() => {
             println!("  now on:       {current} (refetched)")
         }
         (None, Some(current)) if Some(current) != entry.thornlist.as_ref() => {
             println!("  now on:       thornlist {current} (refetched)")
         }
         _ => {}
+    }
+    // §8.10: where to take problems with the stack the tree is on.
+    if let Some(contact) = &entry.stack_contact {
+        println!("  problems?     {contact}");
     }
     for (tone, line) in conformance_lines(entry) {
         match tone {
@@ -273,6 +277,7 @@ mod tests {
             stack: None,
             current_release: None,
             current_thornlist: None,
+            stack_contact: None,
             unfetched_repos,
         }
     }

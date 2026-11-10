@@ -33,7 +33,8 @@ enum Source {
     /// tip of master. `name` is what the DB records and what the user can pass
     /// again; `described` is for printing, and additionally names master's
     /// commit, which `name` deliberately does not.
-    Release { name: String, described: String, bytes: String },
+    /// `contact` is a Cactarium stack's (§8.10); `None` for a manifest release.
+    Release { name: String, described: String, bytes: String, contact: Option<String> },
     /// Positional THORNLIST file.
     File { path: PathBuf, bytes: String },
     /// No argument: the installation's own live thornlist.
@@ -389,8 +390,8 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
         // naturally computes an empty map and clears the marker.
         let unfetched = unfetched_repos(&plan, &report);
         let explicit = match &source {
-            Source::Release { name, .. } => Some((Some(name.clone()), None::<String>)),
-            Source::File { path, .. } => Some((None::<String>, Some(path.display().to_string()))),
+            Source::Release { name, contact, .. } => Some((Some(name.clone()), None::<String>, contact.clone())),
+            Source::File { path, .. } => Some((None::<String>, Some(path.display().to_string()), None)),
             Source::Live { .. } => None,
         };
         let alias = inst.alias.clone();
@@ -401,9 +402,12 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
                 .get_mut(&alias)
                 .ok_or_else(|| anyhow!("Installation \"{alias}\" vanished from the database"))?;
             let was_partial = !entry.unfetched_repos.is_empty();
-            if let Some((current_release, current_thornlist)) = explicit {
+            if let Some((current_release, current_thornlist, stack_contact)) = explicit {
                 entry.current_release = current_release;
                 entry.current_thornlist = current_thornlist;
+                // The contact follows the stack the tree is on; off a stack,
+                // there is none.
+                entry.stack_contact = stack_contact;
             }
             entry.unfetched_repos = unfetched_for_db;
             Ok(was_partial)
@@ -520,11 +524,12 @@ fn resolve_source(ctx: &Ctx, inst: &Installation, args: &RefetchArgs) -> Res<Sou
     if let Some(selector) = args.release.as_deref().filter(|s| s.contains('/')) {
         let db = ctx.db.read()?;
         let selector = stay_on_track(selector, db.installations.get(&inst.alias));
-        let (slug, bytes, unpinned) = crate::cactarium::stack_release_text(&db, &selector)?;
+        let crate::cactarium::StackRelease { slug, text: bytes, unpinned, contact } =
+            crate::cactarium::stack_release_text(&db, &selector)?;
         if unpinned {
             println!("{}", format!("{slug} is not a release: its repos follow their branches").yellow());
         }
-        return Ok(Source::Release { name: slug.clone(), described: format!("stack {slug}"), bytes });
+        return Ok(Source::Release { name: slug.clone(), described: format!("stack {slug}"), bytes, contact });
     }
     if let Some(selector) = &args.release {
         let repo = manifest::ensure_manifest_repo(&crate::CACTUP_ROOT, &ctx.globals.manifest_url)?;
@@ -539,7 +544,7 @@ fn resolve_source(ctx: &Ctx, inst: &Installation, args: &RefetchArgs) -> Res<Sou
             .with_context(|| format!("Release {described} has no einsteintoolkit.th"))?;
         let bytes = String::from_utf8(bytes)
             .with_context(|| format!("Release {described}'s thornlist is not UTF-8"))?;
-        return Ok(Source::Release { name: release.name.clone(), described, bytes });
+        return Ok(Source::Release { name: release.name.clone(), described, bytes, contact: None });
     }
     if let Some(path) = &args.thornlist {
         let expanded = shell::expand_path(&super::p2s(path.clone())?);
@@ -1536,6 +1541,7 @@ mod tests {
             stack: stack.map(Into::into),
             current_release: current.map(Into::into),
             current_thornlist: None,
+            stack_contact: None,
             unfetched_repos: Default::default(),
         };
         let mp = entry(Some("max/carpetx-mp@mixed-precision:1.2.0"), None);

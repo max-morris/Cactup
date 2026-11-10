@@ -196,6 +196,11 @@ pub struct CactusInstallation {
     /// (or `@head`/`@master` for the unpinned forms).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stack: Option<String>,
+    /// Where to report problems with the stack release the tree is on now
+    /// (installed, or refetched to), as the Cactarium gave it: the stack's
+    /// declared contact, else its repo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack_contact: Option<String>,
     /// What the tree is on *now*, when an `installation refetch` with an
     /// explicit source moved it away from its install-time provenance
     /// (§2.1). `release`/`thornlist` above are never rewritten — they record
@@ -735,6 +740,7 @@ mod tests {
                     stack: None,
                     current_release: None,
                     current_thornlist: None,
+                    stack_contact: None,
                     unfetched_repos: IndexMap::new(),
                 },
             );
@@ -790,6 +796,7 @@ mod tests {
                     stack: None,
                     current_release: None,
                     current_thornlist: None,
+                    stack_contact: None,
                     unfetched_repos: unfetched,
                 },
             );
@@ -829,6 +836,7 @@ mod tests {
                     stack: None,
                     current_release: None,
                     current_thornlist: None,
+                    stack_contact: None,
                     unfetched_repos: IndexMap::new(),
                 },
             );

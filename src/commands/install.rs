@@ -24,7 +24,7 @@ enum InstallSource<'repo> {
     /// A Cactarium stack release (§8.10): `content` is its thornlist with
     /// every repo the release pins pinned by `!REPO_COMMIT`; `slug` is the
     /// exact release (`owner/stack@version`, or the unpinned `@head`/`@master`).
-    Stack { slug: String, content: String },
+    Stack { slug: String, content: String, contact: Option<String> },
 }
 
 pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
@@ -435,9 +435,9 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         InstallSource::Release(_) | InstallSource::SimFile { .. } | InstallSource::Stack { .. } => None,
         InstallSource::Custom { path, .. } => Some(path.display().to_string()),
     };
-    let source_stack = match &source {
-        InstallSource::Stack { slug, .. } => Some(slug.clone()),
-        _ => None,
+    let (source_stack, stack_contact) = match &source {
+        InstallSource::Stack { slug, contact, .. } => (Some(slug.clone()), contact.clone()),
+        _ => (None, None),
     };
     let source_simfile = match &source {
         InstallSource::SimFile { path, .. } => Some(path.display().to_string()),
@@ -459,6 +459,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
             thornlist: source_thornlist.clone(),
             simfile: source_simfile.clone(),
             stack: source_stack.clone(),
+            stack_contact: stack_contact.clone(),
             current_release: None,
             current_thornlist: None,
             unfetched_repos: Default::default(),
@@ -534,7 +535,8 @@ fn valid_alias(alias: &str) -> bool {
 /// its thornlist. A range is resolved once, here: the installation records
 /// the exact release, and moving to another is an explicit refetch.
 fn stack_install_source(ctx: &Ctx, req: &str) -> Res<InstallSource<'static>> {
-    let (slug, content, unpinned) = crate::cactarium::stack_release_text(&ctx.db.read()?, req)?;
+    let crate::cactarium::StackRelease { slug, text: content, unpinned, contact } =
+        crate::cactarium::stack_release_text(&ctx.db.read()?, req)?;
     if unpinned {
         println!(
             "{}",
@@ -542,7 +544,7 @@ fn stack_install_source(ctx: &Ctx, req: &str) -> Res<InstallSource<'static>> {
                 .yellow()
         );
     }
-    Ok(InstallSource::Stack { slug, content })
+    Ok(InstallSource::Stack { slug, content, contact })
 }
 
 /// Read a `.sim` file for `install --simfile` (§8.9): its thornlist pinned by

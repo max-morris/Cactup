@@ -4335,7 +4335,10 @@ A 401 adds "run `cactup login`" to the server's message. Every artifact has a
 **contact** (where to go for help: an `https://` URL or `mailto:`, the repo
 when none is declared). `sim export`/`pack` take `--contact` (default: the
 `default-contact` knob); `add` records a package's resolved contact, `inst
-show` prints it beside each added package, and after a failed build whose
+show` prints it beside each added package, and the base stack's (the
+`x-cactarium-contact` header of the release served, recorded in the DB as
+`stack-contact` at install and on every refetch, cleared when a refetch moves
+off a stack), and after a failed build whose
 error lines name an added thorn (its `…/Arrangement/Thorn/` source path or
 `…/build/Thorn/` directory, in the last 64 KiB of the attempt's output),
 cactup says which package the thorn came from and where to report it.

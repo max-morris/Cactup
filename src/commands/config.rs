@@ -337,6 +337,7 @@ mod tests {
                 thornlist: thornlist.map(str::to_owned),
                 simfile: None,
                 stack: None,
+                stack_contact: None,
                 current_release: current_release.map(str::to_owned),
                 current_thornlist: current_thornlist.map(str::to_owned),
                 unfetched_repos: Default::default(),
@@ -379,6 +380,7 @@ mod tests {
             stack: None,
             current_release: None,
             current_thornlist: None,
+            stack_contact: None,
             unfetched_repos: Default::default(),
         };
         assert_eq!(live_thornlist_source(&partial), "release ET_2026_05");
