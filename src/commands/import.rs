@@ -415,8 +415,9 @@ fn settle_inputs(
         }
         given_values.insert(knob.to_owned(), value.to_owned());
     }
-    let dir = crate::inputs::inputs_dir(ctx)?;
     let db = ctx.db.read()?;
+    // Resolved only when an input is fetched: finding it may read the machine.
+    let mut dir = None;
     let policy = crate::inputs::SizePolicy::new(interactive, yes);
     let mut knobs = IndexMap::new();
     let mut missing = Vec::new();
@@ -426,7 +427,10 @@ fn settle_inputs(
             Some(value)
         } else if input.url.is_some() {
             println!("Input {}{what}", input.knob.bold());
-            let value = crate::inputs::fetch(&dir, input, &policy)
+            if dir.is_none() {
+                dir = Some(crate::inputs::inputs_dir(ctx)?);
+            }
+            let value = crate::inputs::fetch(dir.as_deref().expect("set above"), input, &policy)
                 .with_context(|| format!("Failed to fetch input {}", input.knob))?;
             println!("  {} = {}", input.knob, value.display());
             Some(value.display().to_string())
