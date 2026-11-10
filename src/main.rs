@@ -5,6 +5,7 @@ mod cactarium;
 mod commands;
 mod database;
 mod fetch;
+mod format;
 mod freeze;
 mod inputs;
 mod installation;

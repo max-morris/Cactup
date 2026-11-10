@@ -22,7 +22,6 @@ use colored::Colorize;
 use indexmap::IndexMap;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 fn default_schema() -> u32 {
@@ -593,17 +592,8 @@ pub(crate) fn read_toml<T: DeserializeOwned + Default>(path: &Path) -> Res<T> {
 
 /// Atomic (temp + rename) TOML write, so readers never see a torn file.
 pub(crate) fn write_toml<T: Serialize>(path: &Path, value: &T) -> Res<()> {
-    let dir = path.parent().expect("cactup TOML paths have parents");
-    std::fs::create_dir_all(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
     let text = toml::to_string_pretty(value).context("Failed to serialize TOML")?;
-    let mut temp = tempfile::NamedTempFile::new_in(dir)
-        .with_context(|| format!("Failed to create temp file in '{}'", dir.display()))?;
-    temp.write_all(text.as_bytes())
-        .and_then(|()| temp.as_file().sync_all())
-        .with_context(|| format!("Failed to write '{}'", path.display()))?;
-    temp.persist(path)
-        .with_context(|| format!("Failed to move '{}' into place", path.display()))?;
-    Ok(())
+    crate::format::write_atomic(path, &text)
 }
 
 #[cfg(test)]
