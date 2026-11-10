@@ -2241,8 +2241,16 @@ pub(crate) mod testrepo {
         repo.commit("HEAD", "tree", tree_id, parents).expect("commit").detach()
     }
 
-    /// Add one commit on HEAD and return the new commit id.
+    /// Add one commit on HEAD and return the new commit id. A repo [`init`]
+    /// did not make (a clone cactup's fetch made, say) gets the same test
+    /// identity first: gix refuses to commit without one, and a CI runner
+    /// has no ambient one to fall back on.
     pub(crate) fn commit(dir: &Path, message: &str) -> ObjectId {
+        let config = dir.join(".git/config");
+        let text = std::fs::read_to_string(&config).unwrap_or_default();
+        if !text.contains("[user]") {
+            std::fs::write(&config, format!("{text}[user]\n\tname = cactup-test\n\temail = test@invalid\n")).unwrap();
+        }
         let repo = gix::open(dir).expect("open repo");
         let tree = repo
             .write_object(gix::objs::Tree::empty())
