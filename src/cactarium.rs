@@ -10,6 +10,7 @@
 use crate::database::Database;
 use crate::Res;
 use anyhow::{anyhow, bail, Context};
+use colored::Colorize;
 use cactup_ecosystem_common::api::{
     ErrorBody, PackageVersions, Published, Refreshed, Resolved, API_GENERATION, API_GENERATION_HEADER, API_PREFIX,
     CONTACT_HEADER, SHA256_HEADER, UNPINNED_HEADER,
@@ -203,9 +204,19 @@ pub fn stack_release_text(db: &Database, req: &str) -> Res<StackRelease> {
         }
     };
     let (stack, unpinned, contact) = client.stack_release(slug.owner.as_str(), slug.name.as_str(), &version)?;
-    let pins = stack.repos.iter().filter_map(|r| Some((r.name.clone(), r.commit.clone()?))).collect();
-    let text = crate::thornlist::pin_text(&stack.thornlist.text, &pins)
-        .with_context(|| format!("Failed to pin stack {}", stack.stack))?;
+    let pin_failed = || format!("Failed to pin stack {}", stack.stack);
+    let (pins, unchecked) = crate::thornlist::recorded_pins(&stack.thornlist.text, &stack.repos).with_context(pin_failed)?;
+    if !unchecked.is_empty() {
+        println!(
+            "{}",
+            format!(
+                "Downloaded without checking their recorded hash, which names no single file: {}",
+                unchecked.join(", ")
+            )
+            .yellow()
+        );
+    }
+    let text = crate::thornlist::pin_text(&stack.thornlist.text, &pins).with_context(pin_failed)?;
     Ok(StackRelease { slug: stack.stack.to_string(), text, unpinned, contact })
 }
 

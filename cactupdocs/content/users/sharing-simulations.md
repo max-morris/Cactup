@@ -6,8 +6,8 @@ description = "Export a simulation as a .sim file, reproduce one with cactup imp
 # Sharing Simulations
 
 A **`.sim` file** is a simulation you can hand to someone else: its parfile,
-the thornlist it was built from, and the exact commit of every repository
-behind that thornlist. Whoever has the file can rebuild the same code and
+the thornlist it was built from, the exact commit of every repository
+behind that thornlist, and the SHA-256 of every file it downloads. Whoever has the file can rebuild the same code and
 run the same simulation with one command. The **Cactarium** is a registry
 where `.sim` files, thorn packages and stacks (published, versioned
 thornlists) are shared.
@@ -20,7 +20,10 @@ cactup sim export mysim bbh.sim -y # take every default without asking
 ```
 
 The pins are the commits the simulation's executable was **built from**, not
-whatever your installation has moved on to since. On a terminal, export asks
+whatever your installation has moved on to since. A file the thornlist
+downloads (a tarball) is pinned by its SHA-256: the one the thornlist gives
+in a `!CHECKSUM_SHA256` line, else the hash of the file your installation
+has, as long as it has not been downloaded again since the build. On a terminal, export asks
 for a name, summary, authors and license, each prefilled: the summary and
 description come from the comment block at the top of your parfile, the
 authors from your git `user.name`, the license from the `default-license`
@@ -69,7 +72,10 @@ cactup sim unpack bbh.sim --dir work/
 ```
 
 writes the thornlist — with each pinned repository pinned by a
-`!REPO_COMMIT` line — and the parfile, under their original names.
+`!REPO_COMMIT` line and each pinned download by a `!CHECKSUM_SHA256` line —
+and the parfile, under their original names. GetComponents and Cactus skip
+both kinds of line, so the thornlist still works without cactup; it just
+isn't pinned there.
 
 ## Reproducing a .sim file
 
@@ -105,7 +111,9 @@ cactup install --simfile bbh.sim
 ```
 
 Every repository is checked out at its pinned commit, and `cactup inst
-refetch` will never move it.
+refetch` will never move it. Every pinned download is checked against its
+hash: a file that has changed on the server since is refused, and the old
+copy, if any, stays.
 
 ## The Cactarium
 

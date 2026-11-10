@@ -1,16 +1,42 @@
 //! Thornlists. The CRL 1.0 parser itself (spec §3.2) — a port of
 //! GetComponents' `parse_list` plus cactup's extensions (`#DISABLED`,
-//! `!REPO_COMMIT`), and `pin_text`, which writes pins into a list — live in
-//! the Cactup ecosystem's shared crate, where the Cactarium registry parses
-//! and pins lists by exactly the same rules; they are re-exported here.
-//! What stays is what only an installed tree can answer:
-//! [`parse_config_list`], which resolves a plain Cactus `ThornList` through
-//! the tree's arrangement links.
+//! `!REPO_COMMIT`, `!CHECKSUM_SHA256`), and `pin_text`, which writes pins
+//! into a list — live in the Cactup ecosystem's shared crate, where the
+//! Cactarium registry parses and pins lists by exactly the same rules; they
+//! are re-exported here. What stays is what only an installed tree can
+//! answer: [`parse_config_list`], which resolves a plain Cactus `ThornList`
+//! through the tree's arrangement links.
 
-pub use cactup_ecosystem_common::crl::{parse, parse_with_base, pin_text, Component, ComponentType, Thornlist};
+pub use cactup_ecosystem_common::crl::{
+    parse, parse_with_base, pin_text, Component, ComponentType, Pin, Thornlist,
+};
 
 use cactup_ecosystem_common::crl::lexical_canonicalize;
+use cactup_ecosystem_common::sim::RepoPin;
+use std::collections::BTreeMap;
 use std::path::Path;
+
+/// The pins a `.sim` or a stack release records, as [`pin_text`] writes them
+/// into `text`: every commit, and every download's SHA-256 where the list
+/// downloads exactly one file from that repo. A recorded hash for a repo the
+/// list downloads several files from names none of them, so it cannot be
+/// checked; those repos come back by name, for the caller to say so.
+pub fn recorded_pins(text: &str, repos: &[RepoPin]) -> crate::Res<(BTreeMap<String, Pin>, Vec<String>)> {
+    let list = parse(text)?;
+    let mut pins = BTreeMap::new();
+    let mut unchecked = Vec::new();
+    for repo in repos {
+        let Some(pin) = repo.pin() else { continue };
+        if let Pin::Sha256(_) = pin
+            && list.components().iter().filter(|c| c.repo == repo.name).count() != 1
+        {
+            unchecked.push(repo.name.clone());
+            continue;
+        }
+        pins.insert(repo.name.clone(), pin);
+    }
+    Ok((pins, unchecked))
+}
 
 /// A config's processed thornlist, read for the §7.4 change tracking
 /// (sources, providers, shapes): a CRL list parses as one, and a plain Cactus
@@ -78,6 +104,7 @@ pub fn parse_config_list(
         repo_path: None,
         branch: None,
         commit: None,
+        checksum: None,
         fetch_only: false,
         repo,
     };
@@ -235,5 +262,38 @@ mod tests {
             list.components().iter().filter(|c| c.ty == ComponentType::Git).map(|c| c.repo.as_str()).collect();
         assert_eq!(git, ["carpetx", "abs"]);
         assert_eq!(list.untracked(), ["the Cactus flesh".to_string()]);
+    }
+
+    /// A recorded hash pins a download only where the list fetches one file
+    /// from that repo; one that names several files is handed back as
+    /// unchecked, and commits pin as always.
+    #[test]
+    fn recorded_pins_checks_only_single_downloads() {
+        let text = "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\
+                    !TARGET = $ROOT\n!TYPE = git\n!URL = https://x/flesh.git\n!CHECKOUT = Makefile\n\n\
+                    !TARGET = $ROOT/dl\n!TYPE = https\n!URL = https://x/zlib\n!CHECKOUT = zlib.tar.gz\n\n\
+                    !TARGET = $ROOT/dl\n!TYPE = https\n!URL = https://x/many\n!CHECKOUT = a.tgz b.tgz\n";
+        let pin = |name: &str, commit: Option<String>, sha256: Option<String>| RepoPin {
+            name: name.into(),
+            url: String::new(),
+            git_ref: None,
+            commit,
+            sha256,
+            cactarium: None,
+            dirty: false,
+        };
+        let repos = [
+            pin("flesh", Some("a".repeat(40)), None),
+            pin("zlib", None, Some("b".repeat(64))),
+            pin("many", None, Some("c".repeat(64))),
+        ];
+        let (pins, unchecked) = recorded_pins(text, &repos).unwrap();
+        assert_eq!(pins.get("flesh"), Some(&Pin::Commit("a".repeat(40))));
+        assert_eq!(pins.get("zlib"), Some(&Pin::Sha256("b".repeat(64))));
+        assert!(!pins.contains_key("many"));
+        assert_eq!(unchecked, ["many".to_string()]);
+        let pinned = parse(&pin_text(text, &pins).unwrap()).unwrap();
+        let zlib = pinned.components().iter().find(|c| c.repo == "zlib").unwrap();
+        assert_eq!(zlib.checksum.as_deref(), Some("b".repeat(64).as_str()));
     }
 }

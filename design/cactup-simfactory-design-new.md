@@ -629,6 +629,18 @@ pinned repo is created empty with `origin` set to the URL (fetching every
 branch, as a clone would) and then pinned; a failure before its checkout
 began leaves nothing behind.
 
+**Checked downloads: `!CHECKSUM_SHA256`.** A download section (`http`,
+`https`, `ftp`) that checks out exactly one file may carry
+`!CHECKSUM_SHA256 = <64 hex digits>`; on any other type, on a section of
+several files (a hash names one), or with any other value it is refused. The
+same kind of extension as `!REPO_COMMIT`: GetComponents keeps the directives
+it does not know without reading them, and Cactus's ThornList readers drop
+every `!` line, so the list still works anywhere, only unchecked. cactup
+downloads to the usual temporary name and hashes it: a mismatch fails that
+component, is not retried, and leaves the old file in place; a file already
+there with the pinned content is kept without touching the network and,
+like a repo already at its pin, leaves no line.
+
 Classification of a pinned repo follows the rules above with one change:
 the branch it happens to be on is no reason to skip it — local edits and
 local commits still are. A clean **detached** HEAD is a pinned repo's normal
@@ -4172,8 +4184,13 @@ built from. A simulation created before the record was frozen falls back to
 the config's own record only while that still describes the same `build-id`.
 
 - **Pins.** One `[[repo]]` per repo the list names (keyed by the derived repo
-  name, not per section), `ref` = `!REPO_BRANCH` as a label. Non-git
-  components are listed unpinned.
+  name, not per section), `ref` = `!REPO_BRANCH` as a label. A download that
+  is the only file of its repo gets a `sha256`: the list's
+  `!CHECKSUM_SHA256`, else the hash of the file the installation has — the
+  one input export reads from the installation as it is now, since nothing
+  froze a download's hash, so a file written after the config's `built` time
+  (a refetch downloads anew) is left unpinned rather than recorded wrong. Any
+  other component is listed unpinned.
 - **Dirty sources** (a state string with `+Nmod`, §7.4) are refused —
   no commit reproduces that binary — unless `--allow-dirty`, which marks them
   `dirty`.
@@ -4210,10 +4227,12 @@ only a thornlist and a parfile, with the same descriptive fields and checks.
 With `-I <installation>`, each repo is pinned to what that installation has
 checked out (its live HEAD and source state, checked like an export's; a
 checkout of a different repo than the list names is left unpinned, with a
-note). Without, each is pinned to the commit its branch or tag names on the
+note), and each single download by the hash of the file it has.
+Without, each is pinned to the commit its branch or tag names on the
 remote today (`git ls-remote`, no fetch), and the output says so; a remote
 that cannot be asked fails the whole pack, and a repo the list already pins
-keeps its pin. A packed file has no run hints and no build provenance.
+keeps its pin. Either way a download the list gives a `!CHECKSUM_SHA256`
+keeps it, and without `-I` that is the only way one is pinned. A packed file has no run hints and no build provenance.
 
 **`--trim`** (export, and pack with `-I`) cuts the thornlist down to what the
 parfile needs: the thorns its `ActiveThorns` statements name (every statement,
@@ -4239,13 +4258,15 @@ trimmed.
 
 `cactup install --simfile <file.sim>` makes an installation of exactly the
 sources a `.sim` records: its live and pristine thornlists (§3.2) are the
-file's thornlist pinned by `!REPO_COMMIT` to every commit it records, so the
-ordinary fetch checks each repo out at its pin and a later refetch never moves
-it. The file's `root` must match the list's `!DEFINE ROOT`; the alias defaults
+file's thornlist pinned by `!REPO_COMMIT` to every commit it records and by
+`!CHECKSUM_SHA256` to every download hash, so the ordinary fetch checks each
+repo out at its pin, refuses a download that is not the recorded file, and a
+later refetch never moves either. The file's `root` must match the list's `!DEFINE ROOT`; the alias defaults
 to the file's name. It says which repos the file leaves unpinned (they follow
 their branch), which were dirty at export (their edits are not in the file),
-and which tarballs it downloads without checking the recorded hash, and it
-names the knob inputs the parfile needs. The DB records the file as a third
+and which downloads it cannot check (a recorded hash for a repo the list
+downloads several files from names none of them), and it names the knob
+inputs the parfile needs. A Cactarium stack release is pinned the same way. The DB records the file as a third
 kind of install-time provenance, `simfile`, beside `release` and `thornlist`;
 `show`, `list` and `config show` name it.
 
@@ -4281,8 +4302,8 @@ skips the search.
 `cactup sim unpack <file.sim> [--dir D] [-f]` goes the other way, for whoever
 works with loose files: it writes the thornlist and the parfile under the
 names they carried, the thornlist with every pinned repo pinned by
-`!REPO_COMMIT` (`crl::pin_text` in the shared crate: a section from one repo gains the
-directive; a section spanning repos through `$1`/`$2` in its `!URL` is split
+`!REPO_COMMIT` or `!CHECKSUM_SHA256` (`crl::pin_text` in the shared crate: a section from one repo gains the
+directive, replacing any it had; a section spanning repos through `$1`/`$2` in its `!URL` is split
 into one copy per repo; everything else stays byte for byte, and the result
 is parsed back to prove it names the same checkouts with exactly those pins).
 It names the repos left unpinned and the knob inputs the parfile needs.

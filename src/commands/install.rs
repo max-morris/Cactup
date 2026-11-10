@@ -548,18 +548,18 @@ fn stack_install_source(ctx: &Ctx, req: &str) -> Res<InstallSource<'static>> {
 }
 
 /// Read a `.sim` file for `install --simfile` (§8.9): its thornlist pinned by
-/// `!REPO_COMMIT` to every commit it records, and a word on what it does not
-/// pin — repos it leaves on their branch, sources that were dirty when it was
-/// exported (their edits are not in the file), tarballs whose recorded hash
-/// nothing checks yet.
+/// `!REPO_COMMIT` to every commit it records and by `!CHECKSUM_SHA256` to
+/// every download hash, and a word on what it does not pin — repos it leaves
+/// on their branch, sources that were dirty when it was exported (their
+/// edits are not in the file), a hash that names no single file.
 fn sim_install_source(path: &Path) -> Res<InstallSource<'static>> {
     use cactup_ecosystem_common::sim::SimFile;
     let expanded = PathBuf::from(shell::expand_path(&p2s(path.to_owned())?));
     let text = fs::read_to_string(&expanded).with_context(|| format!("Failed to read '{}'", expanded.display()))?;
     let sim = SimFile::from_toml(&text).map_err(|e| anyhow!("'{}': {e}", expanded.display()))?;
-    let pins = sim.repos.iter().filter_map(|r| Some((r.name.clone(), r.commit.clone()?))).collect();
-    let content = crate::thornlist::pin_text(&sim.thornlist.text, &pins)
-        .with_context(|| format!("Failed to pin the thornlist in '{}'", expanded.display()))?;
+    let pin_failed = || format!("Failed to pin the thornlist in '{}'", expanded.display());
+    let (pins, unchecked) = crate::thornlist::recorded_pins(&sim.thornlist.text, &sim.repos).with_context(pin_failed)?;
+    let content = crate::thornlist::pin_text(&sim.thornlist.text, &pins).with_context(pin_failed)?;
     let names = |pred: &dyn Fn(&cactup_ecosystem_common::sim::RepoPin) -> bool| -> Vec<&str> {
         sim.repos.iter().filter(|r| pred(r)).map(|r| r.name.as_str()).collect()
     };
@@ -575,9 +575,15 @@ fn sim_install_source(path: &Path) -> Res<InstallSource<'static>> {
                 .yellow()
         );
     }
-    let hashed = names(&|r| r.sha256.is_some());
-    if !hashed.is_empty() {
-        println!("{}", format!("Downloaded without checking their recorded hash: {}", hashed.join(", ")).yellow());
+    if !unchecked.is_empty() {
+        println!(
+            "{}",
+            format!(
+                "Downloaded without checking their recorded hash, which names no single file: {}",
+                unchecked.join(", ")
+            )
+            .yellow()
+        );
     }
     let resolved = fs::canonicalize(&expanded).unwrap_or(expanded);
     Ok(InstallSource::SimFile { path: resolved, sim: Box::new(sim), content })

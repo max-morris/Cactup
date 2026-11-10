@@ -475,7 +475,9 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                         let outcome = download::download_component(install_root, c, &mut line);
                         let mut report = report.lock().expect("fetch report poisoned");
                         match outcome {
-                            Ok(path) => {
+                            // Kept as it was: nothing happened, so the line leaves nothing.
+                            Ok(download::Downloaded { path, fetched: false }) => report.downloads.push(path),
+                            Ok(download::Downloaded { path, fetched: true }) => {
                                 let size = crate::progress::bytes(prodash::Count::step(&line));
                                 let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
                                 // The line is already named for the
