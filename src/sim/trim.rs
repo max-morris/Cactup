@@ -353,4 +353,22 @@ mod tests {
         let err = format!("{:#}", needed(&list, &cactus, "ActiveThorns = \"Main Nope\"\n").unwrap_err());
         assert!(err.contains("nope"), "{err}");
     }
+
+
+    /// Max's real list, which writes checkout-only thorns on their
+    /// `!CHECKOUT` lines the way the Einstein Toolkit's does: dropping any
+    /// one built thorn must leave every other checkout where it was, built or
+    /// checkout-only (the rewrite's own self-check fails otherwise). Skipped
+    /// where the file is absent.
+    #[test]
+    fn dropping_a_thorn_from_a_real_list_keeps_every_other_placement() {
+        let Some(home) = std::env::home_dir() else { return };
+        let Ok(text) = std::fs::read_to_string(home.join("Cactus-2026/thornlists/carpetx-mp-forks.th")) else { return };
+        let list = crate::thornlist::parse(&text).unwrap();
+        assert!(list.components().iter().any(|c| c.fetch_only && c.checkout.contains('/')), "the list has checkout-only thorns");
+        for c in list.components().iter().filter(|c| is_arrangement_thorn(&list, c)) {
+            let drop: BTreeSet<&str> = [c.checkout.as_str()].into_iter().collect();
+            drop_checkouts(&text, &list, &drop, true).unwrap_or_else(|e| panic!("dropping {}: {e:#}", c.checkout));
+        }
+    }
 }
