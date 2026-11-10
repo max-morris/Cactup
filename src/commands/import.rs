@@ -256,16 +256,18 @@ fn download_published(ctx: &Ctx, req: &str) -> Res<PathBuf> {
     use cactup_ecosystem_common::slug::Slug;
     let slug: Slug = req.parse().map_err(|e| anyhow!("\"{req}\" is neither a file nor a sim (owner/name[@N]): {e}"))?;
     let client = crate::cactarium::Client::new(&ctx.db.read()?);
-    let number = match slug.number().map_err(|e| anyhow!("{e}"))? {
-        Some(n) => n,
-        None => {
-            let resolved = client.resolve(req)?;
-            if resolved.kind != "sim" {
-                bail!("{} is a {}, not a sim", resolved.slug, resolved.kind);
-            }
-            resolved.version.version.parse().map_err(|_| anyhow!("The Cactarium named sim version \"{}\"", resolved.version.version))?
-        }
-    };
+    slug.number().map_err(|e| anyhow!("{e}"))?;
+    // Resolved even for an exact `@N`: that is how a yanked version is told.
+    let resolved = client.resolve(req)?;
+    if resolved.kind != "sim" {
+        bail!("{} is a {}, not a sim", resolved.slug, resolved.kind);
+    }
+    crate::cactarium::warn_if_yanked(&resolved.slug, &resolved.version);
+    let number: u32 = resolved
+        .version
+        .version
+        .parse()
+        .map_err(|_| anyhow!("The Cactarium named sim version \"{}\"", resolved.version.version))?;
     let (owner, name) = (slug.owner.as_str(), slug.name.as_str());
     let dest = crate::CACTUP_ROOT.join("simfiles").join(owner).join(name).join(format!("{number}.sim"));
     if !dest.is_file() {

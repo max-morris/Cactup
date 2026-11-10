@@ -131,6 +131,7 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String]) -> Res<Vec<W
         if resolved.kind != "package" {
             bail!("{} is a {}, not a package; install a stack with `cactup install`", resolved.slug, resolved.kind);
         }
+        crate::cactarium::warn_if_yanked(&resolved.slug, &resolved.version);
         let commit =
             resolved.version.commit.clone().ok_or_else(|| anyhow!("The Cactarium gave {} no commit", resolved.slug))?;
         let url = resolved.url.clone().ok_or_else(|| anyhow!("The Cactarium gave {} no repository", resolved.slug))?;

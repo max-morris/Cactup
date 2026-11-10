@@ -12,7 +12,8 @@ use crate::Res;
 use anyhow::{anyhow, bail, Context};
 use colored::Colorize;
 use cactup_ecosystem_common::api::{
-    ErrorBody, PackageVersions, Published, Refreshed, Resolved, API_GENERATION, API_GENERATION_HEADER, API_PREFIX,
+    ErrorBody, PackageVersions, Published, Refreshed, Resolved, StackReleases, VersionInfo, API_GENERATION,
+    API_GENERATION_HEADER, API_PREFIX,
     CONTACT_HEADER, SHA256_HEADER, UNPINNED_HEADER, UNTRUSTED_HEADER,
 };
 use cactup_ecosystem_common::stack::FrozenStack;
@@ -81,6 +82,28 @@ impl Client {
     pub fn package_versions(&self, owner: &str, name: &str) -> Res<PackageVersions> {
         let url = self.url(&format!("/packages/{owner}/{name}/versions"));
         json(self.send(crate::fetch::download::client().get(&url))?)
+    }
+
+    /// Every release of a stack, each with whether it has been yanked.
+    pub fn stack_releases(&self, owner: &str, name: &str) -> Res<StackReleases> {
+        let url = self.url(&format!("/stacks/{owner}/{name}/releases"));
+        json(self.send(crate::fetch::download::client().get(&url))?)
+    }
+
+    /// Whether `version` of package or stack `owner/name` has been yanked
+    /// since it was installed: `Some(reason)` if so (the reason may be
+    /// empty), `None` if not, or if the registry no longer lists it.
+    pub fn yanked_since(&self, kind: EntryKind, owner: &str, name: &str, version: &str) -> Res<Option<String>> {
+        let info: Option<VersionInfo> = match kind {
+            EntryKind::Package => self
+                .package_versions(owner, name)?
+                .versions
+                .into_iter()
+                .map(|v| v.version)
+                .find(|v| v.version == version),
+            EntryKind::Stack => self.stack_releases(owner, name)?.releases.into_iter().find(|v| v.version == version),
+        };
+        Ok(info.filter(|v| v.yanked).map(|v| v.yank_reason.unwrap_or_default()))
     }
 
     /// Download sim file `owner/name@number` to `dest`, checked against the
@@ -175,6 +198,23 @@ impl Client {
     }
 }
 
+/// The two kinds of registry entry an installation records a version of.
+#[derive(Clone, Copy, Debug)]
+pub enum EntryKind {
+    Package,
+    Stack,
+}
+
+/// Say that `slug` is yanked, when `version` says so. A range never chooses
+/// a yanked version, so one here was asked for exactly: it is used, as asked,
+/// never refused — yanked means "not by default", not "gone".
+pub fn warn_if_yanked(slug: &str, version: &VersionInfo) {
+    if version.yanked {
+        let why = version.yank_reason.as_deref().filter(|r| !r.is_empty()).map(|r| format!(": {r}")).unwrap_or_default();
+        println!("{}", format!("{slug} is yanked{why}. Using it because you asked for exactly that version.").yellow());
+    }
+}
+
 /// One stack response: the release, whether the server marked it unpinned
 /// (`@head`/`@master`) and its stack untrusted (a tip nobody reviews), and
 /// where to report problems with it (its declared contact, else its repo).
@@ -214,6 +254,7 @@ pub fn stack_release_text(db: &Database, req: &str, allow_untrusted: bool) -> Re
             if resolved.kind != "stack" {
                 bail!("{} is a {}, not a stack", resolved.slug, resolved.kind);
             }
+            warn_if_yanked(&resolved.slug, &resolved.version);
             resolved.version.version
         }
     };
@@ -414,6 +455,37 @@ mod tests {
             let err = format!("{:#}", confirm_untrusted("et/et-stack@head", false).unwrap_err());
             assert!(err.contains("without a terminal") && err.contains("--risky-allow-untrusted-artifacts"), "{err}");
         }
+    }
+
+    /// Whether an installed version was yanked since: from the package's
+    /// version list or the stack's release list, with the reason; a version
+    /// the registry lists unyanked, or no longer lists, is not.
+    #[test]
+    fn yanked_since_reads_the_version_lists() {
+        let v = |version: &str, yanked: bool, reason: &str| {
+            format!(
+                r#"{{"version":"{version}","track":null,"tag":null,"commit":"c","tree":null,"yanked":{yanked},
+                "yank-reason":{},"state":"ok","curated":false,"published":0}}"#,
+                if reason.is_empty() { "null".to_owned() } else { format!("\"{reason}\"") }
+            )
+        };
+        let packages = format!(
+            r#"{{"slug":"et/carpetx","versions":[{{{},"url":"u","thorns":[],"claims":[]}},{{{},"url":"u","thorns":[],"claims":[]}}]}}"#,
+            &v("1.1.0", true, "breaks Loop")[1..v("1.1.0", true, "breaks Loop").len() - 1],
+            &v("1.0.0", false, "")[1..v("1.0.0", false, "").len() - 1]
+        );
+        let stacks = format!(r#"{{"slug":"et/et-stack","releases":[{},{}]}}"#, v("2026.5.0", true, ""), v("2026.5.1", false, ""));
+        let (base, _) = serve_with(5, move |path| {
+            let body = if path.contains("/packages/") { packages.clone() } else { stacks.clone() };
+            ("200 OK", "api-generation: 1\r\n".into(), body.into_bytes())
+        });
+        let client = Client::at(&base);
+        use EntryKind::*;
+        assert_eq!(client.yanked_since(Package, "et", "carpetx", "1.1.0").unwrap(), Some("breaks Loop".into()));
+        assert_eq!(client.yanked_since(Package, "et", "carpetx", "1.0.0").unwrap(), None);
+        assert_eq!(client.yanked_since(Package, "et", "carpetx", "0.9.0").unwrap(), None, "no longer listed");
+        assert_eq!(client.yanked_since(Stack, "et", "et-stack", "2026.5.0").unwrap(), Some(String::new()));
+        assert_eq!(client.yanked_since(Stack, "et", "et-stack", "2026.5.1").unwrap(), None);
     }
 
     #[test]

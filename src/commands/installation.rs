@@ -181,6 +181,10 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
         bail!("No installation named \"{alias}\" (see `cactup list`)");
     };
     let active = database.active_installation.as_deref() == Some(&alias);
+    let inst = Installation::new(entry.alias.clone(), &entry.path);
+    let meta = inst.meta().ok();
+    // Asked before anything is printed, so its progress never splits the output.
+    let yanked = yanked_since(&database, entry, meta.as_ref().map_or(&[][..], |m| &m.added[..]))?;
 
     print!("{}", entry.alias.bold());
     if active {
@@ -216,6 +220,11 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     if let Some(contact) = &entry.stack_contact {
         println!("  problems?     {contact}");
     }
+    if let Some(slug) = current_stack(entry)
+        && let Some(why) = yanked.get(slug)
+    {
+        println!("{}", format!("  yanked:       {slug} is yanked on the Cactarium{}", reason(why)).yellow());
+    }
     for (tone, line) in conformance_lines(entry) {
         match tone {
             Tone::Alarm => println!("{}", line.bright_red()),
@@ -225,8 +234,7 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     }
     println!("  path:         {}", entry.path);
 
-    let inst = Installation::new(entry.alias.clone(), &entry.path);
-    if let Ok(meta) = inst.meta() {
+    if let Some(meta) = meta {
         match &meta.active_config {
             Some(config) => println!("  active-config: {config}"),
             None => println!("  active-config: {}", "(null-config)".yellow()),
@@ -249,6 +257,9 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
             };
             println!("  {label:<13} {}@{} ({}){replaces}", package.package, package.version, thorns.join(", "));
             println!("  {:<13}   problems? {}", "", package.contact.as_deref().unwrap_or(&package.url));
+            if let Some(why) = yanked.get(&format!("{}@{}", package.package, package.version)) {
+                println!("{}", format!("  {:<13}   yanked on the Cactarium{}", "", reason(why)).yellow());
+            }
         }
     }
     if let Ok(sims) = inst.simulations() {
@@ -259,6 +270,78 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     }
 
     Ok(())
+}
+
+/// The stack release the tree is on, `owner/stack@version`: where a refetch
+/// took it, else what was installed. `None` for anything else, and for a
+/// branch tip (`@head`/`@master`), which has no release to yank.
+fn current_stack(entry: &CactusInstallation) -> Option<&str> {
+    let slug = entry.current_release.as_deref().filter(|c| c.contains('/')).or(entry.stack.as_deref())?;
+    let version = slug.rsplit_once('@')?.1;
+    (version != "head" && version != "master").then_some(slug)
+}
+
+/// `: <reason>`, or nothing for a yank that gave none.
+fn reason(why: &str) -> String {
+    if why.is_empty() { String::new() } else { format!(": {why}") }
+}
+
+/// What the Cactarium says is yanked now: the installation's stack
+/// release and each added package version, by `owner/name@version`. Only
+/// asked when there is something to ask about; asked in parallel, with
+/// progress. An entry that cannot be asked is left out, with one note, since
+/// `inst show` must still show what it knows offline.
+fn yanked_since(
+    db: &crate::database::Database,
+    entry: &CactusInstallation,
+    added: &[crate::installation::AddedPackage],
+) -> Res<std::collections::BTreeMap<String, String>> {
+    use crate::cactarium::EntryKind;
+    let mut asks: Vec<(EntryKind, String)> = Vec::new();
+    if let Some(slug) = current_stack(entry) {
+        asks.push((EntryKind::Stack, slug.to_owned()));
+    }
+    for package in added {
+        asks.push((EntryKind::Package, format!("{}@{}", package.package, package.version)));
+    }
+    if asks.is_empty() {
+        return Ok(Default::default());
+    }
+    let client = crate::cactarium::Client::new(db);
+    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+    let item = progress.add_child("ask the Cactarium about yanked versions");
+    item.init(Some(asks.len()), Some(prodash::unit::label("entries")));
+    let item = std::sync::Mutex::new(item);
+    let answers = crate::par::parallel_map(&asks, |(kind, slug)| {
+        let current = item.lock().expect("show progress poisoned").add_child(slug.clone());
+        let answer = (|| {
+            let (entry, version) = slug.rsplit_once('@').ok_or_else(|| anyhow!("{slug} names no version"))?;
+            let (owner, name) = entry.split_once('/').ok_or_else(|| anyhow!("{entry} is not owner/name"))?;
+            client.yanked_since(*kind, owner, name, version)
+        })();
+        drop(current);
+        item.lock().expect("show progress poisoned").inc();
+        (slug.clone(), answer)
+    });
+    drop(item);
+    if let Some(renderer) = renderer {
+        renderer.shutdown_and_wait();
+    }
+    let mut yanked = std::collections::BTreeMap::new();
+    let mut failed = None;
+    for (slug, answer) in answers? {
+        match answer {
+            Ok(Some(why)) => {
+                yanked.insert(slug, why);
+            }
+            Ok(None) => {}
+            Err(e) => failed = failed.or(Some(format!("{e:#}"))),
+        }
+    }
+    if let Some(e) = failed {
+        println!("{}", format!("Could not ask the Cactarium whether anything was yanked: {e}").dimmed());
+    }
+    Ok(yanked)
 }
 
 #[cfg(test)]
