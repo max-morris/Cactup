@@ -35,7 +35,7 @@ regex = "1.13.0"
 # stacks, slugs and track versions), shared with the Cactarium registry. Pure
 # Rust with no system libraries (MUSL-safe, D13). Pinned by rev and bumped on
 # purpose, never by branch, so every build is reproducible.
-cactup-ecosystem-common = { git = "https://github.com/max-morris/cactup-ecosystem-common", rev = "e8060d61ae33952332ab2ec02dd17dfe29f62445" }
+cactup-ecosystem-common = { git = "https://github.com/max-morris/cactup-ecosystem-common", rev = "e94c1cade799de0a8889d2647b8e5133431f2cae" }
 gethostname = "1.1.0"
 tempfile = "3.27.0"
 chrono = { version = "0.4.45", features = ["serde"] }
@@ -57,8 +57,17 @@ rustix = { version = "1.1", features = ["param", "process"] }
 # Compresses the build cache's unit records (src/objcache/store.rs). Already
 # in the tree (gix's zlib), pure Rust: nothing for the static binary to load.
 zlib-rs = "0.6"
+# Archive inputs of a .sim (src/inputs.rs): .tar, .tar.gz/.tgz, .tar.xz and
+# .zip (deflate only), every decoder pure Rust (gzip and deflate through the
+# zlib-rs above), so the static binary loads nothing (D13).
+tar = { version = "0.4", default-features = false }
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz"] }
+zip = { version = "9.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [dev-dependencies]
+# Tests build the .tar.xz archives src/inputs.rs unpacks.
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz", "encoder"] }
 gix = { version = "0.85.0", features = ["tree-editor"] }
 
 [[bin]]

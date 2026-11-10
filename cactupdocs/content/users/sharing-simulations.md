@@ -92,6 +92,22 @@ simulation and prints the submit command.
 Inputs are settled **before** anything long runs: from `--input KNOB=VALUE`,
 else by downloading the file the input names (into
 `~/.cactup/inputs/`, checked against its recorded hash), else by asking.
+
+An input can also be an **archive** (`.tar`, `.tar.gz`, `.tar.xz` or `.zip`)
+that `import` unpacks after checking its SHA-256, pointing the knob at one
+file inside it. The `.sim` can also have small text edits made to the
+unpacked files, such as replacing a placeholder path with the real one. A
+download over 1 GB is asked about first (`-y` says yes). Unpacked archives
+are kept and reused by every simulation that needs the same one.
+
+Downloads can be large. On a cluster, keep them somewhere other than your
+home directory with the `inputs-dir` knob:
+
+```sh
+cactup knob -c inputs-dir /work/$USER/cactup-inputs
+cactup cache inputs              # what is there, and how big
+cactup cache inputs --clear      # remove it all
+```
 The values belong to the imported simulation only — your own knobs are never
 changed — and `-K` on the command line still overrides them. If one of your
 knobs has a different value, submit says which value it is using.

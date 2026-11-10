@@ -6,6 +6,7 @@ mod commands;
 mod database;
 mod fetch;
 mod freeze;
+mod inputs;
 mod installation;
 mod lock;
 mod manifest;

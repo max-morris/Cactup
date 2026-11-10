@@ -1990,6 +1990,8 @@ leniently — garbage, or a database that cannot be read, means `off`), `build-c
 depend on them, on a compute node included: `prepare` resolves them and
 freezes the result into the build attempt (§18.2). `KnobSpec::maintenance` is for exactly that kind of knob: one
 that configures cactup rather than a value a job's templates read.
+`inputs-dir` (an absolute path: where `cactup import` keeps a `.sim`'s
+downloaded and unpacked inputs, §8.9) is one too.
 
 **Storage:** knobs live in the **global database** (`~/.cactup/database.json`)
 as a single flat map — a `~/.cactup` lives on exactly one machine, so there is
@@ -4278,9 +4280,35 @@ and blocked on (§7.9) — then `sim create` from the file's parfile, and with
 unless `-T`/`-c`/`-w`/`-q` say otherwise. Without either it prints the submit
 command. The parfile's knob inputs are settled **first**, before anything
 long runs: `--input KNOB=VALUE`, else a download of the input's URL into
-`~/.cactup/inputs/<sha256>/<file name>` (shared by every simulation needing
+`<inputs>/<sha256>/<file name>` (shared by every simulation needing
 the same bytes; checked against the recorded hash, and said so when there is
-none), else a prompt offering the user's global value. The values become the
+none), else a prompt offering the user's global value. `<inputs>` is the
+maintenance knob `inputs-dir` (an absolute path; on a cluster, somewhere
+bigger than `$HOME`), else `~/.cactup/inputs`.
+
+An **archive input** (`.sim` format 2: `unpack = true`, with `url` and the
+archive's `sha256` required, an optional `path` and `[[input.fixup]]`s; the
+shared crate validates all of it, so the Cactarium and cactup agree) is
+unpacked into `<inputs>/unpacked/<key>/`, `<key>` a digest of the archive's
+hash and its fixups in order, so two files that edit the same archive
+differently never share a tree. The archive is downloaded beside it,
+verified before the first byte is unpacked, unpacked into a `.unpacking-*`
+directory, its fixups applied (each `replace`, literal, must occur at least
+once; `{dir}` in `with` is the tree's final absolute path), `path` checked to
+exist, and the whole renamed into place, the download then removed: an
+interrupted import leaves no tree a later one would trust, and a finished
+tree is reused at once. The knob gets `<tree>/<path>`, or the tree itself.
+Kinds go by the URL's extension: `.tar`, `.tar.gz`/`.tgz`, `.tar.xz`/`.txz`,
+`.zip` (deflate), every decoder pure Rust (D13). Unpacking refuses an entry
+with an absolute or `..` path or a backslash, a symlink whose target leaves
+the tree, a hard link to anything but a file already unpacked, a device or
+FIFO, and any write through a link or a non-directory an earlier entry
+made; file modes keep only their permission bits. It stops past 1,000,000
+entries or `max(64 GiB, 32 × the archive)` bytes, and polls the interrupt
+flag per entry and per MiB. A download the server says is over 1 GiB (HEAD,
+`Content-Length`) is asked about on a terminal, taken with `-y`, and refused
+otherwise. `cactup cache inputs` lists the inputs directory (`--clear`
+empties it). The values become the
 simulation's own knobs (§5.1) — a global knob is never changed — and an input
 left to an existing global knob records nothing. An input with no value at all
 fails the import before the install. The chained steps are parsed from

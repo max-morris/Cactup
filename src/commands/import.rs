@@ -48,7 +48,7 @@ pub fn dispatch(ctx: &Ctx, args: ImportArgs) -> Res<()> {
     let interactive = !args.yes && std::io::stdin().is_terminal();
 
     // 1. The inputs, before anything long runs.
-    let knobs = settle_inputs(ctx, &sim_file.inputs, &args.inputs, interactive)?;
+    let knobs = settle_inputs(ctx, &sim_file.inputs, &args.inputs, interactive, args.yes)?;
 
     // 2. The sources, at their pins.
     if let Some(alias) = &existing {
@@ -402,6 +402,7 @@ fn settle_inputs(
     inputs: &[Input],
     given: &[String],
     interactive: bool,
+    yes: bool,
 ) -> Res<IndexMap<String, String>> {
     let mut given_values = IndexMap::new();
     for pair in given {
@@ -415,14 +416,20 @@ fn settle_inputs(
         given_values.insert(knob.to_owned(), value.to_owned());
     }
     let db = ctx.db.read()?;
+    let dir = crate::inputs::inputs_dir(&db);
+    let policy = crate::inputs::SizePolicy::new(interactive, yes);
     let mut knobs = IndexMap::new();
     let mut missing = Vec::new();
     for input in inputs {
         let what = input.description.as_deref().map(|d| format!(" ({d})")).unwrap_or_default();
         let value = if let Some(value) = given_values.shift_remove(&input.knob) {
             Some(value)
-        } else if let Some(url) = &input.url {
-            Some(fetch_input(url, input.sha256.as_deref())?.display().to_string())
+        } else if input.url.is_some() {
+            println!("Input {}{what}", input.knob.bold());
+            let value = crate::inputs::fetch(&dir, input, &policy)
+                .with_context(|| format!("Failed to fetch input {}", input.knob))?;
+            println!("  {} = {}", input.knob, value.display());
+            Some(value.display().to_string())
         } else if interactive {
             let global = db.knob(&input.knob).unwrap_or("");
             let answer = super::prompt_with_default(
@@ -446,55 +453,6 @@ fn settle_inputs(
         bail!("The parfile needs values for: {}. Pass each as --input KNOB=VALUE", missing.join(", "));
     }
     Ok(knobs)
-}
-
-/// Download an input to `~/.cactup/inputs/<sha256>/<file name>`, shared by
-/// every simulation that needs the same bytes, and checked against the
-/// `.sim`'s hash when it records one. Already there: not downloaded again.
-fn fetch_input(url: &str, sha256: Option<&str>) -> Res<PathBuf> {
-    let inputs = crate::CACTUP_ROOT.join("inputs");
-    let file_name = url.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or("input").to_owned();
-    if let Some(hash) = sha256 {
-        let cached = inputs.join(hash.to_ascii_lowercase()).join(&file_name);
-        if cached.is_file() {
-            return Ok(cached);
-        }
-    }
-    std::fs::create_dir_all(&inputs)
-        .with_context(|| format!("Failed to create '{}'", inputs.display()))?;
-    let mut temp =
-        tempfile::NamedTempFile::new_in(&inputs).context("Failed to create a download file")?;
-    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
-    let mut item = progress.add_child(file_name.clone());
-    let downloaded = crate::fetch::download::download_to(
-        crate::fetch::download::client(),
-        url,
-        temp.as_file_mut(),
-        &mut item,
-    );
-    drop(item);
-    if let Some(renderer) = renderer {
-        renderer.shutdown_and_wait();
-    }
-    downloaded?;
-    let actual = crate::update::sha256_hex(temp.path())?;
-    match sha256 {
-        Some(expected) if !expected.eq_ignore_ascii_case(&actual) => {
-            bail!("The download of {url} has SHA-256 {actual}, but the .sim records {expected}")
-        }
-        None => println!(
-            "{}",
-            format!("The .sim records no hash for {url}, so the download could not be checked").yellow()
-        ),
-        Some(_) => {}
-    }
-    let dir = inputs.join(&actual);
-    std::fs::create_dir_all(&dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
-    let dest = dir.join(&file_name);
-    temp.persist(&dest)
-        .with_context(|| format!("Failed to save '{}'", dest.display()))?;
-    println!("Downloaded {url} to '{}'", dest.display());
-    Ok(dest)
 }
 
 /// The topology flags for `sim submit`/`run`: each one given to import, else
@@ -614,7 +572,15 @@ mod tests {
     }
 
     fn input(knob: &str) -> Input {
-        Input { knob: knob.into(), description: Some("initial data".into()), url: None, sha256: None }
+        Input {
+            knob: knob.into(),
+            description: Some("initial data".into()),
+            url: None,
+            sha256: None,
+            unpack: false,
+            path: None,
+            fixups: vec![],
+        }
     }
 
     /// Inputs are settled before anything long runs: `--input` sets the
@@ -626,7 +592,7 @@ mod tests {
         let ctx = ctx(tmp.path());
         let inputs = [input("kadath-initial-data"), input("eos-table")];
 
-        let err = format!("{:#}", settle_inputs(&ctx, &inputs, &[], false).unwrap_err());
+        let err = format!("{:#}", settle_inputs(&ctx, &inputs, &[], false, false).unwrap_err());
         assert!(
             err.contains("kadath-initial-data") && err.contains("eos-table") && err.contains("--input"),
             "{err}"
@@ -639,13 +605,13 @@ mod tests {
             })
             .unwrap();
         let knobs =
-            settle_inputs(&ctx, &inputs, &["kadath-initial-data=/id/bhns.info".to_owned()], false)
+            settle_inputs(&ctx, &inputs, &["kadath-initial-data=/id/bhns.info".to_owned()], false, false)
                 .unwrap();
         assert_eq!(knobs.len(), 1, "the global eos-table is used as is, not copied: {knobs:?}");
         assert_eq!(knobs["kadath-initial-data"], "/id/bhns.info");
 
         let err =
-            format!("{:#}", settle_inputs(&ctx, &inputs, &["nope=1".to_owned()], false).unwrap_err());
+            format!("{:#}", settle_inputs(&ctx, &inputs, &["nope=1".to_owned()], false, false).unwrap_err());
         assert!(err.contains("no input nope"), "{err}");
     }
 

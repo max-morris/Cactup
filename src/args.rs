@@ -932,6 +932,23 @@ pub(crate) enum CacheCommand {
     },
     /// Read every object in the build cache and remove the damaged ones
     Verify,
+    /// List the inputs cactup import downloaded for simulations, or remove them
+    ///
+    /// Inputs live in the inputs-dir knob's directory (default
+    /// ~/.cactup/inputs): downloaded files, and unpacked archives with their
+    /// fixups applied. Each is listed with its size and when it was last
+    /// changed. --clear removes them all; an import fetches again what it
+    /// needs. A simulation already created keeps pointing at its input, so
+    /// clear only what no simulation still reads.
+    ///
+    ///   cactup cache inputs
+    ///   cactup cache inputs --clear
+    #[clap(verbatim_doc_comment)]
+    Inputs {
+        /// Remove every downloaded and unpacked input.
+        #[clap(long)]
+        clear: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

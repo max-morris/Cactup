@@ -102,6 +102,9 @@ pub const KNOWN_KNOBS: &[KnobSpec] = &[
     KnobSpec::maintenance("test-home", |v| crate::mdb::meta::validate_path_knob("test-home", v)),
     KnobSpec::maintenance("scratch-home", |v| crate::mdb::meta::validate_path_knob("scratch-home", v)),
     KnobSpec::maintenance("build-cache-home", |v| crate::mdb::meta::validate_path_knob("build-cache-home", v)),
+    // Where `cactup import` keeps a `.sim`'s downloaded and unpacked inputs
+    // (`inputs::inputs_dir`); on a cluster, somewhere bigger than `$HOME`.
+    KnobSpec::maintenance("inputs-dir", |v| crate::mdb::meta::validate_path_knob("inputs-dir", v)),
 ];
 
 /// The spec for a knob name, if cactup recognizes it.
