@@ -111,7 +111,7 @@ generation it was written for in its `meta.toml`:
 
 ```toml
 [cactup]
-mdb-generation = 3
+mdb-generation = 4
 ```
 
 `cactup machine create` writes the current generation for you. A machine

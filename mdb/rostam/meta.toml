@@ -61,6 +61,9 @@ hostname    = "rostam1.rostam.cct.lsu.edu"
 [paths]
 install-home    = "/work/@USER@/cactup"
 simulation-home = "/work/@USER@/simulations"
+# Where `cactup import` keeps the downloaded and unpacked inputs of shared
+# simulations: big, so beside the simulations, not in the home quota.
+inputs-home = "/work/@USER@/inputs"
 test-home       = "/work/@USER@/tests"
 
 # The login node; each queue below overrides what differs on its nodes.
