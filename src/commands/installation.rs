@@ -455,6 +455,7 @@ mod tests {
                 installation: Some("nope".to_owned()),
                 hostname: None,
                 knob: Vec::new(),
+                risky_allow_untrusted_artifacts: false,
             },
             db,
         };

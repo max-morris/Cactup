@@ -13,7 +13,7 @@ use anyhow::{anyhow, bail, Context};
 use colored::Colorize;
 use cactup_ecosystem_common::api::{
     ErrorBody, PackageVersions, Published, Refreshed, Resolved, API_GENERATION, API_GENERATION_HEADER, API_PREFIX,
-    CONTACT_HEADER, SHA256_HEADER, UNPINNED_HEADER,
+    CONTACT_HEADER, SHA256_HEADER, UNPINNED_HEADER, UNTRUSTED_HEADER,
 };
 use cactup_ecosystem_common::stack::FrozenStack;
 use serde::de::DeserializeOwned;
@@ -61,20 +61,21 @@ impl Client {
         json(self.send(crate::fetch::download::client().get(&url))?)
     }
 
-    /// A stack release (`version` exact, or `head`/`master`): its thornlist
-    /// and pins, whether the server marked it unpinned, and where to report
-    /// problems with it (its declared contact, else its repo).
-    pub fn stack_release(&self, owner: &str, name: &str, version: &str) -> Res<(FrozenStack, bool, Option<String>)> {
+    /// A stack release (`version` exact, or `head`/`master`), with what the
+    /// server's headers say about it.
+    pub fn stack_release(&self, owner: &str, name: &str, version: &str) -> Res<StackResponse> {
         let url = self.url(&format!("/stacks/{owner}/{name}/releases/{version}"));
         let response = self.send(crate::fetch::download::client().get(&url))?;
-        let unpinned = response.headers().get(UNPINNED_HEADER).is_some_and(|v| v.as_bytes() == b"true");
+        let flag = |header: &str| response.headers().get(header).is_some_and(|v| v.as_bytes() == b"true");
+        let unpinned = flag(UNPINNED_HEADER);
+        let untrusted = flag(UNTRUSTED_HEADER);
         let contact = response
             .headers()
             .get(CONTACT_HEADER)
             .and_then(|v| v.to_str().ok())
             .filter(|c| !c.is_empty())
             .map(str::to_owned);
-        Ok((json(response)?, unpinned, contact))
+        Ok(StackResponse { stack: json(response)?, unpinned, untrusted, contact })
     }
 
     pub fn package_versions(&self, owner: &str, name: &str) -> Res<PackageVersions> {
@@ -174,6 +175,16 @@ impl Client {
     }
 }
 
+/// One stack response: the release, whether the server marked it unpinned
+/// (`@head`/`@master`) and its stack untrusted (a tip nobody reviews), and
+/// where to report problems with it (its declared contact, else its repo).
+pub struct StackResponse {
+    pub stack: FrozenStack,
+    pub unpinned: bool,
+    pub untrusted: bool,
+    pub contact: Option<String>,
+}
+
 /// A stack release for `req` (`owner/stack[@range|version|head|master]`):
 /// a range resolved once to the exact release, and that release's thornlist
 /// with every repo it pins pinned by `!REPO_COMMIT`.
@@ -188,8 +199,11 @@ pub struct StackRelease {
     pub contact: Option<String>,
 }
 
-/// See [`StackRelease`].
-pub fn stack_release_text(db: &Database, req: &str) -> Res<StackRelease> {
+/// See [`StackRelease`]. A branch tip of a stack the Cactarium does not trust
+/// is code nobody has reviewed: it is said loudly, and taken only on a yes
+/// typed at the terminal, or with `allow_untrusted`
+/// (`--risky-allow-untrusted-artifacts`), which still prints the warning.
+pub fn stack_release_text(db: &Database, req: &str, allow_untrusted: bool) -> Res<StackRelease> {
     use cactup_ecosystem_common::slug::Slug;
     let slug: Slug = req.parse().map_err(|e| anyhow!("\"{req}\" is not a stack (owner/name[@version]): {e}"))?;
     let client = Client::new(db);
@@ -203,7 +217,11 @@ pub fn stack_release_text(db: &Database, req: &str) -> Res<StackRelease> {
             resolved.version.version
         }
     };
-    let (stack, unpinned, contact) = client.stack_release(slug.owner.as_str(), slug.name.as_str(), &version)?;
+    let StackResponse { stack, unpinned, untrusted, contact } =
+        client.stack_release(slug.owner.as_str(), slug.name.as_str(), &version)?;
+    if untrusted {
+        confirm_untrusted(&stack.stack.to_string(), allow_untrusted)?;
+    }
     let pin_failed = || format!("Failed to pin stack {}", stack.stack);
     let (pins, unchecked) = crate::thornlist::recorded_pins(&stack.thornlist.text, &stack.repos).with_context(pin_failed)?;
     if !unchecked.is_empty() {
@@ -218,6 +236,43 @@ pub fn stack_release_text(db: &Database, req: &str) -> Res<StackRelease> {
     }
     let text = crate::thornlist::pin_text(&stack.thornlist.text, &pins).with_context(pin_failed)?;
     Ok(StackRelease { slug: stack.stack.to_string(), text, unpinned, contact })
+}
+
+/// The warning for an untrusted stack's branch tip, then the yes it needs:
+/// typed at a terminal, or given up front by the flag. Without either there
+/// is nobody to ask, so it is refused.
+fn confirm_untrusted(slug: &str, allow: bool) -> Res<()> {
+    use std::io::{IsTerminal, Write};
+    eprintln!(
+        "{}",
+        format!(
+            "WARNING: {slug} is a branch tip of a stack the Cactarium does not trust. Branch tips of untrusted \
+             stacks are never reviewed: installing it may fetch and build arbitrary code."
+        )
+        .red()
+        .bold()
+    );
+    if allow {
+        eprintln!("{}", "Going on anyway, as --risky-allow-untrusted-artifacts says.".yellow());
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "Refusing the untrusted branch tip {slug} without a terminal to confirm it on; install a release \
+             (owner/stack@X.Y.Z or a range), or pass --risky-allow-untrusted-artifacts"
+        );
+    }
+    eprint!("Type yes to fetch it anyway: ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    if gix::interrupt::is_triggered() {
+        bail!("Interrupted");
+    }
+    if answer.trim() != "yes" {
+        bail!("Not fetching {slug}: install a release instead (owner/stack@X.Y.Z or a range)");
+    }
+    Ok(())
 }
 
 fn json<T: DeserializeOwned>(response: reqwest::blocking::Response) -> Res<T> {
@@ -336,6 +391,29 @@ mod tests {
         let err = format!("{:#}", client.download_sim("o", "n", 2, &tmp.path().join("bad.sim")).unwrap_err());
         assert!(err.contains("SHA-256"), "{err}");
         assert!(!tmp.path().join("bad.sim").exists());
+    }
+
+    /// A tip response says whether its stack is trusted; an untrusted one is
+    /// taken with the flag, and refused with nobody at a terminal to ask.
+    #[test]
+    fn an_untrusted_tip_needs_a_yes() {
+        let body = r#"{"format":1,"stack":"et/et-stack@head","root":"Cactus","repo":[],
+            "thornlist":{"filename":"et.th","text":"!CRL_VERSION = 1.0\n"}}"#;
+        let (base, _) = serve_with(2, move |path| {
+            let untrusted = if path.contains("/et/") { "true" } else { "false" };
+            ("200 OK", format!("x-cactarium-unpinned: true\r\nx-cactarium-untrusted: {untrusted}\r\n"), body.as_bytes().to_vec())
+        });
+        let client = Client::at(&base);
+        let response = |owner: &str| client.stack_release(owner, "s", "head").unwrap_or_else(|e| panic!("{e:#}"));
+        let tip = response("et");
+        assert!(tip.unpinned && tip.untrusted);
+        assert!(!response("max").untrusted);
+
+        confirm_untrusted("et/et-stack@head", true).unwrap();
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            let err = format!("{:#}", confirm_untrusted("et/et-stack@head", false).unwrap_err());
+            assert!(err.contains("without a terminal") && err.contains("--risky-allow-untrusted-artifacts"), "{err}");
+        }
     }
 
     #[test]

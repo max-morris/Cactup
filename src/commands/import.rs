@@ -314,7 +314,7 @@ pub fn publish(ctx: &Ctx, file: &std::path::Path, target: &str) -> Res<()> {
     }
     let client = crate::cactarium::Client::new(&ctx.db.read()?);
     let published = client.publish_sim(slug.owner.as_str(), slug.name.as_str(), text.into_bytes())?;
-    println!("Published {} ({}): {}", published.slug.bold(), published.visibility, published.url);
+    print_published(&published);
     for warning in &published.warnings {
         println!("{}", warning.yellow());
     }
@@ -347,7 +347,7 @@ pub fn publish_stack(
     };
     let client = crate::cactarium::Client::new(&ctx.db.read()?);
     let published = client.publish_stack(slug.owner.as_str(), slug.name.as_str(), &request)?;
-    println!("Published {} ({}): {}", published.slug.bold(), published.visibility, published.url);
+    print_published(&published);
     for warning in &published.warnings {
         println!("{}", warning.yellow());
     }
@@ -371,7 +371,25 @@ pub fn refresh(ctx: &Ctx, target: &str) -> Res<()> {
         1 => println!("{}: {}", refreshed.slug, "1 new version.".green()),
         n => println!("{}: {}", refreshed.slug, format!("{n} new versions.").green()),
     }
+    // New versions of a public entry may wait for an admin; until then the
+    // Cactarium neither serves nor lists them.
+    match refreshed.awaiting_review {
+        0 => {}
+        1 => println!("{}", "1 version awaits review, and is not served until an admin approves it.".yellow()),
+        n => println!("{}", format!("{n} versions await review, and are not served until an admin approves them.").yellow()),
+    }
     Ok(())
+}
+
+/// What a publish made, and whether anyone can have it yet: a release that
+/// waits for review is not served, listed or resolved until it is approved.
+fn print_published(published: &cactup_ecosystem_common::api::Published) {
+    if published.visibility == "pending" {
+        println!("Published {}: {}", published.slug.bold(), published.url);
+        println!("{}", "It awaits review: nobody can install or import it until an admin approves it.".yellow());
+    } else {
+        println!("Published {} ({}): {}", published.slug.bold(), published.visibility, published.url);
+    }
 }
 
 /// The knob values for the parfile's inputs (§5.1): from `--input`, else a
@@ -589,6 +607,7 @@ mod tests {
                 installation: None,
                 hostname: None,
                 knob: Vec::new(),
+                risky_allow_untrusted_artifacts: false,
             },
             db: crate::database::Db::in_dir(dir),
         }

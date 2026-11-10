@@ -138,6 +138,8 @@ cactup sim publish bbh.sim me/bbh
 
 Only a **fully specified** file can be published: every repository pinned,
 nothing dirty. The Cactarium numbers the versions (`me/bbh@1`, `@2`, …).
+A new version may wait for an admin's review before anyone can import it;
+cactup says so when it does.
 
 ### Importing from the Cactarium
 
@@ -169,6 +171,12 @@ Without a version, the installation stays on the track its release came from
 `@head` (the stack's branches as they are now) and `@master` (every
 repository's default branch) install unpinned, for development; cactup says
 so, because such an installation cannot be reproduced.
+
+Nobody reviews those branch tips. For a stack the Cactarium does not trust,
+the Cactarium may refuse to serve them at all; if it does serve one, cactup
+warns that it may fetch and build arbitrary code and asks you to type `yes`.
+`--risky-allow-untrusted-artifacts` skips the question (the warning still
+prints), and is the only way to take such a tip in a script.
 
 ### Adding a package
 
@@ -204,4 +212,6 @@ hours. Right after tagging one, have it look now:
 cactup refresh max/carpetx
 ```
 
-It needs `cactup login`, as an owner of the package.
+It needs `cactup login`, as an owner of the package. It also says how many
+versions are waiting for review, which nobody can install until an admin
+approves them.

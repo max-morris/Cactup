@@ -1202,6 +1202,7 @@ mod tests {
                 installation: Some("et".to_owned()),
                 hostname: Some("testhost".to_owned()),
                 knob: Vec::new(),
+                risky_allow_untrusted_artifacts: false,
             },
             db: crate::database::Db::in_dir(dir),
         }

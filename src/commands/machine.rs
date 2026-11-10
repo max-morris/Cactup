@@ -1043,6 +1043,7 @@ mod tests {
                 installation: None,
                 hostname: None,
                 knob: Vec::new(),
+                risky_allow_untrusted_artifacts: false,
             },
             db: Db::in_dir(sb._dbdir.path()),
         };

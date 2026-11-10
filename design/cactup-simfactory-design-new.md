@@ -4332,20 +4332,32 @@ What uses it, all on the login node (D11):
   exact release; its frozen thornlist is pinned (`crl::pin_text`) and installed
   like `--simfile`, and the DB records the release as `stack` provenance.
   `@head`/`@master` are installed unpinned, and said not to be reproducible.
+  A tip of a stack the Cactarium does not trust (`x-cactarium-untrusted:
+  true`; the server may instead refuse such tips with a 403, whose message is
+  printed as is) is code nobody reviewed: cactup says so loudly and takes it
+  only on `yes` typed at the terminal, or with the global
+  `--risky-allow-untrusted-artifacts`, which still prints the warning;
+  without a terminal and without the flag it refuses. Install and `refetch
+  --release` both reach tips through `cactarium::stack_release_text`, which
+  is where the check sits.
 - `cactup import owner/name[@N]` downloads the published sim (the newest
   version without `@N`) to `~/.cactup/simfiles/<owner>/<name>/<N>.sim`,
   checked against the registry's `x-sha256`, then imports it as a file.
 - `cactup sim publish <file.sim> <owner/name>` uploads a fully specified file
   (anything else is refused locally, naming what is unspecified) as the next
   version; the registry numbers it and says whether it is public or pending
-  review.
+  review. A pending release (new releases of a public entry wait for an
+  admin unless the entry, its owner or the publisher is trusted) is not
+  served, listed or resolved until approved, and cactup says so.
 - `cactup stack publish <cactarium-stack.toml> <owner/name> --version V
   [--thornlist F]` cuts a release from a stack definition (a recipe, or a flat
   list with `--thornlist`); the registry resolves and freezes it, and refuses
   a version that exists — releases never change.
 - `cactup refresh <owner/name>` has the registry check a package's (or a
   repo-kept stack's) repository for new release tags now, instead of at its
-  next poll, and says how many versions it found.
+  next poll, and says how many versions it found and how many of the entry's
+  versions await review (`Refreshed::awaiting_review`; those are not served
+  yet).
 - `cactup inst refetch --release owner/stack` with no version, on an
   installation of a release of that stack from a track, means the newest
   release **on that track** (`owner/stack@track`), never a jump to the default

@@ -536,7 +536,7 @@ fn valid_alias(alias: &str) -> bool {
 /// the exact release, and moving to another is an explicit refetch.
 fn stack_install_source(ctx: &Ctx, req: &str) -> Res<InstallSource<'static>> {
     let crate::cactarium::StackRelease { slug, text: content, unpinned, contact } =
-        crate::cactarium::stack_release_text(&ctx.db.read()?, req)?;
+        crate::cactarium::stack_release_text(&ctx.db.read()?, req, ctx.globals.risky_allow_untrusted_artifacts)?;
     if unpinned {
         println!(
             "{}",
