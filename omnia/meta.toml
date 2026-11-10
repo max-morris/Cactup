@@ -40,6 +40,9 @@ hostname    = "omnia"
 # these in a per-user override (~/.cactup/machines/omnia).
 install-home    = "/storage/users/sbrandt/omnia"
 simulation-home = "/storage/users/sbrandt/omnia/simulations"
+# Where `cactup import` keeps the downloaded and unpacked inputs of shared
+# simulations: big, so beside the simulations, not in the home quota.
+inputs-home = "/storage/users/sbrandt/omnia/inputs"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
 test-home       = "/storage/users/sbrandt/omnia/tests"
 

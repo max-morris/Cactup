@@ -40,6 +40,9 @@ hostname    = "hopper1.nic.uoregon.edu"
 [paths]
 install-home    = "/storage/users/@USER@/.cactup/cacti"
 simulation-home = "/storage/users/@USER@/simulations"
+# Where `cactup import` keeps the downloaded and unpacked inputs of shared
+# simulations: big, so beside the simulations, not in the home quota.
+inputs-home = "/storage/users/@USER@/inputs"
 test-home       = "/storage/users/@USER@/tests"
 
 [hardware]

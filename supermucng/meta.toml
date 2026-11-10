@@ -27,6 +27,9 @@ hostname    = "skx.supermuc.lrz.de"
 # basedir.
 install-home    = "@ENV(HOME)@"
 simulation-home = "@ENV(SCRATCH)@/simulations"
+# Where `cactup import` keeps the downloaded and unpacked inputs of shared
+# simulations: big, so beside the simulations, not in the home quota.
+inputs-home = "@ENV(SCRATCH)@/inputs"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
 test-home       = "@ENV(SCRATCH)@/tests"
 

@@ -15,6 +15,9 @@ hostname    = "login01.csc.uni-frankfurt.de"
 # scratchbasedir.
 install-home    = "/home/agrezzolla/@USER@"
 simulation-home = "/scratch/agrezzolla/@USER@/simulations"
+# Where `cactup import` keeps the downloaded and unpacked inputs of shared
+# simulations: big, so beside the simulations, not in the home quota.
+inputs-home = "/scratch/agrezzolla/@USER@/inputs"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
 test-home       = "/scratch/agrezzolla/@USER@/tests"
 scratch-home    = "/tmp"

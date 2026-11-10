@@ -249,3 +249,27 @@ To bring a generation-2 overlay forward:
    Torque's `qstat @JOB_ID@`, and `'Unknown Job Id|Job has finished'` for
    PBS Pro's (the second for a finished job, when job history is on).
 5. Set `mdb-generation = 3` under `[cactup]` in `meta.toml`.
+
+## Generation 4
+
+`[paths]` gains `inputs-home`: where `cactup import` keeps the files and
+unpacked archives a shared simulation (`.sim`) needs as inputs. Omitted, it
+is `~/.cactup/inputs`. A user's `inputs-home` knob still wins over it.
+`@USER@` and `@ENV(NAME)@` work as in `simulation-home`; a value that cannot
+be resolved fails only `cactup import`, never a build or a simulation. The
+in-repo machines whose `simulation-home` is on a work, scratch or project
+filesystem now set it beside their simulations (`/work/@USER@/inputs`,
+`@ENV(SCRATCH)@/inputs`, ...). Inputs are often large, and a simulation
+reads them where they were unpacked, so put it where the compute nodes see
+it and the home quota does not suffer.
+
+Nothing else changed: a generation-3 machine is a valid generation-4 machine
+once its `mdb-generation` says 4.
+
+To bring an overlay machine forward:
+
+1. Optionally, in `[paths]`, add `inputs-home`, an absolute path (with
+   `@USER@` or `@ENV(NAME)@` if you like), beside `simulation-home` when that
+   is on a work or scratch filesystem. Without it, inputs go to
+   `~/.cactup/inputs` unless your `inputs-home` knob says otherwise.
+2. Set `mdb-generation = 4` under `[cactup]` in `meta.toml`.
