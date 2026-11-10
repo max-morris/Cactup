@@ -33,10 +33,16 @@ pub fn dispatch(ctx: &Ctx, args: ImportArgs) -> Res<()> {
         .with_context(|| format!("Failed to read '{}'", path.display()))?;
     let sim_file = SimFile::from_toml(&text).map_err(|e| anyhow!("'{}': {e}", path.display()))?;
     let name = sim_file.sim.name.clone();
-    let alias = args.alias.clone().unwrap_or_else(|| name.clone());
     let config = args.config.clone().unwrap_or_else(|| name.clone());
     let sim_name = args.sim.clone().unwrap_or_else(|| name.clone());
-    if ctx.db.read()?.installations.contains_key(&alias) {
+    // An installation that already has exactly this code is used as it is,
+    // rather than a second copy of the same tree.
+    let existing = if args.new_installation { None } else { matching_installation(ctx, &sim_file)? };
+    let alias = match &existing {
+        Some(alias) => alias.clone(),
+        None => args.alias.clone().unwrap_or_else(|| name.clone()),
+    };
+    if existing.is_none() && ctx.db.read()?.installations.contains_key(&alias) {
         bail!("An installation named {alias} already exists; pass --alias to name the new one");
     }
     let interactive = !args.yes && std::io::stdin().is_terminal();
@@ -45,24 +51,28 @@ pub fn dispatch(ctx: &Ctx, args: ImportArgs) -> Res<()> {
     let knobs = settle_inputs(ctx, &sim_file.inputs, &args.inputs, interactive)?;
 
     // 2. The sources, at their pins.
-    super::install::dispatch(
-        ctx,
-        InstallArgs {
-            release: None,
-            thornlist: None,
-            simfile: Some(path.clone()),
-            alias: Some(alias.clone()),
-            silent: !interactive,
-            install_prefix: args.install_prefix.clone(),
-            no_symlink: args.no_symlink,
-            symlink_prefix: None,
-            symlink_name: None,
-        },
-    )?;
-    // `install` reports some refusals (an alias taken meanwhile, say) and
-    // returns without error; nothing below may run on a tree it did not register.
-    if !ctx.db.read()?.installations.contains_key(&alias) {
-        bail!("The installation was not created, so the import stops here");
+    if let Some(alias) = &existing {
+        println!("Installation {} already has the file's sources at its pins; using it.", alias.bold());
+    } else {
+        super::install::dispatch(
+            ctx,
+            InstallArgs {
+                release: None,
+                thornlist: None,
+                simfile: Some(path.clone()),
+                alias: Some(alias.clone()),
+                silent: !interactive,
+                install_prefix: args.install_prefix.clone(),
+                no_symlink: args.no_symlink,
+                symlink_prefix: None,
+                symlink_name: None,
+            },
+        )?;
+        // `install` reports some refusals (an alias taken meanwhile, say) and
+        // returns without error; nothing below may run on a tree it did not register.
+        if !ctx.db.read()?.installations.contains_key(&alias) {
+            bail!("The installation was not created, so the import stops here");
+        }
     }
     let ctx = Ctx {
         globals: crate::args::GlobalOpts { installation: Some(alias.clone()), ..ctx.globals.clone() },
@@ -123,6 +133,119 @@ pub fn dispatch(ctx: &Ctx, args: ImportArgs) -> Res<()> {
         println!("Imported. To submit it with the file's suggested shape: {}", command.bold());
         Ok(())
     }
+}
+
+/// The installation to import into without installing: with `-I`, that one,
+/// which must have the file's code exactly (else the import stops, saying
+/// how it differs); without, the first installation that does, the active
+/// one tried first. "Exactly": every thorn the file's thornlist builds is in
+/// the installation's thornlist, built, from the same repository, and every
+/// repo the file pins is checked out at that commit with no uncommitted
+/// changes. Extra thorns are fine: they change nothing the file activates.
+fn matching_installation(ctx: &Ctx, sim: &SimFile) -> Res<Option<String>> {
+    let db = ctx.db.read()?;
+    if let Some(alias) = &ctx.globals.installation {
+        let inst = Installation::resolve(ctx)?;
+        let differences = differences(&inst, sim)?;
+        if !differences.is_empty() {
+            bail!(
+                "Installation {alias} does not have the file's code:\n  {}\nOmit -I (or pass --new-installation) to \
+                 install a copy at the file's pins",
+                differences.join("\n  ")
+            );
+        }
+        return Ok(Some(alias.clone()));
+    }
+    let pins: Vec<(&str, &str)> =
+        sim.repos.iter().filter_map(|r| Some((r.name.as_str(), r.commit.as_deref()?))).collect();
+    if pins.is_empty() {
+        return Ok(None);
+    }
+    // The cheap test first: what each installation's last fetch recorded.
+    // Only one whose record agrees on every pin is probed on disk.
+    let mut candidates: Vec<&crate::database::CactusInstallation> = db
+        .installations
+        .values()
+        .filter(|entry| {
+            let Ok(Some(state)) = crate::fetch::FetchState::read(std::path::Path::new(&entry.path)) else {
+                return false;
+            };
+            pins.iter().all(|(_, commit)| state.repos.values().any(|r| r.head == *commit))
+        })
+        .collect();
+    candidates.sort_by_key(|entry| db.active_installation.as_deref() != Some(entry.alias.as_str()));
+    for entry in candidates {
+        let inst = Installation::new(entry.alias.clone(), &entry.path);
+        if differences(&inst, sim)?.is_empty() {
+            return Ok(Some(entry.alias.clone()));
+        }
+    }
+    Ok(None)
+}
+
+/// How installation `inst`'s code differs from what `sim` records, one line
+/// each (see [`matching_installation`]); empty when it has exactly that code.
+fn differences(inst: &Installation, sim: &SimFile) -> Res<Vec<String>> {
+    use crate::fetch::git::normalize_url;
+    let wanted = crate::thornlist::parse(&sim.thornlist.text).context("The file's thornlist does not parse")?;
+    let live_path = inst.live_thornlist_to_read();
+    let live_text = std::fs::read_to_string(&live_path)
+        .with_context(|| format!("Failed to read '{}'", live_path.display()))?;
+    let live = crate::thornlist::parse(&live_text)
+        .with_context(|| format!("'{}' does not parse", live_path.display()))?;
+    let mut out = Vec::new();
+    // The installation's name for each of the file's repos.
+    let mut repo_dirs: IndexMap<String, String> = IndexMap::new();
+    for c in wanted.components().iter().filter(|c| !c.fetch_only) {
+        let Some(have) = live.components().iter().find(|l| l.checkout == c.checkout) else {
+            out.push(format!("{} is not in its thornlist", c.checkout));
+            continue;
+        };
+        let same_source = match (&c.url, &have.url) {
+            (Some(want), Some(got)) => normalize_url(want) == normalize_url(got),
+            (want, got) => want == got,
+        };
+        if !same_source {
+            out.push(format!("{} comes from {} there", c.checkout, have.url.as_deref().unwrap_or("elsewhere")));
+        } else if have.fetch_only {
+            out.push(format!("{} is fetched but not built there", c.checkout));
+        } else {
+            repo_dirs.entry(c.repo.clone()).or_insert_with(|| have.repo.clone());
+        }
+    }
+    let pins: Vec<(&str, &str, String)> = sim
+        .repos
+        .iter()
+        .filter_map(|r| Some((r.name.as_str(), r.commit.as_deref()?, repo_dirs.get(&r.name)?.clone())))
+        .collect();
+    let repos_dir = inst.cactus_root().join("repos");
+    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+    let item = progress.add_child(format!("compare {} with the file's pins", inst.alias));
+    item.init(Some(pins.len()), Some(prodash::unit::label("repos")));
+    let item = std::sync::Mutex::new(item);
+    let states = crate::par::parallel_map(&pins, |(_, _, dir)| {
+        let current = item.lock().expect("import progress poisoned").add_child(dir.clone());
+        let state = crate::fetch::git::source_state(&repos_dir.join(dir)).ok();
+        drop(current);
+        item.lock().expect("import progress poisoned").inc();
+        state
+    });
+    drop(item);
+    if let Some(renderer) = renderer {
+        renderer.shutdown_and_wait();
+    }
+    for ((name, commit, _), state) in pins.iter().zip(states?) {
+        let short = |c: &str| c[..12.min(c.len())].to_owned();
+        match state {
+            None => out.push(format!("{name} cannot be read there")),
+            Some(state) if state.contains('+') => out.push(format!("{name} has uncommitted changes there")),
+            Some(state) if crate::fetch::committed(&state) != *commit => {
+                out.push(format!("{name} is at {} there; the file pins {}", short(&state), short(commit)))
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(out)
 }
 
 /// Download published sim `req` (`owner/name`, the newest version, or
@@ -227,6 +350,26 @@ pub fn publish_stack(
     println!("Published {} ({}): {}", published.slug.bold(), published.visibility, published.url);
     for warning in &published.warnings {
         println!("{}", warning.yellow());
+    }
+    Ok(())
+}
+
+/// `cactup refresh owner/name` (§8.10): have the Cactarium look for new
+/// release tags in a package's (or a repo-kept stack's) repository now, so a
+/// release just tagged can be installed without waiting for the next poll.
+pub fn refresh(ctx: &Ctx, target: &str) -> Res<()> {
+    use cactup_ecosystem_common::slug::Slug;
+    let slug: Slug = target.parse().map_err(|e| anyhow!("\"{target}\" is not owner/name: {e}"))?;
+    if slug.at.is_some() || slug.thorn.is_some() {
+        bail!("Name the package or stack as owner/name");
+    }
+    let client = crate::cactarium::Client::new(&ctx.db.read()?);
+    println!("Asking {} to check {} for new tags...", client.base(), slug.entry());
+    let refreshed = client.refresh(slug.owner.as_str(), slug.name.as_str())?;
+    match refreshed.new_versions {
+        0 => println!("{}: no new versions.", refreshed.slug),
+        1 => println!("{}: {}", refreshed.slug, "1 new version.".green()),
+        n => println!("{}: {}", refreshed.slug, format!("{n} new versions.").green()),
     }
     Ok(())
 }
@@ -366,6 +509,75 @@ mod tests {
     use super::*;
     use cactup_ecosystem_common::sim::{Parfile, ParfileKind, RunHints, SimMeta, ThornlistText};
 
+    /// An installation has a .sim's code when every thorn the file builds
+    /// is there from the same repo and every pinned repo is at its pin,
+    /// clean; extra thorns do not matter. Each way it can differ is named.
+    #[test]
+    fn an_installation_matches_a_sim_only_at_its_exact_pins() {
+        use crate::fetch::git::testrepo;
+        use cactup_ecosystem_common::sim::RepoPin;
+        let tmp = tempfile::tempdir().unwrap();
+        let upstream = tmp.path().join("upstream/carpetx");
+        testrepo::init(&upstream);
+        let v1 = testrepo::commit_tree(&upstream, &[("Makefile", "v1\n", false)]);
+        let v2 = testrepo::commit_tree(&upstream, &[("Makefile", "v2\n", false)]);
+        let (branch, _) = crate::fetch::git::head_of(&upstream).unwrap();
+        let url = upstream.to_string_lossy().into_owned();
+        let section = |checkout: &str| {
+            format!("!TARGET = $ROOT\n!TYPE = git\n!URL = {url}\n!REPO_BRANCH = {branch}\n!NAME = carpetx\n!CHECKOUT =\n{checkout}\n")
+        };
+        let header = "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n";
+        let sim = |checkout: &str, commit: gix::ObjectId| SimFile {
+            format: cactup_ecosystem_common::SIM_FORMAT,
+            sim: SimMeta {
+                name: "bhns".into(),
+                summary: None,
+                description: None,
+                authors: vec![],
+                license: None,
+                contact: None,
+                cactarium: None,
+                root: "Cactus".into(),
+            },
+            thornlist: ThornlistText { filename: "bhns.th".into(), text: format!("{header}{}", section(checkout)), untracked: vec![] },
+            parfile: Parfile { filename: "bhns.par".into(), kind: ParfileKind::Par, vars: vec![], text: "x\n".into() },
+            inputs: vec![],
+            repos: vec![RepoPin {
+                name: "carpetx".into(),
+                url: url.clone(),
+                git_ref: Some(branch.clone()),
+                commit: Some(commit.to_string()),
+                sha256: None,
+                cactarium: None,
+                dirty: false,
+            }],
+            run: None,
+            provenance: None,
+        };
+
+        // An installation of the repo at v1, with one more file than the
+        // .sim builds.
+        let root = tmp.path().join("install");
+        let inst = Installation::new("t", &root);
+        let live = format!("{header}{}", section("Makefile\nREADME.extra"))
+            .replace("!NAME = carpetx\n", &format!("!NAME = carpetx\n!REPO_COMMIT = {v1}\n"));
+        let list = crate::thornlist::parse(&live).unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("test plan");
+        let plan = crate::fetch::plan(&list, &root, &mut progress).unwrap();
+        let report = crate::fetch::execute(&plan, &root).unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        std::fs::create_dir_all(inst.live_thornlist().parent().unwrap()).unwrap();
+        std::fs::write(inst.live_thornlist(), &live).unwrap();
+
+        assert_eq!(differences(&inst, &sim("Makefile", v1)).unwrap(), Vec::<String>::new());
+        let at_v2 = differences(&inst, &sim("Makefile", v2)).unwrap();
+        assert!(at_v2.len() == 1 && at_v2[0].starts_with("carpetx is at "), "{at_v2:?}");
+        let missing = differences(&inst, &sim("README", v1)).unwrap();
+        assert_eq!(missing, ["README is not in its thornlist"]);
+        std::fs::write(root.join("Cactus/repos/carpetx/Makefile"), "edited\n").unwrap();
+        assert_eq!(differences(&inst, &sim("Makefile", v1)).unwrap(), ["carpetx has uncommitted changes there"]);
+    }
+
     fn ctx(dir: &std::path::Path) -> Ctx {
         Ctx {
             globals: crate::args::GlobalOpts {
@@ -428,6 +640,7 @@ mod tests {
                 description: None,
                 authors: vec![],
                 license: None,
+                contact: None,
                 cactarium: None,
                 root: "Cactus".into(),
             },

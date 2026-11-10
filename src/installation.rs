@@ -78,6 +78,10 @@ pub struct AddedPackage {
     /// are dropped from the composed list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replaces: Vec<String>,
+    /// Where to report problems with the package, as the Cactarium gave it
+    /// (its declared contact, else its repo).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

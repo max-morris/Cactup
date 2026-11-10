@@ -4266,6 +4266,18 @@ fails the import before the install. The chained steps are parsed from
 ordinary command lines, so each gets exactly the defaults the typed command
 would; all network I/O happens here, never on a compute node (D11).
 
+An installation that already has the file's code is used instead of a second
+copy of the same tree: no install, straight to the build. "Has the code"
+means every thorn the file's thornlist builds is in the installation's live
+thornlist, built, from the same repository (normalized URL), and every repo
+the file pins is checked out at that commit with no uncommitted changes;
+extra thorns do not matter, since the parfile activates none of them. With
+`-I` that installation must match, or the import stops naming each
+difference; without, cactup looks for one: first each installation's last
+fetch record (`fetch-state.toml`) must name every pinned commit, and only
+those are probed on disk, the active installation first. `--new-installation`
+skips the search.
+
 `cactup sim unpack <file.sim> [--dir D] [-f]` goes the other way, for whoever
 works with loose files: it writes the thornlist and the parfile under the
 names they carried, the thornlist with every pinned repo pinned by
@@ -4310,14 +4322,35 @@ What uses it, all on the login node (D11):
   [--thornlist F]` cuts a release from a stack definition (a recipe, or a flat
   list with `--thornlist`); the registry resolves and freezes it, and refuses
   a version that exists — releases never change.
+- `cactup refresh <owner/name>` has the registry check a package's (or a
+  repo-kept stack's) repository for new release tags now, instead of at its
+  next poll, and says how many versions it found.
+- `cactup inst refetch --release owner/stack` with no version, on an
+  installation of a release of that stack from a track, means the newest
+  release **on that track** (`owner/stack@track`), never a jump to the default
+  track; the track is read from the release a refetch last moved it to, else
+  the installed one.
+
+A 401 adds "run `cactup login`" to the server's message. Every artifact has a
+**contact** (where to go for help: an `https://` URL or `mailto:`, the repo
+when none is declared). `sim export`/`pack` take `--contact` (default: the
+`default-contact` knob); `add` records a package's resolved contact, `inst
+show` prints it beside each added package, and after a failed build whose
+error lines name an added thorn (its `…/Arrangement/Thorn/` source path or
+`…/build/Thorn/` directory, in the last 64 KiB of the attempt's output),
+cactup says which package the thorn came from and where to report it.
 
 ### 8.11 `cactup add`: Cactarium packages on top of a base
 
-`cactup add owner/name[/Thorn][@version|@track:range] [--replace] [-f]` puts a
-package's thorns into the active installation at the commit the registry froze
-for the resolved version (a tag is only a label; a moved tag never moves an
-install). `owner/name/Thorn` adds one thorn; a later add of the same package
-updates it, adding a named thorn to those already enabled.
+`cactup add owner/name[/Thorn][@version|@track:range]… [--replace] [-f]` puts
+packages' thorns into the active installation at the commit the registry froze
+for each resolved version (a tag is only a label; a moved tag never moves an
+install). `owner/name/Thorn` adds one thorn, and several specs of one package
+(`owner/pkg/A owner/pkg/B`) add those thorns in one go; naming the package
+whole anywhere adds all of them, and two specs resolving to different versions
+of one package are refused. A later add of the same package updates it,
+adding named thorns to those already enabled. All the packages are fetched in
+one pass and recorded together.
 
 **The model.** `installation.toml` records each added package under
 `[[added]]` (package, exact version, tag, commit, URL, repo name, the
@@ -4339,7 +4372,7 @@ its ThornList and skips `!` lines, §7.5). So:
 - only the added repo is fetched by `add`; nothing else in the installation
   moves.
 
-`cactup remove owner/name [-f]` undoes an add: the record goes, the live list
+`cactup remove owner/name… [-f]` undoes an add, one package after another: the record goes, the live list
 is recomposed without it, and only the base repos it replaced are fetched again
 — back to the base's pins. The package's own repo stays on disk, unlisted, for
 `inst refetch --prune` to remove.

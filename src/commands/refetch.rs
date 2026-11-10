@@ -471,6 +471,31 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     Ok(())
 }
 
+/// `owner/stack` with no version, for an installation on a release of that
+/// same stack from a track: the newest release on that track
+/// (`owner/stack@track`), never a jump to the default track. Anything else
+/// is the selector as given.
+fn stay_on_track(selector: &str, entry: Option<&crate::database::CactusInstallation>) -> String {
+    use cactup_ecosystem_common::slug::Slug;
+    let Ok(wanted) = selector.parse::<Slug>() else { return selector.to_owned() };
+    if wanted.at.is_some() || wanted.thorn.is_some() {
+        return selector.to_owned();
+    }
+    // The release it is on now: the last refetch's, else the installed one.
+    let current = entry.and_then(|e| {
+        e.current_release.as_deref().filter(|r| r.contains('/')).or(e.stack.as_deref())
+    });
+    let track = current
+        .and_then(|c| c.parse::<Slug>().ok())
+        .filter(|on| on.entry() == wanted.entry())
+        .and_then(|on| on.exact().ok())
+        .and_then(|v| v.track);
+    match track {
+        Some(track) => format!("{}@{}", wanted.entry(), track.as_str()),
+        None => selector.to_owned(),
+    }
+}
+
 /// A thornlist's `!DEFINE ROOT` may never differ from the `root-dir` this
 /// installation was fetched into: an installation's source tree cannot move,
 /// so a mismatch here is always a hard error, with a fresh install as the
@@ -493,7 +518,9 @@ fn resolve_source(ctx: &Ctx, inst: &Installation, args: &RefetchArgs) -> Res<Sou
     // installation of one moves to another release, its added packages
     // composed back on.
     if let Some(selector) = args.release.as_deref().filter(|s| s.contains('/')) {
-        let (slug, bytes, unpinned) = crate::cactarium::stack_release_text(&ctx.db.read()?, selector)?;
+        let db = ctx.db.read()?;
+        let selector = stay_on_track(selector, db.installations.get(&inst.alias));
+        let (slug, bytes, unpinned) = crate::cactarium::stack_release_text(&db, &selector)?;
         if unpinned {
             println!("{}", format!("{slug} is not a release: its repos follow their branches").yellow());
         }
@@ -1493,6 +1520,33 @@ fn report_configs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--release owner/stack` with no version stays on the track the
+    /// installation's release is from, the last refetch's release winning
+    /// over the installed one; a version, another stack, or a default-track
+    /// release leaves the selector alone.
+    #[test]
+    fn a_bare_stack_stays_on_the_installations_track() {
+        let entry = |stack: Option<&str>, current: Option<&str>| crate::database::CactusInstallation {
+            alias: "s".into(),
+            release: None,
+            path: "/x".into(),
+            thornlist: None,
+            simfile: None,
+            stack: stack.map(Into::into),
+            current_release: current.map(Into::into),
+            current_thornlist: None,
+            unfetched_repos: Default::default(),
+        };
+        let mp = entry(Some("max/carpetx-mp@mixed-precision:1.2.0"), None);
+        assert_eq!(stay_on_track("max/carpetx-mp", Some(&mp)), "max/carpetx-mp@mixed-precision");
+        assert_eq!(stay_on_track("max/carpetx-mp@^2", Some(&mp)), "max/carpetx-mp@^2");
+        assert_eq!(stay_on_track("max/other", Some(&mp)), "max/other");
+        assert_eq!(stay_on_track("max/carpetx-mp", Some(&entry(Some("max/carpetx-mp@1.2.0"), None))), "max/carpetx-mp");
+        let moved = entry(Some("max/carpetx-mp@1.2.0"), Some("max/carpetx-mp@gpu:0.3.0"));
+        assert_eq!(stay_on_track("max/carpetx-mp", Some(&moved)), "max/carpetx-mp@gpu");
+        assert_eq!(stay_on_track("max/carpetx-mp", None), "max/carpetx-mp");
+    }
 
     /// A prune moves the repo out of `repos/` in one step, then deletes it;
     /// cut short, the remainder waits in the pruning directory for the next

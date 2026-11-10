@@ -50,21 +50,94 @@ fn auto(ctx: &Ctx, start: BuildStartArgs) -> Res<()> {
     }
     let machine = machine::resolve(ctx)?;
     let installation = Installation::resolve(ctx)?;
-    if choose_submit(&machine, &start.opts)? {
+    let name = start.name.clone();
+    let result = auto_with(ctx, &machine, &installation, start);
+    if result.is_err() {
+        added_package_hint(&installation, name.as_deref());
+    }
+    result
+}
+
+/// [`auto`] past the compute-node branch, for a machine and installation
+/// already resolved.
+fn auto_with(ctx: &Ctx, machine: &Machine, installation: &Installation, start: BuildStartArgs) -> Res<()> {
+    if choose_submit(machine, &start.opts)? {
         let db = ctx.db.read()?;
         let submitted =
-            submit_impl(&installation, &machine, &db, &start, ctx.globals.hostname.as_deref())?;
+            submit_impl(installation, machine, &db, &start, ctx.globals.hostname.as_deref())?;
         // `submitted` is None when the config was already up to date: there
         // is no job, so there is nothing to block on either.
         let Some((name, attempt_id)) = submitted.filter(|_| start.block) else { return Ok(()) };
         let config_dir = installation.cactus_root().join("configs").join(&name);
-        watch_build(&machine, &config_dir, attempt_id, Watch::Block)
+        watch_build(machine, &config_dir, attempt_id, Watch::Block)
     } else {
         if start.block {
-            return Err(no_queue_to_block_on(&machine, &start.opts));
+            return Err(no_queue_to_block_on(machine, &start.opts));
         }
-        run_with(&machine, &installation, start)
+        run_with(machine, installation, start)
     }
+}
+
+/// After a failed build (§8.11): when the errors at the end of its log name
+/// a thorn `cactup add` put in, say which package it came from and where to
+/// report problems with it. Silent when nothing points at one: it is only a
+/// hint, read off the log.
+fn added_package_hint(installation: &Installation, name: Option<&str>) {
+    let Ok(meta) = installation.meta() else { return };
+    if meta.added.is_empty() {
+        return;
+    }
+    let Some(name) = name.map(str::to_owned).or_else(|| meta.active_config.clone()) else { return };
+    let config_dir = installation.cactus_root().join("configs").join(&name);
+    let Ok(Some(id)) = BuildAttempt::latest_id(&config_dir) else { return };
+    let Ok(attempt) = BuildAttempt::open(&config_dir, id) else { return };
+    let mut text = String::new();
+    for (_, path) in build_log_sources(&attempt) {
+        text.push_str(&log_tail(&path, 64 * 1024));
+        text.push('\n');
+    }
+    for (package, checkout) in implicated(&text, &meta.added) {
+        let contact = package.contact.as_deref().unwrap_or(&package.url);
+        println!(
+            "{}",
+            format!(
+                "{checkout} comes from {}@{} (added with cactup add); problems with it? {contact}",
+                package.package, package.version
+            )
+            .yellow()
+        );
+    }
+}
+
+/// The last `max` bytes of a file, as text; empty when it cannot be read.
+fn log_tail(path: &Path, max: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else { return String::new() };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    if file.seek(SeekFrom::Start(len.saturating_sub(max))).is_err() {
+        return String::new();
+    }
+    let mut bytes = Vec::new();
+    let _ = file.read_to_end(&mut bytes);
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// The added thorns an error line in `log` names, by their source path
+/// (`…/Arrangement/Thorn/…`) or their build directory (`…/build/Thorn/…`),
+/// each once, in the order of the packages.
+fn implicated<'a>(log: &str, added: &'a [crate::installation::AddedPackage]) -> Vec<(&'a crate::installation::AddedPackage, &'a str)> {
+    let errors: Vec<&str> = log.lines().filter(|l| l.to_ascii_lowercase().contains("error")).collect();
+    let mut found = Vec::new();
+    for package in added {
+        for thorn in &package.thorns {
+            let short = thorn.checkout.rsplit('/').next().unwrap_or(&thorn.checkout);
+            let (source, build) = (format!("/{}/", thorn.checkout), format!("/build/{short}/"));
+            if errors.iter().any(|l| l.contains(&source) || l.contains(&build)) {
+                found.push((package, thorn.checkout.as_str()));
+            }
+        }
+    }
+    found
 }
 
 /// `cactup build` for a caller that needs the binary before it can go on
@@ -1474,6 +1547,36 @@ fn prune_impl(machine: &Machine, inst: &Installation, name: Option<&str>, keep: 
 mod tests {
     use super::*;
     use crate::args::{BuildOpts, MakeJobs, TopologyFlags};
+
+    /// A failed build's error lines implicate an added thorn by its source
+    /// path or its build directory; a mention outside an error line, or a
+    /// thorn nobody added, implicates nothing.
+    #[test]
+    fn errors_in_an_added_thorn_name_its_package() {
+        use crate::installation::{AddedPackage, AddedThorn};
+        let package = AddedPackage {
+            package: "max/carpetx".into(),
+            version: "1.0.0".into(),
+            tag: None,
+            commit: "5".repeat(40),
+            url: "https://x/carpetx.git".into(),
+            repo: "carpetx".into(),
+            thorns: ["CarpetX/TestReal4", "CarpetX/Loop"]
+                .iter()
+                .map(|c| AddedThorn { checkout: (*c).into(), repo_path: c.rsplit('/').next().unwrap().into() })
+                .collect(),
+            replaces: vec![],
+            contact: Some("https://x/issues".into()),
+        };
+        let added = [package];
+        let log = "COMPILING CarpetX/Loop/src/loop.cxx\n\
+                   /home/u/Cactus/arrangements/CarpetX/TestReal4/src/t.cxx:3:1: error: expected ';'\n\
+                   make[3]: *** [/home/u/Cactus/configs/sim/build/Loop/make.code.deps] Error 1\n\
+                   /home/u/Cactus/arrangements/CactusBase/IOUtil/src/x.c:1: error: nope\n";
+        let found: Vec<&str> = implicated(log, &added).into_iter().map(|(_, c)| c).collect();
+        assert_eq!(found, ["CarpetX/TestReal4", "CarpetX/Loop"]);
+        assert!(implicated("COMPILING CarpetX/Loop/src/loop.cxx\n", &added).is_empty());
+    }
     use crate::database::Database;
     use crate::mdb::{Layer, Meta};
     use crate::walltime::Walltime;

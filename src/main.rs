@@ -190,9 +190,12 @@ fn main() -> Res<()> {
         Commands::Use { alias } => commands::use_cmd::dispatch(&ctx, alias),
         Commands::Install(install) => commands::install::dispatch(&ctx, install),
         Commands::Import(import) => commands::import::dispatch(&ctx, import),
+        Commands::Refresh { target } => commands::import::refresh(&ctx, &target),
         Commands::Login { token } => commands::import::login(&ctx, token),
-        Commands::Add { package, replace, force } => commands::add::dispatch(&ctx, &package, replace, force),
-        Commands::Remove { package, force } => commands::add::remove(&ctx, &package, force),
+        Commands::Add { packages, replace, force } => commands::add::dispatch(&ctx, &packages, replace, force),
+        Commands::Remove { packages, force } => {
+            packages.iter().try_for_each(|package| commands::add::remove(&ctx, package, force))
+        }
         Commands::Stack(crate::args::StackCommand::Publish { definition, target, version, thornlist }) => {
             commands::import::publish_stack(&ctx, &definition, &target, &version, thornlist.as_deref())
         }

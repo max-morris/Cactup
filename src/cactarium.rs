@@ -11,7 +11,7 @@ use crate::database::Database;
 use crate::Res;
 use anyhow::{anyhow, bail, Context};
 use cactup_ecosystem_common::api::{
-    ErrorBody, PackageVersions, Published, Resolved, API_GENERATION, API_GENERATION_HEADER, API_PREFIX,
+    ErrorBody, PackageVersions, Published, Refreshed, Resolved, API_GENERATION, API_GENERATION_HEADER, API_PREFIX,
     SHA256_HEADER, UNPINNED_HEADER,
 };
 use cactup_ecosystem_common::stack::FrozenStack;
@@ -121,6 +121,16 @@ impl Client {
         json(self.send(request)?)
     }
 
+    /// Have the registry check package (or repo-kept stack) `owner/name`'s
+    /// repository for new release tags now, rather than at its next poll.
+    pub fn refresh(&self, owner: &str, name: &str) -> Res<Refreshed> {
+        let token = token_for(&self.base)?;
+        let request = crate::fetch::download::client()
+            .post(self.url(&format!("/packages/{owner}/{name}/refresh")))
+            .bearer_auth(token);
+        json(self.send(request)?)
+    }
+
     /// Send, then refuse a registry newer than this cactup speaks, and turn
     /// an error status into the message the registry wrote for it.
     fn send(&self, request: reqwest::blocking::RequestBuilder) -> Res<reqwest::blocking::Response> {
@@ -143,8 +153,14 @@ impl Client {
         }
         let status = response.status();
         let text = response.text().unwrap_or_default();
+        // A missing or dead token: say how to get a working one.
+        let login = if status == reqwest::StatusCode::UNAUTHORIZED {
+            format!(" (run `cactup login` with a token from {}/settings)", self.base)
+        } else {
+            String::new()
+        };
         match serde_json::from_str::<ErrorBody>(&text) {
-            Ok(body) => Err(anyhow!("{}", body.error.message)),
+            Ok(body) => Err(anyhow!("{}{login}", body.error.message)),
             Err(_) => Err(anyhow!("The Cactarium at {} answered {status}", self.base)),
         }
     }

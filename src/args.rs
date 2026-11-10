@@ -316,10 +316,11 @@ pub(crate) enum Commands {
     /// Reproduce a .sim file: install its sources, build them, create the simulation, and optionally submit or run it
     Import(ImportArgs),
     // §8.11
-    /// Add a Cactarium package's thorns to the active installation, at the commit the registry froze for the version
+    /// Add Cactarium packages' thorns to the active installation, at the commit the registry froze for each version
     Add {
-        /// The package: owner/name, owner/name/Thorn for one thorn, with @version or @track:range to choose.
-        package: String,
+        /// The packages: owner/name for all its thorns, owner/name/Thorn for one (repeat for several), with @version or @track:range to choose.
+        #[clap(required = true, value_name = "PACKAGE")]
+        packages: Vec<String>,
         /// Use the package in place of a repo the installation's thornlist already has.
         #[clap(long)]
         replace: bool,
@@ -328,10 +329,11 @@ pub(crate) enum Commands {
         force: bool,
     },
     // §8.11
-    /// Remove a package `cactup add` added, restoring any repo it replaced
+    /// Remove packages `cactup add` added, restoring any repo they replaced
     Remove {
-        /// The package: owner/name.
-        package: String,
+        /// The packages: owner/name.
+        #[clap(required = true, value_name = "PACKAGE")]
+        packages: Vec<String>,
         /// Remove even though the live thornlist has hand edits, which are overwritten.
         #[clap(short, long)]
         force: bool,
@@ -340,6 +342,12 @@ pub(crate) enum Commands {
     /// Work with Cactarium stacks
     #[clap(subcommand)]
     Stack(StackCommand),
+    // §8.10
+    /// Have the Cactarium check a package's or stack's repository for new release tags now
+    Refresh {
+        /// The package or stack: owner/name.
+        target: String,
+    },
     // §8.10
     /// Store an API token for the Cactarium (create one on its settings page)
     Login {
@@ -532,7 +540,9 @@ pub(crate) struct RefetchArgs {
     /// Thornlist file to adopt and fetch (default: the installation's live thornlist).
     pub thornlist: Option<PathBuf>,
     /// Refetch to this Einstein Toolkit release tag, or to `master` for the
-    /// tip of the manifest's master branch (see `cactup releases`).
+    /// tip of the manifest's master branch (see `cactup releases`); or to a
+    /// Cactarium stack release, owner/stack@range (a bare owner/stack: the
+    /// newest release on the track the installation is on).
     #[clap(long, value_name = "RELEASE", conflicts_with = "thornlist")]
     pub release: Option<String>,
     /// Skip all confirmations and checks (implies --overwrite-modified and --replace-thornlist).
@@ -968,6 +978,9 @@ pub(crate) struct ImportArgs {
     /// Alias of the new installation (default: the .sim's name).
     #[clap(short, long)]
     pub alias: Option<String>,
+    /// Install a new copy of the sources even when an installation already has them at the file's pins.
+    #[clap(long)]
+    pub new_installation: bool,
     /// Name of the config to build (default: the .sim's name).
     #[clap(long, value_name = "NAME")]
     pub config: Option<String>,
@@ -1079,6 +1092,9 @@ pub(crate) struct SimDescribeArgs {
     /// SPDX license expression (default: the default-license knob, if set).
     #[clap(long, value_name = "SPDX")]
     pub license: Option<String>,
+    /// Where to go for help with the simulation: an https:// URL or a mailto: address (default: the default-contact knob, if set).
+    #[clap(long, value_name = "URL")]
+    pub contact: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1399,6 +1415,11 @@ mod tests {
             vec!["cactup", "inst", "refetch"],
             vec!["cactup", "inst", "refetch", "--release", "ET_2026_11", "-f"],
             vec!["cactup", "inst", "refetch", "--release", "master", "-f"],
+            vec!["cactup", "inst", "refetch", "--release", "max/carpetx-mp"],
+            vec!["cactup", "add", "max/carpetx/TestReal4", "max/carpetx/Loop", "--replace"],
+            vec!["cactup", "remove", "max/carpetx", "max/spacetimex"],
+            vec!["cactup", "refresh", "max/carpetx"],
+            vec!["cactup", "import", "max/bhns@1", "--new-installation"],
             vec!["cactup", "installation", "refetch", "new.th", "--overwrite-modified", "--prune", "-n"],
             vec!["cactup", "inst", "refetch", "--overwrite", "SpacetimeX Cottonmouth", "-n"],
             vec!["cactup", "inst", "refetch", "--overwrite", "SpacetimeX", "--overwrite", "Cottonmouth", "-n"],

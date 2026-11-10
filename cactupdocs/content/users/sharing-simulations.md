@@ -23,9 +23,11 @@ The pins are the commits the simulation's executable was **built from**, not
 whatever your installation has moved on to since. On a terminal, export asks
 for a name, summary, authors and license, each prefilled: the summary and
 description come from the comment block at the top of your parfile, the
-authors from your git `user.name`, and the license from the `default-license`
-knob if you set one. Flags (`--name`, `--summary`, `--description`,
-`--author`, `--license`) skip the questions.
+authors from your git `user.name`, the license from the `default-license`
+knob and the contact (where to go for help: an `https://` URL or a `mailto:`
+address) from the `default-contact` knob, if you set them. Flags (`--name`,
+`--summary`, `--description`, `--author`, `--license`, `--contact`) skip the
+questions.
 
 Export refuses what nobody else could reproduce:
 
@@ -88,6 +90,14 @@ The values belong to the imported simulation only — your own knobs are never
 changed — and `-K` on the command line still overrides them. If one of your
 knobs has a different value, submit says which value it is using.
 
+If one of your installations already has exactly the file's code — every
+thorn it builds, from the same repositories, each pinned repository at its
+commit with no uncommitted changes — `import` uses it instead of installing a
+second copy, and goes straight to the build. Extra thorns in the
+installation do not matter. Name the installation with `-I` to insist on it
+(the import then stops if it differs, saying how), or pass
+`--new-installation` to install a fresh copy anyway.
+
 You can also just install the sources:
 
 ```sh
@@ -141,7 +151,12 @@ Move an installation to a newer release with
 
 ```sh
 cactup inst refetch --release max/carpetx-mp@^1
+cactup inst refetch --release max/carpetx-mp     # the newest on the track it is on
 ```
+
+Without a version, the installation stays on the track its release came from
+(a `mixed-precision:1.2.0` installation moves to the newest
+`mixed-precision` release, never to the default track).
 
 `@head` (the stack's branches as they are now) and `@master` (every
 repository's default branch) install unpinned, for development; cactup says
@@ -150,8 +165,10 @@ so, because such an installation cannot be reproduced.
 ### Adding a package
 
 ```sh
-cactup add max/carpetx@mixed-precision:^1      # a whole package, from a track
-cactup add max/carpetx/TestReal4               # one thorn of it
+cactup add max/carpetx@mixed-precision:^1                # a whole package, from a track
+cactup add max/carpetx/TestReal4                         # one thorn of it
+cactup add max/carpetx/TestReal4 max/carpetx/Loop        # several thorns
+cactup add max/carpetx/Loop max/spacetimex               # several packages at once
 ```
 
 The package is fetched at the commit the Cactarium recorded for that version
@@ -163,3 +180,19 @@ release. Rebuild a config to compile them.
 
 `cactup remove max/carpetx` takes a package out again, putting back any
 repository it replaced at the commit the base names.
+
+`cactup inst show` lists the packages you added, each with where to report
+problems with it (the package's contact, else its repository). If a build
+fails in a thorn you added, cactup says which package it came from and the
+same address.
+
+### Getting a new release noticed
+
+The Cactarium checks each package's repository for new release tags every few
+hours. Right after tagging one, have it look now:
+
+```sh
+cactup refresh max/carpetx
+```
+
+It needs `cactup login`, as an owner of the package.

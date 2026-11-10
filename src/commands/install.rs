@@ -632,6 +632,7 @@ mod tests {
                 description: None,
                 authors: vec![],
                 license: None,
+                contact: None,
                 cactarium: None,
                 root: "Cactus".into(),
             },

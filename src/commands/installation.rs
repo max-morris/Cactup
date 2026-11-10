@@ -233,6 +233,19 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
         if let Some(test_home) = &meta.test_home {
             println!("  test-home:    {}", test_home.display());
         }
+        // §8.11: what `cactup add` put on the base, and where to take
+        // problems with it.
+        for (i, package) in meta.added.iter().enumerate() {
+            let label = if i == 0 { "added:" } else { "" };
+            let thorns: Vec<&str> = package.thorns.iter().map(|t| t.checkout.as_str()).collect();
+            let replaces = if package.replaces.is_empty() {
+                String::new()
+            } else {
+                format!(", in place of {}", package.replaces.join(", "))
+            };
+            println!("  {label:<13} {}@{} ({}){replaces}", package.package, package.version, thorns.join(", "));
+            println!("  {:<13}   problems? {}", "", package.contact.as_deref().unwrap_or(&package.url));
+        }
     }
     if let Ok(sims) = inst.simulations() {
         println!("  simulations:  {} (see `cactup sim list`)", sims.simulations.len());

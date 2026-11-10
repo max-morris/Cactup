@@ -181,6 +181,16 @@ fn finish(ctx: &Ctx, describe: &SimDescribeArgs, file: &Path, parts: Parts) -> R
     };
     let license_default = ctx.db.read().ok().and_then(|db| db.knob("default-license").map(str::to_owned));
     let license = ask("License (SPDX, empty for none)", &describe.license, license_default.unwrap_or_default())?;
+    let contact_default = ctx.db.read().ok().and_then(|db| db.knob("default-contact").map(str::to_owned));
+    let contact = Some(ask(
+        "Where to go for help with it (an https:// URL or mailto: address, empty for none)",
+        &describe.contact,
+        contact_default.unwrap_or_default(),
+    )?)
+    .filter(|c| !c.is_empty());
+    if let Some(contact) = &contact {
+        cactup_ecosystem_common::manifest::validate_contact(contact).map_err(|e| anyhow!("{e}"))?;
+    }
     let mut inputs = inputs(&parfile);
     if interactive {
         for input in &mut inputs {
@@ -200,6 +210,7 @@ fn finish(ctx: &Ctx, describe: &SimDescribeArgs, file: &Path, parts: Parts) -> R
             description: describe.description.clone().or(lead_description),
             authors,
             license: Some(license).filter(|l| !l.is_empty()),
+            contact,
             cactarium: None,
             root,
         },

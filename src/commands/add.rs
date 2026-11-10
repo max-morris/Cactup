@@ -1,5 +1,5 @@
-//! `cactup add owner/pkg[/Thorn][@range]` (spec §8.11): put a Cactarium
-//! package's thorns into the active installation, at the commit the registry
+//! `cactup add owner/pkg[/Thorn][@range]…` (spec §8.11): put Cactarium
+//! packages' thorns into the active installation, at the commit the registry
 //! froze for the version.
 //!
 //! The installation records what was added (`installation.toml`'s
@@ -90,41 +90,120 @@ fn repo_name(url: &str) -> String {
     stripped.rsplit(['/', ':']).next().unwrap_or(stripped).to_owned()
 }
 
-pub fn dispatch(ctx: &Ctx, package: &str, replace: bool, force: bool) -> Res<()> {
-    let slug: Slug = package.parse().map_err(|e| anyhow!("\"{package}\" is not a package (owner/name[/Thorn][@version]): {e}"))?;
-    let entry = format!("{}/{}", slug.owner, slug.name);
-    let req = match &slug.at {
-        Some(at) => format!("{entry}@{at}"),
-        None => entry.clone(),
-    };
+/// One package an `add` names, its specs resolved and merged: which version,
+/// at which commit, and which of its thorns.
+struct Wanted {
+    entry: String,
+    /// `owner/name@version`, as the Cactarium names the resolved version.
+    slug: String,
+    version: String,
+    tag: Option<String>,
+    commit: String,
+    url: String,
+    thorns: Vec<AddedThorn>,
+    contact: Option<String>,
+    /// Only some thorns were named, so a package added before keeps the
+    /// thorns it had.
+    only_named: bool,
+}
+
+/// Resolve every spec, merging the ones of one package: several thorns of
+/// it (`owner/pkg/A owner/pkg/B`) are one add of those thorns, and naming
+/// the package whole anywhere adds all of them. Two specs that resolve to
+/// different versions of one package are an error, not a silent winner.
+fn resolve_all(client: &crate::cactarium::Client, specs: &[String]) -> Res<Vec<Wanted>> {
+    let mut wanted: Vec<Wanted> = Vec::new();
+    let mut listings: std::collections::HashMap<String, cactup_ecosystem_common::api::PackageVersions> =
+        std::collections::HashMap::new();
+    for spec in specs {
+        if gix::interrupt::is_triggered() {
+            bail!("Interrupted");
+        }
+        let slug: Slug =
+            spec.parse().map_err(|e| anyhow!("\"{spec}\" is not a package (owner/name[/Thorn][@version]): {e}"))?;
+        let entry = slug.entry();
+        let req = match &slug.at {
+            Some(at) => format!("{entry}@{at}"),
+            None => entry.clone(),
+        };
+        let resolved = client.resolve(&req)?;
+        if resolved.kind != "package" {
+            bail!("{} is a {}, not a package; install a stack with `cactup install`", resolved.slug, resolved.kind);
+        }
+        let commit =
+            resolved.version.commit.clone().ok_or_else(|| anyhow!("The Cactarium gave {} no commit", resolved.slug))?;
+        let url = resolved.url.clone().ok_or_else(|| anyhow!("The Cactarium gave {} no repository", resolved.slug))?;
+        if !listings.contains_key(&entry) {
+            let versions = client.package_versions(slug.owner.as_str(), slug.name.as_str())?;
+            listings.insert(entry.clone(), versions);
+        }
+        let version = listings[&entry]
+            .versions
+            .iter()
+            .find(|v| v.version.version == resolved.version.version)
+            .ok_or_else(|| anyhow!("The Cactarium lists no thorns for {}", resolved.slug))?;
+        let thorns: Vec<AddedThorn> = version
+            .thorns
+            .iter()
+            .filter(|t| slug.thorn.as_deref().is_none_or(|want| want.eq_ignore_ascii_case(&t.thorn)))
+            .map(|t| AddedThorn { checkout: format!("{}/{}", t.arrangement, t.thorn), repo_path: t.repo_path.clone() })
+            .collect();
+        if thorns.is_empty() {
+            let all: Vec<&str> = version.thorns.iter().map(|t| t.thorn.as_str()).collect();
+            bail!(
+                "{} has no thorn {} (its thorns: {})",
+                resolved.slug,
+                slug.thorn.as_deref().unwrap_or("at all"),
+                all.join(", ")
+            );
+        }
+        let only_named = slug.thorn.is_some();
+        match wanted.iter_mut().find(|w| w.entry == entry) {
+            Some(w) if w.version != resolved.version.version => bail!(
+                "{} and {} are two versions of {entry}; name one",
+                w.slug,
+                resolved.slug
+            ),
+            Some(w) => {
+                for t in thorns {
+                    if !w.thorns.iter().any(|have| have.checkout == t.checkout) {
+                        w.thorns.push(t);
+                    }
+                }
+                w.only_named &= only_named;
+            }
+            None => wanted.push(Wanted {
+                entry,
+                slug: resolved.slug.to_string(),
+                version: resolved.version.version.clone(),
+                tag: resolved.version.tag.clone(),
+                commit,
+                url,
+                thorns,
+                contact: resolved.contact.clone(),
+                only_named,
+            }),
+        }
+    }
+    // A package named whole is all of its thorns, whatever else named some.
+    for w in &mut wanted {
+        if !w.only_named {
+            let listing = &listings[&w.entry];
+            if let Some(v) = listing.versions.iter().find(|v| v.version.version == w.version) {
+                w.thorns = v
+                    .thorns
+                    .iter()
+                    .map(|t| AddedThorn { checkout: format!("{}/{}", t.arrangement, t.thorn), repo_path: t.repo_path.clone() })
+                    .collect();
+            }
+        }
+    }
+    Ok(wanted)
+}
+
+pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<()> {
     let client = crate::cactarium::Client::new(&ctx.db.read()?);
-    let resolved = client.resolve(&req)?;
-    if resolved.kind != "package" {
-        bail!("{} is a {}, not a package; install a stack with `cactup install`", resolved.slug, resolved.kind);
-    }
-    let commit = resolved.version.commit.clone().ok_or_else(|| anyhow!("The Cactarium gave {} no commit", resolved.slug))?;
-    let url = resolved.url.clone().ok_or_else(|| anyhow!("The Cactarium gave {} no repository", resolved.slug))?;
-    let versions = client.package_versions(slug.owner.as_str(), slug.name.as_str())?;
-    let version = versions
-        .versions
-        .iter()
-        .find(|v| v.version.version == resolved.version.version)
-        .ok_or_else(|| anyhow!("The Cactarium lists no thorns for {}", resolved.slug))?;
-    let thorns: Vec<AddedThorn> = version
-        .thorns
-        .iter()
-        .filter(|t| slug.thorn.as_deref().is_none_or(|want| want.eq_ignore_ascii_case(&t.thorn)))
-        .map(|t| AddedThorn { checkout: format!("{}/{}", t.arrangement, t.thorn), repo_path: t.repo_path.clone() })
-        .collect();
-    if thorns.is_empty() {
-        let all: Vec<&str> = version.thorns.iter().map(|t| t.thorn.as_str()).collect();
-        bail!(
-            "{} has no thorn {} (its thorns: {})",
-            resolved.slug,
-            slug.thorn.as_deref().unwrap_or("at all"),
-            all.join(", ")
-        );
-    }
+    let wanted = resolve_all(&client, specs)?;
 
     let inst = Installation::resolve(ctx)?;
     let locked = inst.locked()?;
@@ -144,80 +223,86 @@ pub fn dispatch(ctx: &Ctx, package: &str, replace: bool, force: bool) -> Res<()>
         );
     }
 
-    // What in the base the package collides with: the same repository, or a
-    // thorn it also checks out.
-    let repo = repo_name(&url);
     let base = thornlist::parse(&pristine)?;
-    let want: BTreeSet<&str> = thorns.iter().map(|t| t.checkout.as_str()).collect();
-    let normalized = crate::fetch::git::normalize_url(&url);
-    let conflicts: BTreeSet<String> = base
-        .components()
-        .iter()
-        .filter(|c| {
-            c.repo == repo
-                || c.url.as_deref().is_some_and(|u| crate::fetch::git::normalize_url(u) == normalized)
-                || want.contains(c.checkout.as_str())
-        })
-        .map(|c| c.repo.clone())
-        .collect();
-    if !conflicts.is_empty() && !replace {
-        bail!(
-            "The installation's thornlist already has {} (repo {}); pass --replace to use {} in its place",
-            want.iter().copied().collect::<Vec<_>>().join(", "),
-            conflicts.iter().cloned().collect::<Vec<_>>().join(", "),
-            resolved.slug
-        );
-    }
+    let mut added: Vec<AddedPackage> = Vec::new();
+    for w in wanted {
+        // What in the base the package collides with: the same repository,
+        // or a thorn it also checks out.
+        let repo = repo_name(&w.url);
+        let want: BTreeSet<&str> = w.thorns.iter().map(|t| t.checkout.as_str()).collect();
+        let normalized = crate::fetch::git::normalize_url(&w.url);
+        let conflicts: BTreeSet<String> = base
+            .components()
+            .iter()
+            .filter(|c| {
+                c.repo == repo
+                    || c.url.as_deref().is_some_and(|u| crate::fetch::git::normalize_url(u) == normalized)
+                    || want.contains(c.checkout.as_str())
+            })
+            .map(|c| c.repo.clone())
+            .collect();
+        if !conflicts.is_empty() && !replace {
+            bail!(
+                "The installation's thornlist already has {} (repo {}); pass --replace to use {} in its place",
+                want.iter().copied().collect::<Vec<_>>().join(", "),
+                conflicts.iter().cloned().collect::<Vec<_>>().join(", "),
+                w.slug
+            );
+        }
 
-    // Record it: a second add of the same package updates it, adding a thorn
-    // to the ones already enabled when only a thorn was named.
-    let mut package = AddedPackage {
-        package: entry.clone(),
-        version: resolved.version.version.clone(),
-        tag: resolved.version.tag.clone(),
-        commit,
-        url,
-        repo: repo.clone(),
-        thorns,
-        replaces: conflicts.into_iter().collect(),
-    };
-    if let Some(i) = meta.added.iter().position(|a| a.package == entry) {
-        let old = meta.added.remove(i);
-        if slug.thorn.is_some() {
-            for t in old.thorns {
-                if !package.thorns.iter().any(|n| n.checkout == t.checkout) {
-                    package.thorns.push(t);
+        // Record it: a second add of the same package updates it, adding
+        // thorns to the ones already enabled when only thorns were named.
+        let mut package = AddedPackage {
+            package: w.entry.clone(),
+            version: w.version,
+            tag: w.tag,
+            commit: w.commit,
+            url: w.url,
+            repo,
+            thorns: w.thorns,
+            replaces: conflicts.into_iter().collect(),
+            contact: w.contact,
+        };
+        if let Some(i) = meta.added.iter().position(|a| a.package == w.entry) {
+            let old = meta.added.remove(i);
+            if w.only_named {
+                for t in old.thorns {
+                    if !package.thorns.iter().any(|n| n.checkout == t.checkout) {
+                        package.thorns.push(t);
+                    }
+                }
+            }
+            for r in old.replaces {
+                if !package.replaces.contains(&r) {
+                    package.replaces.push(r);
                 }
             }
         }
-        for r in old.replaces {
-            if !package.replaces.contains(&r) {
-                package.replaces.push(r);
-            }
-        }
+        meta.added.push(package.clone());
+        added.push(package);
     }
-    meta.added.push(package.clone());
     let composed = compose(&pristine, &meta.added)?;
 
-    // Fetch that one repo — never the rest of the installation.
+    // Fetch those repos — never the rest of the installation.
+    let repos: BTreeSet<&str> = added.iter().map(|a| a.repo.as_str()).collect();
     let list = thornlist::parse(&composed)?;
     let (progress, renderer) = crate::manifest::setup_prodash();
     let mut classify = progress.add_child("classify repos");
     let mut plan = crate::fetch::plan(&list, &inst.root, &mut classify)?;
     drop(classify);
     renderer.shutdown_and_wait();
-    if let Some(skipped) = plan.skipped.iter().find(|s| s.repo == repo) {
-        bail!("Repo {repo} in the installation has {}; it was left alone", skipped.reason.describe());
+    if let Some(skipped) = plan.skipped.iter().find(|s| repos.contains(s.repo.as_str())) {
+        bail!("Repo {} in the installation has {}; it was left alone", skipped.repo, skipped.reason.describe());
     }
-    plan.git.retain(|g| g.repo == repo);
-    plan.links.retain(|c| c.repo == repo);
+    plan.git.retain(|g| repos.contains(g.repo.as_str()));
+    plan.links.retain(|c| repos.contains(c.repo.as_str()));
     plan.downloads.clear();
     plan.external.clear();
     plan.skipped.clear();
     let report = crate::fetch::execute(&plan, &inst.root)?;
     if !report.failures.is_empty() {
         let why: Vec<String> = report.failures.iter().map(|f| format!("{}: {}", f.what, f.error)).collect();
-        bail!("Failed to fetch {}:\n  {}", resolved.slug, why.join("\n  "));
+        bail!("Failed to fetch {}:\n  {}", repos.iter().copied().collect::<Vec<_>>().join(", "), why.join("\n  "));
     }
     crate::fetch::FetchState::record(&inst.root, &report.records())?;
 
@@ -225,14 +310,16 @@ pub fn dispatch(ctx: &Ctx, package: &str, replace: bool, force: bool) -> Res<()>
     locked.set_meta(&meta)?;
     drop(locked);
 
-    let checkouts: Vec<&str> = package.thorns.iter().map(|t| t.checkout.as_str()).collect();
-    println!(
-        "Added {} ({}) at {}{}.",
-        resolved.slug.bold(),
-        checkouts.join(", "),
-        &package.commit[..12.min(package.commit.len())],
-        if package.replaces.is_empty() { String::new() } else { format!(", in place of {}", package.replaces.join(", ")) }
-    );
+    for package in &added {
+        let checkouts: Vec<&str> = package.thorns.iter().map(|t| t.checkout.as_str()).collect();
+        println!(
+            "Added {} ({}) at {}{}.",
+            format!("{}@{}", package.package, package.version).bold(),
+            checkouts.join(", "),
+            &package.commit[..12.min(package.commit.len())],
+            if package.replaces.is_empty() { String::new() } else { format!(", in place of {}", package.replaces.join(", ")) }
+        );
+    }
     println!("Build a config to compile them, e.g. `{}`.", "cactup build <config>".bold());
     Ok(())
 }
@@ -328,6 +415,7 @@ mod tests {
                 .map(|(c, p)| AddedThorn { checkout: (*c).into(), repo_path: (*p).into() })
                 .collect(),
             replaces: replaces.iter().map(|r| (*r).to_string()).collect(),
+            contact: None,
         }
     }
 
