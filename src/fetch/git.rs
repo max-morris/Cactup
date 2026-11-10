@@ -1448,6 +1448,36 @@ pub fn remote_tip(scratch: &Path, url: &str, git_ref: Option<&str>) -> Res<Objec
     }
 }
 
+/// The name of the remote's default branch (what its `HEAD` points at), as
+/// `git ls-remote --symref <url> HEAD` says it, without fetching anything.
+/// `scratch` is as for [`remote_tip`].
+pub fn remote_default_branch(scratch: &Path, url: &str) -> Res<String> {
+    const LOCAL: &str = "refs/cactup/head";
+    let repo = gix::open(scratch).with_context(|| format!("Failed to open '{}'", scratch.display()))?;
+    let spec = format!("HEAD:{LOCAL}");
+    let remote = repo
+        .remote_at(url)
+        .with_context(|| format!("Invalid remote URL {url}"))?
+        .with_refspecs(Some(spec.as_str()), Direction::Fetch)
+        .context("Invalid refspec")?;
+    let (map, _) = remote
+        .connect(Direction::Fetch)
+        .with_context(|| format!("Failed to connect to {url}"))?
+        .ref_map(gix::progress::Discard, Default::default())
+        .with_context(|| format!("Failed to list {url}'s branches and tags"))?;
+    let head = map
+        .remote_refs
+        .iter()
+        .find_map(|r| match r {
+            gix::protocol::handshake::Ref::Symbolic { full_ref_name, target, .. } if full_ref_name == "HEAD" => {
+                Some(target.to_string())
+            }
+            _ => None,
+        })
+        .ok_or_else(|| anyhow!("{url} does not say which branch is its default"))?;
+    Ok(head.strip_prefix("refs/heads/").unwrap_or(&head).to_owned())
+}
+
 /// What [`head_of`] names the branch of a detached HEAD.
 pub const DETACHED: &str = "(detached)";
 

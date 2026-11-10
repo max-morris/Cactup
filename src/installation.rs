@@ -66,6 +66,8 @@ pub struct AddedPackage {
     /// The exact version, `[track:]X.Y.Z`.
     pub version: String,
     /// The tag the version was cut from: a label; `commit` is what is fetched.
+    /// For a branch tip (`version` `head`/`master`), the default branch it
+    /// follows: no commit is pinned, and a refetch moves along that branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
     pub commit: String,

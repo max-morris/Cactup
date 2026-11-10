@@ -84,6 +84,16 @@ impl Client {
         json(self.send(crate::fetch::download::client().get(&url))?)
     }
 
+    /// A package's branch tip (`head` or `master`: both its default branch),
+    /// its thorns at the tip's commit, and whether the Cactarium does not
+    /// trust it (then nobody has reviewed that code).
+    pub fn package_tip(&self, owner: &str, name: &str, tip: &str) -> Res<(cactup_ecosystem_common::api::PackageVersion, bool)> {
+        let url = self.url(&format!("/packages/{owner}/{name}/versions/{tip}"));
+        let response = self.send(crate::fetch::download::client().get(&url))?;
+        let untrusted = response.headers().get(UNTRUSTED_HEADER).is_some_and(|v| v.as_bytes() == b"true");
+        Ok((json(response)?, untrusted))
+    }
+
     /// Every release of a stack, each with whether it has been yanked.
     pub fn stack_releases(&self, owner: &str, name: &str) -> Res<StackReleases> {
         let url = self.url(&format!("/stacks/{owner}/{name}/releases"));
@@ -282,7 +292,7 @@ pub fn stack_release_text(db: &Database, req: &str, allow_untrusted: bool) -> Re
 /// The warning for an untrusted stack's branch tip, then the yes it needs:
 /// typed at a terminal, or given up front by the flag. Without either there
 /// is nobody to ask, so it is refused.
-fn confirm_untrusted(slug: &str, allow: bool) -> Res<()> {
+pub(crate) fn confirm_untrusted(slug: &str, allow: bool) -> Res<()> {
     use std::io::{IsTerminal, Write};
     eprintln!(
         "{}",

@@ -55,6 +55,9 @@ pub fn compose(base: &str, added: &[AddedPackage]) -> Res<String> {
         .flat_map(|a| {
             a.thorns.iter().map(move |t| {
                 let repo = clone_of(&a.repo, t);
+                // A branch tip follows its default branch (named in `tag`):
+                // no pin, so a refetch moves it with the tip.
+                let tip = is_tip(&a.version);
                 Component {
                     ty: ComponentType::Git,
                     target: format!("{root}/arrangements"),
@@ -66,7 +69,7 @@ pub fn compose(base: &str, added: &[AddedPackage]) -> Res<String> {
                     anon_pass: None,
                     repo_path: (!t.repo_path.is_empty()).then(|| t.repo_path.clone()),
                     branch: a.tag.clone(),
-                    commit: Some(a.commit.clone()),
+                    commit: (!tip).then(|| a.commit.clone()),
                     checksum: None,
                     fetch_only: false,
                     repo,
@@ -116,6 +119,12 @@ fn reuse_base_clone(base: &thornlist::Thornlist, url: &str, repo: &mut String, t
     }
 }
 
+/// Whether an added package's version is a branch tip (`head`, `master`):
+/// its default branch, followed rather than pinned.
+pub(crate) fn is_tip(version: &str) -> bool {
+    matches!(version, "head" | "master")
+}
+
 /// Every clone a package is fetched into.
 fn package_repos(a: &AddedPackage) -> BTreeSet<String> {
     a.thorns.iter().map(|t| clone_of(&a.repo, t)).collect()
@@ -149,7 +158,7 @@ struct Wanted {
 /// it (`owner/pkg/A owner/pkg/B`) are one add of those thorns, and naming
 /// the package whole anywhere adds all of them. Two specs that resolve to
 /// different versions of one package are an error, not a silent winner.
-fn resolve_all(client: &crate::cactarium::Client, specs: &[String]) -> Res<Vec<Wanted>> {
+fn resolve_all(client: &crate::cactarium::Client, specs: &[String], allow_untrusted: bool) -> Res<Vec<Wanted>> {
     let mut wanted: Vec<Wanted> = Vec::new();
     let mut listings: std::collections::HashMap<String, cactup_ecosystem_common::api::PackageVersions> =
         std::collections::HashMap::new();
@@ -172,15 +181,34 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String]) -> Res<Vec<W
         let commit =
             resolved.version.commit.clone().ok_or_else(|| anyhow!("The Cactarium gave {} no commit", resolved.slug))?;
         let url = resolved.url.clone().ok_or_else(|| anyhow!("The Cactarium gave {} no repository", resolved.slug))?;
-        if !listings.contains_key(&entry) {
-            let versions = client.package_versions(slug.owner.as_str(), slug.name.as_str())?;
-            listings.insert(entry.clone(), versions);
-        }
-        let version = listings[&entry]
-            .versions
-            .iter()
-            .find(|v| v.version.version == resolved.version.version)
-            .ok_or_else(|| anyhow!("The Cactarium lists no thorns for {}", resolved.slug))?;
+        // A branch tip (`@head`, `@master`) is no version in the list: its
+        // thorns come at the tip's commit, with whether anyone vouches for it.
+        let tip_version;
+        // The label recorded with it: the tag a version was cut from, or the
+        // default branch a tip follows, named so a refetch knows which branch
+        // to move along (and never mistakes an earlier pin's tag for one).
+        let mut label = resolved.version.tag.clone();
+        let version = if let Some(tip) = slug.at.as_deref().filter(|_| slug.tip().is_some()) {
+            let (version, untrusted) = client.package_tip(slug.owner.as_str(), slug.name.as_str(), tip)?;
+            if untrusted {
+                crate::cactarium::confirm_untrusted(&resolved.slug, allow_untrusted)?;
+            }
+            let scratch = tempfile::tempdir().context("Failed to create a scratch directory")?;
+            gix::init_bare(scratch.path()).context("Failed to create a scratch repository")?;
+            label = Some(crate::fetch::git::remote_default_branch(scratch.path(), &url)?);
+            tip_version = version;
+            &tip_version
+        } else {
+            if !listings.contains_key(&entry) {
+                let versions = client.package_versions(slug.owner.as_str(), slug.name.as_str())?;
+                listings.insert(entry.clone(), versions);
+            }
+            listings[&entry]
+                .versions
+                .iter()
+                .find(|v| v.version.version == resolved.version.version)
+                .ok_or_else(|| anyhow!("The Cactarium lists no thorns for {}", resolved.slug))?
+        };
         let thorns: Vec<AddedThorn> = version
             .thorns
             .iter()
@@ -223,7 +251,7 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String]) -> Res<Vec<W
                 entry,
                 slug: resolved.slug.to_string(),
                 version: resolved.version.version.clone(),
-                tag: resolved.version.tag.clone(),
+                tag: label,
                 commit,
                 url,
                 thorns,
@@ -250,7 +278,7 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String]) -> Res<Vec<W
 
 pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<()> {
     let client = crate::cactarium::Client::new(&ctx.db.read()?);
-    let wanted = resolve_all(&client, specs)?;
+    let wanted = resolve_all(&client, specs, ctx.globals.risky_allow_untrusted_artifacts)?;
 
     let inst = Installation::resolve(ctx)?;
     let locked = inst.locked()?;
@@ -363,11 +391,16 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<
 
     for package in &added {
         let checkouts: Vec<&str> = package.thorns.iter().map(|t| t.checkout.as_str()).collect();
+        let short = &package.commit[..12.min(package.commit.len())];
+        let at = if is_tip(&package.version) {
+            format!("following its default branch, now at {short}")
+        } else {
+            format!("at {short}")
+        };
         println!(
-            "Added {} ({}) at {}{}.",
+            "Added {} ({}) {at}{}.",
             format!("{}@{}", package.package, package.version).bold(),
             checkouts.join(", "),
-            &package.commit[..12.min(package.commit.len())],
             if package.replaces.is_empty() { String::new() } else { format!(", in place of {}", package.replaces.join(", ")) }
         );
     }
@@ -587,6 +620,22 @@ mod tests {
         let mut kept = vec![AddedThorn { checkout: "CarpetX/Arith".into(), repo_path: "$2".into() }];
         reuse_base_clone(&base, "https://x/carpetx.git", &mut other, &mut kept);
         assert_eq!((other.as_str(), kept[0].repo_path.as_str()), ("carpetx", "$2"));
+    }
+
+    /// A branch tip (`@head`, `@master`) follows its default branch: its
+    /// section names that branch and no commit, so a refetch moves it.
+    #[test]
+    fn a_branch_tip_is_written_unpinned() {
+        let mut tip = package("carpetx", &[("CarpetX/Arith", "$2")], &[]);
+        tip.version = "head".into();
+        tip.tag = Some("main".into());
+        let out = compose(BASE, &[tip]).unwrap();
+        let added = &out[out.find(BLOCK_HEADER).unwrap()..];
+        assert!(!added.contains("!REPO_COMMIT"), "{added}");
+        let list = thornlist::parse(&out).unwrap();
+        let arith = list.components().iter().find(|c| c.checkout == "CarpetX/Arith").unwrap();
+        assert_eq!((arith.commit.as_deref(), arith.branch.as_deref()), (None, Some("main")));
+        assert!(is_tip("master") && !is_tip("1.0.0"));
     }
 
     #[test]
