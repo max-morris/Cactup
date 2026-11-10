@@ -946,14 +946,15 @@ fn execute_restart(sim: &Simulation, r: &mut Restart, tee: bool) -> Res<()> {
     // Liveness (§2.3/§9.3): running.lock with heartbeat + the heartbeat file.
     let running = LinkLock::acquire(&r.running_lock_path())?.with_heartbeat();
     r.touch_heartbeat();
-    r.meta.started = Some(Utc::now());
-    r.meta.status = Some("R".to_owned());
-    // Running, so not ended: a job the scheduler requeued after its run
-    // recorded its end (preemption, `scontrol requeue`) runs again here,
-    // and records its end again when it is over (§8.6).
-    r.meta.terminated = false;
-    r.meta.finished = None;
-    r.store()?;
+    update_restart(sim, r, |meta| {
+        meta.started = Some(Utc::now());
+        meta.status = Some("R".to_owned());
+        // Running, so not ended: a job the scheduler requeued after its run
+        // recorded its end (preemption, `scontrol requeue`) runs again here,
+        // and records its end again when it is over (§8.6).
+        meta.terminated = false;
+        meta.finished = None;
+    })?;
 
     let tee_files = tee.then(|| {
         (r.dir.join(format!("{}.out", sim.name)), r.dir.join(format!("{}.err", sim.name)))
@@ -963,10 +964,11 @@ fn execute_restart(sim: &Simulation, r: &mut Restart, tee: bool) -> Res<()> {
 
     // Record completion whatever happened; the parfile decides its own
     // checkpoint/termination behavior — cactup only bookkeeps (§8.8).
-    r.meta.finished = Some(Utc::now());
-    r.meta.terminated = true;
-    r.meta.status = Some("U".to_owned());
-    r.store()?;
+    update_restart(sim, r, |meta| {
+        meta.finished = Some(Utc::now());
+        meta.terminated = true;
+        meta.status = Some("U".to_owned());
+    })?;
     let _ = parfile; // the ready-to-run parfile stays in the restart (§9.1)
 
     match status {
@@ -984,6 +986,31 @@ fn execute_restart(sim: &Simulation, r: &mut Restart, tee: bool) -> Res<()> {
             Err(e)
         }
     }
+}
+
+/// Change restart `r` on disk by `edit` and nothing else: read afresh under
+/// the per-simulation lock, edited, stored, and `r` left holding what was
+/// stored. A run keeps its restart for days, and meanwhile login-side
+/// commands write to the same file (`sim stop`, the `job-stopped` record,
+/// the reaper); storing the copy read at the start would silently undo
+/// them. A lock that cannot be had in time does not lose the record: the
+/// file is still read afresh, only without the lock's guard against a
+/// writer at that very moment. A file that cannot be read at all gets the
+/// run's own copy, with a warning.
+fn update_restart(sim: &Simulation, r: &mut Restart, edit: impl FnOnce(&mut restart::RestartMeta)) -> Res<()> {
+    let _lock = sim.lock_wait().ok();
+    match Restart::load(&sim.dir, r.id) {
+        Ok(fresh) => r.meta = fresh.meta,
+        // Unreadable now: the run's own copy is recorded rather than nothing,
+        // and said so, since whatever was written meanwhile is lost.
+        Err(e) => eprintln!(
+            "{}",
+            format!("Could not re-read restart {} ({e:#}); recording the run's own copy", restart::dir_name(r.id))
+                .yellow()
+        ),
+    }
+    edit(&mut r.meta);
+    r.store()
 }
 
 /// Spawn the run and wait for it, touching the heartbeat file every
@@ -1239,6 +1266,45 @@ mod tests {
         }
     }
 
+
+    /// A run's start and finish writes change only their own fields: what a
+    /// login-side command wrote meanwhile (`sim stop`'s job-stopped record)
+    /// survives the finish, though the run's copy was read before it.
+    #[test]
+    fn a_runs_writes_keep_what_was_recorded_during_the_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("bbh");
+        let meta = crate::sim::SimulationMeta { parfile: "bbh.par".to_owned(), ..Default::default() };
+        crate::installation::write_toml(&dir.join(".cactup").join("simulation.toml"), &meta).unwrap();
+        let rdir = restart::restart_dir(&dir, 0);
+        fs::create_dir_all(rdir.join(".cactup")).unwrap();
+        fs::write(
+            rdir.join(".cactup").join("restart.toml"),
+            "created = \"2024-01-01T00:00:00Z\"\nnodes = 1\ntasks = 1\ntpn = 1\ncpus = 1\nqueue = \"debug\"\n\
+             walltime = \"24:00:00\"\ncheckpt-buffer = \"00:10:00\"\njob-id = \"42\"\n",
+        )
+        .unwrap();
+        let sim = Simulation::open("bbh", &dir).unwrap();
+        let mut run_copy = Restart::load(&dir, 0).unwrap();
+        update_restart(&sim, &mut run_copy, |m| m.status = Some("R".to_owned())).unwrap();
+
+        // A login-side command writes during the run.
+        let mut login = Restart::load(&dir, 0).unwrap();
+        let stopped = Utc::now();
+        login.meta.job_stopped = Some(stopped);
+        login.store().unwrap();
+
+        update_restart(&sim, &mut run_copy, |m| {
+            m.terminated = true;
+            m.status = Some("U".to_owned());
+        })
+        .unwrap();
+        let on_disk = Restart::load(&dir, 0).unwrap();
+        assert_eq!(on_disk.meta.job_stopped, Some(stopped), "the login-side record survives the finish");
+        assert!(on_disk.meta.terminated);
+        assert_eq!(on_disk.meta.status.as_deref(), Some("U"));
+        assert_eq!(run_copy.meta.job_stopped, Some(stopped), "the run's copy is what was stored");
+    }
     #[test]
     fn submit_chains_and_compute_run_executes() {
         let tmp = tempfile::tempdir().unwrap();
