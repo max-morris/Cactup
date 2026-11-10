@@ -54,25 +54,22 @@ pub fn compose(base: &str, added: &[AddedPackage]) -> Res<String> {
         .iter()
         .flat_map(|a| {
             a.thorns.iter().map(move |t| {
-                let thorn = t.checkout.rsplit('/').next().unwrap_or(&t.checkout);
-                // `$2` (the thorn's name) when the thorn's directory is named
-                // for it, so a package's thorns share one section.
-                let repo_path = if t.repo_path == thorn { "$2".to_owned() } else { t.repo_path.clone() };
+                let repo = clone_of(&a.repo, t);
                 Component {
                     ty: ComponentType::Git,
                     target: format!("{root}/arrangements"),
                     checkout: t.checkout.clone(),
-                    name: Some(a.repo.clone()),
+                    name: Some(repo.clone()),
                     url: Some(a.url.clone()),
                     auth_url: None,
                     anon_user: None,
                     anon_pass: None,
-                    repo_path: Some(repo_path),
+                    repo_path: (!t.repo_path.is_empty()).then(|| t.repo_path.clone()),
                     branch: a.tag.clone(),
                     commit: Some(a.commit.clone()),
                     checksum: None,
                     fetch_only: false,
-                    repo: a.repo.clone(),
+                    repo,
                 }
             })
         })
@@ -82,6 +79,46 @@ pub fn compose(base: &str, added: &[AddedPackage]) -> Res<String> {
     out.push_str(sections);
     thornlist::parse(&out).context("The thornlist with the added packages does not parse")?;
     Ok(out)
+}
+
+/// The clone thorn `t` of a package is fetched into. `t.repo_path` is the
+/// `!REPO_PATH` written for it, verbatim (the Cactarium derives it from where
+/// the thorn sits in the repository, or it is the base list's own, when the
+/// base already clones the repository). GetComponents links the checkout to
+/// `repos/<clone>/<REPO_PATH>`, so a path that starts `../<name>` leaves the
+/// clone and comes back in through `<name>`: the clone must then be named
+/// that, `$1`/`$2` filled in from the checkout, as for the Einstein
+/// Toolkit's ExternalLibraries (`../$1-$2`). Any other path is inside the
+/// package's own clone, `package_repo`.
+fn clone_of(package_repo: &str, t: &crate::installation::AddedThorn) -> String {
+    let Some(rest) = t.repo_path.strip_prefix("../") else { return package_repo.to_owned() };
+    let (arrangement, thorn) = t.checkout.rsplit_once('/').unwrap_or(("", &t.checkout));
+    let name = rest.split('/').next().unwrap_or(rest);
+    name.replace("$1", arrangement).replace("$2", thorn)
+}
+
+/// A base that already clones the package's repository (`url`, normalized)
+/// keeps its clone: the package's thorns go into it, laid out as the base's
+/// section lays that repository out (its clone's name and `!REPO_PATH`),
+/// rather than into a second clone of the same repository.
+fn reuse_base_clone(base: &thornlist::Thornlist, url: &str, repo: &mut String, thorns: &mut [crate::installation::AddedThorn]) {
+    let normalized = crate::fetch::git::normalize_url(url);
+    let Some(same) = base
+        .components()
+        .iter()
+        .find(|c| c.url.as_deref().is_some_and(|u| crate::fetch::git::normalize_url(u) == normalized))
+    else {
+        return;
+    };
+    repo.clone_from(&same.repo);
+    for t in thorns {
+        t.repo_path = same.repo_path.clone().unwrap_or_default();
+    }
+}
+
+/// Every clone a package is fetched into.
+fn package_repos(a: &AddedPackage) -> BTreeSet<String> {
+    a.thorns.iter().map(|t| clone_of(&a.repo, t)).collect()
 }
 
 /// A repo's name as a thornlist derives it from its URL (no `!NAME`): the
@@ -150,6 +187,14 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String]) -> Res<Vec<W
             .filter(|t| slug.thorn.as_deref().is_none_or(|want| want.eq_ignore_ascii_case(&t.thorn)))
             .map(|t| AddedThorn { checkout: format!("{}/{}", t.arrangement, t.thorn), repo_path: t.repo_path.clone() })
             .collect();
+        if let Some(t) = thorns.iter().find(|t| t.repo_path.trim().is_empty()) {
+            bail!(
+                "The Cactarium gave no repo-path for {} in {}, so cactup cannot tell where it sits in the repository \
+                 (a problem on the Cactarium's side; report it there)",
+                t.checkout,
+                resolved.slug
+            );
+        }
         if thorns.is_empty() {
             let all: Vec<&str> = version.thorns.iter().map(|t| t.thorn.as_str()).collect();
             bail!(
@@ -230,7 +275,10 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<
     for w in wanted {
         // What in the base the package collides with: the same repository,
         // or a thorn it also checks out.
-        let repo = repo_name(&w.url);
+        let mut repo = repo_name(&w.url);
+        let mut thorns = w.thorns;
+        reuse_base_clone(&base, &w.url, &mut repo, &mut thorns);
+        let w = Wanted { thorns, ..w };
         let want: BTreeSet<&str> = w.thorns.iter().map(|t| t.checkout.as_str()).collect();
         let normalized = crate::fetch::git::normalize_url(&w.url);
         let conflicts: BTreeSet<String> = base
@@ -286,7 +334,8 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<
     let composed = compose(&pristine, &meta.added)?;
 
     // Fetch those repos — never the rest of the installation.
-    let repos: BTreeSet<&str> = added.iter().map(|a| a.repo.as_str()).collect();
+    let repos: BTreeSet<String> = added.iter().flat_map(package_repos).collect();
+    let repos: BTreeSet<&str> = repos.iter().map(String::as_str).collect();
     let list = thornlist::parse(&composed)?;
     let (progress, renderer) = crate::manifest::setup_prodash();
     let mut classify = progress.add_child("classify repos");
@@ -392,7 +441,8 @@ pub fn remove(ctx: &Ctx, package: &str, force: bool) -> Res<()> {
 
     println!("Removed {} from the thornlist.", removed.package.bold());
     if touched.is_empty() {
-        println!("Its repo {} stays on disk; `cactup inst refetch --prune` removes it.", removed.repo);
+        let repos: Vec<String> = package_repos(&removed).into_iter().collect();
+        println!("Its repo {} stays on disk; `cactup inst refetch --prune` removes it.", repos.join(", "));
     } else {
         println!("Restored {} to the base's commit.", removed.replaces.join(", "));
     }
@@ -433,7 +483,7 @@ mod tests {
     #[test]
     fn compose_appends_a_pinned_block_and_keeps_the_base() {
         assert_eq!(compose(BASE, &[]).unwrap(), BASE);
-        let out = compose(BASE, &[package("spacetimex", &[("SpacetimeX/Z4c", "Z4c"), ("SpacetimeX/ADM", "ADM")], &[])]).unwrap();
+        let out = compose(BASE, &[package("spacetimex", &[("SpacetimeX/Z4c", "$2"), ("SpacetimeX/ADM", "$2")], &[])]).unwrap();
         assert!(out.starts_with(BASE), "{out}");
         let list = thornlist::parse(&out).unwrap();
         let added: Vec<_> = list.components().iter().filter(|c| c.repo == "spacetimex").collect();
@@ -447,7 +497,7 @@ mod tests {
     /// place; without the record, the duplicate is an error.
     #[test]
     fn a_replacing_package_takes_its_checkouts_over_from_the_base() {
-        let fork = package("carpetx-fork", &[("CarpetX/CarpetX", "CarpetX"), ("CarpetX/Loop", "Loop")], &["carpetx"]);
+        let fork = package("carpetx-fork", &[("CarpetX/CarpetX", "$2"), ("CarpetX/Loop", "$2")], &["carpetx"]);
         let out = compose(BASE, std::slice::from_ref(&fork)).unwrap();
         let list = thornlist::parse(&out).unwrap();
         let loop_from: Vec<&str> =
@@ -457,6 +507,86 @@ mod tests {
 
         let unrecorded = AddedPackage { replaces: vec![], ..fork };
         assert!(compose(BASE, &[unrecorded]).is_err(), "two repos claiming one checkout must not compose");
+    }
+
+    /// `!REPO_PATH` is the Cactarium's value, verbatim, for every layout,
+    /// and the clone follows from it: `../$1-$2` (a repository that is one
+    /// thorn) reaches a clone named `<Arrangement>-<Thorn>`, anything else
+    /// the package's own. Checked by fetching real repositories and
+    /// following the links: each thorn lands at `arrangements/<Arr>/<Thorn>`.
+    #[test]
+    fn the_cactarium_s_repo_path_places_every_layout() {
+        use crate::fetch::git::testrepo;
+        let tmp = tempfile::tempdir().unwrap();
+        let upstream = |name: &str, files: &[(&str, &str)], thorns: &[(&str, &str)]| -> AddedPackage {
+            let dir = tmp.path().join("up").join(name);
+            testrepo::init(&dir);
+            let commit = crate::fetch::tests::commit_files(&dir, files);
+            AddedPackage {
+                package: format!("et/{name}"),
+                version: "1.0.0".into(),
+                tag: None,
+                commit: commit.to_string(),
+                url: dir.to_string_lossy().into_owned(),
+                repo: repo_name(&dir.to_string_lossy()),
+                thorns: thorns.iter().map(|(c, p)| AddedThorn { checkout: (*c).into(), repo_path: (*p).into() }).collect(),
+                replaces: Vec::new(),
+                contact: None,
+            }
+        };
+        let packages = [
+            upstream("fakelib-moved", &[("interface.ccl", "fakelib\n")], &[("ExternalLibraries/FakeLib", "../$1-$2")]),
+            upstream(
+                "tools",
+                &[("Foo/interface.ccl", "foo\n"), ("src/Bar/interface.ccl", "bar\n"), ("Tools/Baz/interface.ccl", "baz\n")],
+                &[("Tools/Foo", "$2"), ("Tools/Bar", "src/$2"), ("Tools/Baz", "$1/$2")],
+            ),
+        ];
+        let text = compose("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n", &packages).unwrap();
+        if let Some(out) = std::env::var_os("CACTUP_TEST_DUMP_ADDED") {
+            std::fs::write(out, &text).unwrap();
+        }
+        assert!(text.contains("!REPO_PATH   = ../$1-$2\n"), "{text}");
+        assert!(text.contains("!NAME        = ExternalLibraries-FakeLib\n"), "{text}");
+        assert!(text.contains("!REPO_PATH   = src/$2\n") && text.contains("!REPO_PATH   = $1/$2\n"), "{text}");
+        assert_eq!(package_repos(&packages[0]), ["ExternalLibraries-FakeLib".to_string()].into_iter().collect());
+        assert_eq!(package_repos(&packages[1]), ["tools".to_string()].into_iter().collect());
+
+        let list = thornlist::parse(&text).unwrap();
+        let root = tmp.path().join("install");
+        let mut progress = prodash::tree::Root::new().add_child("plan");
+        let plan = crate::fetch::plan(&list, &root, &mut progress).unwrap();
+        let report = crate::fetch::execute(&plan, &root).unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        for (checkout, content) in
+            [("ExternalLibraries/FakeLib", "fakelib\n"), ("Tools/Foo", "foo\n"), ("Tools/Bar", "bar\n"), ("Tools/Baz", "baz\n")]
+        {
+            let ccl = root.join("Cactus/arrangements").join(checkout).join("interface.ccl");
+            assert_eq!(std::fs::read_to_string(&ccl).unwrap_or_else(|e| panic!("{checkout}: {e}")), content);
+        }
+    }
+
+    /// A base that already clones the repository keeps its clone: an ET
+    /// list's ExternalLibraries-HDF5 section is reused, name and layout,
+    /// whatever the Cactarium derived; a repository the base does not have
+    /// keeps the package's own.
+    #[test]
+    fn a_repository_the_base_already_clones_is_reused() {
+        let base = thornlist::parse(
+            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!TARGET = $ROOT/arrangements\n!TYPE = git\n\
+             !URL = https://github.com/EinsteinToolkit/$1-$2.git\n!REPO_PATH = ../$1-$2\n!CHECKOUT = ExternalLibraries/HDF5\n",
+        )
+        .unwrap();
+        let mut repo = "hdf5-mirror".to_owned();
+        let mut thorns = vec![AddedThorn { checkout: "ExternalLibraries/HDF5".into(), repo_path: "$2".into() }];
+        reuse_base_clone(&base, "https://github.com/EinsteinToolkit/ExternalLibraries-HDF5", &mut repo, &mut thorns);
+        assert_eq!(repo, "ExternalLibraries-HDF5");
+        assert_eq!(thorns[0].repo_path, "../$1-$2");
+
+        let mut other = "carpetx".to_owned();
+        let mut kept = vec![AddedThorn { checkout: "CarpetX/Arith".into(), repo_path: "$2".into() }];
+        reuse_base_clone(&base, "https://x/carpetx.git", &mut other, &mut kept);
+        assert_eq!((other.as_str(), kept[0].repo_path.as_str()), ("carpetx", "$2"));
     }
 
     #[test]

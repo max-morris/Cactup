@@ -1563,7 +1563,7 @@ mod tests {
             repo: "carpetx".into(),
             thorns: ["CarpetX/TestReal4", "CarpetX/Loop"]
                 .iter()
-                .map(|c| AddedThorn { checkout: (*c).into(), repo_path: c.rsplit('/').next().unwrap().into() })
+                .map(|c| AddedThorn { checkout: (*c).into(), repo_path: "$2".into() })
                 .collect(),
             replaces: vec![],
             contact: Some("https://x/issues".into()),

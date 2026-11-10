@@ -277,7 +277,7 @@ checksum = "49e78e506b9d7633710dab98996f22f95f3d0f488e8f1aa162830556ed9fc14d"
 [[package]]
 name = "cactup-ecosystem-common"
 version = "0.1.0"
-source = "git+https://github.com/max-morris/cactup-ecosystem-common?rev=e94c1cade799de0a8889d2647b8e5133431f2cae#e94c1cade799de0a8889d2647b8e5133431f2cae"
+source = "git+https://github.com/max-morris/cactup-ecosystem-common?rev=d1ea72463f7c8fa403ad661c5774b69378b7e110#d1ea72463f7c8fa403ad661c5774b69378b7e110"
 dependencies = [
  "anyhow",
  "indexmap",

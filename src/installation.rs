@@ -72,7 +72,7 @@ pub struct AddedPackage {
     pub url: String,
     /// The repo's name in the thornlist (its URL's basename).
     pub repo: String,
-    /// The checkouts enabled, each `Arrangement/Thorn` with its directory in the repo.
+    /// The checkouts enabled, each `Arrangement/Thorn` with the `!REPO_PATH` it is written with.
     pub thorns: Vec<AddedThorn>,
     /// Base repos this package stands in for (`--replace`): their checkouts
     /// are dropped from the composed list.
@@ -88,6 +88,10 @@ pub struct AddedPackage {
 #[serde(rename_all = "kebab-case")]
 pub struct AddedThorn {
     pub checkout: String,
+    /// The `!REPO_PATH` its section is written with, verbatim: the
+    /// Cactarium's (derived from where the thorn sits in the repository), or
+    /// the base list's own when the base already clones the repository.
+    /// Empty: no `!REPO_PATH`.
     pub repo_path: String,
 }
 

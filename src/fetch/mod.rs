@@ -1176,7 +1176,7 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A miniature list in the shape the real Einstein Toolkit one uses: the
@@ -1558,7 +1558,7 @@ mod tests {
     /// never actually contains the nested path can't provide that after a
     /// real clone (unlike the working tree right after `commit_file`, a
     /// clone only ever materializes what the last commit's tree records).
-    fn commit_files(dir: &Path, files: &[(&str, &str)]) -> gix::ObjectId {
+    pub(crate) fn commit_files(dir: &Path, files: &[(&str, &str)]) -> gix::ObjectId {
         let repo = gix::open(dir).expect("open repo");
 
         #[derive(Default)]
