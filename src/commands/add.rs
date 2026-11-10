@@ -70,6 +70,7 @@ pub fn compose(base: &str, added: &[AddedPackage]) -> Res<String> {
                     repo_path: Some(repo_path),
                     branch: a.tag.clone(),
                     commit: Some(a.commit.clone()),
+                    fetch_only: false,
                     repo: a.repo.clone(),
                 }
             })

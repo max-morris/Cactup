@@ -80,8 +80,13 @@ fn read_ccl(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
+/// A thorn the list builds from an arrangement — what a trim decides on. A
+/// checkout-only thorn (`fetch_only`, written on its `!CHECKOUT` line) is
+/// not one: it is never compiled, so it can neither be activated nor meet a
+/// requirement, and a trim leaves it exactly as it is.
 fn is_arrangement_thorn(list: &Thornlist, c: &Component) -> bool {
-    c.target.trim_end_matches('/') == format!("{}/arrangements", list.root().trim_end_matches('/'))
+    !c.fetch_only
+        && c.target.trim_end_matches('/') == format!("{}/arrangements", list.root().trim_end_matches('/'))
         && c.checkout.matches('/').count() == 1
 }
 
@@ -102,7 +107,7 @@ pub fn needed(list: &Thornlist, cactus_root: &Path, par: &str) -> Res<BTreeSet<S
     let missing: Vec<&String> = active.iter().filter(|t| !by_name.contains_key(t.as_str())).collect();
     if !missing.is_empty() {
         let names: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
-        bail!("The parfile activates thorns the thornlist does not name: {}", names.join(", "));
+        bail!("The parfile activates thorns the thornlist does not build: {}", names.join(", "));
     }
     let lower = |v: &[String]| v.iter().map(|s| s.to_ascii_lowercase()).collect::<Vec<_>>();
     // Who offers what, across the whole list.
@@ -212,18 +217,19 @@ pub fn drop_checkouts(text: &str, list: &Thornlist, drop: &BTreeSet<&str>, disab
         }
         let value_end = keys.get(i + 1).map_or(text.len(), |k| k.1);
         let value = &text[*value_start..value_end];
-        // Tokens before the first comment-only line belong to this
-        // checkout; `#` ends a token run on its line, as the parser reads it.
-        let tokens: Vec<&str> = value
-            .lines()
-            .filter(|l| !l.trim_start().starts_with('#'))
-            .flat_map(|l| l.split('#').next().unwrap_or("").split_whitespace())
-            .collect();
-        if !tokens.iter().any(|t| drop.contains(t)) {
+        // `#` ends a token run on its line, as the parser reads it. Tokens on
+        // the `!CHECKOUT` line itself are the ET's checkout-only idiom —
+        // fetched, never built, because Cactus's ThornList reader skips `!`
+        // lines — and the ones after it are built: each keeps its place.
+        let mut lines = value.split_inclusive('\n');
+        let inline: Vec<&str> = lines.next().map(words).unwrap_or_default();
+        let below: Vec<&str> = lines.flat_map(words).collect();
+        if !inline.iter().chain(&below).any(|t| drop.contains(t)) {
             continue;
         }
-        let kept: Vec<&str> = tokens.iter().copied().filter(|t| !drop.contains(t)).collect();
-        let dropped: Vec<&str> = tokens.iter().copied().filter(|t| drop.contains(t)).collect();
+        let kept_inline: Vec<&str> = inline.iter().copied().filter(|t| !drop.contains(t)).collect();
+        let kept: Vec<&str> = below.iter().copied().filter(|t| !drop.contains(t)).collect();
+        let dropped: Vec<&str> = inline.iter().chain(&below).copied().filter(|t| drop.contains(t)).collect();
         // The comment and blank lines already in the value keep their place
         // after the rewritten checkouts.
         let trailing: String = value
@@ -232,12 +238,14 @@ pub fn drop_checkouts(text: &str, list: &Thornlist, drop: &BTreeSet<&str>, disab
             .filter(|l| l.trim().is_empty() || l.trim_start().starts_with('#'))
             .collect();
         out.push_str(&text[done..*start]);
-        // One checkout per line, never on the `!CHECKOUT` line itself: Cactus
-        // reads the same file as its ThornList, skipping every `!` line and
-        // squeezing the spaces out of the rest (lib/sbin/MakeUtils.pl,
-        // ReadThornlist), so a thorn sharing a line is never built. (No
-        // checkout left: the section fetches nothing, which is harmless.)
-        out.push_str("!CHECKOUT =\n");
+        // Built checkouts one per line: Cactus squeezes the spaces out of a
+        // line (lib/sbin/MakeUtils.pl, ReadThornlist), so two on one would
+        // read as one. (No checkout left: the section fetches nothing.)
+        if kept_inline.is_empty() {
+            out.push_str("!CHECKOUT =\n");
+        } else {
+            out.push_str(&format!("!CHECKOUT = {}\n", kept_inline.join(" ")));
+        }
         for k in &kept {
             out.push_str(&format!("{k}\n"));
         }
@@ -250,12 +258,24 @@ pub fn drop_checkouts(text: &str, list: &Thornlist, drop: &BTreeSet<&str>, disab
     out.push_str(&text[done..]);
 
     let trimmed = crate::thornlist::parse(&out).context("The trimmed thornlist does not parse")?;
-    let names = |l: &Thornlist| -> BTreeSet<String> { l.components().iter().map(|c| c.checkout.clone()).collect() };
-    let want: BTreeSet<String> = names(list).into_iter().filter(|c| !drop.contains(c.as_str())).collect();
+    // Same checkouts, each still fetched-only or built as it was.
+    let names = |l: &Thornlist| -> BTreeSet<(String, bool)> {
+        l.components().iter().map(|c| (c.checkout.clone(), c.fetch_only)).collect()
+    };
+    let want: BTreeSet<(String, bool)> = names(list).into_iter().filter(|(c, _)| !drop.contains(c.as_str())).collect();
     if names(&trimmed) != want {
         bail!("Dropping checkouts changed more than those checkouts (a bug in rewriting this list)");
     }
     Ok(out)
+}
+
+/// The checkout tokens on one line of a `!CHECKOUT` value: none on a comment
+/// line, and none after a `#`.
+fn words(line: &str) -> Vec<&str> {
+    if line.trim_start().starts_with('#') {
+        return Vec::new();
+    }
+    line.split('#').next().unwrap_or("").split_whitespace().collect()
 }
 
 #[cfg(test)]
@@ -296,16 +316,19 @@ mod tests {
         thorn("Lib/HDF5", "IMPLEMENTS: hdf5\n", Some("PROVIDES HDF5\n{\n  SCRIPT configure.sh\n  LANG bash\n}\n"));
         thorn("Lib/HDF5Alt", "IMPLEMENTS: hdf5alt\n", Some("PROVIDES HDF5\n{\n}\n"));
         thorn("B/Unused", "IMPLEMENTS: unused\n", None);
+        // Checkout-only: written on its `!CHECKOUT` line, fetched, never
+        // built — so it cannot provide `driver`, and a trim leaves it be.
+        thorn("A/FetchedOnly", "IMPLEMENTS: driver\n", None);
         thorn("B/AlsoUnused", "IMPLEMENTS: alsounused\n", None);
 
         let text = "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\
                     !TARGET = $ROOT\n!TYPE = git\n!URL = https://x/flesh.git\n!CHECKOUT = Makefile\n\n\
                     !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://x/a.git\n!REPO_PATH = $2\n\
-                    !CHECKOUT = A/Main A/Driver A/OtherDriver\n  A/Helper A/Solver\n\n\
+                    !CHECKOUT = A/FetchedOnly\nA/Main\nA/Driver\nA/OtherDriver\n  A/Helper A/Solver\n\n\
                     !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://x/lib.git\n!REPO_PATH = $2\n\
-                    !CHECKOUT = Lib/HDF5 Lib/HDF5Alt\n\n\
+                    !CHECKOUT =\nLib/HDF5\nLib/HDF5Alt\n\n\
                     # unrelated\n!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://x/b.git\n!REPO_PATH = $2\n\
-                    !CHECKOUT = B/Unused B/AlsoUnused\n";
+                    !CHECKOUT =\nB/Unused\nB/AlsoUnused\n";
         let list = crate::thornlist::parse(text).unwrap();
         let par = "ActiveThorns = \"Main Driver\"\n";
         let keep = needed(&list, &cactus, par).unwrap();
@@ -315,12 +338,16 @@ mod tests {
         let trimmed = trim_text(text, &list, &needed(&list, &cactus, par).unwrap()).unwrap();
         let parsed = crate::thornlist::parse(&trimmed).unwrap();
         let checkouts: Vec<&str> = parsed.components().iter().map(|c| c.checkout.as_str()).collect();
-        assert_eq!(checkouts, ["Makefile", "A/Main", "A/Driver", "A/Helper", "A/Solver", "Lib/HDF5", "Lib/HDF5Alt"]);
+        assert_eq!(checkouts, ["Makefile", "A/FetchedOnly", "A/Main", "A/Driver", "A/Helper", "A/Solver", "Lib/HDF5", "Lib/HDF5Alt"]);
+        let fetched_only: Vec<&str> =
+            parsed.components().iter().filter(|c| c.fetch_only).map(|c| c.checkout.as_str()).collect();
+        // (The flesh's `!CHECKOUT = Makefile` is inline too: no thorn, nothing built.)
+        assert_eq!(fetched_only, ["Makefile", "A/FetchedOnly"], "a trim changes nothing about what is built");
         assert_eq!(parsed.disabled_thorns(), ["A/OtherDriver", "B/Unused", "B/AlsoUnused"]);
         assert!(trimmed.contains("# unrelated\n!TARGET"), "comments stay: {trimmed}");
         // Cactus reads this file as its ThornList and skips `!` lines, so no
         // kept thorn may sit on a `!CHECKOUT` line, and each needs its own.
-        assert!(trimmed.contains("!CHECKOUT =\nA/Main\nA/Driver\nA/Helper\nA/Solver\n"), "{trimmed}");
+        assert!(trimmed.contains("!CHECKOUT = A/FetchedOnly\nA/Main\nA/Driver\nA/Helper\nA/Solver\n"), "{trimmed}");
 
         // A thorn the parfile activates that the list lacks is an error.
         let err = format!("{:#}", needed(&list, &cactus, "ActiveThorns = \"Main Nope\"\n").unwrap_err());

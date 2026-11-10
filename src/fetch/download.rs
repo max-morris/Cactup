@@ -276,6 +276,7 @@ mod tests {
             repo_path: None,
             branch: None,
             commit: None,
+            fetch_only: false,
             repo: "dist".to_owned(),
         }
     }

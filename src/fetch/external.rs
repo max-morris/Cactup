@@ -301,6 +301,7 @@ mod tests {
             repo_path: None,
             branch: None,
             commit: None,
+            fetch_only: false,
             repo: "repo".to_owned(),
         }
     }

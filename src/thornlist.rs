@@ -78,6 +78,7 @@ pub fn parse_config_list(
         repo_path: None,
         branch: None,
         commit: None,
+        fetch_only: false,
         repo,
     };
     let mut components = Vec::new();
