@@ -162,6 +162,11 @@ pub struct Paths {
     /// fill it. For a site whose builds belong somewhere else.
     // §18.7
     pub build_cache_home: Option<String>,
+    /// Where `cactup import` keeps a `.sim`'s downloaded and unpacked inputs;
+    /// fallback `~/.cactup/inputs`. On a cluster, a work or scratch
+    /// filesystem the compute nodes see, not the home quota.
+    // §8.9
+    pub inputs_home: Option<String>,
 }
 
 // §4.2, §8.5 (the layout rules these keys feed).
@@ -1327,14 +1332,15 @@ impl Meta {
         field.map(|value| resolve_path(key, &value)).transpose()
     }
 
-    /// Every `[paths]` key by [`Meta::path_for`], but the build cache's
-    /// place, which is left `None`: that one is the cache's to resolve and
-    /// fall back from (`objcache::store_root`), never a reason to fail a
-    /// build, a simulation or an install.
+    /// Every `[paths]` key by [`Meta::path_for`], but the build cache's and
+    /// the inputs' places, which are left `None`: those are the cache's
+    /// (`objcache::store_root`) and the importer's (`inputs::inputs_dir`) to
+    /// resolve and fall back from, never a reason to fail a build, a
+    /// simulation or an install.
     pub fn paths_for(&self, db: &crate::database::Database) -> Res<Paths> {
         let mut paths = Paths::default();
         for (key, field) in path_fields(&mut paths) {
-            if key != "build-cache-home" {
+            if key != "build-cache-home" && key != "inputs-home" {
                 *field = self.path_for(db, key)?;
             }
         }
@@ -1344,13 +1350,14 @@ impl Meta {
 
 /// Each `[paths]` key with its field, by the name of the knob that
 /// overrides it for one user (§4.2, §5).
-fn path_fields(paths: &mut Paths) -> [(&'static str, &mut Option<String>); 5] {
+fn path_fields(paths: &mut Paths) -> [(&'static str, &mut Option<String>); 6] {
     [
         ("install-home", &mut paths.install_home),
         ("simulation-home", &mut paths.simulation_home),
         ("test-home", &mut paths.test_home),
         ("scratch-home", &mut paths.scratch_home),
         ("build-cache-home", &mut paths.build_cache_home),
+        ("inputs-home", &mut paths.inputs_home),
     ]
 }
 
@@ -1373,6 +1380,7 @@ pub fn fallback_home(key: &str) -> Option<std::path::PathBuf> {
         "install-home" => "cacti",
         "simulation-home" => "simulations",
         "test-home" => "tests",
+        "inputs-home" => "inputs",
         _ => return None,
     };
     Some(crate::CACTUP_ROOT.join(dir))
@@ -1925,6 +1933,27 @@ mod tests {
             assert!(path_knob_unset(key).is_some_and(|note| note.contains("machine's value")), "{key}");
         }
         assert_eq!(path_knob_unset("queue"), None);
+    }
+
+    /// `inputs-home`: the knob, else the machine's value resolved; and like
+    /// `build-cache-home`, an unresolvable machine value fails only its own
+    /// reader, never `paths_for` (a build, a simulation, an install).
+    #[test]
+    fn inputs_home_is_a_path_key_only_import_resolves() {
+        let user = super::super::whoami();
+        let with = |value: &str| -> Meta {
+            toml::from_str(&MIKE.replacen("simulation-home", &format!("inputs-home = \"{value}\"\nsimulation-home"), 1)).unwrap()
+        };
+        let mut db = crate::database::Database::new();
+        let meta = with("/work/@USER@/inputs");
+        assert_eq!(meta.path_for(&db, "inputs-home").unwrap(), Some(format!("/work/{user}/inputs")));
+        assert_eq!(meta.paths_for(&db).unwrap().inputs_home, None, "paths_for leaves it to the importer");
+        let broken = with("@ENV(CACTUP_SURELY_UNSET_VARIABLE)@/inputs");
+        assert!(broken.paths_for(&db).is_ok());
+        assert!(broken.path_for(&db, "inputs-home").is_err());
+        db.set_knob("inputs-home", "/scratch/mine".to_owned());
+        assert_eq!(broken.path_for(&db, "inputs-home").unwrap().as_deref(), Some("/scratch/mine"));
+        assert!(path_knob_unset("inputs-home").unwrap().ends_with("inputs"));
     }
 
     #[test]

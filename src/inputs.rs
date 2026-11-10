@@ -1,13 +1,16 @@
 //! A `.sim`'s inputs fetched from the network (spec §8.9): a file, kept as
 //! downloaded, or an archive, unpacked, edited by its fixups and kept as a
-//! tree. Both live in the inputs directory (the `inputs-dir` knob, else
-//! `~/.cactup/inputs`), shared by every simulation that needs the same
-//! bytes:
+//! tree. Both live in the inputs directory (the `inputs-home` path: the
+//! knob, else the machine's `[paths]` value, else `~/.cactup/inputs`),
+//! shared by every simulation that needs the same bytes:
 //!
 //! - `<dir>/<sha256>/<file name>`: a file input, by its content hash;
 //! - `<dir>/unpacked/<key>/`: an unpacked archive, by [`tree_key`] (the
 //!   archive's hash and its fixups, so two `.sim`s that edit the same archive
-//!   differently never share a tree).
+//!   differently never share a tree). A fixup bakes the tree's absolute
+//!   path into the files it edits, so a tree is only good where it was
+//!   unpacked: only the current inputs directory is ever looked in, and
+//!   moving `inputs-home` means unpacking again there.
 //!
 //! Only `cactup import` reaches this, on the login node (D11). An archive is
 //! never unpacked unverified: its SHA-256 is required (the shared crate's
@@ -33,12 +36,20 @@ const MAX_ENTRIES: u64 = 1_000_000;
 const UNPACKED_RATIO: u64 = 32;
 const MIN_UNPACKED_CAP: u64 = 64 << 30;
 
-/// The inputs directory: the `inputs-dir` knob, else `~/.cactup/inputs`.
-pub fn inputs_dir(db: &crate::database::Database) -> PathBuf {
-    match db.knob("inputs-dir") {
-        Some(dir) => PathBuf::from(crate::shell::expand_path(dir)),
-        None => crate::CACTUP_ROOT.join("inputs"),
-    }
+/// The inputs directory: the `inputs-home` knob, else the machine's
+/// `[paths] inputs-home` (`@USER@`/`@ENV(…)@` resolved), else
+/// `~/.cactup/inputs`. A host no machine matches has only the knob and the
+/// fallback.
+pub fn inputs_dir(ctx: &crate::commands::Ctx) -> Res<PathBuf> {
+    let db = ctx.db.read()?;
+    let from_machine = match crate::commands::machine::resolve_quietly(ctx)? {
+        Some(machine) => machine.meta.path_for(&db, "inputs-home")?,
+        None => db.knob("inputs-home").filter(|v| Path::new(v).is_absolute()).map(str::to_owned),
+    };
+    Ok(match from_machine {
+        Some(dir) => PathBuf::from(dir),
+        None => crate::mdb::meta::fallback_home("inputs-home").expect("inputs-home has a fallback"),
+    })
 }
 
 /// Whether to go ahead with a download of `size` bytes: yes below

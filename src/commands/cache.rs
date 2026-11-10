@@ -146,7 +146,7 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
             println!("The build cache in '{}'.", root.display());
             verify(&root)
         }
-        CacheCommand::Inputs { clear } => crate::inputs::list_or_clear(&crate::inputs::inputs_dir(&ctx.db.read()?), clear),
+        CacheCommand::Inputs { clear } => crate::inputs::list_or_clear(&crate::inputs::inputs_dir(ctx)?, clear),
     }
 }
 

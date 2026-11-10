@@ -74,7 +74,10 @@ and how to update a machine written for an older generation.
 
 A `[paths]` key may also be `build-cache-home`, where the build cache keeps
 its objects; no machine needs it, since the cache's default is beside the
-installations in `install-home`. Every `[paths]` key is a default for each
+installations in `install-home`. And `inputs-home` is where `cactup import`
+keeps the files and unpacked archives a shared simulation needs (default
+`~/.cactup/inputs`); on a cluster, put it on the same work or scratch
+filesystem as `simulation-home`, since inputs are often large. Every `[paths]` key is a default for each
 user: a knob of the same name, an absolute path, wins over it.
 
 ## Detailed field reference
@@ -588,9 +591,9 @@ rather than a job — `autoupdate`, `update-url` and `mdb-url` (see
 `build-cache-relocate`, `build-cache-size` and
 `build-cache-preserve-exact-warnings` (see
 [Building Configs](../users/building-configs.html)), and one per `[paths]`
-key, `install-home`, `simulation-home`, `test-home`, `scratch-home` and
-`build-cache-home`, an absolute path that wins over the machine's value;
-those twelve are never recorded with a simulation as knobs (the paths a job
+key, `install-home`, `simulation-home`, `test-home`, `scratch-home`,
+`build-cache-home` and `inputs-home`, an absolute path that wins over the
+machine's value; those thirteen are never recorded with a simulation as knobs (the paths a job
 needs are recorded as the paths they are). Users can also create
 **custom knobs**
 (`cactup knob -c my-name value`, removed with `cactup knob delete my-name`) and

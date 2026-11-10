@@ -1016,8 +1016,20 @@ TOML port of simfactory's `mdb/machines/<name>.ini` (`simfactory-docs.txt` §8).
   unset) is passed over for the next place with one line, never failing a
   build, a simulation or an install. A purge of the store's storage costs
   misses later, never a wrong object.
+- **`inputs-home`** (optional) is where `cactup import` keeps a `.sim`'s
+  downloaded and unpacked inputs (§8.9); omitted → `~/.cactup/inputs`. A
+  cluster puts it on a work or scratch filesystem the compute nodes see,
+  beside `simulation-home`: inputs are often large, and the simulation reads
+  them where they were unpacked. `@USER@` and `@ENV(NAME)@` work as in
+  `simulation-home`. Like `build-cache-home` it is left out of
+  `Meta::paths_for` and resolved only by its one user (`inputs::inputs_dir`),
+  so a value that cannot be resolved here fails an import, never a build or
+  a simulation. A fixup bakes an unpacked tree's absolute path into its
+  files, so a tree is good only where it was unpacked: moving `inputs-home`
+  means unpacking again there.
 - **Every `[paths]` key has a knob of the same name** (§5): `install-home`,
-  `simulation-home`, `test-home`, `scratch-home`, `build-cache-home`, an
+  `simulation-home`, `test-home`, `scratch-home`, `build-cache-home`,
+  `inputs-home`, an
   absolute path that wins over the machine's value for the user who sets it
   (`Meta::path_for`/`Meta::paths_for`; a machine value a knob overrides is
   not resolved at all). They are read where the machine's are, on the login
@@ -1976,7 +1988,7 @@ since what it serves is installed unasked; trailing `/` stripped; default
 `knob_snapshot()` never freezes them into restart/build/test metadata.
 
 The path knobs, one per `[paths]` key (`install-home`, `simulation-home`,
-`test-home`, `scratch-home`, `build-cache-home`; §4.2), are maintenance knobs
+`test-home`, `scratch-home`, `build-cache-home`, `inputs-home`; §4.2), are maintenance knobs
 too: an absolute path each (validated; read leniently, so a value that is not
 one is no value), winning over the machine's value of that key for the user
 who sets it. Where a job needs one, it is frozen like the machine's would be.
@@ -1990,8 +2002,6 @@ leniently — garbage, or a database that cannot be read, means `off`), `build-c
 depend on them, on a compute node included: `prepare` resolves them and
 freezes the result into the build attempt (§18.2). `KnobSpec::maintenance` is for exactly that kind of knob: one
 that configures cactup rather than a value a job's templates read.
-`inputs-dir` (an absolute path: where `cactup import` keeps a `.sim`'s
-downloaded and unpacked inputs, §8.9) is one too.
 
 **Storage:** knobs live in the **global database** (`~/.cactup/database.json`)
 as a single flat map — a `~/.cactup` lives on exactly one machine, so there is
@@ -4283,8 +4293,8 @@ long runs: `--input KNOB=VALUE`, else a download of the input's URL into
 `<inputs>/<sha256>/<file name>` (shared by every simulation needing
 the same bytes; checked against the recorded hash, and said so when there is
 none), else a prompt offering the user's global value. `<inputs>` is the
-maintenance knob `inputs-dir` (an absolute path; on a cluster, somewhere
-bigger than `$HOME`), else `~/.cactup/inputs`.
+`inputs-home` path (§4.2: the knob, else the machine's `[paths]` value, else
+`~/.cactup/inputs`).
 
 An **archive input** (`.sim` format 2: `unpack = true`, with `url` and the
 archive's `sha256` required, an optional `path` and `[[input.fixup]]`s; the

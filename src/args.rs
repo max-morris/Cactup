@@ -934,9 +934,9 @@ pub(crate) enum CacheCommand {
     Verify,
     /// List the inputs cactup import downloaded for simulations, or remove them
     ///
-    /// Inputs live in the inputs-dir knob's directory (default
-    /// ~/.cactup/inputs): downloaded files, and unpacked archives with their
-    /// fixups applied. Each is listed with its size and when it was last
+    /// Inputs live in the inputs-home directory (the knob, else the
+    /// machine's value, else ~/.cactup/inputs): downloaded files, and
+    /// unpacked archives with their fixups applied. Each is listed with its size and when it was last
     /// changed. --clear removes them all; an import fetches again what it
     /// needs. A simulation already created keeps pointing at its input, so
     /// clear only what no simulation still reads.

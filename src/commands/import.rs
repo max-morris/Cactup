@@ -415,8 +415,8 @@ fn settle_inputs(
         }
         given_values.insert(knob.to_owned(), value.to_owned());
     }
+    let dir = crate::inputs::inputs_dir(ctx)?;
     let db = ctx.db.read()?;
-    let dir = crate::inputs::inputs_dir(&db);
     let policy = crate::inputs::SizePolicy::new(interactive, yes);
     let mut knobs = IndexMap::new();
     let mut missing = Vec::new();

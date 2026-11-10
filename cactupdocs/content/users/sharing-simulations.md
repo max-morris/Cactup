@@ -100,11 +100,12 @@ unpacked files, such as replacing a placeholder path with the real one. A
 download over 1 GB is asked about first (`-y` says yes). Unpacked archives
 are kept and reused by every simulation that needs the same one.
 
-Downloads can be large. On a cluster, keep them somewhere other than your
-home directory with the `inputs-dir` knob:
+Downloads can be large, so on a cluster they belong somewhere other than
+your home directory. The machine's `inputs-home` says where; the knob of
+the same name overrides it for you:
 
 ```sh
-cactup knob -c inputs-dir /work/$USER/cactup-inputs
+cactup knob inputs-home /work/$USER/cactup-inputs
 cactup cache inputs              # what is there, and how big
 cactup cache inputs --clear      # remove it all
 ```
