@@ -25,11 +25,6 @@ use crate::format::{self, Format, Json};
 use crate::lock::LinkLock;
 use crate::Res;
 
-/// On-disk schema version (§2.1) of the cactup TOML records. `database.json`
-/// no longer uses it (it has [`DATABASE`]); it stays until every record has
-/// its own `format::Format` (design/format-versioning-plan.md, phase P2b).
-pub const SCHEMA: u32 = 1;
-
 /// `database.json`'s format: version 1, no migrations. Only login binaries
 /// write it (D11), so it is not `frozen_read`. An older login binary sharing
 /// `~/.cactup` keeps this one's additions when it writes, once it has this

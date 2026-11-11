@@ -1339,7 +1339,8 @@ mod tests {
     ) -> SimEntry {
         let dir = root.join(name);
         let meta = SimulationMeta { parfile: "bbh.par".to_owned(), ..Default::default() };
-        crate::installation::write_toml(&dir.join(".cactup").join("simulation.toml"), &meta).unwrap();
+        let record = dir.join(".cactup").join("simulation.toml");
+        crate::format::write(&record, &meta, &crate::sim::SIMULATION).unwrap();
 
         let rdir = restart::restart_dir(&dir, 0);
         fs::create_dir_all(rdir.join(".cactup")).unwrap();

@@ -76,7 +76,9 @@ pub struct Format<D: 'static> {
 /// A file written by a newer cactup: refused on read and on write.
 #[derive(Debug)]
 pub struct Newer {
-    pub path: PathBuf,
+    /// `None` for a record embedded in another ([`parse_embedded`]): the
+    /// error the outer record's read wraps it in names the file.
+    pub path: Option<PathBuf>,
     pub name: &'static str,
     pub key: &'static str,
     pub found: u64,
@@ -86,10 +88,13 @@ pub struct Newer {
 impl std::fmt::Display for Newer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // One message for every format; no spec references (users read it).
+        match &self.path {
+            Some(path) => write!(f, "'{}'", path.display())?,
+            None => write!(f, "an embedded {}", self.name)?,
+        }
         write!(
             f,
-            "'{}' was written by a newer cactup ({} {} {}; this cactup, {}, reads up to {}); upgrade cactup",
-            self.path.display(),
+            " was written by a newer cactup ({} {} {}; this cactup, {}, reads up to {}); upgrade cactup",
             self.name,
             self.key,
             self.found,
@@ -333,6 +338,19 @@ pub fn write<T: Serialize + DeserializeOwned, D: Document>(
     value: &T,
     f: &Format<D>,
 ) -> Res<()> {
+    write_replacing(path, value, f, &[])
+}
+
+/// [`write`], where this write also replaces whole the sub-records `whole`
+/// names (patterns as [`Format::replace_whole`]) on top of those the format
+/// always replaces: for a writer that sometimes edits a sub-record and
+/// sometimes rebuilds it from elsewhere.
+pub fn write_replacing<T: Serialize + DeserializeOwned, D: Document>(
+    path: &Path,
+    value: &T,
+    f: &Format<D>,
+    whole: &[&str],
+) -> Res<()> {
     let state = match read_text(path, f)? {
         None => DiskState::Absent,
         Some(text) => match decode(&text, path, f) {
@@ -342,7 +360,7 @@ pub fn write<T: Serialize + DeserializeOwned, D: Document>(
             Err(_) => DiskState::Unusable,
         },
     };
-    write_over(path, value, f, &OnDisk { state })
+    write_over_replacing(path, value, f, &OnDisk { state }, whole)
 }
 
 /// Write `value` over what [`read_for_write`] (or [`write`]) found at `path`.
@@ -352,20 +370,31 @@ pub fn write_over<T: Serialize + DeserializeOwned, D: Document>(
     f: &Format<D>,
     disk: &OnDisk<D>,
 ) -> Res<()> {
+    write_over_replacing(path, value, f, disk, &[])
+}
+
+fn write_over_replacing<T: Serialize + DeserializeOwned, D: Document>(
+    path: &Path,
+    value: &T,
+    f: &Format<D>,
+    disk: &OnDisk<D>,
+    whole: &[&str],
+) -> Res<()> {
     let mut doc = D::from_typed(value).with_context(|| format!("Failed to serialize {}", f.name))?;
     // The helper owns the version key, whatever the struct says.
     doc.remove(f.key);
     let floor = match &disk.state {
         DiskState::Parsed { version, doc: on_disk } => {
             if *version > f.current {
-                return Err(newer(path, f, u64::from(*version)));
+                return Err(newer(Some(path), f, u64::from(*version)));
             }
             // Put back before stepping down: the disk document (upgraded),
             // its round trip and `doc` are all at `current` here, so the
             // comparison never mixes two versions' key names; a down-step
             // leaves keys it does not know alone.
             if let Some(known) = round_trip::<T, D>(on_disk, f) {
-                put_back(&mut doc, on_disk, &known, f.replace_whole, &mut Vec::new());
+                let whole = [f.replace_whole, whole].concat();
+                put_back(&mut doc, on_disk, &known, &whole, &mut Vec::new());
             }
             *version
         }
@@ -373,13 +402,6 @@ pub fn write_over<T: Serialize + DeserializeOwned, D: Document>(
     };
     let (version, doc) = f.express(doc, floor);
     write_atomic(path, &with_version_first(doc, f.key, version).render()?)
-}
-
-/// Atomic (temp + rename) write of a plain, unversioned TOML record: for the
-/// records not yet on a [`Format`] (the build records, until P2b).
-pub(crate) fn write_toml<T: Serialize>(path: &Path, value: &T) -> Res<()> {
-    let text = toml::to_string_pretty(value).context("Failed to serialize TOML")?;
-    write_atomic(path, &text)
 }
 
 /// Atomic write (temp file in the same directory + fsync + rename), so a
@@ -427,9 +449,9 @@ fn read_text<D>(path: &Path, f: &Format<D>) -> Res<Option<String>> {
     }
 }
 
-fn newer<D>(path: &Path, f: &Format<D>, found: u64) -> anyhow::Error {
+fn newer<D>(path: Option<&Path>, f: &Format<D>, found: u64) -> anyhow::Error {
     anyhow::Error::new(Newer {
-        path: path.to_owned(),
+        path: path.map(Path::to_owned),
         name: f.name,
         key: f.key,
         found,
@@ -439,18 +461,51 @@ fn newer<D>(path: &Path, f: &Format<D>, found: u64) -> anyhow::Error {
 
 /// Raw parse → version → refuse newer → strip the key → `legacy` → upgrades.
 fn decode<D: Document>(text: &str, path: &Path, f: &Format<D>) -> Res<(u32, D)> {
-    let mut doc = D::parse(text).map_err(|detail| {
+    let doc = D::parse(text).map_err(|detail| {
         anyhow::Error::new(Unparsable { path: path.to_owned(), name: f.name, detail })
     })?;
+    run_chain(doc, Some(path), f)
+}
+
+/// A record of format `f` embedded in another record's document (a map
+/// holding its own version key), typed: the same chain as [`read`] — a
+/// newer one refused, an older one upgraded — for a `deserialize_with`. The
+/// errors name no file; the outer record's read adds it.
+pub fn parse_embedded<T: DeserializeOwned, D: Document>(doc: D, f: &Format<D>) -> Res<T> {
+    let (_, doc) = run_chain(doc, None, f)?;
+    doc.into_typed().with_context(|| format!("Failed to parse the embedded {}", f.name))
+}
+
+/// [`parse_embedded`]'s chain alone, in place: the embedded record brought
+/// to `current`, its version key put back first. For an outer format's
+/// `legacy`, so put-back compares the embedded record at the version its
+/// writer writes, not at the one on disk. On an error (a newer or broken
+/// record) `doc` is left as it was; the typed parse then reports it.
+pub fn upgrade_embedded<D: Document>(doc: &mut D, f: &Format<D>) {
+    if let Ok((_, upgraded)) = run_chain(doc.clone(), None, f) {
+        *doc = with_version_first(upgraded, f.key, f.current);
+    }
+}
+
+/// Where a record sits, for messages: the file, or nowhere of its own.
+fn located(path: Option<&Path>) -> String {
+    match path {
+        Some(path) => format!(" at '{}'", path.display()),
+        None => " (embedded)".to_owned(),
+    }
+}
+
+/// Version → refuse newer → strip the key → `legacy` → upgrades.
+fn run_chain<D: Document>(mut doc: D, path: Option<&Path>, f: &Format<D>) -> Res<(u32, D)> {
     let version = match doc.get(f.key) {
         None => 1,
         Some(value) => match D::as_version(value) {
             Some(v) if v > u64::from(f.current) => return Err(newer(path, f, v)),
             Some(v) if v >= 1 => v as u32,
             _ => anyhow::bail!(
-                "Failed to parse {} at '{}': `{}` is not a positive integer",
+                "Failed to parse {}{}: `{}` is not a positive integer",
                 f.name,
-                path.display(),
+                located(path),
                 f.key
             ),
         },
@@ -462,9 +517,9 @@ fn decode<D: Document>(text: &str, path: &Path, f: &Format<D>) -> Res<(u32, D)> 
     for (index, upgrade) in f.upgrades.iter().enumerate().skip(version as usize - 1) {
         upgrade(&mut doc).with_context(|| {
             format!(
-                "Failed to upgrade {} at '{}' from {} {} to {}",
+                "Failed to upgrade {}{} from {} {} to {}",
                 f.name,
-                path.display(),
+                located(path),
                 f.key,
                 index + 1,
                 index + 2

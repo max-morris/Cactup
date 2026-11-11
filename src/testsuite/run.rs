@@ -972,7 +972,6 @@ mod tests {
         let cactus_root = inst.cactus_root();
         let config_dir = cactus_root.join("configs/tests");
         let attempt_meta = crate::build::attempt::BuildMeta {
-            schema: crate::database::SCHEMA,
             attempt_id: 0,
             config: "tests".to_owned(),
             optionlist_source: OptionlistSource::Flavor("default".to_owned()),

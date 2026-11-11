@@ -1280,7 +1280,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("bbh");
         let meta = crate::sim::SimulationMeta { parfile: "bbh.par".to_owned(), ..Default::default() };
-        crate::installation::write_toml(&dir.join(".cactup").join("simulation.toml"), &meta).unwrap();
+        let record = dir.join(".cactup").join("simulation.toml");
+        crate::format::write(&record, &meta, &crate::sim::SIMULATION).unwrap();
         let rdir = restart::restart_dir(&dir, 0);
         fs::create_dir_all(rdir.join(".cactup")).unwrap();
         fs::write(
@@ -1483,7 +1484,6 @@ mod tests {
         let attempt = crate::build::attempt::BuildAttempt::create(
             crate::build::attempt::BuildAttempt::attempt_dir(&config_dir, 0),
             crate::build::attempt::BuildMeta {
-                schema: crate::database::SCHEMA,
                 attempt_id: 0,
                 config: "sim".to_owned(),
                 optionlist_source: OptionlistSource::Flavor("default".to_owned()),

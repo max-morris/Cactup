@@ -23,10 +23,6 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-// The plain TOML write the build records still use (P2b moves them onto
-// `format::write`).
-pub(crate) use crate::format::write_toml;
-
 /// `installation.toml`'s format: version 1, no migrations. Only login
 /// binaries write it (D11), so it is not `frozen_read`. Every field is a
 /// scalar or an array (`added`, which put-back never enters), so nothing is

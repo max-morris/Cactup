@@ -18,7 +18,7 @@ use crate::build::{self, ConfigMeta};
 use crate::commands::build as build_cmd;
 use crate::commands::Ctx;
 use crate::format::{self, Format, Toml};
-use crate::installation::{write_toml, Installation, SimEntry};
+use crate::installation::{Installation, SimEntry};
 use crate::lock::LinkLock;
 use crate::mdb::Machine;
 use crate::Res;
@@ -437,7 +437,9 @@ pub fn create(
     // Serialized from the record loaded above rather than copied from disk:
     // that is the record whose build-id this simulation names, and a
     // concurrent `cactup build` rewriting the file cannot hand us a torn copy.
-    write_toml(&cactup_dir.join("cfg").join(build::CONFIG_RECORD), &cfg)?;
+    // Written once, as a record made anew (keys of a file already there are
+    // not kept) at the config record's version.
+    format::replace(&cactup_dir.join("cfg").join(build::CONFIG_RECORD), &cfg, &build::CONFIG)?;
 
     // 5. Freeze the binary: populate CACHE/exe/<build-id> and hard-link it in
     //    (port of CopyFileWithCaching, §8.1), GC-ing orphans opportunistically.
