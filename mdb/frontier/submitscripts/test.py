@@ -13,8 +13,15 @@ lines = ["#! /bin/bash"]
 lines.append("#SBATCH -o {0}".format(STDOUT_FILE))
 lines.append("#SBATCH -e {0}".format(STDERR_FILE))
 # Account required: OLCF rejects a job without a project account. The -a flag,
-# else the allocation knob; with neither, cactup refuses before submitting.
-lines.append("#SBATCH --account={0}".format(ALLOCATION or knob("allocation")))
+# else the allocation knob; with neither, cactup refuses before submitting,
+# naming both.
+allocation = ALLOCATION or knob("allocation", "")
+if not allocation:
+    raise CactupError(
+        "{0} needs an allocation: pass -a ACCOUNT, or set it once with "
+        "`cactup knob allocation ACCOUNT`".format(MACHINE)
+    )
+lines.append("#SBATCH --account={0}".format(allocation))
 lines.append("#SBATCH --job-name={0}".format(TEST_NAME))
 if EMAIL:
     lines.append("#SBATCH --mail-type=ALL")

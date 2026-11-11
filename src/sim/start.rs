@@ -514,22 +514,24 @@ fn submit_impl(
         // @KNOB(…)@ without the DB (§5, D11).
         vset.set_knobs(sim.knob_snapshot(db));
         // Before the restart dir exists: a parfile that cannot substitute
-        // (a required knob unset, a typo'd token) fails the submit here,
-        // leaving nothing behind, not the queued job hours from now.
+        // (a required knob unset, a typo'd token) or a script that refuses
+        // (a required allocation unset) fails the submit here, leaving
+        // nothing behind, not the queued job hours from now — nor an empty
+        // restart dir that would take this id.
         check_parfile(sim, &vset)?;
-        fs::create_dir_all(rdir.join(".cactup"))
-            .with_context(|| format!("Failed to create '{}'", rdir.display()))?;
 
         // Submit-phase artifact: same vars, submit-phase ENV_SETUP under the
         // submit universe (§6.1).
         let mut submit_vars = vset.clone();
         submit_vars.set("ENV_SETUP", machine.meta.phase_env(submit_uni_name, Phase::Submit));
         let submit_script = generate_script(machine, ScriptKind::Submit, &sub_script_name, &submit_vars, Phase::Submit, submit_uni_name)?;
-        write_executable(&rdir.join(".cactup").join("submit-script"), &submit_script)?;
-
         // Run-phase artifact, frozen now so the compute node never touches
         // the MDB (§8.3.1).
         let run_script = generate_script(machine, ScriptKind::Run, &run_script_name, &vset, Phase::Run, run_uni_name)?;
+
+        fs::create_dir_all(rdir.join(".cactup"))
+            .with_context(|| format!("Failed to create '{}'", rdir.display()))?;
+        write_executable(&rdir.join(".cactup").join("submit-script"), &submit_script)?;
         write_executable(&rdir.join(".cactup").join("run-script"), &run_script)?;
 
         let mut r = Restart {
@@ -762,13 +764,12 @@ fn run_interactive(
         scratch_home: &scratch_home,
     })?;
     vset.set_knobs(sim.knob_snapshot(db));
-    // As in submit: a parfile that cannot substitute fails before any
-    // restart directory exists.
+    // As in submit: a parfile that cannot substitute, or a run script that
+    // refuses, fails before any restart directory exists.
     check_parfile(sim, &vset)?;
+    let run_script = generate_script(machine, ScriptKind::Run, run_script_name, &vset, Phase::Run, run_uni_name)?;
     fs::create_dir_all(rdir.join(".cactup"))
         .with_context(|| format!("Failed to create '{}'", rdir.display()))?;
-
-    let run_script = generate_script(machine, ScriptKind::Run, run_script_name, &vset, Phase::Run, run_uni_name)?;
     write_executable(&rdir.join(".cactup").join("run-script"), &run_script)?;
 
     let mut r = Restart {
@@ -1373,8 +1374,22 @@ mod tests {
             assert!(cfg.join(f).is_file(), "{f} should be snapshotted into the sim");
         }
 
-        // 50 h on a 24 h ceiling → 3 chained segments (§8.8).
+        // A submit script that refuses (a machine requiring an allocation,
+        // none set) also leaves no restart directory behind: no husk to
+        // take id 0, which the good submit below must still get.
+        let scripts = machine.dir.join("submitscripts");
+        fs::rename(scripts.join("default.sh"), scripts.join("default.sh.off")).unwrap();
+        fs::write(scripts.join("default.py"), "print(ALLOCATION or knob(\"allocation\"))\n").unwrap();
         let db = ctx.db.read().unwrap();
+        let err = submit_impl(&inst, &machine, &db, &sim, &start_args("bbh", "50:00:00"), false, Some("testhost"))
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("knob allocation is unset"), "{err:#}");
+        assert!(restart::list_ids(&sim.dir).unwrap().is_empty(), "no restart dir left behind");
+        assert!(!restart::restart_dir(&sim.dir, 0).exists(), "not even an empty one");
+        fs::remove_file(scripts.join("default.py")).unwrap();
+        fs::rename(scripts.join("default.sh.off"), scripts.join("default.sh")).unwrap();
+
+        // 50 h on a 24 h ceiling → 3 chained segments (§8.8).
         submit_impl(&inst, &machine, &db, &sim, &start_args("bbh", "50:00:00"), false, Some("testhost"))
             .unwrap();
 
@@ -2078,59 +2093,76 @@ mod tests {
         })
     }
 
+    /// A variable set broad enough for every in-repo submit and build-submit
+    /// script, and the runscripts that read `@ALLOCATION@`, on `queue`:
+    /// `flag` stands for `@ALLOCATION@` (the `-a` flag, else the global
+    /// knob), `knob` for the `allocation` knob in the snapshot.
+    fn sweep_vars(machine: &Machine, queue: &str, flag: &str, knob: Option<&str>) -> VarSet {
+        let mut v = VarSet::new();
+        vars::set_machine_vars(&mut v, machine, queue, None).unwrap();
+        for (var, n) in [
+            ("NODES", 1u64), ("TASKS", 1), ("TASKS_PER_NODE", 1), ("CPUS_PER_TASK", 1),
+            ("GPUS_PER_TASK", 1), ("RESTART_ID", 0), ("RESULTS_ID", 0), ("ATTEMPT_ID", 0), ("MAKEJOBS", 1),
+        ] {
+            v.set(var, n);
+        }
+        v.set("GPU", true);
+        v.set("QUEUE", machine.meta.scheduler_queue_name(queue).unwrap());
+        v.set("ALLOCATION", flag);
+        for var in ["EMAIL", "MAIL", "CHAINED_JOB_ID", "JOB_ID"] {
+            v.set(var, "");
+        }
+        for var in [
+            "STDOUT_FILE", "STDERR_FILE", "CACTUP", "SIMULATION_NAME", "SHORT_SIMULATION_NAME", "SIMULATION_DIR",
+            "SOURCEDIR", "ALIAS", "TEST_NAME", "TEST_DIR", "RUNDIR", "CONFIGURATION", "CONFIG_DIR",
+            "JOB_NAME", "MAIL_TYPE", "USER", "HOSTNAME", "SCRIPTFILE", "SCRATCH_HOME", "EXECUTABLE", "PARFILE",
+            "SIMULATION_ID", "TESTSUITE_RESULTS_DIR", "TESTSUITE_SELECT",
+        ] {
+            v.set(var, format!("<{}>", var.to_lowercase()));
+        }
+        v.set("MACHINE", machine.name.as_str());
+        vars::set_walltime_vars(&mut v, Walltime::parse("1:00:00").unwrap(), Walltime::parse("0:05:00").unwrap());
+        v.set_knobs(knob.map(|k| ("allocation".to_owned(), k.to_owned())).into_iter().collect());
+        v
+    }
+
+    /// The queue a script's route serves first, else the machine's default.
+    fn sweep_queue(machine: &Machine, route: &crate::mdb::meta::Route) -> String {
+        route
+            .queues
+            .first()
+            .cloned()
+            .or_else(|| machine.meta.default_queue(None).map(str::to_owned))
+            .or_else(|| machine.meta.queues.keys().next().cloned())
+            .unwrap()
+    }
+
+    fn sweep_mdb() -> crate::mdb::Mdb {
+        crate::mdb::Mdb::with_roots(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"),
+            PathBuf::from("/nonexistent-user-mdb"),
+        )
+    }
+
     /// The bug a real QB4 test hit: with no allocation, a script wrote
     /// `#SBATCH -A ` and sbatch read the next directive as the account. Every
     /// in-repo submit and build-submit script, rendered with no allocation,
     /// must leave the directive out (a machine where it is optional) or
-    /// refuse through the allocation knob (one where it is required); given
-    /// one, whether by `-a` alone (`@ALLOCATION@`, no knob) or the knob,
-    /// every directive it writes carries it.
+    /// refuse naming `-a` (one where it is required). Given one — by `-a`
+    /// alone (`@ALLOCATION@`, no knob), by a knob `@ALLOCATION@` does not
+    /// see (a simulation's own), or both — every render writes the same
+    /// account lines, each carrying it.
     #[test]
     fn no_mdb_script_writes_an_empty_account_directive() {
-        let mdb = crate::mdb::Mdb::with_roots(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"),
-            PathBuf::from("/nonexistent-user-mdb"),
-        );
+        let mdb = sweep_mdb();
         let mut directives = 0;
         for name in mdb.machines().unwrap().into_keys() {
             let machine = mdb.load(&name).unwrap();
             for kind in [ScriptKind::Submit, ScriptKind::BuildSubmit] {
                 for (script, route) in &machine.meta.scripts(kind).routes {
-                    let queue = route
-                        .queues
-                        .first()
-                        .cloned()
-                        .or_else(|| machine.meta.default_queue(None).map(str::to_owned))
-                        .or_else(|| machine.meta.queues.keys().next().cloned())
-                        .unwrap();
+                    let queue = sweep_queue(&machine, route);
                     let render = |flag: &str, knob: Option<&str>| {
-                        let mut v = VarSet::new();
-                        vars::set_machine_vars(&mut v, &machine, &queue, None).unwrap();
-                        for (var, n) in [
-                            ("NODES", 1u64), ("TASKS", 1), ("TASKS_PER_NODE", 1), ("CPUS_PER_TASK", 1),
-                            ("GPUS_PER_TASK", 1), ("RESTART_ID", 0), ("RESULTS_ID", 0), ("ATTEMPT_ID", 0),
-                            ("MAKEJOBS", 1),
-                        ] {
-                            v.set(var, n);
-                        }
-                        v.set("GPU", true);
-                        v.set("QUEUE", machine.meta.scheduler_queue_name(&queue).unwrap());
-                        v.set("ALLOCATION", flag);
-                        for var in ["EMAIL", "MAIL", "CHAINED_JOB_ID", "JOB_ID"] {
-                            v.set(var, "");
-                        }
-                        for var in [
-                            "STDOUT_FILE", "STDERR_FILE", "CACTUP", "SIMULATION_NAME", "SHORT_SIMULATION_NAME",
-                            "SIMULATION_DIR", "SOURCEDIR", "MACHINE", "ALIAS", "TEST_NAME", "TEST_DIR", "RUNDIR",
-                            "CONFIGURATION", "CONFIG_DIR", "JOB_NAME", "MAIL_TYPE", "USER", "HOSTNAME",
-                            "SCRIPTFILE", "SCRATCH_HOME", "EXECUTABLE", "PARFILE", "SIMULATION_ID",
-                        ] {
-                            v.set(var, format!("<{}>", var.to_lowercase()));
-                        }
-                        let hour = Walltime::parse("1:00:00").unwrap();
-                        vars::set_walltime_vars(&mut v, hour, Walltime::parse("0:05:00").unwrap());
-                        v.set_knobs(knob.map(|k| ("allocation".to_owned(), k.to_owned())).into_iter().collect());
-                        generate_script(&machine, kind, script, &v, Phase::Submit, None)
+                        generate_script(&machine, kind, script, &sweep_vars(&machine, &queue, flag, knob), Phase::Submit, None)
                     };
                     let what = format!("{name} {} script {script}", kind.dir_name());
                     match render("", None) {
@@ -2141,20 +2173,86 @@ mod tests {
                         }
                         Err(e) => {
                             let e = format!("{e:#}");
-                            assert!(e.contains("knob allocation is unset"), "{what}: {e}");
+                            assert!(
+                                e.contains(&format!("{name} needs an allocation: pass -a ACCOUNT, or set it once with")),
+                                "{what}: {e}"
+                            );
                         }
                     }
-                    for (flag, knob) in [("acct_x", None), ("acct_x", Some("acct_x"))] {
+                    let lines = |flag: &str, knob: Option<&str>| -> Vec<String> {
                         let text = render(flag, knob).unwrap_or_else(|e| panic!("{what}: {e:#}"));
-                        for value in text.lines().filter_map(account_directive) {
-                            assert!(value.contains("acct_x"), "{what}: account directive `{value}`");
-                            directives += 1;
-                        }
+                        text.lines().filter(|l| account_directive(l).is_some()).map(str::to_owned).collect()
+                    };
+                    let both = lines("acct_x", Some("acct_x"));
+                    for line in &both {
+                        let value = account_directive(line).unwrap();
+                        assert!(value.contains("acct_x"), "{what}: account directive `{line}`");
                     }
+                    assert_eq!(lines("acct_x", None), both, "{what}: -a alone");
+                    assert_eq!(lines("", Some("acct_x")), both, "{what}: the knob alone");
+                    directives += both.len();
                 }
             }
         }
         // The sweep saw the scripts it is about.
-        assert!(directives > 50, "only {directives} account directives rendered");
+        assert!(directives > 25, "only {directives} account directives rendered");
+    }
+
+    /// A runscript that hands `@ALLOCATION@` to `srun -A` (qbc, db1) runs
+    /// inside the job, which already has an account: with none set the `-A`
+    /// must vanish, not leave `srun -A -p …` taking `-p` as the account.
+    /// Each such runscript binds it as `alloc='@ALLOCATION@'` and passes
+    /// `${alloc:+-A …}`; the shell's own expansion is checked here.
+    #[test]
+    fn runscripts_pass_srun_a_only_with_an_allocation() {
+        let mdb = sweep_mdb();
+        let mut checked = Vec::new();
+        for name in mdb.machines().unwrap().into_keys() {
+            let machine = mdb.load(&name).unwrap();
+            for (script, route) in &machine.meta.scripts(ScriptKind::Run).routes {
+                let file = machine.script_path(ScriptKind::Run, script).unwrap();
+                if !fs::read_to_string(&file.path).unwrap().contains("ALLOCATION") {
+                    continue;
+                }
+                let what = format!("{name} runscript {script}");
+                let queue = sweep_queue(&machine, route);
+                for flag in ["", "acct_x"] {
+                    let v = sweep_vars(&machine, &queue, flag, None);
+                    let text = generate_script(&machine, ScriptKind::Run, script, &v, Phase::Run, None)
+                        .unwrap_or_else(|e| panic!("{what}: {e:#}"));
+                    // No `-A` token followed by another flag or by nothing.
+                    for line in text.lines().filter(|l| l.contains("srun")) {
+                        let tokens: Vec<&str> = line.split_whitespace().collect();
+                        for (i, t) in tokens.iter().enumerate() {
+                            if *t == "-A" {
+                                let next = tokens.get(i + 1).copied().unwrap_or("");
+                                assert!(!next.is_empty() && !next.starts_with('-') && next != "\\", "{what}: `{line}`");
+                            }
+                        }
+                    }
+                    let alloc = text.lines().find(|l| l.starts_with("alloc=")).unwrap_or_else(|| panic!("{what}: no alloc= line"));
+                    let out = Command::new("bash")
+                        .arg("-c")
+                        .arg(format!("{alloc}\nset -- ${{alloc:+-A \"$alloc\"}}; echo \"$#:$*\""))
+                        .output()
+                        .unwrap();
+                    let expect = if flag.is_empty() { "0:\n".to_owned() } else { format!("2:-A {flag}\n") };
+                    assert_eq!(String::from_utf8_lossy(&out.stdout), expect, "{what} with ALLOCATION={flag:?}");
+                    // Each `-A` use goes through the guard, never the bare value.
+                    assert!(!text.contains("-A acct_x") && !text.contains("-A  "), "{what}: an unguarded -A");
+                    let code = text.lines().filter(|l| !l.trim_start().starts_with('#'));
+                    for line in code.filter(|l| l.contains("srun") && l.contains("-A")) {
+                        assert!(line.contains("${alloc:+-A "), "{what}: `{line}`");
+                    }
+                }
+                checked.push(what);
+            }
+        }
+        for want in [
+            "qbc.loni.org runscript default", "qbc.loni.org runscript test",
+            "db1.hpc.lsu.edu runscript sing", "db1.hpc.lsu.edu runscript sing-test",
+        ] {
+            assert!(checked.iter().any(|c| c == want), "{want} not swept: {checked:?}");
+        }
     }
 }

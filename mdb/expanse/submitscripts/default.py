@@ -20,8 +20,14 @@ lines = ["#! /bin/bash"]
 lines.append("#SBATCH -t {0}".format(WALLTIME))
 # Account required: SDSC Expanse rejects a job without an account. The -a
 # flag, else the allocation knob; with neither, cactup refuses before
-# submitting.
-lines.append("#SBATCH --account={0}".format(ALLOCATION or knob("allocation")))
+# submitting, naming both.
+allocation = ALLOCATION or knob("allocation", "")
+if not allocation:
+    raise CactupError(
+        "{0} needs an allocation: pass -a ACCOUNT, or set it once with "
+        "`cactup knob allocation ACCOUNT`".format(MACHINE)
+    )
+lines.append("#SBATCH --account={0}".format(allocation))
 lines.append("#SBATCH --partition={0}".format(QUEUE))
 lines.append("#SBATCH --nodes={0}".format(NODES))
 lines.append("#SBATCH --mem={0}".format("0" if QUEUE == "compute" else "249208M"))
