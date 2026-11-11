@@ -10,6 +10,8 @@
 
 use super::Ctx;
 use crate::args::{Args, Commands, ImportArgs, InstallArgs, SimCommand};
+#[cfg(test)]
+use crate::args::{StartFlags, TopologyFlags, UniverseFlags};
 use crate::installation::Installation;
 use crate::Res;
 use anyhow::{anyhow, bail, Context};
@@ -116,7 +118,7 @@ pub fn dispatch(ctx: &Ctx, args: ImportArgs) -> Res<()> {
     }
 
     // 5. Started, or the command that starts it.
-    let topology = topology(&sim_file, &args);
+    let topology = start_args(&sim_file, &args);
     if args.submit || args.run {
         let verb = if args.submit { "submit" } else { "run" };
         let mut command = vec!["sim".to_owned(), verb.to_owned(), sim_name.clone()];
@@ -505,25 +507,27 @@ fn settle_inputs(
     Ok(knobs)
 }
 
-/// The topology flags for `sim submit`/`run`: each one given to import, else
-/// the `.sim`'s suggestion. A `.sim` suggests no node count (it is machine
-/// shaped), so without `-n` the started command derives one from the tasks
-/// (§8.5).
-fn topology(sim: &SimFile, args: &ImportArgs) -> Vec<String> {
+/// The flags for `sim submit`/`run`: every start, universe and TOPOLOGY flag
+/// given to import, passed through as given; the `.sim`'s run hints fill in
+/// tasks, CPUs and GPUs per task and wall time where those give none. A
+/// `.sim` suggests no node count (it is machine shaped), so without `-n` the
+/// started command derives one from the tasks (§8.5).
+fn start_args(sim: &SimFile, args: &ImportArgs) -> Vec<String> {
     let hints = sim.run.as_ref();
-    let mut flags = Vec::new();
-    let mut add = |flag: &str, value: Option<String>| {
-        if let Some(value) = value {
-            flags.extend([flag.to_owned(), value]);
-        }
-    };
-    add("-n", args.nodes.map(|n| n.to_string()));
-    add("-T", args.tasks.or(hints.and_then(|h| h.tasks)).map(|n| n.to_string()));
-    add("-c", args.cpus.or(hints.and_then(|h| h.cpus_per_task)).map(|n| n.to_string()));
-    add("-G", hints.and_then(|h| h.gpus_per_task).map(|n| n.to_string()));
-    add("-w", args.wall_time.clone().or(hints.and_then(|h| h.walltime.clone())));
-    add("-q", args.queue.clone());
-    flags
+    let mut topology = args.topology.clone();
+    topology.tasks = topology.tasks.or(hints.and_then(|h| h.tasks));
+    topology.cpus = topology.cpus.or(hints.and_then(|h| h.cpus_per_task));
+    topology.gpus_per_task = topology.gpus_per_task.or(hints.and_then(|h| h.gpus_per_task));
+    let mut words = args.start_flags.to_args();
+    words.extend(args.universe.to_args());
+    words.extend(topology.to_args());
+    // The hint stays text: the started command parses it like any typed one.
+    if topology.wall_time.is_none()
+        && let Some(wall) = hints.and_then(|h| h.walltime.clone())
+    {
+        words.extend(["--wall-time".to_owned(), wall]);
+    }
+    words
 }
 
 /// Parse a cactup command line (without the program name), so the steps
@@ -701,11 +705,152 @@ mod tests {
             provenance: None,
         };
         let args = ImportArgs::try_parse_from_args(&["s.sim", "-T", "64", "-q", "checkpt"]);
-        assert_eq!(topology(&sim, &args), ["-T", "64", "-c", "8", "-w", "48:00:00", "-q", "checkpt"]);
+        assert_eq!(
+            start_args(&sim, &args),
+            ["--queue", "checkpt", "--tasks", "64", "--cpus", "8", "--wall-time", "48:00:00"]
+        );
         // No node count of its own: `sim submit` derives it from the tasks.
-        // An explicit one is passed through.
-        let args = ImportArgs::try_parse_from_args(&["s.sim", "-n", "2"]);
-        assert_eq!(topology(&sim, &args), ["-n", "2", "-T", "256", "-c", "8", "-w", "48:00:00"]);
+        // An explicit one is passed through, as is a wall time given here.
+        let args = ImportArgs::try_parse_from_args(&["s.sim", "-n", "2", "-w", "1:00:00"]);
+        assert_eq!(
+            start_args(&sim, &args),
+            ["--nodes", "2", "--tasks", "256", "--cpus", "8", "--wall-time", "01:00:00"]
+        );
+    }
+
+    fn sim_without_hints() -> SimFile {
+        SimFile {
+            format: cactup_ecosystem_common::SIM_FORMAT,
+            sim: SimMeta {
+                name: "s".into(),
+                summary: None,
+                description: None,
+                authors: vec![],
+                license: None,
+                contact: None,
+                cactarium: None,
+                root: "Cactus".into(),
+            },
+            thornlist: ThornlistText { filename: "s.th".into(), text: String::new(), untracked: vec![] },
+            parfile: Parfile {
+                filename: "s.par".into(),
+                kind: ParfileKind::Par,
+                vars: vec![],
+                text: String::new(),
+            },
+            inputs: vec![],
+            repos: vec![],
+            run: None,
+            provenance: None,
+        }
+    }
+
+    /// The start, universe and TOPOLOGY flags as one comparable string.
+    fn shared(start: &StartFlags, universe: &UniverseFlags, topology: &TopologyFlags) -> String {
+        format!("{start:?} {universe:?} {topology:?}")
+    }
+
+    /// Every flag of the groups `import` shares with `sim submit`/`sim run`
+    /// parses under `import` (long form, and short form but for `-a`) and
+    /// reaches the started command exactly as given. The flags are read off
+    /// the groups' own clap definitions, so one added to a group later is
+    /// covered without touching this test, and fails here if `to_args` does
+    /// not pass it on.
+    #[test]
+    fn import_passes_every_shared_flag_through() {
+        use clap::Args as _;
+        let sim = sim_without_hints();
+        let parse_import = |words: &[String]| {
+            let mut argv: Vec<String> =
+                ["cactup", "import", "s.sim", "--submit"].iter().map(|w| w.to_string()).collect();
+            argv.extend(words.iter().cloned());
+            match Args::try_parse_from(argv).map(|a| a.command) {
+                Ok(Commands::Import(args)) => Some(args),
+                _ => None,
+            }
+        };
+        let defaults = parse_import(&[]).unwrap();
+        let defaults = shared(&defaults.start_flags, &defaults.universe, &defaults.topology);
+        let groups = [
+            TopologyFlags::augment_args(clap::Command::new("g")),
+            UniverseFlags::augment_args(clap::Command::new("g")),
+            StartFlags::augment_args(clap::Command::new("g")),
+        ];
+        let mut checked = 0;
+        for arg in groups.iter().flat_map(|g| g.get_arguments()) {
+            let long = arg.get_long().unwrap_or_else(|| panic!("{} has no long form", arg.get_id()));
+            // A value each kind of flag accepts: a count, a wall time, a name.
+            let with = |flag: String| -> Option<(Vec<String>, ImportArgs)> {
+                if !arg.get_action().takes_values() {
+                    return parse_import(std::slice::from_ref(&flag)).map(|a| (vec![flag.clone()], a));
+                }
+                ["3", "1:00:00", "x"].iter().find_map(|v| {
+                    let words = vec![flag.clone(), v.to_string()];
+                    parse_import(&words).map(|a| (words, a))
+                })
+            };
+            let (words, args) =
+                with(format!("--{long}")).unwrap_or_else(|| panic!("--{long} does not parse under import"));
+            let given = shared(&args.start_flags, &args.universe, &args.topology);
+            assert_ne!(given, defaults, "--{long} changed nothing");
+            assert_eq!(args.alias, None, "--{long}");
+            if let Some(short) = arg.get_short().filter(|_| long != "allocation") {
+                let (_, by_short) =
+                    with(format!("-{short}")).unwrap_or_else(|| panic!("-{short} does not parse under import"));
+                let by_short = shared(&by_short.start_flags, &by_short.universe, &by_short.topology);
+                assert_eq!(by_short, given, "-{short}");
+            }
+            for verb in ["submit", "run"] {
+                let mut command = vec!["sim".to_owned(), verb.to_owned(), "s".to_owned()];
+                command.extend(start_args(&sim, &args));
+                let started = match parse(&command).unwrap() {
+                    Commands::Sim(SimCommand::Submit(start)) => start,
+                    Commands::Sim(SimCommand::Run(run)) => run.start,
+                    _ => unreachable!(),
+                };
+                let reached = shared(&started.start_flags, &started.universe, &started.topology);
+                assert_eq!(reached, given, "{words:?} under `sim {verb}`");
+            }
+            checked += 1;
+        }
+        assert!(checked >= 19, "only {checked} shared flags found");
+
+        // `-a` is the alias here; the account is `--allocation`.
+        let args = parse_import(&["-a".to_owned(), "mine".to_owned()]).unwrap();
+        assert_eq!((args.alias.as_deref(), args.topology.allocation.as_deref()), (Some("mine"), None));
+        let args = parse_import(&["--allocation".to_owned(), "acct".to_owned()]).unwrap();
+        assert_eq!((args.alias.as_deref(), args.topology.allocation.as_deref()), (None, Some("acct")));
+    }
+
+    /// `import` takes everything `sim submit` and `sim run` take, but for
+    /// what only names or creates a simulation there (`sim` and `config` are
+    /// import's own `--sim`/`--config`, naming what it creates). A flag added to
+    /// `sim submit`/`sim run` outside the shared groups fails here.
+    #[test]
+    fn import_accepts_what_sim_submit_and_run_accept() {
+        use clap::CommandFactory;
+        let mut cmd = Args::command();
+        cmd.build();
+        let import = cmd.find_subcommand("import").unwrap();
+        let has: std::collections::HashSet<&str> =
+            import.get_arguments().map(|a| a.get_id().as_str()).collect();
+        let sim = cmd.find_subcommand("sim").unwrap();
+        let missing = |verb: &str| -> Vec<String> {
+            let sub = sim.find_subcommand(verb).unwrap();
+            let ids = sub.get_arguments().map(|a| a.get_id().to_string());
+            ids.filter(|id| !has.contains(id.as_str())).collect()
+        };
+        let own = ["parfile", "force", "overwrite", "silent"];
+        assert_eq!(missing("submit"), own);
+        let mut run_own = own.to_vec();
+        run_own.extend(["debug", "restart_id", "sim_dir"]);
+        assert_eq!(missing("run"), run_own);
+        // Only the allocation's short form is dropped, and only here.
+        let short = |c: &clap::Command| {
+            c.get_arguments().find(|a| a.get_id() == "allocation").unwrap().get_short()
+        };
+        assert_eq!(short(import), None);
+        assert_eq!(short(sim.find_subcommand("submit").unwrap()), Some('a'));
     }
 
     impl ImportArgs {

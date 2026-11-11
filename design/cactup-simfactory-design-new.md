@@ -4375,11 +4375,17 @@ kind of install-time provenance, `simfile`, beside `release` and `thornlist`;
 --simfile` under the file's name (or `--alias`), `cactup build` of a config of
 that name — in the foreground, or, on a machine that queues builds, submitted
 and blocked on (§7.9) — then `sim create` from the file's parfile, and with
-`--submit`/`--run` the simulation started, its topology the file's run hints
-unless `-T`/`-c`/`-w`/`-q` say otherwise. A `.sim` suggests no node count
-(nodes are machine shaped): `-n` passes one through, and without it the started
-command derives it from the tasks (§8.5). Without either flag it prints the
-submit command. The parfile's knob inputs are settled **first**, before anything
+`--submit`/`--run` the simulation started. `import` takes every flag of the
+groups `sim submit` and `sim run` start with — the TOPOLOGY flags (§8.5), the
+universe flags (§4.8) and the start flags `--force-queue`, `--ignore-machine`,
+`--checkpt-buffer` — by flattening those same groups, so the two cannot drift,
+and passes them through to the command it starts; the file's run hints fill
+in tasks, CPUs and GPUs per task and wall time where those flags give none.
+`-a` is `--alias` in `import`, as in `install`, so there the allocation is
+`--allocation` only. A `.sim` suggests no node count (nodes are machine
+shaped): `-n` passes one through, and without it the started command derives
+it from the tasks (§8.5). Without either flag it prints the submit command,
+with the same flags. The parfile's knob inputs are settled **first**, before anything
 long runs: `--input KNOB=VALUE`, else a download of the input's URL into
 `<inputs>/<sha256>/<file name>` (shared by every simulation needing
 the same bytes; checked against the recorded hash, and said so when there is
