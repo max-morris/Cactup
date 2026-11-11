@@ -193,6 +193,26 @@ impl Client {
         json(self.send(request)?)
     }
 
+    /// A request that never got an answer. A server that cannot be reached
+    /// (no such host, refused, timed out) is one line naming it, its root
+    /// cause, and how to point cactup elsewhere; reqwest's chain of wrappers
+    /// says nothing more. Anything else keeps its full chain.
+    fn unreachable(&self, e: reqwest::Error) -> anyhow::Error {
+        if !(e.is_connect() || e.is_timeout()) {
+            return anyhow::Error::new(e).context(format!("Failed to reach the Cactarium at {}", self.base));
+        }
+        let mut cause: &dyn std::error::Error = &e;
+        while let Some(next) = cause.source() {
+            cause = next;
+        }
+        let why = if e.is_timeout() { "it did not answer in time".to_owned() } else { cause.to_string() };
+        anyhow!(
+            "The Cactarium at {} isn't reachable ({why}). Check the network, or point cactup at another \
+             Cactarium with the {URL_KNOB} knob or CACTARIUM_URL",
+            self.base
+        )
+    }
+
     /// Send, then refuse a registry newer than this cactup speaks, and turn
     /// an error status into the message the registry wrote for it.
     fn send(&self, request: reqwest::blocking::RequestBuilder) -> Res<reqwest::blocking::Response> {
@@ -203,7 +223,7 @@ impl Client {
         let response = request
             .header(API_GENERATION_HEADER, API_GENERATION.to_string())
             .send()
-            .with_context(|| format!("Failed to reach the Cactarium at {}", self.base))?;
+            .map_err(|e| self.unreachable(e))?;
         if let Some(generation) = response.headers().get(API_GENERATION_HEADER) {
             let generation: u32 = generation.to_str().ok().and_then(|g| g.parse().ok()).unwrap_or(0);
             if generation > API_GENERATION {
@@ -453,6 +473,16 @@ mod tests {
         let (base, _) = serve_with(1, |_| ("200 OK", "api-generation: 99\r\n".into(), b"{}".to_vec()));
         let err = format!("{:#}", Client::at(&base).resolve("a/b").unwrap_err());
         assert!(err.contains("generation 99") && err.contains("cactup update"), "{err}");
+    }
+
+    #[test]
+    fn an_unreachable_registry_is_one_line_naming_it() {
+        // A port nothing listens on: bound, then let go.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}");
+        let err = format!("{:#}", Client::at(&base).resolve("a/b").unwrap_err());
+        assert!(err.starts_with(&format!("The Cactarium at {base} isn't reachable (")), "{err}");
+        assert!(err.contains("cactarium-url") && !err.contains("error sending request"), "{err}");
     }
 
     #[test]
