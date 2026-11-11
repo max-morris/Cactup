@@ -1,6 +1,7 @@
 //! Literal `@NAME@` substitution engine and the `.py` script calling
 //! convention (spec §6.1–§6.3, D7). No expression evaluation; the computed
-//! token forms are `@ENV(…)@` and `@KNOB(…)@` with their `-OPTIONAL` variants.
+//! token forms are `@ENV(…)@` and `@KNOB(…)@` with their `-OPTIONAL` and
+//! `-OR-DROP-LINE` variants.
 //!
 //! Substitution rules (§6.1, kind 1), applied in one left-to-right pass:
 //! - `@NAME@` is replaced by the variable's canonical string value.
@@ -13,6 +14,14 @@
 //! - `@KNOB(name)@`, `@KNOB-OPTIONAL(name)@`, `@KNOB-OPTIONAL(name, default)@`
 //!   are the same three forms over the knob snapshot the set carries (§5) —
 //!   the effective knob values as of submit time, `-K` overlay included.
+//! - `@ENV-OR-DROP-LINE(NAME)@` / `@KNOB-OR-DROP-LINE(name)@` expand like the
+//!   required forms when set; unset or empty, the whole source line holding
+//!   the token is removed, newline included, as it is when any one of several
+//!   such tokens on a line is empty. They are an error in [`Syntax::Plain`]
+//!   (a single value has no lines) and on a line that runs on into the next
+//!   or continues one (a backslash-newline in shell and optionlist text, a
+//!   string spanning lines in a parfile), set or not: dropping half of it
+//!   would break the rest.
 //! - `@@` collapses to a literal `@` and the result is never re-scanned, so
 //!   `@@NAME@@` yields the literal `@NAME@`.
 //! - An unknown `@NAME@` token is an error (fixes simfactory's `@QEUEUE@` bug).
@@ -498,10 +507,15 @@ impl Source {
     fn hint(self, arg: &str) -> String {
         match self {
             Source::Env => String::new(),
-            Source::Knob => format!(
-                "; set it with `cactup knob {arg} VALUE` (`-c` first for a new custom knob) or \
-                 pass -K {arg}=VALUE for this command"
-            ),
+            Source::Knob => {
+                // A knob a command-line flag also sets says so: `-a` is
+                // shorthand for `-K allocation=…`.
+                let flag = if arg == "allocation" { "-a VALUE or " } else { "" };
+                format!(
+                    "; set it with `cactup knob {arg} VALUE` (`-c` first for a new custom knob) or \
+                     pass {flag}-K {arg}=VALUE for this command"
+                )
+            }
         }
     }
 }
@@ -634,6 +648,153 @@ fn parse_default(cur: &mut Cursor<'_>, at: usize, form: &str, arg: &str) -> Res<
     }
 }
 
+/// A resolved computed token: its value, or `None` for an
+/// `-OR-DROP-LINE` token whose source is unset or empty (its line goes);
+/// `drop_line` names the form when it is an `-OR-DROP-LINE` one.
+struct Computed {
+    value: Option<String>,
+    drop_line: Option<String>,
+}
+
+/// One substitution pass over a whole text: the output, plus what it takes
+/// to drop source lines from it afterward (§6.1 `-OR-DROP-LINE`).
+struct Pass<'a> {
+    text: &'a str,
+    syntax: Syntax,
+    comments: &'a [Range<usize>],
+    /// Byte offsets of every newline in `text`.
+    newlines: Vec<usize>,
+    out: String,
+    /// For each newline of `text` copied to `out`, in order: the source line
+    /// it ends and the offset in `out` just past it.
+    copied: Vec<(usize, usize)>,
+    /// Source lines (1-based) an empty `-OR-DROP-LINE` token removes.
+    drops: std::collections::BTreeSet<usize>,
+}
+
+impl Pass<'_> {
+    /// The 1-based source line byte `pos` is on.
+    fn line_at(&self, pos: usize) -> usize {
+        self.newlines.partition_point(|&n| n < pos) + 1
+    }
+
+    /// Source line `line`'s bytes, without its newline.
+    fn line_range(&self, line: usize) -> Range<usize> {
+        let start = if line == 1 { 0 } else { self.newlines[line - 2] + 1 };
+        start..self.newlines.get(line - 1).copied().unwrap_or(self.text.len())
+    }
+
+    /// Copy `s`, the source text starting at byte `src`, to the output,
+    /// noting where each of its newlines lands.
+    fn copy(&mut self, src: usize, s: &str) {
+        for (i, _) in s.match_indices('\n') {
+            let line = self.line_at(src + i);
+            self.copied.push((line, self.out.len() + i + 1));
+        }
+        self.out.push_str(s);
+    }
+
+    /// Whether source line `line` runs on into the next one, per the text's
+    /// syntax: a backslash-newline outside a comment for shell and
+    /// optionlist text, an unclosed `"…"` string in a parfile.
+    fn continues(&self, line: usize) -> bool {
+        if line == 0 || line > self.newlines.len() {
+            return false;
+        }
+        let range = self.line_range(line);
+        match self.syntax {
+            Syntax::Plain => false,
+            Syntax::Shell | Syntax::Hash => {
+                if self.comments.iter().any(|c| c.start < range.end && c.end > range.start) {
+                    return false;
+                }
+                let trailing = self.text[range].bytes().rev().take_while(|&b| b == b'\\').count();
+                trailing % 2 == 1
+            }
+            Syntax::Parfile => parfile_string_open_after(self.text, range.end),
+        }
+    }
+
+    /// An `-OR-DROP-LINE` token at byte `pos` must sit on a whole line of
+    /// its own: there are no lines in a single value, and dropping half of a
+    /// continued command or string breaks what is left.
+    fn check_drop_line(&self, pos: usize, form: &str) -> Res<()> {
+        let line = self.line_at(pos);
+        if self.syntax == Syntax::Plain {
+            bail!(
+                "@{form}(…)@ on line {line}: this value has no lines to drop (an argument, a \
+                 path); use the plain or -OPTIONAL form"
+            );
+        }
+        let what = match self.syntax {
+            Syntax::Parfile => "a string that spans lines",
+            _ => "a line continued with a backslash",
+        };
+        if self.continues(line) {
+            bail!(
+                "@{form}(…)@ on line {line}: the line runs on into the next ({what}), so dropping \
+                 it would leave half of it behind; put the token on a line of its own"
+            );
+        }
+        if self.continues(line - 1) {
+            bail!(
+                "@{form}(…)@ on line {line}: the line continues line {} ({what}), so dropping it \
+                 would leave half of it behind; put the token on a line of its own",
+                line - 1
+            );
+        }
+        Ok(())
+    }
+
+    /// The output with every dropped source line removed, newline included.
+    /// A source newline swallowed by a token (a quoted default spanning
+    /// lines) joins its two lines, which then go or stay together.
+    fn finish(self) -> String {
+        if self.drops.is_empty() {
+            return self.out;
+        }
+        let mut cut: Vec<Range<usize>> = Vec::new();
+        for &line in &self.drops {
+            let start = self.copied.iter().rev().find(|(l, _)| *l < line).map_or(0, |&(_, o)| o);
+            let end = self.copied.iter().find(|(l, _)| *l >= line).map_or(self.out.len(), |&(_, o)| o);
+            match cut.last_mut() {
+                Some(last) if start <= last.end => last.end = last.end.max(end),
+                _ => cut.push(start..end),
+            }
+        }
+        let mut out = String::with_capacity(self.out.len());
+        let mut done = 0;
+        for range in cut {
+            out.push_str(&self.out[done..range.start]);
+            done = range.end;
+        }
+        out.push_str(&self.out[done..]);
+        out
+    }
+}
+
+/// Whether a parfile `"…"` string is still open at byte `pos` (the end of a
+/// line): `#` outside a string comments to the end of the line, a backslash
+/// inside one escapes the next byte, and a quote inside a string comment
+/// still closes the string (`parfile_comments`).
+fn parfile_string_open_after(text: &str, pos: usize) -> bool {
+    let b = &text.as_bytes()[..pos];
+    let mut open = false;
+    let mut i = 0;
+    while i < b.len() {
+        match (open, b[i]) {
+            (false, b'#') => i = end_of_line(b, i),
+            (true, b'\\') => i += 2,
+            (_, b'"') => {
+                open = !open;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    open
+}
+
 impl VarSet {
     pub fn new() -> Self {
         Self::default()
@@ -690,37 +851,41 @@ impl VarSet {
     }
 
     fn substitute_impl(&self, text: &str, syntax: Syntax, env_lenient: bool) -> Res<String> {
-        let mut out = String::with_capacity(text.len());
+        let comments = syntax.comments(text);
+        let mut pass = Pass {
+            text,
+            syntax,
+            comments: &comments,
+            newlines: text.match_indices('\n').map(|(i, _)| i).collect(),
+            out: String::with_capacity(text.len()),
+            copied: Vec::new(),
+            drops: std::collections::BTreeSet::new(),
+        };
         let mut done = 0;
-        for span in syntax.comments(text) {
-            self.substitute_range(text, done..span.start, syntax, env_lenient, &mut out)?;
-            out.push_str(&text[span.clone()]);
+        for span in &comments {
+            self.substitute_range(&mut pass, done..span.start, env_lenient)?;
+            // A comment never holds its line's newline (`Syntax::comments`).
+            pass.out.push_str(&text[span.clone()]);
             done = span.end;
         }
-        self.substitute_range(text, done..text.len(), syntax, env_lenient, &mut out)?;
-        Ok(out)
+        self.substitute_range(&mut pass, done..text.len(), env_lenient)?;
+        Ok(pass.finish())
     }
 
     /// Substitute `text[range]` — a comment-free stretch — onto `out`.
     /// Positions in errors are reported as lines of the whole `text`.
-    fn substitute_range(
-        &self,
-        text: &str,
-        range: Range<usize>,
-        syntax: Syntax,
-        env_lenient: bool,
-        out: &mut String,
-    ) -> Res<()> {
+    fn substitute_range(&self, pass: &mut Pass<'_>, range: Range<usize>, env_lenient: bool) -> Res<()> {
+        let (text, syntax) = (pass.text, pass.syntax);
         let mut cur = Cursor { text, pos: range.start, end: range.end };
 
         loop {
             // Copy everything up to the next `@` verbatim.
             let rest = cur.rest();
             let Some(off) = rest.find('@') else {
-                out.push_str(rest);
+                pass.copy(cur.pos, rest);
                 break;
             };
-            out.push_str(&rest[..off]);
+            pass.copy(cur.pos, &rest[..off]);
             cur.pos += off;
             let pos = cur.pos;
             let at = line_of(text, pos);
@@ -728,7 +893,7 @@ impl VarSet {
 
             // `@@` → literal `@`, never re-scanned.
             if cur.eat(b'@') {
-                out.push('@');
+                pass.out.push('@');
                 continue;
             }
 
@@ -740,7 +905,7 @@ impl VarSet {
                     return Err(stray_at(text, pos, syntax));
                 }
                 match self.vars.get(name) {
-                    Some(v) => out.push_str(&v.canonical()),
+                    Some(v) => pass.out.push_str(&v.canonical()),
                     None => bail!("Unknown substitution variable @{name}@ on line {at}"),
                 }
                 continue;
@@ -756,8 +921,16 @@ impl VarSet {
             if let Some(source) = source
                 && matches!(cur.peek(), Some(b'(') | Some(b'-'))
             {
-                let value = self.computed_token(&mut cur, at, source, env_lenient)?;
-                out.push_str(&value);
+                let computed = self.computed_token(&mut cur, at, source, env_lenient)?;
+                if let Some(form) = &computed.drop_line {
+                    pass.check_drop_line(pos, form)?;
+                }
+                match computed.value {
+                    Some(value) => pass.out.push_str(&value),
+                    None => {
+                        pass.drops.insert(pass.line_at(pos));
+                    }
+                }
                 continue;
             }
 
@@ -778,16 +951,27 @@ impl VarSet {
         at: usize,
         source: Source,
         env_lenient: bool,
-    ) -> Res<String> {
+    ) -> Res<Computed> {
         let func = source.func();
-        let optional = cur.eat(b'-');
-        if optional && !cur.eat_str("OPTIONAL") {
-            bail!(
-                "Malformed @{func}-…@ token on line {at}: the only suffix is -OPTIONAL \
-                 (@{func}-OPTIONAL(…)@)"
-            );
+        let mut optional = false;
+        let mut drop_line = false;
+        if cur.eat(b'-') {
+            if cur.eat_str("OPTIONAL") {
+                optional = true;
+            } else if cur.eat_str("OR-DROP-LINE") {
+                drop_line = true;
+            } else {
+                bail!(
+                    "Malformed @{func}-…@ token on line {at}: the only suffixes are -OPTIONAL \
+                     (@{func}-OPTIONAL(…)@) and -OR-DROP-LINE (@{func}-OR-DROP-LINE(…)@)"
+                );
+            }
         }
-        let form = if optional { format!("{func}-OPTIONAL") } else { func.to_owned() };
+        let form = match (optional, drop_line) {
+            (true, _) => format!("{func}-OPTIONAL"),
+            (_, true) => format!("{func}-OR-DROP-LINE"),
+            _ => func.to_owned(),
+        };
         if !cur.eat(b'(') {
             bail!("Malformed @{form}(…)@ token on line {at}: expected '(' after {form}");
         }
@@ -800,7 +984,7 @@ impl VarSet {
         let default = if cur.eat(b',') {
             if !optional {
                 bail!(
-                    "@{func}({arg})@ on line {at} takes no default value; use \
+                    "@{form}({arg})@ on line {at} takes no default value; use \
                      @{func}-OPTIONAL({arg}, …)@ for a default"
                 );
             }
@@ -828,12 +1012,14 @@ impl VarSet {
                 knobs.get(arg).cloned()
             }
         };
-        match value.filter(|v| !v.is_empty()) {
-            Some(v) => Ok(v),
-            None if optional => Ok(default.unwrap_or_default()),
-            None if env_lenient && source == Source::Env => Ok(String::new()),
+        let value = match value.filter(|v| !v.is_empty()) {
+            Some(v) => Some(v),
+            None if optional => Some(default.unwrap_or_default()),
+            None if env_lenient && source == Source::Env => Some(String::new()),
+            None if drop_line => None,
             None => bail!("@{func}({arg})@: {} is unset or empty{}", source.what(arg), source.hint(arg)),
-        }
+        };
+        Ok(Computed { value, drop_line: drop_line.then_some(form) })
     }
 
     /// The JSON object handed to `.py` scripts on stdin: `vars` maps every
@@ -1152,6 +1338,129 @@ mod tests {
         // an optional one, which would otherwise quietly read as "unset".
         let err = vars().substitute("@KNOB-OPTIONAL(allocation, x)@", Syntax::Plain).unwrap_err().to_string();
         assert!(err.contains("not available in this context"), "{err}");
+    }
+
+    #[test]
+    fn drop_line_tokens_replace_or_remove_their_line() {
+        let v = vars_with_knobs();
+        let text = "#!/bin/sh\n#SBATCH -A @KNOB-OR-DROP-LINE(allocation)@\n#SBATCH --mail-user=@KNOB-OR-DROP-LINE(email)@\nexec run\n";
+        // Set: replaced as @KNOB(…)@ would be. Empty or unset: the line and
+        // its newline are gone.
+        assert_eq!(v.substitute(text, Syntax::Shell).unwrap(), "#!/bin/sh\n#SBATCH -A hpc_xxx\nexec run\n");
+        assert_eq!(
+            v.substitute("a\nb @KNOB-OR-DROP-LINE(mail)@\nc", Syntax::Hash).unwrap(),
+            "a\nc",
+            "an unset knob drops like an empty one"
+        );
+        // The last line, with no newline of its own.
+        assert_eq!(v.substitute("a\nb @KNOB-OR-DROP-LINE(mail)@", Syntax::Shell).unwrap(), "a\n");
+        assert_eq!(v.substitute("@KNOB-OR-DROP-LINE(mail)@\nrest\n", Syntax::Shell).unwrap(), "rest\n");
+        // The ENV form, over the environment.
+        let set = "CACTUP_TEST_DROP_SET";
+        let unset = "CACTUP_TEST_DROP_UNSET";
+        // SAFETY: the variables are this test's own, unique names.
+        unsafe {
+            std::env::set_var(set, "on");
+            std::env::remove_var(unset);
+        }
+        assert_eq!(
+            v.substitute(&format!("x=@ENV-OR-DROP-LINE({set})@\ny=@ENV-OR-DROP-LINE({unset})@\nz\n"), Syntax::Shell)
+                .unwrap(),
+            "x=on\nz\n"
+        );
+        // No snapshot at all is an error, as for @KNOB(…)@.
+        assert!(vars().substitute("@KNOB-OR-DROP-LINE(allocation)@\n", Syntax::Shell).is_err());
+        // A drop form takes no default.
+        let err = v.substitute("@KNOB-OR-DROP-LINE(mail, x)@\n", Syntax::Shell).unwrap_err().to_string();
+        assert!(err.contains("takes no default value"), "{err}");
+        let err = v.substitute("@KNOB-OR-DROP(mail)@\n", Syntax::Shell).unwrap_err().to_string();
+        assert!(err.contains("-OR-DROP-LINE"), "{err}");
+    }
+
+    #[test]
+    fn one_empty_drop_token_drops_the_whole_line() {
+        let v = vars_with_knobs();
+        let text = "keep\n--a=@KNOB-OR-DROP-LINE(allocation)@ --b=@KNOB-OR-DROP-LINE(email)@\nend\n";
+        assert_eq!(v.substitute(text, Syntax::Shell).unwrap(), "keep\nend\n");
+        let text = "--a=@KNOB-OR-DROP-LINE(allocation)@ --b=@KNOB-OR-DROP-LINE(kadath-initial-data)@\n";
+        assert_eq!(v.substitute(text, Syntax::Shell).unwrap(), "--a=hpc_xxx --b=/scratch/id/bhns.info\n");
+    }
+
+    #[test]
+    fn a_dropped_line_still_scans_but_leaves_nothing() {
+        let v = vars_with_knobs();
+        // `@@` and other tokens on a dropped line are substituted and then
+        // dropped with it; the lines around it are untouched.
+        let text = "a=@NODES@ b=@@x\nmail @@ @NODES@ @KNOB(allocation)@ @KNOB-OR-DROP-LINE(email)@\nc=@@y\n";
+        assert_eq!(v.substitute(text, Syntax::Shell).unwrap(), "a=4 b=@x\nc=@y\n");
+        // A token on a dropped line is still checked: an unknown one fails.
+        assert!(v.substitute("@NOPE@ @KNOB-OR-DROP-LINE(email)@\n", Syntax::Shell).is_err());
+        // Several dropped lines in a row, and a value with newlines on a
+        // kept line, which stays one source line.
+        let mut v2 = v.clone();
+        v2.set("ENV_SETUP", "module load a\nmodule load b");
+        let text = "@ENV_SETUP@\nx @KNOB-OR-DROP-LINE(email)@\ny @KNOB-OR-DROP-LINE(mail)@\nend\n";
+        assert_eq!(v2.substitute(text, Syntax::Shell).unwrap(), "module load a\nmodule load b\nend\n");
+    }
+
+    #[test]
+    fn drop_line_tokens_have_no_place_in_a_single_value() {
+        let v = vars_with_knobs();
+        for text in ["@KNOB-OR-DROP-LINE(allocation)@", "@ENV-OR-DROP-LINE(HOME)@"] {
+            let err = v.substitute(text, Syntax::Plain).unwrap_err().to_string();
+            assert!(err.contains("no lines to drop"), "{err}");
+        }
+    }
+
+    #[test]
+    fn drop_line_tokens_refuse_a_continued_line() {
+        let v = vars_with_knobs();
+        // Set or not, the token may not sit on a line that a backslash
+        // continues, nor on the line that continues one.
+        for knob in ["allocation", "email"] {
+            let ends = format!("srun -A @KNOB-OR-DROP-LINE({knob})@ \\\n  -n 4 exe\n");
+            let err = v.substitute(&ends, Syntax::Shell).unwrap_err().to_string();
+            assert!(err.contains("runs on into the next"), "{err}");
+            let continues = format!("srun -n 4 \\\n  -A @KNOB-OR-DROP-LINE({knob})@ exe\n");
+            let err = v.substitute(&continues, Syntax::Shell).unwrap_err().to_string();
+            assert!(err.contains("continues line 1"), "{err}");
+        }
+        // An escaped backslash ends the line; one in a comment continues
+        // nothing.
+        assert_eq!(v.substitute("a \\\\\nb @KNOB-OR-DROP-LINE(email)@\n", Syntax::Shell).unwrap(), "a \\\\\n");
+        assert_eq!(v.substitute("a # note \\\nb @KNOB-OR-DROP-LINE(email)@\n", Syntax::Shell).unwrap(), "a # note \\\n");
+        // Optionlists continue with a backslash too; a parfile line inside a
+        // string that spans lines is refused.
+        assert!(v.substitute("X = a \\\n  @KNOB-OR-DROP-LINE(email)@\n", Syntax::Hash).is_err());
+        let err = v
+            .substitute("A::s = \"one\n@KNOB-OR-DROP-LINE(email)@\n\"\n", Syntax::Parfile)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("a string that spans lines"), "{err}");
+        assert_eq!(
+            v.substitute("A::s = \"one\"\nB::t = \"@KNOB-OR-DROP-LINE(email)@\"\n", Syntax::Parfile).unwrap(),
+            "A::s = \"one\"\n"
+        );
+    }
+
+    #[test]
+    fn a_drop_line_token_in_a_comment_does_nothing() {
+        let v = vars_with_knobs();
+        let text = "# -A @KNOB-OR-DROP-LINE(email)@ stays\necho hi # @KNOB-OR-DROP-LINE(email)@\n";
+        assert_eq!(v.substitute(text, Syntax::Shell).unwrap(), text);
+        let text = "X = 1 # @KNOB-OR-DROP-LINE(email)@\n";
+        assert_eq!(v.substitute(text, Syntax::Hash).unwrap(), text);
+    }
+
+    #[test]
+    fn the_allocation_knobs_refusal_names_its_flag() {
+        let v = vars_with_knobs();
+        let err = v.substitute("@KNOB(mail)@", Syntax::Plain).unwrap_err().to_string();
+        assert!(err.contains("pass -K mail=VALUE"), "{err}");
+        let mut empty = VarSet::new();
+        empty.set_knobs(IndexMap::new());
+        let err = empty.substitute("-A @KNOB(allocation)@", Syntax::Shell).unwrap_err().to_string();
+        assert!(err.contains("pass -a VALUE or -K allocation=VALUE"), "{err}");
     }
 
     #[test]

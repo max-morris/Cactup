@@ -146,7 +146,7 @@ The same engine expands submit/run scripts, build submit scripts, optionlists,
     every character is scanned.
 
 Two **computed** token families read values that are not variables. Each has a
-required form and two optional forms:
+required form, two optional forms and a drop-line form:
 
 | Token | Expands to |
 |---|---|
@@ -156,11 +156,42 @@ required form and two optional forms:
 | `@KNOB(name)@` | the knob `name`; **error** if unset or empty |
 | `@KNOB-OPTIONAL(name)@` | the knob, or the empty string |
 | `@KNOB-OPTIONAL(name, default)@` | the knob, or `default` |
+| `@ENV-OR-DROP-LINE(NAME)@` | `NAME`; if unset or empty, the **whole line** is removed |
+| `@KNOB-OR-DROP-LINE(name)@` | the knob; if unset or empty, the **whole line** is removed |
 
 Environment variable names are `UPPER_SNAKE`; knob names are kebab-case
 (lowercase letters, digits after the first character, dashes inside). The
-required forms take no default — that would defeat them — and blanks around
-the pieces are fine.
+required and drop-line forms take no default — that would defeat them — and
+blanks around the pieces are fine.
+
+**Drop-line tokens** are for a line that must not go out with an empty value.
+A scheduler reads `#SBATCH -A ` with nothing after it as "the account is the
+next directive", so a machine where an account is optional writes:
+
+```bash
+#SBATCH -A @KNOB-OR-DROP-LINE(allocation)@
+```
+
+With an allocation set (`cactup knob allocation ACCOUNT`, or `-a ACCOUNT` for
+one command) the line reads `#SBATCH -A ACCOUNT`; with none, it is not there at
+all. A machine that requires an account writes `@KNOB(allocation)@` instead,
+and a submit with none refuses before anything is queued. The rules:
+
+- If a line has several drop-line tokens and any of them is empty, the line
+  goes. The other tokens on it are still checked (an unknown `@NAME@` is
+  still an error).
+- A drop-line token in a comment does nothing, like any token there.
+- They are an error in `[paths]` values and `wrapper-argv` words, which have
+  no lines.
+- They are an error on a line that runs on into the next, or on a line that
+  continues one: a line ending in a backslash in a shell script or
+  optionlist, or a `"…"` string spanning lines in a parfile. Dropping half a
+  command breaks the rest, so give the token a line of its own.
+- A value in the middle of a line, such as `srun -A` inside a quoted command,
+  can't use one. Use a shell expansion there instead:
+  `alloc='@ALLOCATION@'`, then `${alloc:+-A "$alloc"}`.
+
+Drop-line tokens need MDB generation 5 or later.
 
 The **default value** is written one of three ways:
 

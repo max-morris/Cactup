@@ -2075,7 +2075,7 @@ redistributed:
 ## 6. Templating / variable substitution
 
 Per D7, cactup implements **literal `@NAME@` replacement plus two computed
-token families**, `ENV` and `KNOB`, each in three forms:
+token families**, `ENV` and `KNOB`, each in four forms:
 
 | Token | Value |
 |---|---|
@@ -2085,11 +2085,13 @@ token families**, `ENV` and `KNOB`, each in three forms:
 | `@KNOB(name)@` | the knob `name` from the set's knob snapshot (§5.1); unset or empty is a hard error |
 | `@KNOB-OPTIONAL(name)@` | the knob, or the empty string |
 | `@KNOB-OPTIONAL(name, default)@` | the knob, or `default` |
+| `@ENV-OR-DROP-LINE(NAME)@` | `NAME`; unset or empty removes the whole line holding the token |
+| `@KNOB-OR-DROP-LINE(name)@` | the knob; unset or empty removes the whole line holding the token |
 
 `ENV` arguments are `UPPER_SNAKE`, `KNOB` arguments are kebab-case knob
 identifiers (§5); blanks around the argument and default are tolerated; the
-required forms reject a default (it would defeat them); the only suffix is
-`-OPTIONAL`. The **default** is `"double-quoted"`, `'single-quoted'` — quotes
+required and drop-line forms reject a default (it would defeat them); the
+suffixes are `-OPTIONAL` and `-OR-DROP-LINE`. The **default** is `"double-quoted"`, `'single-quoted'` — quotes
 dropped, `\"`/`\'`/`\\` escape the quote or backslash, any other backslash is
 literal — or a **bare** run of ASCII letters and digits; a bare default
 containing anything else (a space, `/`, `_`, `.`) is an error that names the
@@ -2099,7 +2101,30 @@ machine in question (login node for a submit script or optionlist, compute
 node for a run script or parfile). `KNOB` reads the snapshot attached to the
 variable set; a set without one (MDB `[paths]`, ad-hoc sets) rejects every
 `KNOB` token, optional or not, as "not available in this context" rather than
-reading as unset.
+reading as unset. The required `@KNOB(allocation)@` refusal names `-a` as well
+as `-K`, since `-a ACCOUNT` is shorthand for `-K allocation=ACCOUNT` (§8.5).
+
+**Drop-line forms** (MDB generation 5). An `-OR-DROP-LINE` token whose value is
+set and non-empty is replaced exactly as the required form would be; unset or
+empty, the whole source line holding it is removed, newline included — for a
+directive that must not go out with an empty value (`#SBATCH -A
+@KNOB-OR-DROP-LINE(allocation)@`: a bare `#SBATCH -A ` makes sbatch read the
+next directive as the account). Rules:
+- A line with several drop tokens goes if any of them is empty.
+- Every other token on a dropped line is still substituted, and still fails
+  (an unknown `@NAME@`, say); its output goes with the line.
+- A comment is opaque (§6.1), so a drop token in one does nothing.
+- They are an error in `Plain` text (a `[paths]` value, a `wrapper-argv`
+  word): a single value has no lines.
+- They are an error, set or not, on a line that runs on into the next or on
+  the line that continues one, since dropping half of it breaks what is left.
+  What runs on depends on the syntax: a backslash-newline outside a comment
+  for shell and optionlist text, a `"…"` string spanning lines in a parfile.
+  A mid-line value inside a quoted command (the qbc/db1 runscripts' `srun -A`)
+  is not a line to drop; those keep a shell `${alloc:+-A …}` instead.
+- `.py` scripts take no tokens: `knob(name, "")` and an `if` do the same.
+- `VarSet::check`, which is lenient about an unset `@ENV(…)@`, keeps such a
+  line rather than dropping it.
 
 `@ENV()@` is the mechanism for machine paths only the machine's environment
 knows (TACC/LRZ-style hashed storage roots in `[paths]`, §4.2); because of
