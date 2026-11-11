@@ -129,11 +129,11 @@ pub fn dispatch(ctx: &Ctx, args: ImportArgs) -> Res<()> {
             _ => unreachable!("parsed as sim submit/run"),
         }
     } else {
-        let mut command = format!("cactup -I {alias} sim submit {sim_name}");
-        for word in topology {
-            command.push(' ');
-            command.push_str(&word);
-        }
+        let words = ["cactup", "-I", alias.as_str(), "sim", "submit", sim_name.as_str()]
+            .into_iter()
+            .map(str::to_owned)
+            .chain(topology);
+        let command = words.map(|w| paste_word(&w)).collect::<Vec<_>>().join(" ");
         println!("Imported. To submit it with the file's suggested shape: {}", command.bold());
         Ok(())
     }
@@ -250,6 +250,13 @@ fn differences(inst: &Installation, sim: &SimFile) -> Res<Vec<String>> {
         }
     }
     Ok(out)
+}
+
+/// `word` as it can be pasted into a shell and read back as itself: bare when
+/// it is plain, else single-quoted.
+fn paste_word(word: &str) -> String {
+    let plain = !word.is_empty() && word.bytes().all(|b| b.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&b));
+    if plain { word.to_owned() } else { crate::sim::start::shell_quote(word) }
 }
 
 /// Download published sim `req` (`owner/name`, the newest version, or
@@ -539,6 +546,16 @@ fn parse(words: &[String]) -> Res<Commands> {
 
 #[cfg(test)]
 mod tests {
+    /// The printed command pastes back as the words it was built from.
+    #[test]
+    fn printed_words_paste_back_as_themselves() {
+        assert_eq!(super::paste_word("--job-name"), "--job-name");
+        assert_eq!(super::paste_word("my job"), "'my job'");
+        assert_eq!(super::paste_word("it's"), "'it'\\''s'");
+        assert_eq!(super::paste_word(""), "''");
+        assert_eq!(super::paste_word("01:00:00"), "01:00:00");
+    }
+
     use super::*;
     use cactup_ecosystem_common::sim::{Parfile, ParfileKind, RunHints, SimMeta, ThornlistText};
 
