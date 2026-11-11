@@ -19,7 +19,9 @@
 # --mem 494000MB, and the `sleep 10` before the payload.
 
 lines = ["#! /bin/bash"]
-lines.append("#SBATCH -A {0}".format(ALLOCATION))
+# Account required: CINECA rejects a job without an account. The -a flag, else
+# the allocation knob; with neither, cactup refuses before submitting.
+lines.append("#SBATCH -A {0}".format(ALLOCATION or knob("allocation")))
 lines.append("#SBATCH -p {0}".format(QUEUE))
 lines.append("#SBATCH -t {0}".format(WALLTIME))
 lines.append("#SBATCH --mem 494000MB")

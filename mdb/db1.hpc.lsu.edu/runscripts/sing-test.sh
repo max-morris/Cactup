@@ -39,7 +39,11 @@ date
 # the GPU request is pinned to --gres=gpu:2 (default.sh's GRES=1/2 arithmetic
 # depends on the per-test $nprocs, which is not known here).
 export CCTK_TESTSUITE_RUN_PROCESSORS=@TASKS@
-export CCTK_TESTSUITE_RUN_COMMAND='srun -u -A @ALLOCATION@ -p gpu -n $nprocs --gres=gpu:2 --gpus-per-task @GPUS_PER_TASK@ singularity exec --nv --bind /var/spool --bind /project --bind /ddnA/project --bind /etc/ssh/ssh_known_hosts --bind /ddnA/work --bind /work --bind /scratch /work/sbrandt/images/etworkshop2.simg $exe $parfile'
+# Each test's srun runs inside the job, which already charges an account:
+# pass -A only when an allocation is set. An empty `-A` would take the next
+# flag as the account.
+alloc='@ALLOCATION@'
+export CCTK_TESTSUITE_RUN_COMMAND='srun -u '"${alloc:+-A $alloc }"'-p gpu -n $nprocs --gres=gpu:2 --gpus-per-task @GPUS_PER_TASK@ singularity exec --nv --bind /var/spool --bind /project --bind /ddnA/project --bind /etc/ssh/ssh_known_hosts --bind /ddnA/work --bind /work --bind /scratch /work/sbrandt/images/etworkshop2.simg $exe $parfile'
 
 # Redirect testsuite output into test-home (design §11.6): the flesh harness
 # honors TESTS_DIR and writes each test's run dirs plus summary.log under

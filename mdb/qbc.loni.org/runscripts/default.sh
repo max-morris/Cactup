@@ -46,9 +46,13 @@ env | sort > .cactup/ENVIRONMENT
 
 echo "Starting:"
 export CACTUS_STARTTIME=$(date +%s)
+# srun runs inside the job, which already charges an account: pass -A only
+# when an allocation is set. An empty `-A` would take the next flag as the
+# account.
+alloc='@ALLOCATION@'
 if which srun 2>/dev/null
 then
-time srun -u -A @ALLOCATION@ -p checkpt \
+time srun -u ${alloc:+-A "$alloc"} -p checkpt \
     -N @NODES@ -n @TASKS@ \
     --cpus-per-task @CPUS_PER_TASK@ \
     singularity exec --bind /var/spool --bind /project --bind /ddnA/project --bind /etc/ssh/ssh_known_hosts --bind /ddnA/work --bind /work --bind /scratch /work/sbrandt/images/etworkshop-cpu.simg @EXECUTABLE@ -L 3 @PARFILE@

@@ -12,7 +12,10 @@
 # --gres against its CPUs-per-GPU cap, so the reservation has to be computed.
 
 lines = ["#! /bin/bash"]
-lines.append("#SBATCH -A {0}".format(ALLOCATION))
+# Account required: LSU/LONI clusters reject a job without an allocation. The
+# -a flag, else the allocation knob; with neither, cactup refuses before
+# submitting.
+lines.append("#SBATCH -A {0}".format(ALLOCATION or knob("allocation")))
 lines.append("#SBATCH -p {0}".format(QUEUE))
 
 # GPUs to reserve. A build needs none of them to compile, but on gpu2 the cap

@@ -24,7 +24,10 @@
 #     2-node, 4-task job asked each node for 8 of its 2 GPUs).
 
 lines = ["#! /bin/bash"]
-lines.append("#SBATCH -A {0}".format(ALLOCATION))
+# Account required: LSU/LONI clusters reject a job without an allocation. The
+# -a flag, else the allocation knob; with neither, cactup refuses before
+# submitting.
+lines.append("#SBATCH -A {0}".format(ALLOCATION or knob("allocation")))
 lines.append("#SBATCH -p {0}".format(QUEUE))
 lines.append("#SBATCH -t {0}".format(WALLTIME))
 lines.append("#SBATCH -N {0} -n {1}".format(NODES, TASKS))

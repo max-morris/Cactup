@@ -19,7 +19,9 @@ if EMAIL:
     lines.append("#SBATCH --mail-user={0}".format(EMAIL))
 lines.append("#SBATCH -o {0}".format(STDOUT_FILE))
 lines.append("#SBATCH -e {0}".format(STDERR_FILE))
-lines.append("#SBATCH -A {0}".format(ALLOCATION))
+# Account required: DiRAC COSMA rejects a job without a project. The -a flag,
+# else the allocation knob; with neither, cactup refuses before submitting.
+lines.append("#SBATCH -A {0}".format(ALLOCATION or knob("allocation")))
 
 # env-setup is NOT auto-prepended for .py scripts (design §6.1).
 lines.append(ENV_SETUP)
