@@ -13,8 +13,16 @@
       "current-release": "master",
       "current-thornlist": "/home/user/.cactup/cacti/et/Cactus/thornlists/mine.th",
       "unfetched-repos": {
-        "CarpetX": {
+        "CarpetX0": {
           "reason": "skipped",
+          "thorns": [
+            "CarpetX/Algo",
+            "CarpetX/Loop"
+          ],
+          "detail": "local modifications (Loop/src/loop.cxx)"
+        },
+        "CarpetX1": {
+          "reason": "failed",
           "thorns": [
             "CarpetX/Algo",
             "CarpetX/Loop"

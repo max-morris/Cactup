@@ -66,6 +66,11 @@ pub struct Format<D: 'static> {
     /// Same-version normalizations shipped before versioning did their job,
     /// run before the upgrades. A closed list: new changes bump instead.
     pub legacy: Option<fn(&mut D)>,
+    /// Sub-records a writer replaces whole rather than edits (dotted paths,
+    /// `*` for any one key: `installations.*.unfetched-repos.*`). Put-back
+    /// never reaches into them: a key a newer binary added to the old record
+    /// says something about the old record, not about its replacement.
+    pub replace_whole: &'static [&'static str],
 }
 
 /// A file written by a newer cactup: refused on read and on write.
@@ -345,7 +350,7 @@ pub fn write_over<T: Serialize + DeserializeOwned, D: Document>(
             // comparison never mixes two versions' key names; a down-step
             // leaves keys it does not know alone.
             if let Some(known) = round_trip::<T, D>(on_disk, f) {
-                put_back(&mut doc, on_disk, &known);
+                put_back(&mut doc, on_disk, &known, f.replace_whole, &mut Vec::new());
             }
             *version
         }
@@ -467,21 +472,35 @@ fn round_trip<T: Serialize + DeserializeOwned, D: Document>(on_disk: &D, f: &For
 /// identity is its position, and a reordered array would graft a key onto
 /// the wrong element. A key the writer cleared is in `known`, so it stays
 /// cleared. A put-back key goes after the nearest key that precedes it on
-/// disk and is present in `new`, so the file keeps its order.
-fn put_back<D: Document>(new: &mut D, on_disk: &D, known: &D) {
+/// disk and is present in `new`, so the file keeps its order. `path` is
+/// where `new` sits in the document; a sub-record `whole` names is left as
+/// the writer made it.
+/// Whether `path` is one of the `whole` patterns (dotted, `*` any one key).
+fn replaced_whole(whole: &[&str], path: &[String]) -> bool {
+    whole.iter().any(|pattern| {
+        let parts: Vec<&str> = pattern.split('.').collect();
+        parts.len() == path.len() && parts.iter().zip(path).all(|(p, k)| *p == "*" || *p == k)
+    })
+}
+
+fn put_back<D: Document>(new: &mut D, on_disk: &D, known: &D, whole: &[&str], path: &mut Vec<String>) {
     let mut anchor: Option<&str> = None;
     for (key, disk_value) in on_disk.iter() {
         match known.get(key) {
             None if new.get(key).is_none() => insert_after(new, anchor, key.clone(), disk_value.clone()),
             None => {}
             Some(known_value) => {
-                if let (Some(disk_map), Some(known_map), Some(new_map)) = (
-                    D::as_map(disk_value),
-                    D::as_map(known_value),
-                    new.get_mut(key).and_then(D::as_map_mut),
-                ) {
-                    put_back(new_map, disk_map, known_map);
+                path.push(key.clone());
+                if !replaced_whole(whole, path)
+                    && let (Some(disk_map), Some(known_map), Some(new_map)) = (
+                        D::as_map(disk_value),
+                        D::as_map(known_value),
+                        new.get_mut(key).and_then(D::as_map_mut),
+                    )
+                {
+                    put_back(new_map, disk_map, known_map, whole, path);
                 }
+                path.pop();
             }
         }
         if new.get(key).is_some() {
@@ -762,6 +781,7 @@ mod tests {
         downgrades: &[toy_down_2],
         down_floor: 1,
         frozen_read: true,
+        replace_whole: &[],
         legacy: Some(toy_legacy),
     };
 
@@ -819,6 +839,7 @@ mod tests {
             downgrades: &[],
             down_floor: 1,
             frozen_read: true,
+            replace_whole: &[],
             legacy: None,
         };
         descriptor_is_consistent(&BAD);

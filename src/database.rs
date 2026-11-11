@@ -31,8 +31,9 @@ use crate::Res;
 pub const SCHEMA: u32 = 1;
 
 /// `database.json`'s format: version 1, no migrations. Only login binaries
-/// write it (D11), so it is not `frozen_read`; an older login binary sharing
-/// `~/.cactup` keeps this one's additions when it writes.
+/// write it (D11), so it is not `frozen_read`. An older login binary sharing
+/// `~/.cactup` keeps this one's additions when it writes, once it has this
+/// module too: binaries from before it drop keys they do not know.
 pub static DATABASE: Format<Json> = Format {
     name: "database",
     key: "schema",
@@ -42,6 +43,10 @@ pub static DATABASE: Format<Json> = Format {
     down_floor: 1,
     frozen_read: false,
     legacy: Some(drop_detected_machine),
+    // Replaced whole by their writers: a newly detected machine
+    // (`commands::machine::remember`), a repo's unfetched record
+    // (`refetch`).
+    replace_whole: &["detected", "installations.*.unfetched-repos.*"],
 };
 
 /// The bare `detected-machine` string (before the stamped `detected` record)
@@ -611,16 +616,31 @@ mod tests {
 
     /// Every field set, every collection non-empty, and no `..`: a new field
     /// fails to compile here, and the shape pin then says what to do.
+    /// Every value of every enum the database holds, in a match with no
+    /// wildcard: a new value fails to compile here until it is in the sample
+    /// (an older binary meeting it would fail to read the whole database).
+    fn every_unfetched_reason() -> [UnfetchedReason; 2] {
+        let all = [UnfetchedReason::Skipped, UnfetchedReason::Failed];
+        for reason in &all {
+            match reason {
+                UnfetchedReason::Skipped | UnfetchedReason::Failed => {}
+            }
+        }
+        all
+    }
+
     fn exhaustive_sample() -> Database {
         let mut unfetched_repos = IndexMap::new();
-        unfetched_repos.insert(
-            "CarpetX".to_owned(),
-            UnfetchedRepo {
-                reason: UnfetchedReason::Skipped,
-                thorns: vec!["CarpetX/Algo".to_owned(), "CarpetX/Loop".to_owned()],
-                detail: Some("local modifications (Loop/src/loop.cxx)".to_owned()),
-            },
-        );
+        for (i, reason) in every_unfetched_reason().into_iter().enumerate() {
+            unfetched_repos.insert(
+                format!("CarpetX{i}"),
+                UnfetchedRepo {
+                    reason,
+                    thorns: vec!["CarpetX/Algo".to_owned(), "CarpetX/Loop".to_owned()],
+                    detail: Some("local modifications (Loop/src/loop.cxx)".to_owned()),
+                },
+            );
+        }
         let mut installations = IndexMap::new();
         installations.insert(
             "et".to_owned(),
@@ -773,6 +793,38 @@ mod tests {
         assert!(doc["installations"].get("gone").is_none());
         assert_eq!(doc["active-installation"], serde_json::Value::Null);
         assert_eq!(doc["cactup-version"], crate::VERSION);
+    }
+
+    /// A sub-record its writer replaces whole (a newly detected machine, a
+    /// repo's unfetched record) does not inherit the old one's unknown keys.
+    #[test]
+    fn records_replaced_whole_keep_no_stale_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::in_dir(dir.path());
+        let path = dir.path().join("database.json");
+        fs::write(
+            &path,
+            r#"{"schema": 1, "cactup-version": "0.0.1",
+  "installations": {"et": {"alias": "et", "release": null, "path": "/x", "future-field": 2,
+    "unfetched-repos": {"CarpetX": {"reason": "skipped", "thorns": [], "verified-by": "old"}}}},
+  "knobs": {},
+  "detected": {"name": "mike", "hostname": "mike1", "verified-by": "old"}}"#,
+        )
+        .unwrap();
+        db.update(|d| {
+            d.detected = Some(DetectedMachine { name: "qbd".into(), hostname: "qbd2".into(), session: None });
+            let et = d.installations.get_mut("et").unwrap();
+            et.unfetched_repos.insert(
+                "CarpetX".into(),
+                UnfetchedRepo { reason: UnfetchedReason::Failed, thorns: vec![], detail: None },
+            );
+            Ok(())
+        })
+        .unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(doc["detected"].get("verified-by").is_none(), "{doc}");
+        assert!(doc["installations"]["et"]["unfetched-repos"]["CarpetX"].get("verified-by").is_none(), "{doc}");
+        assert_eq!(doc["installations"]["et"]["future-field"], 2, "an edited record keeps its keys");
     }
 
     /// Reads take no lock: a read succeeds while another process holds the
