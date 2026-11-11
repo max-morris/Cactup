@@ -10,8 +10,14 @@
 lines = ["#! /bin/bash"]
 # Account required: LSU/LONI clusters reject a job without an allocation. The
 # -a flag, else the allocation knob; with neither, cactup refuses before
-# submitting.
-lines.append("#PBS -A {0}".format(ALLOCATION or knob("allocation")))
+# submitting, naming both.
+allocation = ALLOCATION or knob("allocation", "")
+if not allocation:
+    raise CactupError(
+        "{0} needs an allocation: pass -a ACCOUNT, or set it once with "
+        "`cactup knob allocation ACCOUNT`".format(MACHINE)
+    )
+lines.append("#PBS -A {0}".format(allocation))
 lines.append("#PBS -q {0}".format(QUEUE))
 lines.append("#PBS -r n")
 lines.append("#PBS -l walltime={0}".format(WALLTIME))

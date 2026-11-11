@@ -372,9 +372,9 @@ plain `os.environ`. The same conventions hold for a `.py` **parfile**.
 
 An account directive never goes out empty: `#SBATCH -A ` with nothing after it
 makes sbatch read the next directive as the account. `ALLOCATION` is the `-a`
-flag, else the `allocation` knob, so the in-repo machines write
-`ALLOCATION or knob("allocation")` where the site rejects a job without an
-account (nothing set refuses the submit), and where it does not:
+flag, else the global `allocation` knob; the snapshot also holds a
+simulation's own. The in-repo machines read both, and where the site does not
+require an account they leave the line out:
 
 ```python
 allocation = ALLOCATION or knob("allocation", "")
@@ -382,8 +382,21 @@ if allocation:
     lines.append(f"#SBATCH -A {allocation}")
 ```
 
-A `.sh` script has no conditional, so an optional account directive needs a
-`.py` script.
+Where the site rejects a job without one, they refuse instead, naming both
+ways to give it:
+
+```python
+allocation = ALLOCATION or knob("allocation", "")
+if not allocation:
+    raise CactupError(
+        f"{MACHINE} needs an allocation: pass -a ACCOUNT, or set it once with "
+        "`cactup knob allocation ACCOUNT`"
+    )
+lines.append(f"#SBATCH -A {allocation}")
+```
+
+A `.sh` script has no conditional, so either kind of account directive needs a
+`.py` script (`@KNOB(allocation)@` alone would not see `-a`).
 
 Python is useful for complex script generation, but shell is simpler for most machines.
 
