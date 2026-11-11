@@ -186,14 +186,15 @@ the next rebuild of that config stops and says where each key went.
 
 cactup's own files (the installation list, simulation and build records, your
 configs) each carry a format version. A newer cactup reads every older file
-it ever wrote; it does not touch the file when it only reads, and the file
-is rewritten in the current format the next time cactup saves it. A cactup
-that is older than one that wrote a file keeps the keys it does not know when
-it saves, but refuses a file whose format it cannot read at all:
+it ever wrote, and does not touch a file it only reads; the file is upgraded
+the next time cactup saves it (a record that queued jobs read may be saved in
+an older format that still holds its content, so those jobs keep working). A
+cactup that is older than the one that wrote a file keeps the keys it does not
+know when it saves (cactup releases from before November 2026 do not), but
+refuses a file whose format it cannot read at all:
 
 ```
-'/home/you/.cactup/database.json' was written by a newer cactup (database
-schema 2; this cactup, a1b2c3d, reads up to 1); upgrade cactup
+'/home/you/.cactup/database.json' was written by a newer cactup (database schema 2; this cactup, 0.1.0 (a1b2c3d 2026-11-10), reads up to 1); upgrade cactup
 ```
 
 Nothing is overwritten when you see this. Run `cactup update` (or use the

@@ -8,8 +8,9 @@
 //! - **Read: version first.** The raw document is parsed, its version key
 //!   read (missing = 1), and a version newer than [`Format::current`] is
 //!   refused with one upgrade message naming the file ([`Newer`]) before any
-//!   typed parse. An older one runs [`Format::legacy`] and the upgrade chain
-//!   over the raw document, then parses. A read never rewrites the file.
+//!   typed parse. [`Format::legacy`] runs on every read, then an older one runs
+//!   the upgrade chain over the raw document, then parses. A read never
+//!   rewrites the file.
 //! - **Write: atomic, never over a newer file, sticky, keeping what it does
 //!   not know.** The target is re-read first; a newer version is refused. The
 //!   version written is the oldest one, no older than the file on disk, that

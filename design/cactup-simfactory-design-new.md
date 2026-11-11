@@ -397,44 +397,55 @@ written; §7.4, §9.3 and the CLAUDE.md rule point here. The mechanism is
 
 **Principles.**
 
-1. **One version per format, and it belongs to the file.** Every file cactup
-   writes and reads back has a `static` `Format` descriptor in the module that
-   owns the record (the table below). Local records carry an integer
-   **`schema`** as their first key; the shared crate's interchange formats
-   (`.sim`, `cactarium.toml`, the stack release) carry **`format`**. A missing
-   key reads as 1. Structs hold no version field: `format::read` strips the
-   key before the typed parse and `format::write` puts it back, first. The
-   version is separate from the human `cactup-version` string.
+1. **One version per format.** Every local record cactup writes and reads
+   back has a `static` `Format` descriptor in the module that owns the record
+   (the table below); `.sim`, `latest.json` and the caches have none. A local
+   record carries an integer **`schema`** as its first key; a missing key
+   reads as 1, and its struct holds no version field: `format::read` strips
+   the key before the typed parse and `format::write` puts it back, first.
+   The shared crate's interchange formats (`.sim`, `cactarium.toml`, the stack
+   release) carry **`format`** as a required field of their own struct,
+   checked by the crate's `generation::check` before the typed parse (a
+   missing `format` is an error). Both are separate from the human
+   `cactup-version` string.
 2. **Read: version first.** The raw document is parsed, its version read, and
    a version newer than `Format::current` is refused with one message naming
    the file (`'<path>' was written by a newer cactup (<name> schema N; this
    cactup, <VERSION>, reads up to M); upgrade cactup`) before any typed parse.
    The verdict is final, including in the database's lock-free read; only a
-   raw document that does not parse is retried (a torn read on NFS). An older
-   file runs the closed `legacy` normalization (below) and then the upgrade
-   chain `vN → vN+1` over the raw document, and is then parsed. **Upgrades are
+   raw document that does not parse, or a stale NFS file handle, is retried
+   (a torn or half-visible read). The
+   closed `legacy` normalization (below) runs on every read, then an older
+   file runs the upgrade chain `vN → vN+1` over the raw document, and the
+   result is parsed. **Upgrades are
    kept forever. A read never rewrites the file** (rewriting on read races a
    concurrent writer): an old file reaches the current version the next time
    it is saved.
 3. **Write: atomic, never over a newer file, sticky, keeping what it does
    not know.** Every write is a temp file in the same directory, fsync, and
-   rename, so a reader sees the old file or the new one. The target is
-   re-read first: a newer version is refused, so a newer cactup's file is
+   rename, so a reader sees the old file or the new one. `write` re-reads
+   the target first: a newer version is refused, so a newer cactup's file is
    never overwritten; one that does not parse is overwritten with nothing put
-   back. The version written is the **oldest version, no older than the file
+   back. A writer serialized by a lock may instead read once with
+   `read_for_write` and write with `write_over` (`Db::update`,
+   `BuildAttempt::store_meta_keeping_job`): the refusal and the put-back come
+   from that one read, and a file that does not parse fails the read instead
+   of being overwritten. Use the pair only under the lock. The version written is the **oldest version, no older than the file
    on disk, that the format's down-chain reaches** while the content fits it
    (a down-step answers `CannotExpress` when the document uses something the
    older version cannot hold); a new file is written at the oldest version
    that holds its content. A format with no down-steps writes `current`.
 4. **Unknown keys are put back, decided from disk.** Records are not
-   `deny_unknown_fields`. At write time the helper takes the disk document
+   `deny_unknown_fields` (the config record's `[runs-on]` reuses the MDB's
+   strict `RunsOn` but is read through `tolerant_runs_on`, which drops unknown
+   keys, so the rule holds). At write time the helper takes the disk document
    (after `legacy` and the upgrades), types and re-serializes it, and treats
    every key that does not survive the round trip as one this binary does not
    model. Those are copied into the new document only where the key is absent
    there, recursing into **maps only** (never into array elements: a
    reordered array would graft a key onto the wrong element), keeping the
    file's key order. So an older binary's rewrite keeps a newer one's
-   additions, and a key the writer cleared stays cleared. Two invariants
+   additions (cactup releases from before November 2026 do not), and a key the writer cleared stays cleared. Two invariants
    follow: `skip_serializing_if` may only skip the field's deserialize
    default, and the version key never takes part in the comparison. A flattened
    `extra` table and `serde_ignored` were rejected: flatten buffers through
@@ -443,8 +454,9 @@ written; §7.4, §9.3 and the CLAUDE.md rule point here. The mechanism is
    reports nothing under `flatten`.
 5. **`write`, `replace`, `write_replacing`, `write_private`.** `write` edits
    the record on disk (put-back as above). `replace` writes a record made
-   anew (a build finishing, a test re-run in the same directory, the frozen
-   config copy of `sim create`): the same refusal of a newer file and the same
+   anew (a build finishing, `BuildAttempt::create`, a test re-run in the same
+   directory, the frozen config copy of `sim create`; the submit binary's
+   build-finish config write is one): the same refusal of a newer file and the same
    sticky version, but **nothing is put back**, since a key a newer binary
    added to the old record says nothing about the new one.
    `Format::replace_whole` names sub-records a writer always rebuilds whole
@@ -463,21 +475,26 @@ written; §7.4, §9.3 and the CLAUDE.md rule point here. The mechanism is
 
    | Change | Bump? | Mechanism |
    |---|---|---|
-   | New optional key whose absence means the old behavior and that an older binary can safely ignore | No | Older readers ignore it; older writers put it back (4). |
+   | New optional key whose absence means the old behavior and that an older binary can safely ignore | No | Older readers ignore it; older writers put it back (4), except inside array elements (`installation.toml`'s `[[added]]`, `[[added.thorns]]`), where an older writer drops it: accept that loss or bump. |
    | New key an older binary would get *wrong* by ignoring it | Yes | The down-step answers `CannotExpress` only when the key is used, so only files using the feature get the new version (the `.sim` `unpack` pattern). |
    | Rename, retype, removal, new meaning, stricter validation, new required key | Yes | The `vN → vN+1` upgrade, a new fixture, and, for a `frozen_read` record, the `vN+1 → vN` down-step. |
    | A change inside a cache | n/a | A fresh namespace (store `FORMAT`/`KEY_LABEL`, §18). |
 
-8. **`legacy` is a closed list.** `Format::legacy` runs before the upgrades on
-   a raw document and holds same-version normalizations that shipped before
+8. **`legacy` is a closed list.** `Format::legacy` runs on every read, before
+   the upgrades, on the raw document and holds same-version normalizations that shipped before
    versioning existed: the database's bare `detected-machine` string, and
    `build.toml`'s `variant` → `flavor` rename (which also brings the embedded
    config record to the current schema, so put-back compares it in the shape
-   its writer writes). New changes bump; they do not join the list.
+   its writer writes). New changes bump; they do not join the list, and no entry is ever
+   removed (a queued build may carry any of them).
 9. **Embedded records.** The config record inside `build.toml` keeps its own
    `schema` through `parse_embedded` / `upgrade_embedded`: the same chain, a
    newer embedded record refusing the outer file on every path, read and
-   write.
+   write. The embedded copy is always *written* at `CONFIG.current`
+   (`ConfigMeta::serialize_versioned`), and `BUILD`'s `legacy` lifts it to
+   current. So the next bump of `CONFIG` must first make the embedded copy
+   sticky; otherwise a newer binary's stop rewrites a queued build's record
+   into one its older binary refuses, losing the build's outcome.
 
 **Fixtures and the shape pin.** `fixtures/formats/<format>/` holds one file per
 shipped shape (`v1.toml`, a `-noschema` variant where a format once had no
@@ -510,13 +527,13 @@ of a server or update site.
 | `database.json`, `installation.toml`, `simulations.toml`, `tests.toml`, `fetch-state.toml`, `credentials` | login binaries only (D11) | (b) | Same version: older binaries ignore new keys and put them back on write. A bump: older binaries refuse with "upgrade", which `cactup update` fixes, so avoid bumping. | Upgrade chain. |
 | `simulation.toml` | `sim create`, `set_knobs` (login) | (a) every queued restart's compute binary | Sticky version and put-back: a newer binary writes nothing that must be understood into an existing file. | Chain. |
 | `restart.toml` | the submitting binary S (submit, compute start/finish) and a newer login binary L (stop, clean, reaper, `job-stopped`) | (a) S | Sticky and put-back. | Chain. |
-| `build.toml` (with the embedded config record) | S (submit, compute), L (stop) | (a) S | Sticky and put-back; the embedded record is written at `CONFIG.current` (its stickiness must be designed when `CONFIG` next bumps). | Chain, plus `legacy`. |
+| `build.toml` (with the embedded config record) | S (submit, compute), L (stop) | (a) S | Sticky and put-back; the embedded record is written at `CONFIG.current`, so it must be made sticky before `CONFIG` next bumps (principle 9). | Chain, plus `legacy`. |
 | `test.toml` | S, L | (a) S | Sticky and put-back. | Chain. |
 | `cactup-config.toml` | S at build finish; L on build, the up-to-date refresh and the thornlist retarget | (a) S at `execute` start | Sticky and put-back. The 1 → 2 bump predates down-steps and is grandfathered (`down_floor` 2): §7.4's accepted narrow window. | Chain `[1 → 2]`. |
 | `<sim>/.cactup/cfg/cactup-config.toml` | `sim create`, once, by `replace` | login readers (`sim export`) | Written once, at the oldest version that holds it. | The config chain. |
-| `.sim` | `cactup export` | (c) every cactup import, the server | Written at the oldest generation that holds the content (`SimFile::required_format`), so a file needing nothing new stays readable by older cactups. | Reads generations 1 to `SIM_FORMAT`; a newer one is refused with an upgrade message, and so is a file claiming a generation older than its content needs. |
-| `cactarium.toml`, `cactarium-stack.toml` | authors | the server | Exact match today (`MANIFEST_FORMAT` 1). When it bumps, read 1..=N forever: tags are immutable. | n/a |
-| Stack release (API JSON, `FrozenStack`) | the server | (c) all clients | Gated by the `api-generation` header, and cactup checks the release's `format` against `STACK_FORMAT` before the typed parse, so a newer one says to upgrade rather than failing on an unknown key. The server should keep answering older-generation clients in their generation beside the new one until a deliberate cutoff (a rule for the Cactarium repository). | n/a |
+| `.sim` | `cactup export` | (c) every cactup import, the server | Written at the oldest generation that holds the content (`SimFile::required_format`), so a file needing nothing new stays readable by older cactups. | Reads generations 1 to `SIM_FORMAT`; a newer one is refused with an upgrade message, and a file claiming a generation older than its content needs is refused as invalid. |
+| `cactarium.toml`, `cactarium-stack.toml` | authors | the server | An exact match at the current pin (the same thing while `MANIFEST_FORMAT` is 1); once the pin moves past the shared crate's change, read 1..=N forever: tags are immutable. | n/a |
+| Stack release (API JSON, `FrozenStack`) | the server | (c) all clients | Gated by the `api-generation` header, and cactup checks the release's `format` against `STACK_FORMAT` (its own copy in `cactarium.rs` until the pin moves, the crate's after) before the typed parse, so a newer one says to upgrade rather than failing on an unknown key. The server should keep answering older-generation clients in their generation beside the new one until a deliberate cutoff (a rule for the Cactarium repository). | n/a |
 | `latest.json` | CI (`ci/assemble-site.sh`) | (c) every deployed binary and the installer | **Never versioned and never broken**: a refusal would leave old binaries unable to update themselves. It carries no version key; **the path is the version**. Keys may only be added (it is read leniently), and a change that cannot be additive is published at a new path beside the old one. | n/a |
 
 **The hard case.** A newer L rewriting `restart.toml` at a bumped version
@@ -568,12 +585,16 @@ in a build attempt: it names the exact binary that reads it
 (`BuildConf.cactup`), a stronger stamp than an integer. *Lock stamps*: only
 ever append lines; the parser ignores extras. *`log.txt`* is simfactory's
 format; *CRL thornlists* are an external format. *`update-check` and
-`*.retired`* are markers whose mtime is the content. The **MDB** is out of
+`*.retired`* are markers whose mtime is the content. The MDB sync stamp
+(`.synced-<N>`) is best effort: a stamp that does not read is a missing one. The **MDB** is out of
 scope: its generation mechanism (D14, §17) is its only one.
 
-**The next change.** The pattern for it is the one `build::CONFIG` set: a
-read-side upgrade in one place, the record's own `schema` bumped, never a
-rewrite on read.
+**The next change.** The shape is a read-side upgrade in one place, the
+record's own `schema` bumped, never a rewrite on read. `build::CONFIG`'s 1 → 2
+bump is the model for the upgrade only: it shipped no down-step and is
+grandfathered (`down_floor` 2), so a `frozen_read` bump must also ship its
+down-step, and `CONFIG`'s next bump needs the embedded copy made sticky first
+(principle 9).
 
 ---
 
@@ -2753,8 +2774,8 @@ never the queue a build of it is submitted to (§7.9).
 `flavor` and grouped the flat `gpu`/`compatible-queues` keys as `[runs-on]`
 (`queues`/`gpu`). A schema-1 record — or one predating the `schema` key — is
 upgraded in memory on every read, in one place (`build::CONFIG`'s chain), for
-both copies on disk (`cactup-config.toml` and the record embedded in each
-build attempt's `build.toml`). The upgrade is kept indefinitely, since a build
+every copy on disk (`cactup-config.toml`, the record embedded in each
+build attempt's `build.toml`, and the sim's frozen `cfg/cactup-config.toml`). The upgrade is kept indefinitely, since a build
 queued by an older cactup writes a schema-1 record when it finishes. This
 bump predates down-steps (`down_floor` 2), so an older binary cannot read a
 schema-2 record: a build queued by an older cactup that finds the config
@@ -4787,8 +4808,8 @@ sims with cactup; there is no interop. If that proves painful, a one-shot
 **Schema versioning.** Every cactup TOML file (`simulation.toml`,
 `restart.toml`, `cactup-config.toml`, `installation.toml`, `simulations.toml`)
 and the global `database.json` carries a top-level integer **`schema`** as its
-first key; the rules for reading, upgrading and writing it, and which formats
-a compute node reads, are §2.5.
+first key (every local record; the table in §2.5); the rules for reading,
+upgrading and writing it, and which formats a compute node reads, are §2.5.
 
 `simulation.toml` (sim level) carries `schema`, the keys simfactory wrote at
 create (`simfactory-docs.txt` §15) — `machine`, `simulation-id`, `sourcedir`,
@@ -5718,7 +5739,8 @@ Each is marked **ASSUMPTION** inline above; collected here:
         (§11.6). None of these change the two hard requirements (separate command
         tree, separate configurable output root).
 12. Schema/version handling: versioned formats read old, refuse newer, keep
-    unknown keys, and are upgraded on read (§2.5).
+    unknown keys, and are upgraded in memory on read (never rewritten on read)
+    (§2.5).
 13. Universes (§4.8): generic command-wrapper (`wrapper-argv` prefix form default,
     `wrapper`/`@COMMAND@` template power-form), wired for all three seams —
     `cactup build`, `sim run`, and `sim submit` — via one `[universes.*]` registry
