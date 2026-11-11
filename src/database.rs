@@ -102,6 +102,7 @@ pub const KNOWN_KNOBS: &[KnobSpec] = &[
     KnobSpec::maintenance("test-home", |v| crate::mdb::meta::validate_path_knob("test-home", v)),
     KnobSpec::maintenance("scratch-home", |v| crate::mdb::meta::validate_path_knob("scratch-home", v)),
     KnobSpec::maintenance("build-cache-home", |v| crate::mdb::meta::validate_path_knob("build-cache-home", v)),
+    KnobSpec::maintenance("inputs-home", |v| crate::mdb::meta::validate_path_knob("inputs-home", v)),
 ];
 
 /// The spec for a knob name, if cactup recognizes it.
@@ -186,6 +187,21 @@ pub struct CactusInstallation {
     /// recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thornlist: Option<String>,
+    /// For an installation made from a `.sim` file (`install --simfile`,
+    /// §8.9): the file it was made from — the third kind of install-time
+    /// provenance, beside a release and a custom thornlist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simfile: Option<String>,
+    /// For an installation made from a Cactarium stack release (`install
+    /// owner/stack@version`, §8.10): the exact release, as `owner/stack@v`
+    /// (or `@head`/`@master` for the unpinned forms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<String>,
+    /// Where to report problems with the stack release the tree is on now
+    /// (installed, or refetched to), as the Cactarium gave it: the stack's
+    /// declared contact, else its repo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack_contact: Option<String>,
     /// What the tree is on *now*, when an `installation refetch` with an
     /// explicit source moved it away from its install-time provenance
     /// (§2.1). `release`/`thornlist` above are never rewritten — they record
@@ -395,9 +411,9 @@ impl Database {
         }
 
         let contents = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read database from {}", path.display()))?;
+            .with_context(|| format!("Failed to read database from '{}'", path.display()))?;
         let db: Database = serde_json::from_str(&contents)
-            .with_context(|| format!("Failed to parse database at {}", path.display()))?;
+            .with_context(|| format!("Failed to parse database at '{}'", path.display()))?;
         db.check_schema(path)?;
         Ok(db)
     }
@@ -406,8 +422,8 @@ impl Database {
     fn check_schema(&self, path: &Path) -> Res<()> {
         if self.schema > SCHEMA {
             bail!(
-                "{} has schema {} but this cactup ({}) understands at most schema {SCHEMA}. \
-                 It was written by a newer cactup; please upgrade.",
+                "'{}' has schema {} but this cactup ({}) understands at most schema {SCHEMA}; \
+                 please upgrade cactup",
                 path.display(),
                 self.schema,
                 crate::VERSION
@@ -423,12 +439,12 @@ impl Database {
             serde_json::to_string_pretty(self).with_context(|| "Failed to serialize database")?;
         let dir = path.parent().expect("database path has a parent");
         let mut temp = tempfile::NamedTempFile::new_in(dir)
-            .with_context(|| format!("Failed to create temp file in {}", dir.display()))?;
+            .with_context(|| format!("Failed to create temp file in '{}'", dir.display()))?;
         temp.write_all(contents.as_bytes())
             .and_then(|()| temp.as_file().sync_all())
             .with_context(|| "Failed to write database temp file")?;
         temp.persist(path)
-            .with_context(|| format!("Failed to move database into place at {}", path.display()))?;
+            .with_context(|| format!("Failed to move database into place at '{}'", path.display()))?;
         Ok(())
     }
 }
@@ -439,6 +455,7 @@ const UNLOCKED_READ_ATTEMPTS: u32 = 3;
 
 /// Handle to the on-disk global DB. Cheap to construct; owns no lock. All
 /// access goes through [`Db::read`] / [`Db::update`].
+#[derive(Clone)]
 pub struct Db {
     path: PathBuf,
     lock_path: PathBuf,
@@ -530,7 +547,7 @@ impl Db {
     fn ensure_dir(&self) -> Res<()> {
         let dir = self.path.parent().expect("database path has a parent");
         fs::create_dir_all(dir)
-            .with_context(|| format!("Failed to create cactup directory {}", dir.display()))
+            .with_context(|| format!("Failed to create cactup directory '{}'", dir.display()))
     }
 }
 
@@ -720,8 +737,11 @@ mod tests {
                     release: None,
                     path: "/x".to_owned(),
                     thornlist: Some("/home/u/lists/mine.th".to_owned()),
+                    simfile: None,
+                    stack: None,
                     current_release: None,
                     current_thornlist: None,
+                    stack_contact: None,
                     unfetched_repos: IndexMap::new(),
                 },
             );
@@ -773,8 +793,11 @@ mod tests {
                     release: Some("ET_2026_05".to_owned()),
                     path: "/x".to_owned(),
                     thornlist: None,
+                    simfile: None,
+                    stack: None,
                     current_release: None,
                     current_thornlist: None,
+                    stack_contact: None,
                     unfetched_repos: unfetched,
                 },
             );
@@ -810,8 +833,11 @@ mod tests {
                     release: Some("ET_2026_05".to_owned()),
                     path: "/y".to_owned(),
                     thornlist: None,
+                    simfile: None,
+                    stack: None,
                     current_release: None,
                     current_thornlist: None,
+                    stack_contact: None,
                     unfetched_repos: IndexMap::new(),
                 },
             );

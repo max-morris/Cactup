@@ -211,21 +211,19 @@ fn stop_by_hand(id: &str, group: Option<&crate::lock::ProcGroup>) -> String {
             format!("`kill -- -{}` stops it and every process it started", group.pgid)
         }
         Some(group) if group.own => format!(
-            "`kill -- -{}` stops it and the processes it started in its group, but not pids {}, which it \
-             started in groups of their own: stop those too",
+            "`kill -- -{}` stops it and the processes it started in its group, but not pids {}, which run \
+             in groups of their own; stop those too",
             group.pgid,
             pids(&group.outside)
         ),
         Some(group) if group.tree.len() > 1 => format!(
-            "no single command stops it alone, as its process group holds processes cactup cannot tell \
-             are the job's: stop pid {id} and the processes it started (now pids {}; `pstree -p {id}` shows \
-             them), or interrupt the run where it runs (Ctrl-C)",
+            "its process group holds processes that may not be the job's; stop pid {id} and the processes it started \
+             (now pids {}; see `pstree -p {id}`), or interrupt the run (Ctrl-C)",
             pids(&group.tree)
         ),
         _ => format!(
-            "no single command stops it alone, as its process group holds processes cactup cannot tell are \
-             the job's: stop pid {id} and any process it started (`pstree -p {id}` shows them), or interrupt \
-             the run where it runs (Ctrl-C)"
+            "its process group holds processes that may not be the job's; stop pid {id} and any process it started \
+             (see `pstree -p {id}`), or interrupt the run (Ctrl-C)"
         ),
     }
 }
@@ -235,9 +233,8 @@ impl std::fmt::Display for UnverifiedPid {
         let how = stop_by_hand(&self.id, self.group.as_ref());
         write!(
             f,
-            "job {0} was recorded by an older cactup, without the host and start time of its \
-             process, and a process with pid {0} runs here: it may be the job or another process, \
-             so cactup does not stop it (if it is the job, {how}; or try again once it has ended)",
+            "job {0} was recorded by an older cactup and pid {0} may now be another process, so \
+             cactup will not stop it; if it is the job, {how}, or try again once it has ended",
             self.id
         )
     }
@@ -257,12 +254,9 @@ impl std::fmt::Display for SharedGroup {
         let pgid = group.as_ref().map(|g| format!(" ({})", g.pgid)).unwrap_or_default();
         write!(
             f,
-            "job {0} shares its process group{pgid} with processes cactup cannot tell are the job's, so cactup does \
-             not stop it: the machine's stop command would stop them too, and no single command stops \
-             the job alone. Stop pid {0} and the processes it started by hand (`pstree -p {0}` shows \
-             them), or interrupt the run where it runs (Ctrl-C; a foreground `cactup sim run` started \
-             from a script or later in a pipeline is one); a submit command that starts each job with \
-             `setsid` gives it a group of its own",
+            "job {0} shares its process group{pgid} with processes that may not be the job's, so cactup \
+             will not stop it: the machine's stop command would stop them too. Stop pid {0} and the processes it started by hand (see `pstree -p {0}`), or interrupt the \
+             run (Ctrl-C); starting each job with `setsid` in the submit command avoids this",
             self.0
         )
     }
@@ -308,9 +302,8 @@ pub const REQUEUE_WINDOW: chrono::TimeDelta = chrono::TimeDelta::days(14);
 /// as ended by what only reads or removes records (displays, deletes).
 pub fn note_taken_as_ended(job_id: &str) {
     eprintln!(
-        "{} the status query for job {job_id} failed, and its run had recorded its end: taken as \
-         ended (if this repeats, check that unknown-job-pattern in the machine's [scheduler] table \
-         matches what get-status prints for a job the scheduler does not know)",
+        "{} the status query for job {job_id} failed after its run ended; treating it as ended. \
+         If this repeats, check unknown-job-pattern in the machine's [scheduler] table",
         "note:".yellow()
     );
 }
@@ -336,7 +329,7 @@ pub fn listed_state_words(status: JobStatus) -> &'static str {
     match status {
         JobStatus::Queued => "queued again",
         JobStatus::Holding => "queued again, and held",
-        _ => "listed running: leaving the queue, or starting again",
+        _ => "running: leaving the queue, or starting again",
     }
 }
 
@@ -346,11 +339,11 @@ pub fn listed_state_words(status: JobStatus) -> &'static str {
 /// starting again (the patterns cannot tell which).
 pub fn listed_after_end(status: JobStatus, stop: &str) -> String {
     match status {
-        JobStatus::Queued => format!("as queued again: `{stop}` to stop it, or wait until it has run"),
-        JobStatus::Holding => format!("as queued again, and held: `{stop}` to stop it"),
+        JobStatus::Queued => format!("as queued again; run `{stop}` to stop it, or wait until it has run"),
+        JobStatus::Holding => format!("as queued again, and held; run `{stop}` to stop it"),
         _ => format!(
-            "as running (leaving the queue, or starting again): wait until it leaves the queue, or `{stop}` \
-             to stop it"
+            "as running (leaving the queue, or starting again); wait until it leaves the queue, or run \
+             `{stop}` to stop it"
         ),
     }
 }
@@ -360,7 +353,7 @@ pub fn listed_after_end(status: JobStatus, stop: &str) -> String {
 /// heading, turned around).
 pub fn stop_said(e: &anyhow::Error) -> String {
     let text = format!("{e:#}");
-    let (status, rest) = match text.strip_prefix("command exited unsuccessfully (").and_then(|t| t.split_once("):")) {
+    let (status, rest) = match text.strip_prefix("Command exited unsuccessfully (").and_then(|t| t.split_once("):")) {
         Some((status, rest)) => (Some(status), rest),
         None => (None, text.as_str()),
     };
@@ -491,14 +484,14 @@ impl<'m> Scheduler<'m> {
         let output = self.run(&submit, universe.map(|(_, u)| u), vars)?;
 
         let pattern = self.meta.scheduler.submit_pattern.as_deref().unwrap_or("(.*)");
-        let regex = Regex::new(pattern).with_context(|| format!("invalid submit-pattern {pattern:?}"))?;
+        let regex = Regex::new(pattern).with_context(|| format!("Invalid submit-pattern {pattern:?}"))?;
         let job_id = regex
             .captures(output.trim())
             .and_then(|c| c.get(1))
             .map(|m| m.as_str().trim().to_owned())
             .filter(|id| !id.is_empty())
             .ok_or_else(|| {
-                anyhow!("could not parse a job id from the submit output via {pattern:?}:\n{output}")
+                anyhow!("Could not parse a job id from the submit output via {pattern:?}:\n{output}")
             })?;
         Ok(self.submitted(job_id))
     }
@@ -563,7 +556,7 @@ impl<'m> Scheduler<'m> {
         let command = self.command_in(&submit, universe.map(|(_, u)| u), vars)?;
 
         let pattern = self.meta.scheduler.submit_pattern.as_deref().unwrap_or("(.*)");
-        let regex = Regex::new(pattern).with_context(|| format!("invalid submit-pattern {pattern:?}"))?;
+        let regex = Regex::new(pattern).with_context(|| format!("Invalid submit-pattern {pattern:?}"))?;
 
         let mut job_id: Option<JobRecord> = None;
         let waited = stream_until_exit(command, &submit, &mut |line| {
@@ -590,12 +583,12 @@ impl<'m> Scheduler<'m> {
         // No job id at all. Name which of the three ways it went wrong: the
         // caller has nothing else left to go on.
         match waited {
-            Waited::Interrupted => bail!("interrupted before the scheduler reported a job id"),
+            Waited::Interrupted => bail!("Interrupted before the scheduler reported a job id"),
             Waited::Exited { status, output } if !status.success() => {
-                bail!("the blocking submit exited unsuccessfully ({status}):\n{output}")
+                bail!("The blocking submit exited unsuccessfully ({status}):\n{output}")
             }
             Waited::Exited { output, .. } => bail!(
-                "could not parse a job id from the blocking-submit output via {pattern:?}:\n{output}"
+                "Could not parse a job id from the blocking-submit output via {pattern:?}:\n{output}"
             ),
         }
     }
@@ -634,7 +627,7 @@ impl<'m> Scheduler<'m> {
         // no answer, not "not in the queue" (CLAUDE.md's interrupt
         // contract), and a caller must not act on it.
         if gix::interrupt::is_triggered() {
-            bail!("interrupted");
+            bail!("Interrupted");
         }
         if let Some(status) = classify_listed(&output, job_id, self.meta)? {
             return Ok(status);
@@ -647,16 +640,14 @@ impl<'m> Scheduler<'m> {
             let said = match output.trim() {
                 "" => "It printed nothing.".to_owned(),
                 text => format!(
-                    "It printed:\n{text}\nIf the scheduler's message for a job it does not know is among \
-                     these lines, unknown-job-pattern does not match it: fix the pattern in the \
-                     machine's [scheduler] table."
+                    "It printed:\n{text}\nIf the scheduler's message for an unknown job is among these \
+                     lines, unknown-job-pattern does not match it: fix the pattern in the machine's \
+                     [scheduler] table."
                 ),
             };
             return Err(FailedQuery(format!(
-                "the status query for job {job_id}, `{query}`, printed no line matching the machine's \
-                 status-pattern ('{status_pattern}') for the job, and none matching its \
-                 unknown-job-pattern ('{unknown_pattern}'), so cactup cannot tell whether the job \
-                 runs. {said}"
+                "the status query for job {job_id}, `{query}`, matched neither status-pattern \
+                 ('{status_pattern}') nor unknown-job-pattern ('{unknown_pattern}'). {said}"
             ))
             .into());
         }
@@ -765,14 +756,14 @@ impl<'m> Scheduler<'m> {
         }
         let said = stop_said(&e);
         if matches!(case, StopCase::Listed) {
-            bail!("the stop command for job {} failed: {said}", job.id);
+            bail!("The stop command for job {} failed: {said}", job.id);
         }
         if self.unknown_job(&format!("{e:#}"), job.id)? == Some(true) {
             return Ok(EndedStop::NotKnown(said));
         }
         let pattern = self.meta.scheduler.unknown_job_pattern.as_deref().unwrap_or_default();
         let hint = format!(
-            "If the scheduler's message for a job it does not know is among these lines, \
+            "If the scheduler's message for an unknown job is among these lines, \
              unknown-job-pattern ('{pattern}') does not match it: fix the pattern in the machine's \
              [scheduler] table."
         );
@@ -782,7 +773,7 @@ impl<'m> Scheduler<'m> {
                  reached: {said}\n{hint}",
                 job.id
             ),
-            _ => bail!("the stop command for job {} failed: {said}\n{hint}", job.id),
+            _ => bail!("The stop command for job {} failed: {said}\n{hint}", job.id),
         }
     }
 
@@ -819,7 +810,7 @@ impl<'m> Scheduler<'m> {
         match self.pid_check(job)? {
             PidCheck::Gone => Some(format!("process {} is gone, or is another process now", job.id)),
             PidCheck::Elsewhere => Some(format!(
-                "it ran on host {}, and nothing of its run holds its lock",
+                "it ran on host {} and no run holds its lock",
                 job.host.unwrap_or_default()
             )),
             PidCheck::Here | PidCheck::Unverified => None,
@@ -857,7 +848,7 @@ impl<'m> Scheduler<'m> {
             renderer.shutdown_and_wait();
         }
         if gix::interrupt::is_triggered() {
-            bail!("interrupted");
+            bail!("Interrupted");
         }
         Ok(statuses)
     }
@@ -908,7 +899,7 @@ impl<'m> Scheduler<'m> {
     pub fn unknown_job(&self, output: &str, job_id: &str) -> Res<Option<bool>> {
         let Some(pattern) = self.meta.scheduler.unknown_job_pattern.as_deref() else { return Ok(None) };
         let pattern = pattern.replace("@JOB_ID@", &regex::escape(job_id));
-        let regex = Regex::new(&pattern).with_context(|| format!("invalid unknown-job-pattern {pattern:?}"))?;
+        let regex = Regex::new(&pattern).with_context(|| format!("Invalid unknown-job-pattern {pattern:?}"))?;
         Ok(Some(output.lines().any(|line| regex.is_match(line))))
     }
 
@@ -1015,7 +1006,7 @@ impl<'m> Scheduler<'m> {
         // As in `get_status`: a listing Ctrl-C cut short lists nothing,
         // which says nothing of the jobs.
         if gix::interrupt::is_triggered() {
-            bail!("interrupted");
+            bail!("Interrupted");
         }
 
         let mut lines: HashMap<&str, &str> = HashMap::new();
@@ -1055,7 +1046,7 @@ impl<'m> Scheduler<'m> {
         let vars = Self::query_vars(job.id);
         let cmd = self.command_for("stop", self.meta.scheduler.stop.as_deref(), &vars, None)?;
         // A stop command Ctrl-C ended is no failure of the scheduler's.
-        self.spawn_sh(&cmd, false).map_err(|e| if gix::interrupt::is_triggered() { anyhow!("interrupted") } else { e })?;
+        self.spawn_sh(&cmd, false).map_err(|e| if gix::interrupt::is_triggered() { anyhow!("Interrupted") } else { e })?;
         Ok(Stopped::Sent)
     }
 
@@ -1070,7 +1061,7 @@ impl<'m> Scheduler<'m> {
         let output = self.spawn_sh(&cmd, true)?;
 
         let pattern = self.meta.scheduler.exec_host_pattern.as_deref().unwrap_or("(.*)");
-        let regex = Regex::new(pattern).with_context(|| format!("invalid exec-host-pattern {pattern:?}"))?;
+        let regex = Regex::new(pattern).with_context(|| format!("Invalid exec-host-pattern {pattern:?}"))?;
         Ok(regex
             .captures(output.trim())
             .and_then(|c| c.get(1))
@@ -1088,10 +1079,10 @@ impl<'m> Scheduler<'m> {
         env_universe: Option<&str>,
     ) -> Res<String> {
         let template = template
-            .ok_or_else(|| anyhow!("this machine's meta.toml defines no [scheduler].{what} command"))?;
+            .ok_or_else(|| anyhow!("This machine's meta.toml defines no [scheduler].{what} command"))?;
         let cmd = vars
             .substitute(template, Syntax::Shell)
-            .with_context(|| format!("substituting the [scheduler].{what} command"))?;
+            .with_context(|| format!("Substituting the [scheduler].{what} command"))?;
         let env = self.meta.effective_env(env_universe, Phase::Submit);
         Ok(if env.is_empty() { cmd } else { format!("{env}\n{cmd}") })
     }
@@ -1205,7 +1196,7 @@ fn stream_until_exit(
             output.push('\n');
             line(&l)?;
         }
-        if let Some(status) = child.try_wait().with_context(|| format!("waiting for: {what}"))? {
+        if let Some(status) = child.try_wait().with_context(|| format!("Waiting for: {what}"))? {
             break status;
         }
         if gix::interrupt::is_triggered() {
@@ -1242,7 +1233,7 @@ fn collect_output(output: std::process::Output, tolerate_failure: bool) -> Res<S
         String::from_utf8_lossy(&output.stderr)
     );
     if !output.status.success() && !tolerate_failure {
-        bail!("command exited unsuccessfully ({}):\n{combined}", output.status);
+        bail!("Command exited unsuccessfully ({}):\n{combined}", output.status);
     }
     Ok(combined)
 }
@@ -1263,7 +1254,7 @@ fn classify_listed(output: &str, job_id: &str, meta: &Meta) -> Res<Option<JobSta
     let compile = |what: &str, pattern: Option<&str>| -> Res<Regex> {
         // `$^` (match nothing) is the conventional never-pattern default.
         let pattern = pattern.unwrap_or("$^").replace("@JOB_ID@", &regex::escape(job_id));
-        Regex::new(&pattern).with_context(|| format!("invalid {what} {pattern:?}"))
+        Regex::new(&pattern).with_context(|| format!("Invalid {what} {pattern:?}"))
     };
     let status = compile("status-pattern", sched.status_pattern.as_deref())?;
     let holding = compile("holding-pattern", sched.holding_pattern.as_deref())?;
@@ -1752,7 +1743,7 @@ mod tests {
         }
         // Just listed: the same refusal is an error, nothing settled.
         let err = sched.stop_judged(JobRef::bare("4242"), StopCase::Listed).unwrap_err().to_string();
-        assert!(err.contains("the stop command for job 4242 failed: qdel: Unknown Job Id"), "{err}");
+        assert!(err.contains("The stop command for job 4242 failed: qdel: Unknown Job Id"), "{err}");
         assert!(sched.stop(JobRef::bare("4242")).is_err(), "before the end it is an error still");
         for transient in [
             "scancel: error: Kill job error on job id 4242: Socket timed out on send/recv operation",
@@ -1766,10 +1757,10 @@ mod tests {
             assert!(err.contains("qstat: cannot connect to server qb2"), "the failed query's output: {err}");
             assert!(err.contains("unknown-job-pattern ('Unknown Job Id') does not match it"), "{err}");
             let err = sched.stop_judged(JobRef::bare("4242"), StopCase::Unread).unwrap_err().to_string();
-            assert!(err.contains("the stop command for job 4242 failed") && err.contains(transient), "{err}");
+            assert!(err.contains("The stop command for job 4242 failed") && err.contains(transient), "{err}");
             assert!(err.contains("does not match it"), "{err}");
             let err = sched.stop_judged(JobRef::bare("4242"), StopCase::Listed).unwrap_err().to_string();
-            assert!(err.contains("the stop command for job 4242 failed") && err.contains(transient), "{err}");
+            assert!(err.contains("The stop command for job 4242 failed") && err.contains(transient), "{err}");
         }
         let taking = with_stop("true");
         assert_eq!(Scheduler::new(&taking).stop_judged(JobRef::bare("4242"), StopCase::Unread).unwrap(), EndedStop::Sent);
@@ -1990,7 +1981,7 @@ mod tests {
             "{:#}",
             Scheduler::new(&m).submit_blocking(&VarSet::new(), None, &mut |_| Ok(())).unwrap_err()
         );
-        assert!(err.contains("could not parse a job id"), "{err}");
+        assert!(err.contains("Could not parse a job id"), "{err}");
         assert!(err.contains("Submitted batch job"), "{err}");
     }
 

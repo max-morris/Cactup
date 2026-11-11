@@ -16,19 +16,23 @@ pub fn dispatch(ctx: &Ctx) -> Res<()> {
         print!("- {}", installation.alias.bold());
         match (&installation.release, &installation.thornlist) {
             (Some(release), _) => print!(" (release {})", release.bold()),
+            (None, _) if let Some(simfile) = &installation.simfile => {
+                print!(" (from {})", format!("'{simfile}'").bold())
+            }
+            (None, _) if let Some(stack) = &installation.stack => print!(" (stack {})", stack.bold()),
             // Symmetric with the release case: name what it was built from.
-            (None, Some(thornlist)) => print!(" (custom thornlist {})", thornlist.bold()),
+            (None, Some(thornlist)) => print!(" (custom thornlist {})", format!("'{thornlist}'").bold()),
             (None, None) => print!(" (custom)"),
         }
         // A refetch with an explicit source moved the tree off its
         // install-time provenance (§2.1). Shown only when it actually
         // differs — refetching the same release back is not news.
         match (&installation.current_release, &installation.current_thornlist) {
-            (Some(current), _) if Some(current) != installation.release.as_ref() => {
+            (Some(current), _) if Some(current) != installation.release.as_ref() && Some(current) != installation.stack.as_ref() => {
                 print!(", now on {}", current.bold())
             }
             (None, Some(current)) if Some(current) != installation.thornlist.as_ref() => {
-                print!(", now on thornlist {}", current.bold())
+                print!(", now on thornlist {}", format!("'{current}'").bold())
             }
             _ => {}
         }

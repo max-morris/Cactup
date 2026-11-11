@@ -870,7 +870,7 @@ pub(crate) fn follow_tui(sources: &[(&str, PathBuf); 2], subject: &str) -> Res<(
     let stop = super::install_sigint_flag()?;
     install_panic_hook();
 
-    let mut terminal = setup_terminal().context("setting up the log-follow TUI")?;
+    let mut terminal = setup_terminal().context("Setting up the log-follow TUI")?;
     let (out_pane, out_tail) = Pane::seeded(sources[0].0, sources[0].1.clone());
     let (err_pane, err_tail) = Pane::seeded(sources[1].0, sources[1].1.clone());
     let result = run_app(&mut terminal, [out_pane, err_pane], [out_tail, err_tail], subject, &stop);
@@ -927,7 +927,7 @@ fn enable_rich_keys(stdout: &mut std::io::Stdout) {
 }
 
 fn setup_terminal() -> Res<Terminal<Backend>> {
-    enable_raw_mode().context("enabling raw mode")?;
+    enable_raw_mode().context("Enabling raw mode")?;
     // Detection before the screen is cleared, deliberately: it waits on a
     // reply the terminal may never send (crossterm gives up after two
     // seconds), and on the rare terminal that stays silent a pause on the
@@ -940,12 +940,12 @@ fn setup_terminal() -> Res<Terminal<Backend>> {
     // hands the mouse back for the terminals where that is the only copy
     // route (see [`set_mouse_capture`]).
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-        .context("entering the alternate screen")?;
+        .context("Entering the alternate screen")?;
     let _ = stdout.write_all(ALT_SCROLL_ON);
     if rich {
         enable_rich_keys(&mut stdout);
     }
-    Terminal::new(CrosstermBackend::new(stdout)).context("creating the ratatui terminal")
+    Terminal::new(CrosstermBackend::new(stdout)).context("Creating the ratatui terminal")
 }
 
 /// Best-effort: leave raw mode / the alternate screen / mouse capture,
@@ -1132,8 +1132,8 @@ fn run_app(
         // dirty there's no frame pending, so wait out the whole tick.
         let dirty = view_dirty || content_dirty.load(Ordering::Acquire);
         let timeout = if dirty { pacer.due_in(Instant::now()).min(TICK) } else { TICK };
-        if event::poll(timeout).context("polling terminal events")? {
-            match event::read().context("reading a terminal event")? {
+        if event::poll(timeout).context("Polling terminal events")? {
+            match event::read().context("Reading a terminal event")? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     if handle_key(
                         key,
@@ -1298,11 +1298,9 @@ fn normal_key(
             *mouse = !*mouse;
             set_mouse_capture(*mouse)?;
             let msg: &str = if *mouse {
-                "mouse captured — click focuses a pane, drag selects its text; \
-                 your terminal's own selection is off until m"
+                "mouse captured: click focuses a pane, drag selects; m to release"
             } else {
-                "mouse released — double-click, drag and copy with your terminal \
-                 as usual (it can't see the panes), m to take it back"
+                "mouse released: select with your terminal; m to capture"
             };
             note(status, msg, false);
             return Ok(false);
@@ -1570,7 +1568,7 @@ fn commit_search(
 /// `n` / `N`: step along the pane's search direction, or against it.
 fn step_along(pane: &mut Pane, reverse: bool, inner: (u16, u16), status: &mut Option<Status>) {
     let Some(search) = &pane.search else {
-        note(status, "no search yet — press / to start one", true);
+        note(status, "no search yet; press / to start one", true);
         return;
     };
     let dir = if reverse { search.dir.reverse() } else { search.dir };
@@ -1583,7 +1581,7 @@ fn step_along(pane: &mut Pane, reverse: bool, inner: (u16, u16), status: &mut Op
 fn step_search(pane: &mut Pane, dir: Direction, inner: (u16, u16), status: &mut Option<Status>) {
     let (found, pattern) = {
         let Some(search) = &pane.search else {
-            note(status, "no search yet — press / to start one", true);
+            note(status, "no search yet; press / to start one", true);
             return;
         };
         let content = lock(&pane.content);
@@ -1696,7 +1694,7 @@ fn copy_text(lines: &[String], what: &str, counted: Counted, status: &mut Option
     };
     let msg = if copied.truncated {
         format!(
-            "copied {count} {unit} of {what} — cut off at {} KB, past what terminals accept",
+            "copied {count} {unit} of {what}, truncated at {} KB",
             clipboard::MAX_CLIP_BYTES / 1000
         )
     } else {
@@ -1735,9 +1733,9 @@ fn copy_view(pane: &Pane, inner_height: u16, status: &mut Option<Status>) -> Res
 fn set_mouse_capture(on: bool) -> Res<()> {
     let mut out = std::io::stdout();
     if on {
-        execute!(out, EnableMouseCapture).context("enabling mouse capture")
+        execute!(out, EnableMouseCapture).context("Enabling mouse capture")
     } else {
-        execute!(out, DisableMouseCapture).context("disabling mouse capture")
+        execute!(out, DisableMouseCapture).context("Disabling mouse capture")
     }
 }
 
@@ -2070,7 +2068,7 @@ fn draw(
             render_pane(frame, right, &mut panes[STDERR], focused == STDERR);
             render_footer(frame, footer, mode, status, panes, focused, mouse);
         })
-        .context("drawing the log-follow TUI")?;
+        .context("Drawing the log-follow TUI")?;
     let _ = execute!(std::io::stdout(), EndSynchronizedUpdate);
     Ok(())
 }

@@ -610,6 +610,51 @@ thornlist's URL, persisted to `.git/config` and always reported, before
 fetching and checking out from it; this is the fork-adoption path (point the
 thornlist at a fork of a component, then `refetch --overwrite <that repo>`).
 
+**Pinned repos: `!REPO_COMMIT`.** A git section may carry
+`!REPO_COMMIT = <full commit id>` (40 hex digits, or 64 for a SHA-256 repo;
+abbreviations are refused, and so is a pin on any other `!TYPE`). It is a
+cactup extension: GetComponents ignores directives it does not know, so an
+older tool fetches the branch unpinned rather than failing. A pinned repo is
+checked out **detached at exactly that commit** and is **never
+fast-forwarded**: a refetch of an unchanged pin finds the repo already there
+and leaves it alone without touching the network. `!REPO_BRANCH` keeps
+naming where the pin came from — a branch, or a tag such as a Cactarium
+track tag `mixed-precision/v1.4.0` — and is only a label plus the place to
+look for the commit. The commit is fetched by its id alone at depth 1 when the
+repo lacks it; a server that will not hand out an unadvertised commit
+(protocol v0/v1 without `allowAnySHA1InWant`) gets the fallback of fetching
+`!REPO_BRANCH` with full history and finding the commit there. Every
+component of one repo must agree on the pin, as on URL and branch. A fresh
+pinned repo is created empty with `origin` set to the URL (fetching every
+branch, as a clone would) and then pinned; a failure before its checkout
+began leaves nothing behind.
+
+**Checked downloads: `!CHECKSUM_SHA256`.** A download section (`http`,
+`https`, `ftp`) that checks out exactly one file may carry
+`!CHECKSUM_SHA256 = <64 hex digits>`; on any other type, on a section of
+several files (a hash names one), or with any other value it is refused. The
+same kind of extension as `!REPO_COMMIT`: GetComponents keeps the directives
+it does not know without reading them, and Cactus's ThornList readers drop
+every `!` line, so the list still works anywhere, only unchecked. cactup
+downloads to the usual temporary name and hashes it: a mismatch fails that
+component, is not retried, and leaves the old file in place; a file already
+there with the pinned content is kept without touching the network and,
+like a repo already at its pin, leaves no line.
+
+Classification of a pinned repo follows the rules above with one change:
+the branch it happens to be on is no reason to skip it — local edits and
+local commits still are. A clean **detached** HEAD is a pinned repo's normal
+state, and whether cactup may move it depends on who put it there:
+`fetch-state.toml` records, per repo, the commit each fetch left HEAD at and
+the pin it fetched to (`commit`). Detached at the pin, or where cactup's
+last fetch left it, the repo is cactup's to move — to a new pin, or back
+onto its branch when the list drops the pin. Detached anywhere else is the
+user's doing and is skipped (`detached HEAD at …`) unless forced; forcing a
+pinned repo pins it. `installation delta` compares a pinned repo by commit
+alone (its recorded branch is a label, not a branch HEAD should be on), and
+`refetch --prune` treats an orphan detached exactly at cactup's pin as
+clean.
+
 **The arrangement link pass.** After every fetch, each git component's
 `$TARGET/$CHECKOUT` is materialized as a **relative symlink** into
 `<root-dir>/repos/<repo>[/<REPO_PATH>]`. This is what actually puts a thorn into
@@ -720,7 +765,10 @@ diverge in two independent ways.**
 
 1. **Per repo**, from a git status walk of `<root-dir>/repos/<repo>`: a moved
    HEAD, a changed branch, modified tracked files, untracked files (which never
-   affect a build but do block `--prune`), a repo the fetch recorded that is no
+   affect a build but do block `--prune`; a path the thornlist itself checks
+   another component out into — a `!TARGET` that resolves, through the
+   arrangement links, to inside this repo, as pretty-bhns puts FUKA inside
+   KadathThorn — is that component's, not an untracked file here), a repo the fetch recorded that is no
    longer on disk, and a repo directory that **cannot be inspected as a git
    repo at all** — most often because someone replaced the checkout with a
    hand-built variant that has no `.git/`.
@@ -968,8 +1016,20 @@ TOML port of simfactory's `mdb/machines/<name>.ini` (`simfactory-docs.txt` §8).
   unset) is passed over for the next place with one line, never failing a
   build, a simulation or an install. A purge of the store's storage costs
   misses later, never a wrong object.
+- **`inputs-home`** (optional) is where `cactup import` keeps a `.sim`'s
+  downloaded and unpacked inputs (§8.9); omitted → `~/.cactup/inputs`. A
+  cluster puts it on a work or scratch filesystem the compute nodes see,
+  beside `simulation-home`: inputs are often large, and the simulation reads
+  them where they were unpacked. `@USER@` and `@ENV(NAME)@` work as in
+  `simulation-home`. Like `build-cache-home` it is left out of
+  `Meta::paths_for` and resolved only by its one user (`inputs::inputs_dir`),
+  so a value that cannot be resolved here fails an import, never a build or
+  a simulation. A fixup bakes an unpacked tree's absolute path into its
+  files, so a tree is good only where it was unpacked: moving `inputs-home`
+  means unpacking again there.
 - **Every `[paths]` key has a knob of the same name** (§5): `install-home`,
-  `simulation-home`, `test-home`, `scratch-home`, `build-cache-home`, an
+  `simulation-home`, `test-home`, `scratch-home`, `build-cache-home`,
+  `inputs-home`, an
   absolute path that wins over the machine's value for the user who sets it
   (`Meta::path_for`/`Meta::paths_for`; a machine value a knob overrides is
   not resolved at all). They are read where the machine's are, on the login
@@ -1928,7 +1988,7 @@ since what it serves is installed unasked; trailing `/` stripped; default
 `knob_snapshot()` never freezes them into restart/build/test metadata.
 
 The path knobs, one per `[paths]` key (`install-home`, `simulation-home`,
-`test-home`, `scratch-home`, `build-cache-home`; §4.2), are maintenance knobs
+`test-home`, `scratch-home`, `build-cache-home`, `inputs-home`; §4.2), are maintenance knobs
 too: an absolute path each (validated; read leniently, so a value that is not
 one is no value), winning over the machine's value of that key for the user
 who sets it. Where a job needs one, it is frozen like the machine's would be.
@@ -1984,6 +2044,16 @@ plus every custom knob, overlay included. It is attached to the variable set
 and **frozen** into the corresponding metadata — `restart.toml`, `build.toml`,
 `test.toml` `[knobs]` tables (§9.3) — so the compute node resolves
 `@KNOB(…)@` from disk and never opens the DB (D11).
+
+**A simulation's own knobs.** `simulation.toml` may carry a `[knobs]` table:
+values that belong to that simulation rather than to the user — what
+`cactup import` sets for the inputs a `.sim`'s parfile needs (§8.9), such as
+`kadath-initial-data`. A restart of the simulation freezes the global snapshot
+with these laid over it, and the `-K` overlay over both (a knob `-K` names
+keeps its `-K` value): `-K` > the simulation's knobs > the global knobs. Import
+never changes a global knob. When a stored global value contradicts the
+simulation's, submit and run warn, naming the `-K` that would choose
+otherwise. `sim show` lists them.
 
 ### 5.2 No `defs.ini` / `defs.local.ini`
 
@@ -3429,7 +3499,12 @@ Port of `create()` (`simfactory-docs.txt` §14.1):
    (`cactup-thornlist.th` processed + `cactup-thornlist.src.th` source, §7.5).
    The processed thornlist is what records *which thorns the frozen binary
    contains*, so a simulation stays self-describing after its config is
-   rebuilt or deleted. `simulation.toml`'s `optionlist`/`thornlist` keys name
+   rebuilt or deleted. The config record itself (`cactup-config.toml`, §7.4)
+   is frozen alongside, serialized from the record whose `build-id` the
+   simulation names: its `sources` map is the per-repo commit set the binary
+   was compiled from, with the build flags and flavor, all of which the
+   config's next build overwrites. It is what `sim export` reads; a
+   simulation created before it was frozen has none. `simulation.toml`'s `optionlist`/`thornlist` keys name
    the fed-to-Cactus copy of each pair; both are empty strings when the config
    was built by a cactup old enough not to have written the artifact.
 
@@ -4095,6 +4170,344 @@ make (above), so there is no knob to expose. There is no user-facing chaining
 flag either; internally cactup still tracks `chained-job-id` in `restart.toml`
 (§9.3) to wire up scheduler dependencies — computed, not asked for.
 
+### 8.9 `sim export`: `.sim` files
+
+```
+cactup sim export <sim> [file] [-f] [-y] [--name N] [--summary S] [--description D]
+                  [--author A]… [--license SPDX] [--allow-dirty] [--allow-unpushed]
+```
+
+Writes a simulation as a `.sim` file (default `<sim>.sim`): the Cactup
+ecosystem's portable record of a parfile plus the exact sources and build it
+ran on, the unit the Cactarium registry stores and `cactup import` consumes.
+The format belongs to the shared `cactup-ecosystem-common` crate
+(`sim::SimFile`): TOML, strict, generation-versioned (`format`), with the
+thornlist and the parfile carried **verbatim** and the pins in a per-repo
+table beside them.
+
+Everything comes from what the simulation froze at create (§8.2 step 6), never
+from the installation as it is now: the **source** thornlist snapshot (which
+must be a CRL list; its `!INCLUDE`s are spliced in by the parser's own
+splicer, `crl::splice_includes`, resolved against the directory of the list the
+config recorded — and `sim pack` against the given list's — so a `.sim`
+carries the whole list), and the config record,
+whose `sources` map gives each git repo's pin — the commit the binary was
+built from. A simulation created before the record was frozen falls back to
+the config's own record only while that still describes the same `build-id`.
+
+- **Pins.** One `[[repo]]` per repo the list names (keyed by the derived repo
+  name, not per section), `ref` = `!REPO_BRANCH` as a label. A download that
+  is the only file of its repo gets a `sha256`: the list's
+  `!CHECKSUM_SHA256`, else the hash the build froze. Every download's hash is
+  recorded in `fetch-state.toml` when it is fetched (`downloads`, by its path
+  under the installation), and `prepare` copies the hashes of the list's
+  single-file downloads into the config record (`downloads`, beside
+  `sources`), so a later refetch cannot change what a simulation of that
+  build records. A config built before hashes were recorded has none to
+  give: export leaves such a download unpinned and says to rebuild, rather
+  than hash a file the binary may not have been built from. Any other
+  component is listed unpinned.
+- **Dirty sources** (a state string with `+Nmod`, §7.4) are refused —
+  no commit reproduces that binary — unless `--allow-dirty`, which marks them
+  `dirty`.
+- **Unpublished commits** are refused unless `--allow-unpushed`: a pin passes
+  when cactup's fetch record shows it fetched that very commit, or when it is
+  the tip or in the history of a remote-tracking branch or tag in the
+  installation's repo — read locally, so a commit pushed since the last fetch,
+  or below a shallow boundary, reads as unpublished and errs toward asking.
+- **Inputs.** Every required `@KNOB(name)@` in a `.par` that is not a
+  standard knob (§5) becomes an `[[input]]`: something the simulation needs
+  from outside the source tree. `vars` lists the `@VAR@`s used. Both come
+  from the shared crate's parfile lexer (`par::references`), which lexes as
+  substitution does — comments (`par::comment_spans`) and `@@` skipped — and
+  which the Cactarium's review uses too, so the registry flags exactly what
+  export declares. A `.py` parfile has neither. An input can be given where
+  its file is downloaded (`--input-url KNOB=URL`, else asked on a terminal):
+  the file is downloaded once into the inputs directory and its `sha256`
+  recorded. An archive is recorded `unpack = true`, unpacked in a scratch
+  directory there: `path` is the member the knob's value here ends with
+  (else `--input-path KNOB=MEMBER`, else asked), the knob's value minus that
+  path is the author's unpack directory, and each text member (up to
+  16 MiB) whose copy there differs only on lines naming that directory
+  gives whole-line fixups, the directory written `{dir}` (asked about on a
+  terminal); any other difference is reported and not recorded. A plain
+  file's download is compared with the author's copy and a difference
+  said. The absolute-path warning
+  looks only outside comments, likewise.
+- **Run hints** (`tasks`, `cpus-per-task`, `gpus-per-task`, `walltime`) come
+  from the latest restart; machine-shaped settings stay out.
+- **Provenance**: exporter version and time, machine, flavor or optionlist,
+  build universe, flags, and `machine-disabled` (thorns disabled in the list
+  Cactus was handed but not in the source list).
+- **Descriptive fields** default to the simulation's name, the parfile's
+  leading comment block (its first line as the summary), the git `user.name`,
+  and the `default-license` knob; on a terminal each one a flag did not give
+  is asked for, prefilled (`-y` takes them all). Absolute paths in parfile
+  values are warned about, suggesting a knob input instead.
+
+A file with every repo pinned and nothing dirty or untracked is **fully
+specified**; only such a file can be published, and export says so when its
+output is not.
+
+`cactup sim pack <file.th> <file.par> [file]` makes a `.sim` for whoever has
+only a thornlist and a parfile, with the same descriptive fields and checks.
+With `-I <installation>`, each repo is pinned to what that installation has
+checked out (its live HEAD and source state, checked like an export's; a
+checkout of a different repo than the list names is left unpinned, with a
+note), and each single download by the hash its fetch record keeps, or,
+fetched before hashes were recorded, by hashing the installed file (pack
+pins the installation as it is now).
+Without, each is pinned to the commit its branch or tag names on the
+remote today (`git ls-remote`, no fetch), and the output says so; a remote
+that cannot be asked fails the whole pack, and a repo the list already pins
+keeps its pin. Either way a download the list gives a `!CHECKSUM_SHA256`
+keeps it, and without `-I` that is the only way one is pinned. A packed file has no run hints and no build provenance.
+
+**`--trim`** (export, and pack with `-I`) cuts the thornlist down to what the
+parfile needs: the thorns its `ActiveThorns` statements name (every statement,
+the key case-insensitive, names compared case-insensitively), closed under
+their `.ccl` facts as the shared crate's CCL scanner reads them from the
+installed tree (only **built** thorns take part: a checkout-only thorn —
+written on its `!CHECKOUT` line, the Einstein Toolkit's idiom for "fetch, do
+not build", since Cactus's ThornList reader skips `!` lines; the parser's
+`Component::fetch_only` — can neither be activated nor meet a requirement,
+and a trim leaves it exactly as it is) — every provider of a `REQUIRES`d capability (which one a build
+settles on is not ours to guess), `REQUIRES THORNS`, and the implementers of
+an `INHERITS`/`FRIEND` implementation or providers of a `REQUIRES FUNCTION`
+only when no kept thorn already offers it. The flesh and every component that
+is not an arrangement thorn stay, as does a thorn whose `interface.ccl` cannot
+be read. A trimmed thorn is not deleted: it moves out of its `!CHECKOUT` into
+a `#DISABLED Arrangement/Thorn` line, so it is neither fetched nor built but
+stays one edit from coming back. Every kept checkout keeps its place — inline
+on the `!CHECKOUT` line (checkout-only) or on a line of its own (built) — and
+the result is parsed back and must name exactly the kept checkouts, each still
+built or checkout-only as it was, and the pins follow the trimmed list. A thorn the
+parfile activates that the list lacks is an error; a `.py` parfile cannot be
+trimmed.
+
+`cactup install --simfile <file.sim>` makes an installation of exactly the
+sources a `.sim` records: its live and pristine thornlists (§3.2) are the
+file's thornlist pinned by `!REPO_COMMIT` to every commit it records and by
+`!CHECKSUM_SHA256` to every download hash, so the ordinary fetch checks each
+repo out at its pin, refuses a download that is not the recorded file, and a
+later refetch never moves either. The file's `root` must match the list's `!DEFINE ROOT`; the alias defaults
+to the file's name. It says which repos the file leaves unpinned (they follow
+their branch), which were dirty at export (their edits are not in the file),
+and which downloads it cannot check (a recorded hash for a repo the list
+downloads several files from names none of them), and it names the knob
+inputs the parfile needs. A Cactarium stack release is pinned the same way. The DB records the file as a third
+kind of install-time provenance, `simfile`, beside `release` and `thornlist`;
+`show`, `list` and `config show` name it.
+
+`cactup import <file.sim>` reproduces a `.sim` in one step: `install
+--simfile` under the file's name (or `--alias`), `cactup build` of a config of
+that name — in the foreground, or, on a machine that queues builds, submitted
+and blocked on (§7.9) — then `sim create` from the file's parfile, and with
+`--submit`/`--run` the simulation started, its topology the file's run hints
+unless `-T`/`-c`/`-w`/`-q` say otherwise. Without either it prints the submit
+command. The parfile's knob inputs are settled **first**, before anything
+long runs: `--input KNOB=VALUE`, else a download of the input's URL into
+`<inputs>/<sha256>/<file name>` (shared by every simulation needing
+the same bytes; checked against the recorded hash, and said so when there is
+none), else a prompt offering the user's global value. `<inputs>` is the
+`inputs-home` path (§4.2: the knob, else the machine's `[paths]` value, else
+`~/.cactup/inputs`).
+
+An **archive input** (`.sim` format 2: `unpack = true`, with `url` and the
+archive's `sha256` required, an optional `path` and `[[input.fixup]]`s; the
+shared crate validates all of it, so the Cactarium and cactup agree) is
+unpacked into `<inputs>/unpacked/<key>/`, `<key>` a digest of the archive's
+hash and its fixups in order, so two files that edit the same archive
+differently never share a tree. The archive is downloaded beside it,
+verified before the first byte is unpacked, unpacked into a `.unpacking-*`
+directory, its fixups applied (each `replace`, literal, must occur at least
+once; `{dir}` in `with` is the tree's final absolute path), `path` checked to
+exist, and the whole renamed into place, the download then removed: an
+interrupted import leaves no tree a later one would trust, and a finished
+tree is reused at once. The knob gets `<tree>/<path>`, or the tree itself.
+Kinds go by the URL's extension: `.tar`, `.tar.gz`/`.tgz`, `.tar.xz`/`.txz`,
+`.zip` (deflate), every decoder pure Rust (D13). Unpacking refuses an entry
+with an absolute or `..` path or a backslash, a hard link to anything but a
+regular file already unpacked, a device or FIFO, and any write through a
+non-directory an earlier entry made; file modes keep only their permission
+bits. Symlinks are made **last**, after every file and directory, so nothing
+is ever written through one; each is then checked where it really resolves,
+through any link before it, to stay inside the tree (a dangling one through
+its deepest existing ancestor, with no `..` past it) — a lexical check alone
+is fooled by a chain of links (`x -> .`, `y -> x/x/../..`). A fixup's file,
+the `path` and a hard link's source are reached through no link at all, and
+a fixup writes a new file renamed over the old (so a read-only member can be
+edited, its mode kept). It stops past 1,000,000 entries or
+`max(4 GiB, 32 × the archive)` bytes, a 4 KiB link target, or an `.xz`
+stream asking for over 1 GiB of memory, and polls the interrupt flag per
+entry and per MiB. A finished tree carries a marker; one without it, or
+without its `path` (a scratch purge removes files, not directories), is
+unpacked again. A download the server says is over 1 GiB (HEAD,
+`Content-Length`) is asked about on a terminal, taken with `-y`, and refused
+otherwise; the GET then stops past what was announced, or past 1 GiB when
+the server would not say (unless `-y`). The archive's hash is computed with
+progress. `cactup cache inputs` lists the inputs directory, what an
+interrupted import left included (`--clear` empties it). The values become the
+simulation's own knobs (§5.1) — a global knob is never changed — and an input
+left to an existing global knob records nothing. An input with no value at all
+fails the import before the install. The chained steps are parsed from
+ordinary command lines, so each gets exactly the defaults the typed command
+would; all network I/O happens here, never on a compute node (D11).
+
+An installation that already has the file's code is used instead of a second
+copy of the same tree: no install, straight to the build. "Has the code"
+means every thorn the file's thornlist builds is in the installation's live
+thornlist, built, from the same repository (normalized URL), and every repo
+the file pins is checked out at that commit with no uncommitted changes;
+extra thorns do not matter, since the parfile activates none of them. With
+`-I` that installation must match, or the import stops naming each
+difference; without, cactup looks for one: first each installation's last
+fetch record (`fetch-state.toml`) must name every pinned commit, and only
+those are probed on disk, the active installation first. `--new-installation`
+skips the search.
+
+`cactup sim unpack <file.sim> [--dir D] [-f]` goes the other way, for whoever
+works with loose files: it writes the thornlist and the parfile under the
+names they carried, the thornlist with every pinned repo pinned by
+`!REPO_COMMIT` or `!CHECKSUM_SHA256` (`crl::pin_text` in the shared crate: a section from one repo gains the
+directive, replacing any it had; a section spanning repos through `$1`/`$2` in its `!URL` is split
+into one copy per repo; everything else stays byte for byte, and the result
+is parsed back to prove it names the same checkouts with exactly those pins).
+It names the repos left unpinned and the knob inputs the parfile needs.
+
+### 8.10 The Cactarium registry
+
+The Cactarium (a registry of thorn packages, stacks and `.sim` files) is
+reached over its HTTP API, whose request and response shapes are the shared
+crate's `api` module — the structs the server itself serves — so the two
+sides cannot drift apart silently. `src/cactarium.rs` is only transport:
+
+- **Where:** `CACTARIUM_URL`, else the `cactarium-url` knob, else
+  `https://cactarium.cct.lsu.edu`.
+- **Generations:** every request says the API generation cactup speaks; an
+  answer from a newer generation is refused with "run `cactup update`".
+- **Errors:** an error body's `message` is printed as the server wrote it.
+- **Tokens:** `cactup login [--token T]` stores one per registry in
+  `~/.cactup/credentials`, written owner-only; `CACTARIUM_TOKEN` overrides.
+  Never a knob: knob values are frozen into every restart's metadata (§5.1),
+  and a token there would travel with every simulation.
+
+What uses it, all on the login node (D11):
+
+- `cactup install owner/stack[@range|version|head|master]` — a `/` tells a
+  stack from a manifest release. A range resolves once (`/resolve`) to an
+  exact release; its frozen thornlist is pinned (`crl::pin_text`) and installed
+  like `--simfile`, and the DB records the release as `stack` provenance.
+  `@head`/`@master` are installed unpinned, and said not to be reproducible.
+  A tip of a stack the Cactarium does not trust (`x-cactarium-untrusted:
+  true`, or no such header on a tip at all: the check fails closed; the
+  server may instead refuse such tips with a 403, whose message is printed
+  as is) is code nobody reviewed: cactup says so loudly and takes it only on
+  `yes` typed at the terminal (stdin and stderr both terminals; the prompt
+  reads on a thread of its own, so the first Ctrl-C stops it), or with the
+  global `--risky-allow-untrusted-artifacts`, which still prints the
+  warning; without a terminal and without the flag it refuses. Install and
+  `refetch --release` reach stack tips through
+  `cactarium::stack_release_text`, `add` reaches package tips through the
+  same `confirm_untrusted`.
+- `cactup import owner/name[@range|=X.Y.Z]` downloads the published sim
+  (versions are semver, like packages and stacks; the newest matching, or
+  the newest at all) to `~/.cactup/simfiles/<owner>/<name>/<X.Y.Z>.sim`,
+  checked against the registry's `x-sha256`, then imports it as a file. It
+  resolves even an exact version, which is how a yank is told; an exact
+  version already downloaded still imports when the registry cannot be
+  reached, its yank status unknown. A sim the Cactarium publishes from its
+  repository (`cactarium-sim.toml`) may have `repo-file` inputs (`.sim`
+  format 3): files of that repository, fetched at the version's commit (by
+  id, at depth 1) from the URL and commit `/resolve` gives for the file's
+  `cactarium` stamp, kept at `<inputs>/repo/<commit>/<path>` or unpacked like
+  a download (the tree keyed by `repo:<commit>:<path>` and the fixups).
+- **Yanked versions.** A range never chooses a yanked version, so one cactup
+  gets was asked for exactly: `add`, stack installs and refetches, and sim
+  imports warn with the reason and go on (yanked is "not by default", not
+  "gone"). `inst show` asks whether the installation's stack release (the
+  one a refetch last took it to, else the installed one, never after a
+  refetch elsewhere) or any added package version is yanked now, in
+  parallel, with progress and a 5 s limit per request, and only when there
+  is something to ask about; a registry it cannot reach gets one dim note.
+- `cactup sim publish <file.sim> <owner/name> [--version X.Y.Z]` uploads a
+  fully specified file (anything else is refused locally, naming what is
+  unspecified) as that version, else the next major version; the registry
+  says whether it is public or pending review. A pending release (new releases of a public entry wait for an
+  admin unless the entry, its owner or the publisher is trusted) is not
+  served, listed or resolved until approved, and cactup says so.
+- `cactup stack publish <cactarium-stack.toml> <owner/name> --version V
+  [--thornlist F]` cuts a release from a stack definition (a recipe, or a flat
+  list with `--thornlist`); the registry resolves and freezes it, and refuses
+  a version that exists — releases never change.
+- `cactup refresh <owner/name>` has the registry check a package's (or a
+  repo-kept stack's) repository for new release tags now, instead of at its
+  next poll, and says how many versions it found and how many of the entry's
+  versions await review (`Refreshed::awaiting_review`; those are not served
+  yet).
+- `cactup inst refetch --release owner/stack` with no version, on an
+  installation of a release of that stack from a track, means the newest
+  release **on that track** (`owner/stack@track`), never a jump to the default
+  track; the track is read from the release a refetch last moved it to, else
+  the installed one.
+
+A 401 adds "run `cactup login`" to the server's message. Every artifact has a
+**contact** (where to go for help: an `https://` URL or `mailto:`, the repo
+when none is declared). `sim export`/`pack` take `--contact` (default: the
+`default-contact` knob); `add` records a package's resolved contact, `inst
+show` prints it beside each added package, and the base stack's (the
+`x-cactarium-contact` header of the release served, recorded in the DB as
+`stack-contact` at install and on every refetch, cleared when a refetch moves
+off a stack), and after a failed build whose
+error lines name an added thorn (its `…/Arrangement/Thorn/` source path or
+`…/build/Thorn/` directory, in the last 64 KiB of the attempt's output),
+cactup says which package the thorn came from and where to report it.
+
+### 8.11 `cactup add`: Cactarium packages on top of a base
+
+`cactup add owner/name[/Thorn][@version|@track:range]… [--replace] [-f]` puts
+packages' thorns into the active installation at the commit the registry froze
+for each resolved version (a tag is only a label; a moved tag never moves an
+install). `owner/name/Thorn` adds one thorn, and several specs of one package
+(`owner/pkg/A owner/pkg/B`) add those thorns in one go; naming the package
+whole anywhere adds all of them, and two specs resolving to different versions
+of one package are refused. A later add of the same package updates it,
+adding named thorns to those already enabled. All the packages are fetched in
+one pass and recorded together.
+
+**The model.** `installation.toml` records each added package under
+`[[added]]` (package, exact version, tag, commit, URL, repo name, the
+checkouts with their directories in the repo, and the base repos it
+`replaces`). The pristine thornlist (§3.2) stays the **base** — what was
+installed, a stack release say — and the live thornlist is always
+`compose(base, added)`: the base byte for byte, then one cactup-managed block
+(opened by a `# Added by \`cactup add\`` line) of generated sections, each
+pinned by `!REPO_COMMIT` with one checkout per line (Cactus reads the list as
+its ThornList and skips `!` lines, §7.5). So:
+
+- refetch's hand-edit guard compares the live list against that composition,
+  not against the bare base, and an add never reads as a hand edit; `add`
+  itself refuses to overwrite real hand edits unless `-f`;
+- an explicit refetch source is a new base: the added packages are composed
+  onto it before it is planned, fetched and written live — which is how
+  `cactup inst refetch --release owner/stack@range` upgrades a stack
+  installation and keeps everything added to it;
+- only the added repo is fetched by `add`; nothing else in the installation
+  moves.
+
+`cactup remove owner/name… [-f]` undoes an add, one package after another: the record goes, the live list
+is recomposed without it, and only the base repos it replaced are fetched again
+— back to the base's pins. The package's own repo stays on disk, unlisted, for
+`inst refetch --prune` to remove.
+
+**Collisions.** A package whose repository the base already has (same derived
+name or same normalized URL), or that checks out a thorn the base already
+checks out, is refused unless `--replace`, which records the base repos it
+stands in for. Composition then drops those repos' checkouts of the claimed
+thorns from the base by parsed component (the same rewrite `--trim` uses,
+without the `#DISABLED` lines), and the composed list must still parse, so two
+sources can never silently claim one checkout.
+
 ---
 
 ## 9. ON-DISK LAYOUT — the binding compatibility contract
@@ -4179,8 +4592,8 @@ format. External tools do not read this metadata, so changing it is safe.
   exe                              hard link → CACHE/exe/<build-id> (the frozen
                                    binary for this sim's config; a plain copy only
                                    if CACHE is on a different filesystem — §8.1)
-  cfg/  par/                       master copies of the optionlist + thornlist, and
-                                   of the parfile (§8.2)
+  cfg/  par/                       master copies of the optionlist + thornlist and
+                                   the config record (§8.2), and of the parfile
 output-%04d/.cactup/               restart-level metadata              [cactup-owned]
   restart.toml                     (replaces restart properties.ini; absorbs the
                                     old timestamp/simulation mark files)

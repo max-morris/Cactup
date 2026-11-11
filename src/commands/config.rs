@@ -19,7 +19,7 @@ pub fn dispatch(ctx: &Ctx, cmd: ConfigCommand) -> Res<()> {
         ConfigCommand::Show { name } => show(ctx, &installation, name.as_deref()),
         ConfigCommand::Use { name } => {
             if ConfigMeta::load(&installation.cactus_root(), &name)?.is_none() {
-                bail!("no config named \"{name}\" in this installation (see `cactup config list`)");
+                bail!("No config named \"{name}\" in this installation (see `cactup config list`)");
             }
             let locked = installation.locked()?;
             let mut meta = locked.meta()?;
@@ -114,8 +114,13 @@ fn live_thornlist_source(entry: &crate::database::CactusInstallation) -> String 
     } else {
         (entry.release.as_deref(), entry.thornlist.as_deref())
     };
+    let simfile = entry.simfile.as_deref().filter(|_| entry.current_release.is_none() && entry.current_thornlist.is_none());
     let mut source = match (release, from_list) {
         (Some(release), _) => format!("release {release}"),
+        (None, _) if let Some(simfile) = simfile => format!("from the .sim file {simfile}"),
+        (None, _) if let Some(stack) = entry.stack.as_deref().filter(|_| simfile.is_none() && entry.current_thornlist.is_none()) => {
+            format!("stack {stack}")
+        }
         (None, Some(list)) => format!("custom, from {list}"),
         (None, None) => "custom installation".to_owned(),
     };
@@ -142,15 +147,14 @@ pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -
         Some(name) => name.to_owned(),
         None => installation.meta()?.active_config.ok_or_else(|| {
             anyhow::anyhow!(
-                "this installation has no active config (null-config state); \
-                 see `cactup config list`"
+                "This installation has no active config; see `cactup config list`"
             )
         })?,
     };
     let name = name.as_str();
 
     let Some(meta) = ConfigMeta::load(&cactus_root, name)? else {
-        bail!("no config named \"{name}\" in this installation (see `cactup config list`)");
+        bail!("No config named \"{name}\" in this installation (see `cactup config list`)");
     };
     println!("{}", meta.name.bold());
     // Labeled for what it actually is: "flavor" would misdescribe a config
@@ -172,7 +176,7 @@ pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -
             .ok()
             .and_then(|db| db.installations.get(&installation.alias).map(live_thornlist_source));
         match source {
-            Some(source) => format!("the installation's live list — {source}"),
+            Some(source) => format!("the installation's live list: {source}"),
             None => "the installation's live list".to_owned(),
         }
     } else if Path::new(&meta.thornlist).is_file() {
@@ -182,7 +186,7 @@ pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -
         // silently uses the config's snapshot — worth surfacing here.
         format!(
             "recorded from --thornlist; {}",
-            "no longer readable — builds fall back to this config's snapshot".yellow()
+            "no longer readable; builds use this config's snapshot".yellow()
         )
     };
     println!("  thornlist: {} ({provenance})", meta.thornlist);
@@ -211,7 +215,7 @@ pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -
         // recorded metadata is what answers §7.9's "in flight?" here.
         let config_dir = cactus_root.join("configs").join(name);
         match build_cmd::in_flight_build(&config_dir, name, None) {
-            Some(phrase) => println!("  status: incomplete — {phrase}"),
+            Some(phrase) => println!("  status: incomplete; {phrase}"),
             None => println!("  status: incomplete"),
         }
     }
@@ -222,7 +226,7 @@ fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
     let cactus_root = installation.cactus_root();
     let config_dir = cactus_root.join("configs").join(name);
     if !config_dir.is_dir() {
-        bail!("no config named \"{name}\" in this installation");
+        bail!("No config named \"{name}\" in this installation");
     }
     // §7.1: warn+refuse when simulations were built from this config.
     let registry = installation.simulations()?;
@@ -234,9 +238,8 @@ fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
         .collect();
     if !dependents.is_empty() && !force {
         bail!(
-            "{} simulation(s) were built from config \"{name}\": {} — they keep working \
-             (each holds its own frozen exe), but their config metadata will be gone. \
-             Pass -f to delete anyway.",
+            "{} simulation(s) were built from config \"{name}\": {}; they keep working but lose \
+             their config metadata. Pass -f to delete anyway.",
             dependents.len(),
             dependents.join(", ")
         );
@@ -253,8 +256,8 @@ fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
         .collect();
     if !test_dependents.is_empty() && !force {
         bail!(
-            "{} test run(s) reference config \"{name}\": {} — their results stay readable, \
-             but re-running them needs the config rebuilt. Pass -f to delete anyway.",
+            "{} test run(s) use config \"{name}\": {}; re-running them will need the config \
+             rebuilt. Pass -f to delete anyway.",
             test_dependents.len(),
             test_dependents.join(", ")
         );
@@ -270,8 +273,7 @@ fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
         && !force
     {
         bail!(
-            "{phrase} — deleting this config out from under it would fail the build in a \
-             confusing way; `cactup build stop {name}` first, or pass -f to delete anyway."
+            "{phrase}; run `cactup build stop {name}` first, or pass -f to delete anyway"
         );
     }
 
@@ -295,8 +297,8 @@ fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
             .map(|(n, _)| n.clone());
         locked.set_meta(&meta)?;
         match &meta.active_config {
-            Some(next) => println!("Active config switched to {} (most recently built).", next.bold()),
-            None => println!("The last config is gone; this installation is now in the null-config state."),
+            Some(next) => println!("Active config switched to {}.", next.bold()),
+            None => println!("No configs left; this installation has no active config."),
         }
     }
     drop(locked);
@@ -333,6 +335,9 @@ mod tests {
                 release: release.map(str::to_owned),
                 path: "/inst".into(),
                 thornlist: thornlist.map(str::to_owned),
+                simfile: None,
+                stack: None,
+                stack_contact: None,
                 current_release: current_release.map(str::to_owned),
                 current_thornlist: current_thornlist.map(str::to_owned),
                 unfetched_repos: Default::default(),
@@ -371,8 +376,11 @@ mod tests {
             release: Some("ET_2026_05".into()),
             path: "/inst".into(),
             thornlist: None,
+            simfile: None,
+            stack: None,
             current_release: None,
             current_thornlist: None,
+            stack_contact: None,
             unfetched_repos: Default::default(),
         };
         assert_eq!(live_thornlist_source(&partial), "release ET_2026_05");

@@ -1,10 +1,12 @@
 mod args;
 mod build;
 mod build_info;
+mod cactarium;
 mod commands;
 mod database;
 mod fetch;
 mod freeze;
+mod inputs;
 mod installation;
 mod lock;
 mod manifest;
@@ -46,7 +48,7 @@ pub static CACTUP_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
             use colored::Colorize;
             eprintln!(
                 "{}",
-                format!("Warning: ignoring CACTUP_HOME={} (not an absolute path)", home.display())
+                format!("Warning: ignoring CACTUP_HOME='{}': not an absolute path", home.display())
                     .yellow()
             );
         }
@@ -144,7 +146,7 @@ fn main() -> Res<()> {
         drop(span);
         if gix::interrupt::is_triggered() {
             timing::report();
-            anyhow::bail!("interrupted");
+            anyhow::bail!("Interrupted");
         }
     }
     // §17: a binary pinned to an older MDB generation keeps working on the
@@ -188,6 +190,16 @@ fn main() -> Res<()> {
         Commands::Show => commands::show::dispatch(&ctx),
         Commands::Use { alias } => commands::use_cmd::dispatch(&ctx, alias),
         Commands::Install(install) => commands::install::dispatch(&ctx, install),
+        Commands::Import(import) => commands::import::dispatch(&ctx, import),
+        Commands::Refresh { target } => commands::import::refresh(&ctx, &target),
+        Commands::Login { token } => commands::import::login(&ctx, token),
+        Commands::Add { packages, replace, force } => commands::add::dispatch(&ctx, &packages, replace, force),
+        Commands::Remove { packages, force } => {
+            packages.iter().try_for_each(|package| commands::add::remove(&ctx, package, force))
+        }
+        Commands::Stack(crate::args::StackCommand::Publish { definition, target, version, thornlist }) => {
+            commands::import::publish_stack(&ctx, &definition, &target, &version, thornlist.as_deref())
+        }
         Commands::Uninstall { alias, force } => commands::uninstall::dispatch(&ctx, alias, force),
         Commands::Installation(cmd) | Commands::Inst(cmd) => commands::installation::dispatch(&ctx, cmd),
         Commands::Config(cmd) => commands::config::dispatch(&ctx, cmd),

@@ -14,7 +14,7 @@ use std::ffi::OsString;
 pub fn dispatch(ctx: &Ctx, check: bool, prune: bool) -> Res<()> {
     let Some(me) = build_info::DIST.filter(|_| build_info::is_dist()) else {
         bail!(
-            "this is a development build of cactup, which never updates itself; use git pull and cargo build"
+            "This is a development build of cactup; update it with git pull and cargo build"
         );
     };
     let base = update::update_url(&ctx.db.read()?);
@@ -48,10 +48,10 @@ pub fn dispatch(ctx: &Ctx, check: bool, prune: bool) -> Res<()> {
         let exe = std::env::current_exe().context("Failed to locate the running cactup")?;
         let removed = update::prune_binaries(&bin_dir, &exe)?;
         for path in &removed {
-            println!("removed {}", path.display());
+            println!("Removed '{}'", path.display());
         }
         if removed.is_empty() {
-            println!("no build was retired more than 30 days ago");
+            println!("No build was retired more than 30 days ago");
         }
     }
     binary
@@ -62,14 +62,14 @@ pub fn dispatch(ctx: &Ctx, check: bool, prune: bool) -> Res<()> {
 fn report(me: &Stamp, base: &str) -> Res<()> {
     let latest = update::check(base).context("Could not check for a newer cactup")?;
     println!(
-        "this cactup  {}  {}  machine database generation {}  ({})",
+        "This cactup  {}  {}  machine database generation {}  ({})",
         me.id,
         update::short_date(me.date),
         build_info::MDB_GENERATION,
         build_info::TARGET
     );
     println!(
-        "published    {}  {}  machine database generation {}  ({base})",
+        "Published    {}  {}  machine database generation {}  ({base})",
         latest.build,
         update::short_date(&latest.date),
         latest.mdb_generation
@@ -77,11 +77,11 @@ fn report(me: &Stamp, base: &str) -> Res<()> {
     match update::decide(&latest, me, build_info::TARGET)? {
         Decision::UpToDate => println!("{}", "cactup is up to date".green()),
         Decision::ServerOlder => {
-            println!("the published build is not newer than this one; nothing to install")
+            println!("The published build is not newer than this one; nothing to install")
         }
         Decision::NoTarget => println!(
             "{}",
-            format!("no build for {} is published at {base}", build_info::TARGET).yellow()
+            format!("No build for {} is published at {base}", build_info::TARGET).yellow()
         ),
         Decision::Newer(_) => {
             println!(
@@ -157,8 +157,8 @@ fn update_binary(me: &Stamp, base: &str) -> Res<()> {
             eprintln!(
                 "{}",
                 format!(
-                    "cactup {} is announced, but its download is not available yet (a release is still \
-                     propagating); try again in a few minutes",
+                    "cactup {} is announced, but its download is not available yet; try again in a \
+                     few minutes",
                     latest.build
                 )
                 .yellow()
@@ -172,5 +172,5 @@ fn update_binary(me: &Stamp, base: &str) -> Res<()> {
     // The same command line, so global flags (-K, --mdb-path) carry over.
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let e = update::exec_updated(&path, &args);
-    Err(anyhow!(e).context(format!("Failed to start the updated cactup at {}", path.display())))
+    Err(anyhow!(e).context(format!("Failed to start the updated cactup at '{}'", path.display())))
 }

@@ -46,6 +46,9 @@ hostname    = "db1.hpc.lsu.edu"
 # setup); override [paths] per-user if you build those flavors there.
 install-home    = "/work/@USER@"
 simulation-home = "/work/@USER@/simulations"
+# Where `cactup import` keeps the downloaded and unpacked inputs of shared
+# simulations: big, so beside the simulations, not in the home quota.
+inputs-home = "/work/@USER@/inputs"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
 test-home       = "/work/@USER@/tests"
 

@@ -49,6 +49,52 @@ pub struct InstallationMeta {
     /// missing value means the historical default, `Cactus`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_dir: Option<String>,
+    /// Cactarium packages `cactup add` put on top of the base thornlist
+    /// (§8.11). The live thornlist is the pristine base with these composed
+    /// onto it, so a refetch of a new base (a stack upgrade) re-applies them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added: Vec<AddedPackage>,
+}
+
+/// One package `cactup add` added (§8.11), frozen at the commit the registry
+/// served for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AddedPackage {
+    /// `owner/name`.
+    pub package: String,
+    /// The exact version, `[track:]X.Y.Z`.
+    pub version: String,
+    /// The tag the version was cut from: a label; `commit` is what is fetched.
+    /// For a branch tip (`version` `head`/`master`), the default branch it
+    /// follows: no commit is pinned, and a refetch moves along that branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    pub commit: String,
+    pub url: String,
+    /// The repo's name in the thornlist (its URL's basename).
+    pub repo: String,
+    /// The checkouts enabled, each `Arrangement/Thorn` with the `!REPO_PATH` it is written with.
+    pub thorns: Vec<AddedThorn>,
+    /// Base repos this package stands in for (`--replace`): their checkouts
+    /// are dropped from the composed list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replaces: Vec<String>,
+    /// Where to report problems with the package, as the Cactarium gave it
+    /// (its declared contact, else its repo).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AddedThorn {
+    pub checkout: String,
+    /// The `!REPO_PATH` its section is written with, verbatim: the
+    /// Cactarium's (derived from where the thorn sits in the repository), or
+    /// the base list's own when the base already clones the repository.
+    /// Empty: no `!REPO_PATH`.
+    pub repo_path: String,
 }
 
 impl Default for InstallationMeta {
@@ -59,6 +105,7 @@ impl Default for InstallationMeta {
             sim_home: None,
             test_home: None,
             root_dir: None,
+            added: Vec::new(),
         }
     }
 }
@@ -68,7 +115,7 @@ impl InstallationMeta {
     pub fn active_config(&self) -> Res<&str> {
         self.active_config.as_deref().ok_or_else(|| {
             anyhow!(
-                "this installation has no active config (null-config state); \
+                "This installation has no active config; \
                  build one with `cactup build <name>` or select one with `cactup config use <name>`"
             )
         })
@@ -77,13 +124,13 @@ impl InstallationMeta {
     pub fn sim_home(&self) -> Res<&Path> {
         self.sim_home
             .as_deref()
-            .ok_or_else(|| anyhow!("installation.toml records no sim-home; `cactup use <alias>` backfills it"))
+            .ok_or_else(|| anyhow!("installation.toml records no sim-home; run `cactup use <alias>` to set it"))
     }
 
     pub fn test_home(&self) -> Res<&Path> {
         self.test_home
             .as_deref()
-            .ok_or_else(|| anyhow!("installation.toml records no test-home; `cactup use <alias>` backfills it"))
+            .ok_or_else(|| anyhow!("installation.toml records no test-home; run `cactup use <alias>` to set it"))
     }
 }
 
@@ -181,9 +228,8 @@ pub fn validate_root_dir(root: &str) -> Res<()> {
     let path = Path::new(root);
     if root.is_empty() || root == "." {
         bail!(
-            "this thornlist does not name a source directory (its !DEFINE ROOT is absent or \"\
-             .\"); cactup needs the Cactus tree in a subdirectory of the installation home, so \
-             add a !DEFINE ROOT line naming one"
+            "This thornlist does not name a source directory; add a line such as \
+             \"!DEFINE ROOT = Cactus\""
         );
     }
     // `Path::components()` yields a leading `Component::CurDir` only for a
@@ -191,15 +237,14 @@ pub fn validate_root_dir(root: &str) -> Res<()> {
     // triggers this) — see `leading_curdir_component_is_only_from_a_leading_dot_slash`.
     if path.components().next() == Some(std::path::Component::CurDir) {
         bail!(
-            "thornlist !DEFINE ROOT \"{root}\" starts with \"./\"; write the plain directory \
-             name instead (e.g. \"Cactus\", not \"./Cactus\")"
+            "Thornlist !DEFINE ROOT \"{root}\" starts with \"./\"; remove the \"./\""
         );
     }
     if path.is_absolute() {
-        bail!("thornlist !DEFINE ROOT \"{root}\" is an absolute path; it must be relative to the installation home");
+        bail!("Thornlist !DEFINE ROOT \"{root}\" is an absolute path; it must be relative to the installation home");
     }
     if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-        bail!("thornlist !DEFINE ROOT \"{root}\" contains \"..\"; it must stay inside the installation home");
+        bail!("Thornlist !DEFINE ROOT \"{root}\" contains \"..\"; it must stay inside the installation home");
     }
     Ok(())
 }
@@ -242,15 +287,14 @@ impl Installation {
             Some(alias) => alias.clone(),
             None => db.active_installation.clone().ok_or_else(|| {
                 anyhow!(
-                    "no active installation; run `cactup install`, or `cactup use <alias>` \
-                     to activate an existing one"
+                    "No active installation; run `cactup install` or `cactup use <alias>`"
                 )
             })?,
         };
         let entry = db
             .installations
             .get(&alias)
-            .ok_or_else(|| anyhow!("no installation named \"{alias}\" (see `cactup list`)"))?;
+            .ok_or_else(|| anyhow!("No installation named \"{alias}\" (see `cactup list`)"))?;
         let inst = Installation::new(alias, &entry.path);
         // Upgrade a pre-rename installation on first use, whatever the command
         // is: every path that reads a thornlist then sees one set of names.
@@ -337,8 +381,7 @@ impl Installation {
             Ok(true) => eprintln!(
                 "{}",
                 format!(
-                    "Renamed this installation's thornlists: the pristine as-fetched copy is now \
-                     {}, and the live, editable one is {}.",
+                    "Renamed this installation's thornlists: pristine copy '{}', live copy '{}'.",
                     self.source_thornlist().display(),
                     self.live_thornlist().display()
                 )
@@ -376,7 +419,7 @@ impl Installation {
                 continue;
             }
             std::fs::rename(&legacy, &current).with_context(|| {
-                format!("Failed to rename {} to {}", legacy.display(), current.display())
+                format!("Failed to rename '{}' to '{}'", legacy.display(), current.display())
             })?;
             moved = true;
         }
@@ -425,7 +468,7 @@ impl Installation {
     /// calls (the lock is not reentrant).
     pub fn locked(&self) -> Res<LockedInstallation<'_>> {
         std::fs::create_dir_all(self.cactup_dir())
-            .with_context(|| format!("Failed to create {}", self.cactup_dir().display()))?;
+            .with_context(|| format!("Failed to create '{}'", self.cactup_dir().display()))?;
         let lock = LinkLock::acquire(&self.cactup_dir().join(".cactup-install.lock"))?;
         Ok(LockedInstallation { inst: self, _lock: lock })
     }
@@ -534,32 +577,32 @@ pub(crate) fn read_toml<T: DeserializeOwned + Default>(path: &Path) -> Res<T> {
 
     let text = match std::fs::read_to_string(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
-        other => other.with_context(|| format!("Failed to read {}", path.display()))?,
+        other => other.with_context(|| format!("Failed to read '{}'", path.display()))?,
     };
     let probe: SchemaOnly =
-        toml::from_str(&text).with_context(|| format!("Failed to parse {}", path.display()))?;
+        toml::from_str(&text).with_context(|| format!("Failed to parse '{}'", path.display()))?;
     if probe.schema > SCHEMA {
         bail!(
-            "{} has schema {} but this cactup understands at most schema {SCHEMA}; please upgrade cactup",
+            "'{}' has schema {} but this cactup understands at most schema {SCHEMA}; please upgrade cactup",
             path.display(),
             probe.schema
         );
     }
-    toml::from_str(&text).with_context(|| format!("Failed to parse {}", path.display()))
+    toml::from_str(&text).with_context(|| format!("Failed to parse '{}'", path.display()))
 }
 
 /// Atomic (temp + rename) TOML write, so readers never see a torn file.
 pub(crate) fn write_toml<T: Serialize>(path: &Path, value: &T) -> Res<()> {
     let dir = path.parent().expect("cactup TOML paths have parents");
-    std::fs::create_dir_all(dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
     let text = toml::to_string_pretty(value).context("Failed to serialize TOML")?;
     let mut temp = tempfile::NamedTempFile::new_in(dir)
-        .with_context(|| format!("Failed to create temp file in {}", dir.display()))?;
+        .with_context(|| format!("Failed to create temp file in '{}'", dir.display()))?;
     temp.write_all(text.as_bytes())
         .and_then(|()| temp.as_file().sync_all())
-        .with_context(|| format!("Failed to write {}", path.display()))?;
+        .with_context(|| format!("Failed to write '{}'", path.display()))?;
     temp.persist(path)
-        .with_context(|| format!("Failed to move {} into place", path.display()))?;
+        .with_context(|| format!("Failed to move '{}' into place", path.display()))?;
     Ok(())
 }
 

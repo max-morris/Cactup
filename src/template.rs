@@ -97,7 +97,7 @@ fn stray_at(text: &str, pos: usize, syntax: Syntax) -> anyhow::Error {
     let line_start = text[..pos].rfind('\n').map_or(0, |n| n + 1);
     let directive_shaped = syntax == Syntax::Shell && text[line_start..].trim_start().starts_with('#');
     anyhow!(
-        "stray '@' on line {}: not an '@@' escape nor a well-formed @NAME@ token \
+        "Stray '@' on line {}: not an '@@' escape nor a well-formed @NAME@ token \
          (write a literal '@' as '@@'{})",
         line_of(text, pos),
         if directive_shaped {
@@ -478,11 +478,11 @@ impl Source {
     fn check_arg(self, arg: &str, at: usize, form: &str) -> Res<()> {
         match self {
             Source::Env if arg.is_empty() => {
-                bail!("malformed @{form}(NAME)@ token on line {at} (NAME must be UPPER_SNAKE)")
+                bail!("Malformed @{form}(NAME)@ token on line {at} (NAME must be UPPER_SNAKE)")
             }
             Source::Env => Ok(()),
             Source::Knob => crate::database::validate_knob_name(arg)
-                .with_context(|| format!("malformed @{form}(name)@ token on line {at}")),
+                .with_context(|| format!("Malformed @{form}(name)@ token on line {at}")),
         }
     }
 
@@ -576,7 +576,7 @@ fn parse_default(cur: &mut Cursor<'_>, at: usize, form: &str, arg: &str) -> Res<
             loop {
                 match cur.bump() {
                     None => bail!(
-                        "unterminated quoted default value in @{form}({arg}, …)@ on line {at}"
+                        "Unterminated quoted default value in @{form}({arg}, …)@ on line {at}"
                     ),
                     Some(b'\\') => match cur.bump() {
                         Some(c @ (b'"' | b'\'' | b'\\')) => bytes.push(c),
@@ -585,7 +585,7 @@ fn parse_default(cur: &mut Cursor<'_>, at: usize, form: &str, arg: &str) -> Res<
                             bytes.push(c);
                         }
                         None => bail!(
-                            "unterminated quoted default value in @{form}({arg}, …)@ on line {at}"
+                            "Unterminated quoted default value in @{form}({arg}, …)@ on line {at}"
                         ),
                     },
                     Some(b) if b == quote => break,
@@ -594,7 +594,7 @@ fn parse_default(cur: &mut Cursor<'_>, at: usize, form: &str, arg: &str) -> Res<
             }
             // Only ASCII bytes were ever removed from valid UTF-8, so the rest
             // is still valid UTF-8.
-            String::from_utf8(bytes).context("default value is not valid UTF-8")
+            String::from_utf8(bytes).context("Default value is not valid UTF-8")
         }
         _ => {
             let bare = cur.take_while(|b| b.is_ascii_alphanumeric());
@@ -614,18 +614,18 @@ fn parse_default(cur: &mut Cursor<'_>, at: usize, form: &str, arg: &str) -> Res<
             if !closes {
                 match next {
                     None => bail!(
-                        "malformed @{form}({arg}, …)@ token on line {at}: expected ')@' to close it"
+                        "Malformed @{form}({arg}, …)@ token on line {at}: expected ')@' to close it"
                     ),
                     Some(c) => bail!(
-                        "unquoted default value in @{form}({arg}, …)@ on line {at} contains \
-                         '{c}'; only letters and digits may go unquoted — quote it: \
+                        "Unquoted default value in @{form}({arg}, …)@ on line {at} contains \
+                         '{c}'; only letters and digits may go unquoted, so quote it: \
                          @{form}({arg}, \"…\")@"
                     ),
                 }
             }
             if bare.is_empty() {
                 bail!(
-                    "empty default value in @{form}({arg}, )@ on line {at}: write \"\" for an \
+                    "Empty default value in @{form}({arg}, )@ on line {at}: write \"\" for an \
                      empty default, or drop the comma"
                 );
             }
@@ -741,7 +741,7 @@ impl VarSet {
                 }
                 match self.vars.get(name) {
                     Some(v) => out.push_str(&v.canonical()),
-                    None => bail!("unknown substitution variable @{name}@ on line {at}"),
+                    None => bail!("Unknown substitution variable @{name}@ on line {at}"),
                 }
                 continue;
             }
@@ -783,13 +783,13 @@ impl VarSet {
         let optional = cur.eat(b'-');
         if optional && !cur.eat_str("OPTIONAL") {
             bail!(
-                "malformed @{func}-…@ token on line {at}: the only suffix is -OPTIONAL \
+                "Malformed @{func}-…@ token on line {at}: the only suffix is -OPTIONAL \
                  (@{func}-OPTIONAL(…)@)"
             );
         }
         let form = if optional { format!("{func}-OPTIONAL") } else { func.to_owned() };
         if !cur.eat(b'(') {
-            bail!("malformed @{form}(…)@ token on line {at}: expected '(' after {form}");
+            bail!("Malformed @{form}(…)@ token on line {at}: expected '(' after {form}");
         }
 
         cur.skip_ws();
@@ -800,10 +800,8 @@ impl VarSet {
         let default = if cur.eat(b',') {
             if !optional {
                 bail!(
-                    "@{func}({arg})@ on line {at} takes no default value — the required form \
-                     fails when {} is unset; write @{func}-OPTIONAL({arg}, …)@ to fall back \
-                     to a default",
-                    source.what(arg)
+                    "@{func}({arg})@ on line {at} takes no default value; use \
+                     @{func}-OPTIONAL({arg}, …)@ for a default"
                 );
             }
             cur.skip_ws();
@@ -815,7 +813,7 @@ impl VarSet {
         };
 
         if !cur.eat(b')') || !cur.eat(b'@') {
-            bail!("malformed @{form}({arg}…)@ token on line {at}: expected ')@' to close it");
+            bail!("Malformed @{form}({arg}…)@ token on line {at}: expected ')@' to close it");
         }
 
         let value = match source {
@@ -824,8 +822,7 @@ impl VarSet {
                 let knobs = self.knobs.as_ref().ok_or_else(|| {
                     anyhow!(
                         "@{form}({arg})@ on line {at}: knob values are not available in this \
-                         context (knobs can be read in scripts, optionlists and parfiles, not \
-                         in machine paths)"
+                         context; only scripts, optionlists and parfiles can read knobs"
                     )
                 })?;
                 knobs.get(arg).cloned()
@@ -873,7 +870,7 @@ impl VarSet {
     /// surfacing the script's stderr.
     pub fn run_py_script(&self, script: &Path) -> Res<String> {
         let body = std::fs::read_to_string(script)
-            .with_context(|| format!("Failed to read Python script {}", script.display()))?;
+            .with_context(|| format!("Failed to read Python script '{}'", script.display()))?;
 
         // The preamble + body run as one program from a temp file (stdin must
         // stay free for the JSON payload).
@@ -892,18 +889,18 @@ impl VarSet {
         crate::shell::trace_command(&command);
         let mut child = command
             .spawn()
-            .with_context(|| format!("Failed to run python3 for {}", script.display()))?;
+            .with_context(|| format!("Failed to run python3 for '{}'", script.display()))?;
 
         child
             .stdin
             .take()
             .ok_or_else(|| anyhow!("Failed to open python3 stdin"))?
             .write_all(self.to_py_json().to_string().as_bytes())
-            .with_context(|| format!("Failed to send variables to {}", script.display()))?;
+            .with_context(|| format!("Failed to send variables to '{}'", script.display()))?;
 
         let output = child
             .wait_with_output()
-            .with_context(|| format!("Failed to wait for python3 running {}", script.display()))?;
+            .with_context(|| format!("Failed to wait for python3 running '{}'", script.display()))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -912,10 +909,10 @@ impl VarSet {
             // wrapping — the user asked cactup for something this machine
             // cannot do, which is not a crash.
             if let Some((_, message)) = stderr.split_once(PY_ERROR_MARKER) {
-                bail!("{} ({})", message.trim(), script.display());
+                bail!("{} ('{}')", message.trim(), script.display());
             }
             bail!(
-                "Python script {} exited unsuccessfully ({}):\n{}",
+                "Python script '{}' exited unsuccessfully ({}):\n{}",
                 script.display(),
                 output.status,
                 stderr.trim_end()
@@ -923,7 +920,7 @@ impl VarSet {
         }
 
         String::from_utf8(output.stdout)
-            .with_context(|| format!("{} produced non-UTF-8 output", script.display()))
+            .with_context(|| format!("'{}' produced non-UTF-8 output", script.display()))
     }
 }
 
