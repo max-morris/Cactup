@@ -2576,7 +2576,7 @@ never the queue a build of it is submitted to (§7.9).
 **Schema 2, and the first read-side upgrade.** Schema 2 renamed `variant` to
 `flavor` and grouped the flat `gpu`/`compatible-queues` keys as `[runs-on]`
 (`queues`/`gpu`). A schema-1 record — or one predating the `schema` key — is
-upgraded **in memory on every read**, in one place (`ConfigMeta::from_table`),
+upgraded **in memory on every read**, in one place (`build::CONFIG`'s chain),
 and that covers both copies on disk: `cactup-config.toml` and the record
 embedded in each build attempt's `build.toml` (whose own top-level `variant`
 key is renamed the same way when the attempt is opened). A read never rewrites

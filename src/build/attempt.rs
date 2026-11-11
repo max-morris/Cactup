@@ -56,13 +56,14 @@ pub static BUILD: Format<Toml> = Format {
 /// in the shape its writer writes: compared at its on-disk schema 1, the
 /// keys schema 2 renamed would look unknown and be put back beside their
 /// new names.
-fn build_legacy(doc: &mut Toml) {
+fn build_legacy(doc: &mut Toml) -> Res<()> {
     if let Some(flavor) = doc.remove("variant") {
         doc.insert("flavor".to_owned(), flavor);
     }
     if let Some(config_meta) = doc.get_mut("config-meta").and_then(toml::Value::as_table_mut) {
-        format::upgrade_embedded(config_meta, &CONFIG);
+        format::upgrade_embedded(config_meta, &CONFIG)?;
     }
+    Ok(())
 }
 
 /// `[timestamps]` in `build.toml`, mirroring `testsuite::Timestamps` plus the
@@ -675,6 +676,27 @@ mod tests {
             "unexpected error: {err}"
         );
         assert!(!err.contains('§'), "{err}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+    }
+
+    /// A newer cactup rewriting the embedded config record after this one
+    /// opened the attempt: neither the edit (`store_meta`) nor a record made
+    /// anew over it (`create`) steps it down to this binary's schema.
+    #[test]
+    fn writes_refuse_a_future_embedded_config_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = BuildAttempt::attempt_dir(tmp.path(), 0);
+        let attempt = BuildAttempt::create(dir.clone(), sample_meta()).unwrap();
+        let path = BuildAttempt::meta_path(&dir);
+        let text = fs::read_to_string(&path).unwrap();
+        let text = text.replace("[config-meta]\nschema = 2\n", "[config-meta]\nschema = 3\nnew-v3-key = 1\n");
+        fs::write(&path, &text).unwrap();
+
+        let err = format!("{:#}", attempt.store_meta().unwrap_err());
+        assert!(err.contains("build.toml") && err.contains("newer cactup"), "unexpected error: {err}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        let err = format!("{:#}", BuildAttempt::create(dir, sample_meta()).unwrap_err());
+        assert!(err.contains("newer cactup"), "unexpected error: {err}");
         assert_eq!(fs::read_to_string(&path).unwrap(), text);
     }
 

@@ -47,8 +47,9 @@ pub static DATABASE: Format<Json> = Format {
 /// The bare `detected-machine` string (before the stamped `detected` record)
 /// was dropped by every write once cactup stopped modeling it; put-back
 /// would otherwise keep it forever. Discovery simply runs again.
-fn drop_detected_machine(doc: &mut Json) {
+fn drop_detected_machine(doc: &mut Json) -> Res<()> {
     doc.shift_remove("detected-machine");
+    Ok(())
 }
 
 /// A knob cactup recognizes (§5): its name plus how to check a value on

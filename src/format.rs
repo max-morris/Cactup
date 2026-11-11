@@ -65,7 +65,9 @@ pub struct Format<D: 'static> {
     pub frozen_read: bool,
     /// Same-version normalizations shipped before versioning did their job,
     /// run before the upgrades. A closed list: new changes bump instead.
-    pub legacy: Option<fn(&mut D)>,
+    /// Fails only to refuse what this binary must not write over (an
+    /// embedded record a newer cactup wrote: [`upgrade_embedded`]).
+    pub legacy: Option<fn(&mut D) -> Res<()>>,
     /// Sub-records a writer replaces whole rather than edits (dotted paths,
     /// `*` for any one key: `installations.*.unfetched-repos.*`). Put-back
     /// never reaches into them: a key a newer binary added to the old record
@@ -405,18 +407,41 @@ fn write_over_replacing<T: Serialize + DeserializeOwned, D: Document>(
 }
 
 /// Atomic write (temp file in the same directory + fsync + rename), so a
-/// reader sees the old file or the new one, never a torn one.
+/// reader sees the old file or the new one, never a torn one. The file
+/// keeps the mode it had, and a new one gets the mode a plain write would
+/// give it (0666 less the umask), not the temp file's owner-only 0600: a
+/// record in a group-shared Cactus tree must stay readable by the group.
+/// Not for secrets (the credentials file keeps its own owner-only write).
 pub(crate) fn write_atomic(path: &Path, text: &str) -> Res<()> {
+    use std::os::unix::fs::PermissionsExt;
     let dir = path.parent().expect("cactup record paths have parents");
     std::fs::create_dir_all(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
     let mut temp = tempfile::NamedTempFile::new_in(dir)
         .with_context(|| format!("Failed to create temp file in '{}'", dir.display()))?;
+    let mode = match std::fs::metadata(path) {
+        Ok(meta) => Some(meta.permissions().mode() & 0o7777),
+        Err(_) => umask().map(|mask| 0o666 & !mask),
+    };
+    if let Some(mode) = mode {
+        temp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(mode))
+            .with_context(|| format!("Failed to write '{}'", path.display()))?;
+    }
     temp.write_all(text.as_bytes())
         .and_then(|()| temp.as_file().sync_all())
         .with_context(|| format!("Failed to write '{}'", path.display()))?;
     temp.persist(path)
         .with_context(|| format!("Failed to move '{}' into place", path.display()))?;
     Ok(())
+}
+
+/// This process's umask, from `/proc` (std has no call for it, and the
+/// binary takes no C library binding: D13). `None` where `/proc` does not
+/// say; the file then stays owner-only.
+fn umask() -> Option<u32> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let value = status.lines().find_map(|line| line.strip_prefix("Umask:"))?;
+    u32::from_str_radix(value.trim(), 8).ok()
 }
 
 impl<D: Document> Format<D> {
@@ -479,12 +504,17 @@ pub fn parse_embedded<T: DeserializeOwned, D: Document>(doc: D, f: &Format<D>) -
 /// [`parse_embedded`]'s chain alone, in place: the embedded record brought
 /// to `current`, its version key put back first. For an outer format's
 /// `legacy`, so put-back compares the embedded record at the version its
-/// writer writes, not at the one on disk. On an error (a newer or broken
-/// record) `doc` is left as it was; the typed parse then reports it.
-pub fn upgrade_embedded<D: Document>(doc: &mut D, f: &Format<D>) {
-    if let Ok((_, upgraded)) = run_chain(doc.clone(), None, f) {
-        *doc = with_version_first(upgraded, f.key, f.current);
+/// writer writes, not at the one on disk. A newer embedded record fails
+/// with [`Newer`], so every write path refuses the outer file as it refuses
+/// a newer outer version (never a silent downgrade); on any other error (a
+/// broken record) `doc` is left as it was and the typed parse reports it.
+pub fn upgrade_embedded<D: Document>(doc: &mut D, f: &Format<D>) -> Res<()> {
+    match run_chain(doc.clone(), None, f) {
+        Ok((_, upgraded)) => *doc = with_version_first(upgraded, f.key, f.current),
+        Err(e) if e.downcast_ref::<Newer>().is_some() => return Err(e),
+        Err(_) => {}
     }
+    Ok(())
 }
 
 /// Where a record sits, for messages: the file, or nowhere of its own.
@@ -512,7 +542,7 @@ fn run_chain<D: Document>(mut doc: D, path: Option<&Path>, f: &Format<D>) -> Res
     };
     doc.remove(f.key);
     if let Some(legacy) = f.legacy {
-        legacy(&mut doc);
+        legacy(&mut doc).with_context(|| format!("Failed to read {}{}", f.name, located(path)))?;
     }
     for (index, upgrade) in f.upgrades.iter().enumerate().skip(version as usize - 1) {
         upgrade(&mut doc).with_context(|| {
@@ -846,8 +876,9 @@ mod tests {
         Ok(())
     }
 
-    fn toy_legacy(doc: &mut Toml) {
+    fn toy_legacy(doc: &mut Toml) -> Res<()> {
         doc.remove("obsolete");
+        Ok(())
     }
 
     static TOY: Format<Toml> = Format {
@@ -1033,5 +1064,21 @@ mod tests {
     fn json_documents_keep_their_key_order() {
         let doc = <Json as Document>::parse(r#"{"z": 1, "a": 2, "m": {"y": 1, "b": 2}}"#).unwrap();
         assert_eq!(doc.render().unwrap().replace([' ', '\n'], ""), r#"{"z":1,"a":2,"m":{"y":1,"b":2}}"#);
+    }
+
+    /// A rewrite keeps the file's mode; a new file gets 0666 less the
+    /// umask, as a plain write would, not the temp file's 0600.
+    #[test]
+    fn writes_keep_the_files_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("record.toml");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        write_atomic(&path, "a = 1\n").unwrap();
+        assert_eq!(mode(&path), 0o666 & !umask().unwrap());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        write_atomic(&path, "a = 2\n").unwrap();
+        assert_eq!(mode(&path), 0o640);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a = 2\n");
     }
 }
