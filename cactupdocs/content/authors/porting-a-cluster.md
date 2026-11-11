@@ -98,6 +98,14 @@ Check your cluster's specs:
 sinfo -o "%n %c %m" | head -1  # CPUs and memory per node
 ```
 
+Write `max-cpus-per-node` down rather than leaving it out. `machine create`
+keeps the value of the machine you copied, and copying `generic` writes the
+cores of the machine you run it on, which on a cluster is a login node. A batch
+machine copied from one that has no value gets none; cactup then detects it
+from the node it runs on, the login node again. A detected value still sizes the default layout, but
+cactup derives no node count from it: `sim submit -T 256` stays on one node
+unless you give `-n`.
+
 ### Build section
 
 Set the default parallel make jobs:

@@ -211,8 +211,15 @@ pub struct Hardware {
     /// rule divides by `CPUS_PER_TASK` to get `TASKS_PER_NODE` (on a GPU run a
     /// derived one is also bounded by `max-gpus-per-node`, as §8.5 details, so a
     /// machine may declare a `default-cpus-per-task` that deliberately leaves
-    /// CPUs idle), and that a missing `--nodes` is derived from.
+    /// CPUs idle), and that a missing `--nodes` is derived from — when it is
+    /// declared (`max_cpus_per_node_detected` below).
     pub max_cpus_per_node: Option<u32>,
+    /// Whether `max_cpus_per_node` was filled from this host at load (§4.6)
+    /// rather than declared. A login node's cores say nothing about a compute
+    /// node's, so no node count is derived, and no layout refused, on a
+    /// detected value (§8.5).
+    #[serde(skip)]
+    pub max_cpus_per_node_detected: bool,
     /// Request-side default for `CPUS_PER_TASK` when `--cpus` is omitted.
     // §8.5
     pub default_cpus_per_task: Option<u32>,
@@ -993,6 +1000,8 @@ impl Meta {
         Ok(Hardware {
             autodetect: self.hardware.autodetect,
             max_cpus_per_node: q.max_cpus_per_node.or(self.hardware.max_cpus_per_node),
+            max_cpus_per_node_detected: q.max_cpus_per_node.is_none()
+                && self.hardware.max_cpus_per_node_detected,
             default_cpus_per_task: q.default_cpus_per_task.or(self.hardware.default_cpus_per_task),
             max_gpus_per_node: q.max_gpus_per_node.or(self.hardware.max_gpus_per_node),
             default_gpus_per_task: q.default_gpus_per_task.or(self.hardware.default_gpus_per_task),
@@ -1087,6 +1096,30 @@ impl Meta {
     pub fn in_allocation(&self) -> Option<bool> {
         self.allocation_status(|name| {
             std::env::var_os(name).is_some_and(|v| !v.is_empty())
+        })
+    }
+
+    /// The node count of the job allocation this process runs in, where its
+    /// environment says (§8.5): beside a set Slurm `allocation-env` variable,
+    /// `SLURM_JOB_NUM_NODES` (or the older `SLURM_NNODES`); beside a PBS one,
+    /// Torque's `PBS_NUM_NODES`. `None` outside an allocation, or when the
+    /// family offers no count.
+    pub fn allocation_nodes(&self) -> Option<u32> {
+        self.allocation_nodes_with(|name| std::env::var(name).ok())
+    }
+
+    /// The `allocation_nodes` core, taking the env lookup as a closure.
+    pub(crate) fn allocation_nodes_with(&self, get: impl Fn(&str) -> Option<String>) -> Option<u32> {
+        let set = |name: &str| get(name).is_some_and(|v| !v.is_empty());
+        self.scheduler.allocation_env.iter().filter(|var| set(var)).find_map(|var| {
+            let counts: &[&str] = if var.starts_with("SLURM_") {
+                &["SLURM_JOB_NUM_NODES", "SLURM_NNODES"]
+            } else if var.starts_with("PBS_") {
+                &["PBS_NUM_NODES"]
+            } else {
+                &[]
+            };
+            counts.iter().find_map(|c| get(c)?.trim().parse::<u32>().ok().filter(|&n| n > 0))
         })
     }
 
@@ -2370,6 +2403,20 @@ mod tests {
         assert_eq!(meta.scheduler.allocation_env, ["SLURM_JOB_ID", "PBS_JOBID"]);
         assert_eq!(meta.allocation_status(|n| n == "PBS_JOBID"), Some(true));
         assert_eq!(meta.allocation_status(|_| false), Some(false));
+
+        // The allocation's node count, from the family of the set variable.
+        let env = |vars: &'static [(&'static str, &'static str)]| {
+            move |name: &str| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.to_string())
+        };
+        let nodes = |vars| meta.allocation_nodes_with(env(vars));
+        assert_eq!(nodes(&[]), None);
+        assert_eq!(nodes(&[("SLURM_JOB_ID", "7"), ("SLURM_JOB_NUM_NODES", "4")]), Some(4));
+        assert_eq!(nodes(&[("SLURM_JOB_ID", "7"), ("SLURM_NNODES", "2")]), Some(2));
+        assert_eq!(nodes(&[("PBS_JOBID", "7"), ("PBS_NUM_NODES", "3")]), Some(3));
+        // A count without its allocation variable, or one that is no count, is none.
+        assert_eq!(nodes(&[("SLURM_JOB_NUM_NODES", "4")]), None);
+        assert_eq!(nodes(&[("SLURM_JOB_ID", "7"), ("SLURM_JOB_NUM_NODES", "0")]), None);
+        assert_eq!(nodes(&[("PBS_JOBID", "7"), ("SLURM_NNODES", "2")]), None);
     }
 
     #[test]

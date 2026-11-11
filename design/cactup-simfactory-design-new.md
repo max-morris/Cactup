@@ -1616,6 +1616,10 @@ no GPUs is the ordinary case, and §8.5 already falls back to one thread per CPU
 and one GPU per task. A kernel that reports no CPU topology at all (some VMs)
 falls back to one core per thread and claims nothing about SMT.
 
+A detected `max-cpus-per-node` is marked as such: it still sizes the
+fill-the-node default, but §8.5 derives no node count from it and refuses no
+layout on it, since on a cluster it is the login node's, not a compute node's.
+
 This is the same detection simfactory's `CREATE_MACHINE` did at setup time
 (`simfactory-docs.txt` §20), but done at runtime so the built-in `generic`
 works on any laptop with zero configuration. Explicit `meta.toml` values always
@@ -1650,8 +1654,14 @@ cactup machine delete <name>
   the user may re-create to refresh). If the source no longer exists, the warning
   says so instead.
 - `<name>` defaults to the local hostname's short form.
-- **Autodetects and writes concrete hardware** (`max-cpus-per-node`, `memory`
-  via §4.6) so the persisted machine is stable rather than re-detecting each run.
+- **Autodetects and writes concrete hardware** the base lacks (`memory`,
+  `max-gpus-per-node`, and `max-cpus-per-node` for a base whose jobs run on this
+  host, `job-ids = "pids"`, via §4.6) so the persisted machine is stable rather
+  than re-detecting each run. What the base declares stays: it describes the
+  base's nodes, and the host running `machine create` (a login node) need not
+  be one of them. A batch machine's missing `max-cpus-per-node` is left to
+  load-time detection, which marks it detected, so no node count is derived
+  from a login node's cores (§8.5).
 - Sets `simulation-home`/`install-home` (prompted; defaults are the
   `~/.cactup/simulations` and `~/.cactup/cacti` fallbacks, §4.2) and prompts for
   `user`/`email`/`allocation` knobs unless `--silent` (which takes defaults — the
@@ -3669,7 +3679,7 @@ proc-distribution math. Flags (those passed through to submit scripts marked *):
 | `-q/--queue` * | scheduler queue | `queue` knob (passed over when the binary may not run there) → the flavor's `runs-on.default-queue` → machine default queue (§4.4). A build job: `build-queue` knob → `[build].queue` → machine default (§7.9) |
 | `-m/--mail` * | notify address | knob |
 | `-M/--mail-type` * | notify type | knob (`all`) |
-| `-n/--nodes` * | node count | derived: `ceil(TASKS / TASKS_PER_NODE)` for a scheduled job or a run inside an allocation; 1 on a single host (see below) |
+| `-n/--nodes` * | node count | derived: `ceil(TASKS / TASKS_PER_NODE)` for a scheduled job; inside an allocation, its own node count where known; 1 on a single host (see below) |
 | `-T/--tasks` | total tasks (MPI ranks) | inferred: `nodes * tpn` |
 | `-t/--tpn` * | tasks per node | full node (see below) |
 | `-c/--cpus` * | CPUs (threads) per task | 1 |
@@ -3729,34 +3739,52 @@ facts fill any topology the user left unset.
   allocation's nodes. Anything else runs on a *single host*: a login node, or a
   machine with `job-ids = "pids"`, whose "submit" backgrounds the script on the
   submitting host.
-- `NODES` = `--nodes` if given. Else, when `--tasks` is given and the job is
-  scheduled or runs inside an allocation: `ceil(TASKS / per-node)`, where
-  per-node is `--tpn` if given, else the node's room — `--tasks 256 --cpus 1` on
-  qbd's 64-core nodes is 4 nodes, `--tasks 100` 2, `--tasks 64 --cpus 2` 2.
-  Dividing ranks rather than CPUs (`ceil(TASKS × CPUS_PER_TASK /
-  MAX_CPUS_PER_NODE)`) matters when the CPUs do not split evenly: a rank's
-  threads cannot straddle two nodes, so 64 ranks of 3 CPUs need 4 such nodes,
-  not 3. Otherwise 1. A node of unknown size (no `max-cpus-per-node`, nothing
-  detected) derives nothing either.
+- `NODES` = `--nodes` if given. Else, for a scheduled job: `ceil(TASKS /
+  per-node)` when `--tasks` is given, where per-node is `--tpn` if given, else
+  the node's room — `--tasks 256 --cpus 1` on qbd's 64-core nodes is 4 nodes,
+  `--tasks 100` 2, `--tasks 64 --cpus 2` 2, and on qbd's 2-GPU `gpu2` nodes
+  `--tasks 100` is 50. Dividing ranks rather than CPUs (`ceil(TASKS ×
+  CPUS_PER_TASK / MAX_CPUS_PER_NODE)`) matters when the CPUs do not split
+  evenly: a rank's threads cannot straddle two nodes, so 64 ranks of 3 CPUs need
+  4 such nodes, not 3. Inside an allocation whose environment gives its node
+  count (`SLURM_JOB_NUM_NODES`/`SLURM_NNODES` beside a Slurm `allocation-env`
+  variable, `PBS_NUM_NODES` beside a PBS one), `NODES` is that count — all of
+  it with no `--tasks`, else never more nodes than the ranks need by the rule
+  above: the queue's node size is not necessarily the allocation's, so a one-node
+  `salloc` of a big node stays one node. An allocation of unknown size derives
+  like a scheduled job. Otherwise 1.
+  Nodes are derived only from a **declared** `max-cpus-per-node` (§4.2): one
+  filled from the OS at load (§4.6) is the login node's, which says nothing
+  about a compute node's, so with it `NODES` stays 1 and nothing below is
+  refused on its strength. Whenever a derived `NODES` is above 1, cactup says so
+  in one line before submitting or running, naming the count and what decided
+  it (`Asking for 50 nodes: at most 2 tasks per node (the queue's 2 GPUs per
+  node at 1 GPU per task) for 100 tasks; pass -n to choose`).
 - `TASKS_PER_NODE` = `--tpn` if given. Else, with no `--tasks`, the node's room
-  (fill the node). With `--tasks`, the ranks spread evenly over the nodes,
-  `ceil(TASKS / NODES)` — capped, on a single host whose node count was not
-  derived, at the CPU rule's room (not the GPU-bounded one). That cap is
-  deliberate: there an explicit `--tasks` is a requested rank count and every
-  one of those ranks lands on the node, so quietly shrinking
-  `TASKS_PER_NODE` under it would bless a layout the node cannot run; it meets
-  the GPU ceiling below instead. An explicit `--tpn` is authoritative and never
-  capped (`--tasks=1` with no `--tpn` is 1 rank on 1 node, not `TASKS = 1,
-  TASKS_PER_NODE = 2`).
+  (fill the node). With `--tasks` and a derived `NODES`, the ranks spread
+  evenly over the nodes, `ceil(TASKS / NODES)`. With `--tasks` and a `NODES`
+  that was not derived — an explicit `--nodes` in any placement, or a single
+  host — the same, but capped at the CPU rule's room (not the GPU-bounded one).
+  That cap is deliberate: an explicit `--tasks` is then a requested rank count
+  for the nodes given, so quietly shrinking `TASKS_PER_NODE` under it would bless
+  a layout the nodes cannot run; it meets the GPU ceiling below, or for a
+  scheduled job the refusal below, instead. An explicit `--tpn` is
+  authoritative and never capped (`--tasks=1` with no `--tpn` is 1 rank on 1
+  node, not `TASKS = 1, TASKS_PER_NODE = 2`).
 - `TASKS` = `--tasks` if given, else `NODES * TASKS_PER_NODE`.
 - **A scheduled layout that cannot fit is refused** before anything is
   submitted: when `TASKS > NODES × TASKS_PER_NODE` — an explicit `--nodes`
-  with more ranks than its nodes have room for, or an explicit `--tpn` that
-  cannot hold them — cactup names the `--nodes` that would fit (or says to
+  with more ranks than its nodes' CPUs have room for, or an explicit `--tpn`
+  that cannot hold them — cactup names the `--nodes` that would fit (or says to
   leave it out) rather than hand the scheduler a job it refuses with
-  "Requested node configuration is not available". A run inside an allocation
-  or on a single host is never refused on this ground: what fits an allocation
-  cactup does not know, and oversubscribing one host's CPUs is a choice.
+  "Requested node configuration is not available". The count it names comes
+  from the GPU-bounded room, so it is one the GPU ceiling also accepts (qbd
+  `gpu2`, `-n 1 -T 128 -c 1`: `-n 64`, not the 2 the CPUs alone allow); and the
+  GPU ceiling, refusing an explicit `--nodes` whose ranks fit its CPUs but not
+  its GPUs, gives the same advice. A run inside an allocation or on a single
+  host is never refused on the CPU ground: what fits an allocation cactup does
+  not know, and oversubscribing one host's CPUs is a choice. Counts of zero are
+  refused by the parser; a zero from the MDB counts as 1.
 - **Script-route default tasks (§4.2).** When *no* process-layout flag
   (`-n`/`-T`/`-t`) was given, the routed script's optional `tasks = N`
   setting replaces the fill-the-node `TASKS`, and is treated as a `--tasks`

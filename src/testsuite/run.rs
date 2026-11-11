@@ -277,6 +277,9 @@ fn start_impl(
         None => run_entry.tasks,
     };
     apply_tasks_default(&mut topo, &args.topology, script_tasks, Some(TESTSUITE_DEFAULT_TASKS));
+    if let Some(note) = topo.nodes_note() {
+        println!("{note}");
+    }
     let submit_uni = match sub_entry {
         Some(sub_entry) => resolve_submit_universe(machine, sub_entry.universe.as_deref())?,
         None => None,

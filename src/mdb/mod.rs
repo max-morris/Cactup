@@ -473,7 +473,10 @@ impl Machine {
         if meta.hardware.autodetect || incomplete {
             let detected = autodetect::detect();
             let hw = &mut meta.hardware;
-            hw.max_cpus_per_node = hw.max_cpus_per_node.or(Some(detected.cores));
+            if hw.max_cpus_per_node.is_none() {
+                hw.max_cpus_per_node = Some(detected.cores);
+                hw.max_cpus_per_node_detected = true;
+            }
             hw.memory = hw.memory.or(detected.memory_mb);
             hw.max_gpus_per_node = hw.max_gpus_per_node.or(detected.gpus);
             hw.threads_per_cpu = hw.threads_per_cpu.or(detected.threads_per_cpu);
@@ -912,6 +915,10 @@ mod tests {
         // §4.6: autodetect filled the missing hardware.
         assert!(generic.meta.hardware.max_cpus_per_node.unwrap() >= 1);
         assert!(generic.meta.hardware.memory.unwrap() > 0);
+        // …and says so, so no node count is derived from this host's cores
+        // (§8.5); a queue inherits that, while a declared value never is.
+        assert!(generic.meta.effective_hardware("local").unwrap().max_cpus_per_node_detected);
+        assert!(!db1.meta.effective_hardware("gpu").unwrap().max_cpus_per_node_detected);
         // generic has no paths: consumers use the ~/.cactup fallbacks.
         assert!(generic.meta.paths.simulation_home.is_none());
         assert_eq!(generic.select_optionlist(None).unwrap(), "default"); // sole flavor

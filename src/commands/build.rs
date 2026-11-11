@@ -521,6 +521,9 @@ fn submit_impl(
             topo.queue
         );
     }
+    if let Some(note) = topo.nodes_note() {
+        println!("{note}");
+    }
 
     let reservation = Reservation {
         queue: topo.queue.clone(),

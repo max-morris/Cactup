@@ -127,16 +127,25 @@ cactup sim submit mysim -t 32       # 32 tasks per node
 If you don't specify:
 - Tasks per node (`-t`) defaults to filling the node: `floor(MAX_CPUS_PER_NODE / CPUS_PER_TASK)` (one task per CPU when `-c` is 1). On a GPU queue it is also no more than the node's GPUs can feed. With `-T`, the tasks spread evenly over the nodes.
 - Total tasks (`-T`) defaults to nodes × tasks-per-node (or the selected script's `tasks` setting when it declares one)
-- Nodes (`-n`) defaults to as many as the tasks need, `ceil(tasks / tasks-per-node)`, for `sim submit` and for a `sim run` inside a job allocation. Otherwise it is 1: a `sim run` on a login node, or on a machine without a batch system, runs on that one machine.
+- Nodes (`-n`) defaults to as many as the tasks need, `ceil(tasks / tasks-per-node)`, for `sim submit`. A `sim run` inside a job allocation (`salloc`) uses the allocation's nodes, but no more than the tasks need. Otherwise it is 1: a `sim run` on a login node, or on a machine without a batch system, runs on that one machine.
 
-For example, a 4-node submission with 32 CPUs per node and no `-T` or `-t` creates 4 × 32 = 128 tasks. The other way round, `-T 256 -c 1` on 64-CPU nodes is submitted on 4 nodes, and `-T 100 -c 1` on 2 nodes with 50 tasks each.
+For example, a 4-node submission with 32 CPUs per node and no `-T` or `-t` creates 4 × 32 = 128 tasks. The other way round, `-T 256 -c 1` on 64-CPU nodes is submitted on 4 nodes, and `-T 100 -c 1` on 2 nodes with 50 tasks each. On a GPU queue the GPUs can decide it instead: `-T 100 -c 1` on nodes with 2 GPUs is 50 nodes, one task per GPU. Whenever cactup picks more than one node for you, it says so, and why:
+
+```console
+$ cactup sim submit mysim -T 100 -c 1 -q gpu2
+Asking for 50 nodes: at most 2 tasks per node (the queue's 2 GPUs per node at 1 GPU per task) for 100 tasks; pass -n to choose
+```
+
+Node counts are derived only from a node size the machine database declares. If cactup had to detect it from the machine it runs on (a login node), it keeps one node unless you give `-n`.
 
 An explicit `-n` always wins. If the tasks can't fit on the nodes you asked for, `sim submit` refuses before anything reaches the scheduler, and says how many nodes would work:
 
 ```console
 $ cactup sim submit mysim -n 1 -T 256 -c 1 -q checkpt
-Error: 256 tasks of 1 CPU each do not fit on 1 node: a node of queue "checkpt" has 64 CPUs, room for 64 such tasks; ask for -n 4, or leave out -n to have it derived
+Error: 256 tasks of 1 CPU each do not fit on 1 node: a node of queue "checkpt" has room for 64 of them (64 CPUs per node at 1 CPU per task); ask for -n 4, or leave out -n to have it derived
 ```
+
+On a GPU queue the count it suggests is one the GPUs allow too.
 
 ### CPUs per task
 

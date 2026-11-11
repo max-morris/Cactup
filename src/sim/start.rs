@@ -454,6 +454,9 @@ fn submit_impl(
     let (run_script_name, run_entry) = run_scripts.route(&topo.queue, cfg_universe, false)?;
     // Script default tasks (§4.2): submitscript first for a submit.
     vars::apply_tasks_default(&mut topo, &args.topology, sub_entry.tasks.or(run_entry.tasks), None);
+    if let Some(note) = topo.nodes_note() {
+        println!("{note}");
+    }
     let submit_uni = resolve_submit_universe(
         machine,
         sub_entry.universe.as_deref(),
@@ -726,6 +729,9 @@ fn run_interactive(
     let (run_script_name, run_entry) = run_scripts.route(&topo.queue, cfg_universe, false)?;
     // Script default tasks (§4.2).
     vars::apply_tasks_default(&mut topo, &args.start.topology, run_entry.tasks, None);
+    if let Some(note) = topo.nodes_note() {
+        println!("{note}");
+    }
     let run_uni = resolve_run_universe(
         machine,
         &cfg,

@@ -633,19 +633,19 @@ pub(crate) struct TopologyFlags {
     /// Node count. Default: for a job given to the scheduler, or a run inside
     /// a job allocation, as many nodes as the tasks need, ceil(tasks /
     /// tasks-per-node); otherwise 1.
-    #[clap(short, long, value_name = "N")]
+    #[clap(short, long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     pub nodes: Option<u32>,
     /// Total tasks (MPI ranks). Default: the run/submit script's `tasks` setting,
     /// else nodes * tasks-per-node; `test run`/`test submit` default to 2.
-    #[clap(short = 'T', long, value_name = "N")]
+    #[clap(short = 'T', long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     pub tasks: Option<u32>,
     /// Tasks per node. Default: fill the node, floor(MAX_CPUS_PER_NODE / cpus),
     /// and on a GPU run no more than the node's GPUs can feed; with --tasks,
     /// the tasks spread evenly over the nodes.
-    #[clap(short, long, value_name = "N")]
+    #[clap(short, long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     pub tpn: Option<u32>,
     /// CPUs (threads) per task (default: the machine/queue `default-cpus-per-task`, else 1).
-    #[clap(short, long, value_name = "N")]
+    #[clap(short, long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     pub cpus: Option<u32>,
     /// Use GPUs (default: inferred from the queue's gpu flag).
     #[clap(short, long)]
@@ -1028,14 +1028,15 @@ pub(crate) struct ImportArgs {
     /// Run the simulation in the foreground once it is created.
     #[clap(long)]
     pub run: bool,
-    /// Node count for --submit/--run (default: derived from the tasks, as `sim submit`/`sim run` do).
-    #[clap(short, long, value_name = "N")]
+    /// Node count for --submit/--run (default: --submit asks for as many as the tasks need;
+    /// --run uses 1 on a login node, or the nodes of the job allocation it runs in).
+    #[clap(short, long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     pub nodes: Option<u32>,
     /// Total tasks (MPI ranks) for --submit/--run (default: the .sim's suggestion).
-    #[clap(short = 'T', long, value_name = "N")]
+    #[clap(short = 'T', long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     pub tasks: Option<u32>,
     /// CPUs per task for --submit/--run (default: the .sim's suggestion).
-    #[clap(short, long, value_name = "N")]
+    #[clap(short, long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     pub cpus: Option<u32>,
     /// Wall time for --submit/--run (default: the .sim's suggestion).
     #[clap(short, long, value_name = "(DD-)?HH:MM:SS")]

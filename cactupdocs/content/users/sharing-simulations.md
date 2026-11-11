@@ -101,7 +101,8 @@ cactup import bbh.sim --input my-initial-data=/data/id.h5 --submit
 creates the simulation, and with `--submit` (or `--run`) starts it, using the
 file's suggested tasks, CPUs per task and wall time unless you give `-T`,
 `-c`, `-w` or `-q`. The file suggests no node count: a submitted job gets as
-many nodes as its tasks need on your machine, unless you give `-n`. Without
+many nodes as its tasks need on your machine, unless you give `-n`; `--run`
+from a login node runs on that one machine. Without
 either flag it stops after creating the simulation and prints the submit
 command.
 
