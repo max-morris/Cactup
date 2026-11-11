@@ -18,7 +18,12 @@
 # No partition directive: Compute Canada schedules by account (NO_QUEUE).
 
 lines = ["#! /bin/bash"]
-lines.append("#SBATCH --account={0}".format(ALLOCATION))
+# Account optional: the Alliance charges a user's only account by default. The
+# -a flag, else the allocation knob; with neither, the line is left out (an
+# empty one makes the scheduler read the next directive as the account).
+allocation = ALLOCATION or knob("allocation", "")
+if allocation:
+    lines.append("#SBATCH --account={0}".format(allocation))
 lines.append("#SBATCH --time={0}".format(WALLTIME))
 lines.append("#SBATCH --nodes={0} --ntasks={1} --cpus-per-task={2}".format(
     NODES, TASKS, CPUS_PER_TASK))
