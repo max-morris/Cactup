@@ -442,6 +442,28 @@ pub struct Db {
 }
 
 impl Db {
+    /// Only the knobs of a database this cactup cannot read as a whole
+    /// (written by a newer one): taken from the raw JSON, whatever else it
+    /// holds, for updating, which is the way out of that refusal and must
+    /// still honor the user's update settings (`autoupdate`, `update-url`,
+    /// `mdb-url`). Knobs that are not strings are skipped.
+    pub fn knobs_only(&self) -> Res<Database> {
+        let text = fs::read_to_string(&self.path).with_context(|| format!("Failed to read '{}'", self.path.display()))?;
+        let raw: serde_json::Value =
+            serde_json::from_str(&text).with_context(|| format!("Failed to parse '{}'", self.path.display()))?;
+        let mut db = Database::new();
+        if let Some(knobs) = raw.get("knobs").and_then(|k| k.as_object()) {
+            for (name, value) in knobs {
+                if let Some(value) = value.as_str() {
+                    db.knobs.insert(name.clone(), value.to_owned());
+                }
+            }
+        }
+        Ok(db)
+    }
+}
+
+impl Db {
     /// The production handle under `~/.cactup`.
     pub fn open() -> Res<Db> {
         Ok(Self::in_dir(&crate::CACTUP_ROOT))
@@ -620,12 +642,18 @@ mod tests {
     /// wildcard: a new value fails to compile here until it is in the sample
     /// (an older binary meeting it would fail to read the whole database).
     fn every_unfetched_reason() -> [UnfetchedReason; 2] {
+        // Each value's place in `all`: a new value fails to compile here until
+        // it is given the next place — and then goes into `all` too, which
+        // must hold every place exactly once (checked below; Rust cannot list
+        // an enum's values, so the place given is what this relies on).
+        let place = |reason: &UnfetchedReason| match reason {
+            UnfetchedReason::Skipped => 0,
+            UnfetchedReason::Failed => 1,
+        };
         let all = [UnfetchedReason::Skipped, UnfetchedReason::Failed];
-        for reason in &all {
-            match reason {
-                UnfetchedReason::Skipped | UnfetchedReason::Failed => {}
-            }
-        }
+        let mut places: Vec<usize> = all.iter().map(place).collect();
+        places.sort();
+        assert_eq!(places, (0..all.len()).collect::<Vec<_>>(), "every UnfetchedReason, once");
         all
     }
 

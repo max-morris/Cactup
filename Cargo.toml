@@ -25,8 +25,6 @@ colored = "3.1.1"
 fastrand = "2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_derive = "1.0.228"
-# `preserve_order` (indexmap, already a dependency): `database.json` keeps its
-# key order when it goes through `format::write` as a raw document.
 # preserve_order (through indexmap, already a dependency): database.json keeps
 # its key order across writes (src/format.rs). Crate-wide, so the JSON handed
 # to .py scripts also keeps insertion order now; nothing reads meaning into it.

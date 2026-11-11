@@ -616,12 +616,12 @@ pub(crate) fn sha256_hex_counting(path: &Path, progress: &mut impl prodash::Prog
 }
 
 /// The database as updating reads it: a database written by a newer cactup
-/// is refused everywhere else ("upgrade cactup"), so here it stands for an
-/// empty one, its update knobs at their defaults, and updating stays the
-/// way out of that message.
+/// is refused everywhere else ("upgrade cactup"), so here only its knobs
+/// are taken ([`crate::database::Db::knobs_only`]) and updating stays the way
+/// out of that message, under the user's own update settings.
 pub(crate) fn readable_db(db: &crate::database::Db) -> Res<Database> {
     match db.read() {
-        Err(e) if e.downcast_ref::<crate::format::Newer>().is_some() => Ok(Database::new()),
+        Err(e) if e.downcast_ref::<crate::format::Newer>().is_some() => db.knobs_only(),
         other => other,
     }
 }
@@ -892,7 +892,8 @@ mod tests {
         std::fs::write(dir.path().join("database.json"), r#"{"schema": 99, "knobs": {"update-url": "https://x"}}"#).unwrap();
         assert!(db.read().is_err(), "everywhere else it is refused");
         let read = readable_db(&db).unwrap();
-        assert!(read.knobs.is_empty() && read.installations.is_empty());
+        assert!(read.installations.is_empty());
+        assert_eq!(read.knob("update-url"), Some("https://x"), "the user's update settings still hold");
         std::fs::write(dir.path().join("database.json"), "{ not json").unwrap();
         assert!(readable_db(&db).is_err(), "an unreadable database still fails");
     }

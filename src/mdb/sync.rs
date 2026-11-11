@@ -129,8 +129,9 @@ pub fn system_root(root: &Path, db: &Db, mode: Mode) -> Res<PathBuf> {
     let dir = match fresh_link(root, generation, mode) {
         Some(dir) => dir,
         None => {
-            let url = db
-                .read()?
+            // As updating reads it: the sync that follows an update must not
+            // fail on a database a newer cactup wrote.
+            let url = crate::update::readable_db(db)?
                 .knob_or_default("mdb-url")
                 .unwrap_or_else(|| crate::update::DEFAULT_MDB_URL.to_owned());
             sync_at(root, &url, generation, mode)?
