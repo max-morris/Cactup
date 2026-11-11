@@ -353,6 +353,12 @@ pub fn write_replacing<T: Serialize + DeserializeOwned, D: Document>(
     f: &Format<D>,
     whole: &[&str],
 ) -> Res<()> {
+    write_over_replacing(path, value, f, &disk_state(path, f)?, whole)
+}
+
+/// What a write finds at `path`: a newer file refuses it, one that does not
+/// parse is overwritten with nothing put back.
+fn disk_state<D: Document>(path: &Path, f: &Format<D>) -> Res<OnDisk<D>> {
     let state = match read_text(path, f)? {
         None => DiskState::Absent,
         Some(text) => match decode(&text, path, f) {
@@ -362,7 +368,16 @@ pub fn write_replacing<T: Serialize + DeserializeOwned, D: Document>(
             Err(_) => DiskState::Unusable,
         },
     };
-    write_over_replacing(path, value, f, &OnDisk { state }, whole)
+    Ok(OnDisk { state })
+}
+
+/// [`write`] for a file that holds a secret: the same versioning and
+/// put-back, but the file is always owner-only (0600), however it was or
+/// the umask says. It is created so (a temp file `tempfile` makes 0600) and
+/// never has a wider mode, not even between the write and a later chmod.
+pub fn write_private<T: Serialize + DeserializeOwned, D: Document>(path: &Path, value: &T, f: &Format<D>) -> Res<()> {
+    let text = render_over(path, value, f, &disk_state(path, f)?, &[])?;
+    write_atomic_as(path, &text, Some(0o600))
 }
 
 /// Write `value` over what [`read_for_write`] (or [`write`]) found at `path`.
@@ -382,6 +397,18 @@ fn write_over_replacing<T: Serialize + DeserializeOwned, D: Document>(
     disk: &OnDisk<D>,
     whole: &[&str],
 ) -> Res<()> {
+    write_atomic(path, &render_over(path, value, f, disk, whole)?)
+}
+
+/// The text of the file a write of `value` over `disk` leaves: version
+/// chosen, unknown keys put back, version key first.
+fn render_over<T: Serialize + DeserializeOwned, D: Document>(
+    path: &Path,
+    value: &T,
+    f: &Format<D>,
+    disk: &OnDisk<D>,
+    whole: &[&str],
+) -> Res<String> {
     let mut doc = D::from_typed(value).with_context(|| format!("Failed to serialize {}", f.name))?;
     // The helper owns the version key, whatever the struct says.
     doc.remove(f.key);
@@ -403,7 +430,7 @@ fn write_over_replacing<T: Serialize + DeserializeOwned, D: Document>(
         DiskState::Absent | DiskState::Unusable => f.down_floor,
     };
     let (version, doc) = f.express(doc, floor);
-    write_atomic(path, &with_version_first(doc, f.key, version).render()?)
+    with_version_first(doc, f.key, version).render()
 }
 
 /// Atomic write (temp file in the same directory + fsync + rename), so a
@@ -411,17 +438,22 @@ fn write_over_replacing<T: Serialize + DeserializeOwned, D: Document>(
 /// keeps the mode it had, and a new one gets the mode a plain write would
 /// give it (0666 less the umask), not the temp file's owner-only 0600: a
 /// record in a group-shared Cactus tree must stay readable by the group.
-/// Not for secrets (the credentials file keeps its own owner-only write).
+/// Not for secrets: those go through [`write_private`].
 pub(crate) fn write_atomic(path: &Path, text: &str) -> Res<()> {
+    write_atomic_as(path, text, None)
+}
+
+/// [`write_atomic`], with `mode` (when given) the file's mode whatever it was.
+fn write_atomic_as(path: &Path, text: &str, mode: Option<u32>) -> Res<()> {
     use std::os::unix::fs::PermissionsExt;
     let dir = path.parent().expect("cactup record paths have parents");
     std::fs::create_dir_all(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
     let mut temp = tempfile::NamedTempFile::new_in(dir)
         .with_context(|| format!("Failed to create temp file in '{}'", dir.display()))?;
-    let mode = match std::fs::metadata(path) {
+    let mode = mode.or(match std::fs::metadata(path) {
         Ok(meta) => Some(meta.permissions().mode() & 0o7777),
         Err(_) => umask().map(|mask| 0o666 & !mask),
-    };
+    });
     if let Some(mode) = mode {
         temp.as_file()
             .set_permissions(std::fs::Permissions::from_mode(mode))

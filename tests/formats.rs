@@ -169,3 +169,44 @@ fn a_newer_simulation_record_stops_the_run_before_it_starts() {
     assert_eq!(text(&sim.simulation()), newer);
     assert_eq!(text(&sim.restart()), RESTART, "the restart was touched");
 }
+
+/// `cactup login` through the real binary: the credentials file is written
+/// owner-only with its `schema`, and a second login keeps what a newer
+/// cactup put in it and keeps the mode, even over a file that was wider.
+#[test]
+fn login_writes_an_owner_only_versioned_file_and_keeps_unknown_keys() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let login = |token: &str| {
+        let out = Command::new(CACTUP)
+            .args(["login", "--token", token])
+            .env("CACTUP_HOME", &home)
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+        out
+    };
+    let file = home.join("credentials");
+    let mode = || fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+
+    login("dummy-one");
+    assert_eq!(mode(), 0o600);
+    assert!(text(&file).starts_with("schema = 1\n"), "{}", text(&file));
+
+    let mut doc = table(&file);
+    doc.insert("future-credentials-key".to_owned(), toml::Value::Integer(5));
+    fs::write(&file, toml::to_string(&doc).unwrap()).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+
+    let out = login("dummy-two");
+    assert_eq!(mode(), 0o600);
+    let doc = table(&file);
+    assert_eq!(doc["future-credentials-key"].as_integer(), Some(5), "{}", text(&file));
+    assert_eq!(doc["schema"].as_integer(), Some(1));
+    assert!(doc["tokens"].as_table().unwrap().values().any(|t| t.as_str() == Some("dummy-two")));
+    let said = String::from_utf8_lossy(&out.stdout).into_owned() + &stderr(&out);
+    assert!(!said.contains("dummy-two"), "the token was printed: {said}");
+}

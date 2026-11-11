@@ -205,6 +205,14 @@ const UPDATE_LOCK: &str = ".update.lock";
 
 /// The release manifest, `<update-url>/latest.json`. Read leniently: keys
 /// a later site adds are ignored.
+///
+/// **Never break this file.** Every deployed binary and the installer read
+/// it to update themselves; a `latest.json` one of them refuses would leave
+/// it unable to update, forever. It carries no version key on purpose: the
+/// path is the version. Keys may only be added, and the ones above keep
+/// their names, types and meanings. A change that cannot be additive (a
+/// renamed key, a different shape) is published at a new path beside this
+/// one (for example `latest-2.json`), which binaries that understand it read instead.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Latest {
     /// The build id (abbreviated commit hash) of the published release.
@@ -885,6 +893,21 @@ mod tests {
     /// Updating is the way out of "written by a newer cactup", so a newer
     /// database reads as an empty one there (default update knobs), while
     /// any other failure still fails.
+    /// A manifest with keys this binary has never heard of (a later site's
+    /// additions, at the top level, on a target and inside it) still parses:
+    /// reading `latest.json` stays lenient.
+    #[test]
+    fn a_manifest_with_unknown_keys_still_parses() {
+        let json = br#"{"build":"abc1234","date":"2026-11-10T12:00:00Z","mdb_generation":3,
+            "channel":"stable","notes":{"url":"https://example.org/notes"},
+            "targets":{"x86_64-unknown-linux-musl":{"path":"x86_64-unknown-linux-musl/cactup-abc1234",
+            "sha256":"ab","size":12,"signature":"sig","mirrors":["https://example.org/m"]}}}"#;
+        let latest: Latest = serde_json::from_slice(json).unwrap();
+        assert_eq!(latest.build, "abc1234");
+        assert_eq!(latest.mdb_generation, 3);
+        assert_eq!(latest.targets["x86_64-unknown-linux-musl"].size, 12);
+    }
+
     #[test]
     fn a_newer_database_does_not_stop_an_update() {
         let dir = tempfile::tempdir().unwrap();

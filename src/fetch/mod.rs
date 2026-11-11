@@ -11,6 +11,7 @@ pub mod git;
 pub mod link;
 pub(crate) mod retry;
 
+use crate::format::{self, Format, Toml};
 use crate::thornlist::{Component, ComponentType, Thornlist};
 use crate::Res;
 use anyhow::{bail, Context};
@@ -661,10 +662,9 @@ fn settle_indexes(repos: &[(String, std::path::PathBuf)]) {
 /// cactup itself fetched (URL, branch, resolved HEAD). Prune only ever
 /// removes repos this file (or the current thornlist) accounts for, and it
 /// is the input a future rebuild-decision hookup will diff (§7.5).
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct FetchState {
-    pub schema: u32,
     #[serde(default)]
     pub repos: indexmap::IndexMap<String, RepoRecord>,
     /// Each download's SHA-256 as last fetched, by [`download_key`]. An
@@ -687,9 +687,27 @@ pub struct RepoRecord {
     pub commit: Option<String>,
 }
 
-impl FetchState {
-    pub const SCHEMA: u32 = 1;
+/// `fetch-state.toml`'s format. Written by login binaries only (a fetch
+/// never runs on a compute node), so it is not `frozen_read`. Every deployed
+/// binary requires the `schema` key, which the helper always writes, first.
+/// `record` edits the file in place: a repo it did not fetch keeps its
+/// record whole, unknown keys included; a repo it did fetch gets a record
+/// made anew, which it names to `write_replacing`, so a key a newer binary
+/// put on the old record does not outlive the commit it described. The
+/// downloads table is a map of hashes: nothing to replace whole.
+pub static FETCH_STATE: Format<Toml> = Format {
+    name: "fetch state",
+    key: "schema",
+    current: 1,
+    upgrades: &[],
+    downgrades: &[],
+    down_floor: 1,
+    frozen_read: false,
+    legacy: None,
+    replace_whole: &[],
+};
 
+impl FetchState {
     fn path(install_root: &Path) -> PathBuf {
         install_root.join(".cactup").join("fetch-state.toml")
     }
@@ -698,24 +716,13 @@ impl FetchState {
     /// installations) — callers must treat that as "no record", never as
     /// "nothing was fetched by cactup".
     pub fn read(install_root: &Path) -> Res<Option<FetchState>> {
-        let path = Self::path(install_root);
-        let text = match std::fs::read_to_string(&path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            other => other.with_context(|| format!("Failed to read '{}'", path.display()))?,
-        };
-        let state: FetchState = toml::from_str(&text)
-            .with_context(|| format!("Failed to parse '{}'", path.display()))?;
-        Ok(Some(state))
+        format::read(&Self::path(install_root), &FETCH_STATE)
     }
 
     /// Merge `records` over the existing state (repos not touched by this
     /// fetch keep their previous record) and write atomically.
     pub fn record(install_root: &Path, records: &FetchRecords) -> Res<()> {
-        let mut state = Self::read(install_root)?.unwrap_or_else(|| FetchState {
-            schema: Self::SCHEMA,
-            repos: Default::default(),
-            downloads: Default::default(),
-        });
+        let mut state = Self::read(install_root)?.unwrap_or_default();
         for (key, sum) in &records.downloads {
             state.downloads.insert(key.clone(), sum.clone());
         }
@@ -730,18 +737,16 @@ impl FetchState {
                 },
             );
         }
-        let path = Self::path(install_root);
-        let dir = path.parent().expect("fetch-state path has a parent");
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("Failed to create '{}'", dir.display()))?;
-        let text = toml::to_string_pretty(&state).with_context(|| "Failed to render fetch state")?;
-        let tmp = tempfile::NamedTempFile::new_in(dir)
-            .with_context(|| format!("Failed to create temp file in '{}'", dir.display()))?;
-        std::fs::write(tmp.path(), text)
-            .with_context(|| "Failed to write fetch state temp file")?;
-        tmp.persist(&path)
-            .with_context(|| format!("Failed to replace '{}'", path.display()))?;
-        Ok(())
+        // The records made anew above: put-back must not reach into them. A
+        // repo name with a dot cannot be named in a dotted pattern, so a
+        // write that touches one replaces every record whole.
+        let patterns: Vec<String> = if records.repos.iter().any(|(repo, _)| repo.contains('.')) {
+            vec!["repos.*".to_owned()]
+        } else {
+            records.repos.iter().map(|(repo, _)| format!("repos.{repo}")).collect()
+        };
+        let whole: Vec<&str> = patterns.iter().map(String::as_str).collect();
+        format::write_replacing(&Self::path(install_root), &state, &FETCH_STATE, &whole)
     }
 }
 
@@ -1909,6 +1914,104 @@ pub(crate) mod tests {
     /// this right (it read `list.root()`), but nothing enforced it, so a
     /// future regression here would silently reopen the exact same split
     /// between where components are planned and where `install` looks.
+    fn exhaustive_fetch_state() -> FetchState {
+        let mut repos = indexmap::IndexMap::new();
+        for (name, branch) in [("CarpetX", "main"), ("Cactus", "master")] {
+            repos.insert(
+                name.to_owned(),
+                RepoRecord {
+                    url: format!("https://github.com/example/{name}.git"),
+                    branch: Some(branch.to_owned()),
+                    head: "3f2c9e1a00112233445566778899aabbccddeeff".to_owned(),
+                    commit: Some("3f2c9e1a00112233445566778899aabbccddeeff".to_owned()),
+                },
+            );
+        }
+        let mut downloads = indexmap::IndexMap::new();
+        downloads.insert("Cactus/dl/data.tar.gz".to_owned(), "ab".repeat(32));
+        FetchState { repos, downloads }
+    }
+
+    #[test]
+    fn fetch_state_format_generic_tests() {
+        use crate::format::testing::*;
+        let sample = exhaustive_fetch_state();
+        descriptor_is_consistent(&FETCH_STATE);
+        let fixtures = fixture_dir("fetch-state");
+        shape_is_pinned(&FETCH_STATE, &fixtures, &sample);
+        every_fixture_loads::<FetchState, _>(&FETCH_STATE, &fixtures);
+        newer_is_refused::<FetchState, _>(&FETCH_STATE, "fetch-state.toml", "repos = 7\n", &sample);
+        unknown_keys_survive(
+            &FETCH_STATE,
+            "fetch-state.toml",
+            &sample,
+            &["repos", "CarpetX"],
+            |s: &mut FetchState| s.repos["CarpetX"].commit = None,
+            &["repos", "CarpetX", "commit"],
+        );
+    }
+
+    /// `record` through a real file, from the shapes that shipped: the
+    /// `schema` key a deployed binary requires is always written, first; keys
+    /// this binary does not know survive on records it did not touch and
+    /// do not on one it replaced; a newer file is refused and left alone.
+    #[test]
+    fn record_keeps_schema_and_unknown_keys_and_refuses_newer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let file = root.join(".cactup/fetch-state.toml");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let fixture = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/formats/fetch-state/v1-nodownloads.toml"),
+        )
+        .unwrap();
+        // A newer binary's additions: top level, on each repo record.
+        let future = fixture
+            .replace("[repos.CarpetX]\n", "[repos.CarpetX]\nnewer-key = 1\n")
+            .replace("[repos.Cactus]\n", "[repos.Cactus]\nnewer-key = 2\n")
+            + "\n[future]\nx = 1\n";
+        std::fs::write(&file, &future).unwrap();
+
+        let moved = RepoRecord {
+            url: "https://github.com/example/CarpetX.git".to_owned(),
+            branch: Some("main".to_owned()),
+            head: "ffffffffffffffffffffffffffffffffffffffff".to_owned(),
+            commit: None,
+        };
+        let sum = "cd".repeat(32);
+        let records = FetchRecords {
+            repos: vec![("CarpetX".to_owned(), moved)],
+            downloads: vec![("Cactus/dl/data.tar.gz".to_owned(), sum.clone())],
+        };
+        FetchState::record(root, &records).unwrap();
+
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.starts_with("schema = 1\n"), "{text}");
+        let doc: toml::Table = toml::from_str(&text).unwrap();
+        assert_eq!(doc["future"]["x"].as_integer(), Some(1), "{text}");
+        assert_eq!(doc["repos"]["Cactus"]["newer-key"].as_integer(), Some(2), "an untouched record keeps its keys");
+        assert!(doc["repos"]["CarpetX"].get("newer-key").is_none(), "a replaced record starts clean: {text}");
+        assert_eq!(doc["repos"]["CarpetX"]["head"].as_str(), Some("ffffffffffffffffffffffffffffffffffffffff"));
+        assert_eq!(doc["downloads"]["Cactus/dl/data.tar.gz"].as_str(), Some(sum.as_str()));
+
+        // A newer file: refused, byte for byte as it was.
+        let newer = text.replacen("schema = 1", "schema = 2", 1);
+        std::fs::write(&file, &newer).unwrap();
+        let err = format!("{:#}", FetchState::record(root, &records).unwrap_err());
+        assert!(err.contains("upgrade cactup") && err.contains("fetch-state.toml"), "{err}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), newer);
+        assert!(FetchState::read(root).is_err());
+    }
+
+    /// A first fetch (no file yet) writes `schema` too.
+    #[test]
+    fn a_first_record_writes_the_schema_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        FetchState::record(tmp.path(), &FetchRecords { repos: Vec::new(), downloads: Vec::new() }).unwrap();
+        let text = std::fs::read_to_string(tmp.path().join(".cactup/fetch-state.toml")).unwrap();
+        assert!(text.starts_with("schema = 1\n"), "{text}");
+    }
+
     #[test]
     fn plan_places_every_repo_under_the_declared_root() {
         let tmp = tempfile::tempdir().unwrap();
