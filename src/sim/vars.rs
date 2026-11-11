@@ -2151,7 +2151,10 @@ mod tests {
                 scratch_home: "",
             })
             .unwrap();
+            // qbd requires an allocation, read from the knob (ALLOCATION is
+            // its legacy alias).
             vars.set("ALLOCATION", "alloc");
+            vars.set_knobs([("allocation".to_owned(), "alloc".to_owned())].into_iter().collect());
             let script = crate::sim::start::generate_script(
                 &machine,
                 ScriptKind::Submit,
@@ -2316,6 +2319,8 @@ mod tests {
                     )
                     .unwrap();
                     set_topology_vars(&mut v, &topo, "job");
+                    // A script's set always carries the knob snapshot.
+                    v.set_knobs(Default::default());
                     for token in body.split('@').skip(1).step_by(2) {
                         // Fill everything this template names that isn't ours,
                         // so the assertion is about GPUS_PER_TASK alone.

@@ -66,7 +66,7 @@ max-walltime = "24:00:00"
 # Overlay machines only (~/.cactup/machines/<name>/): the MDB generation
 # this file was written for. `cactup machine create` fills it in.
 [cactup]
-mdb-generation = 4
+mdb-generation = 5
 ```
 
 See [MDB Generations](mdb-generations.html) for what `mdb-generation` means

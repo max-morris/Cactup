@@ -6,9 +6,9 @@
 
 lines = ["#! /bin/bash"]
 # Account required: LSU/LONI clusters reject a job without an allocation. The
-# -a flag, else the allocation knob; with neither, cactup refuses before
-# submitting, naming both.
-allocation = ALLOCATION or knob("allocation", "")
+# allocation knob, which -a sets for one command; with none, cactup refuses
+# before submitting, naming both.
+allocation = knob("allocation", "")
 if not allocation:
     raise CactupError(
         "{0} needs an allocation: pass -a ACCOUNT, or set it once with "

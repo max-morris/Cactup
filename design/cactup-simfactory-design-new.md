@@ -5946,8 +5946,16 @@ names: an overlay that keeps them fails to load), adds the provisioning keys
 rostam's `arm-conda` micromamba block and `x86-modules` Perl stub moved into
 `build-provision`), and adds `[scheduler]`'s `job-ids` and
 `unknown-job-pattern` (§10); `ENV_SETUP` now carries the provisioning steps
-too. Overlays set `[cactup] mdb-generation = 3`. `mdb/GENERATIONS.md` carries
-the step-by-step overlay recipe for each.
+too. Overlays set `[cactup] mdb-generation = 3`. *Generation 4* adds
+`[paths].inputs-home`, where `cactup import` keeps a shared simulation's
+inputs (§8.9). *Generation 5* adds the drop-line tokens
+`@KNOB-OR-DROP-LINE(name)@`/`@ENV-OR-DROP-LINE(NAME)@` (§6), allowed only in
+`.sh` scripts, optionlists and parfiles; with `-a` now shorthand for
+`-K allocation=` (§5.1), the in-repo machines read the `allocation` knob and
+say whether they need it: required ones refuse a submit with none
+(`@KNOB(allocation)@`, or a `.py` `CactupError`), optional ones leave the
+account line out (`@KNOB-OR-DROP-LINE(allocation)@`, or a `.py` `if`).
+`mdb/GENERATIONS.md` carries the step-by-step overlay recipe for each.
 
 **Overlays** (`~/.cactup/machines/<name>/meta.toml`) carry
 `[cactup] mdb-generation = N` (written by `machine create`). On load of a

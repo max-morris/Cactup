@@ -14,10 +14,10 @@
 alloc_tasks = typed["TASKS"] * typed["CPUS_PER_TASK"]
 
 lines = ["#! /bin/bash"]
-# Account optional: the old ini declared no allocation. The -a flag, else the
-# allocation knob; with neither, the line is left out (an empty one makes the
-# scheduler read the next directive as the account).
-allocation = ALLOCATION or knob("allocation", "")
+# Account optional: the old ini declared no allocation. The allocation knob,
+# which -a sets for one command; with none, the line is left out (an empty one
+# makes the scheduler read the next directive as the account).
+allocation = knob("allocation", "")
 if allocation:
     lines.append("#SBATCH -A {0}".format(allocation))
 lines.append("#SBATCH -t {0}".format(WALLTIME))

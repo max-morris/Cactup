@@ -407,22 +407,30 @@ knob refuses the run with the same message cactup would print for the token.
 plain `os.environ`. The same conventions hold for a `.py` **parfile**.
 
 An account directive never goes out empty: `#SBATCH -A ` with nothing after it
-makes sbatch read the next directive as the account. `ALLOCATION` is the `-a`
-flag, else the global `allocation` knob; the snapshot also holds a
-simulation's own. The in-repo machines read both, and where the site does not
-require an account they leave the line out:
+makes sbatch read the next directive as the account. Read the allocation from
+the `allocation` knob: `-a ACCOUNT` sets it for one command, and it already
+holds a simulation's own value where there is one. (`ALLOCATION` and
+`@ALLOCATION@` still work, as aliases of that knob, but new scripts should not
+need them.) In a `.sh` script, where the site does not require an account:
+
+```bash
+#SBATCH -A @KNOB-OR-DROP-LINE(allocation)@
+```
+
+and where it does, `#SBATCH -A @KNOB(allocation)@`, which refuses the submit
+when none is set and says to pass `-a` or set the knob. In a `.py` script:
 
 ```python
-allocation = ALLOCATION or knob("allocation", "")
+allocation = knob("allocation", "")
 if allocation:
     lines.append(f"#SBATCH -A {allocation}")
 ```
 
-Where the site rejects a job without one, they refuse instead, naming both
-ways to give it:
+or, where the site rejects a job without one, a refusal that names both ways
+to give it:
 
 ```python
-allocation = ALLOCATION or knob("allocation", "")
+allocation = knob("allocation", "")
 if not allocation:
     raise CactupError(
         f"{MACHINE} needs an allocation: pass -a ACCOUNT, or set it once with "
@@ -430,9 +438,6 @@ if not allocation:
     )
 lines.append(f"#SBATCH -A {allocation}")
 ```
-
-A `.sh` script has no conditional, so either kind of account directive needs a
-`.py` script (`@KNOB(allocation)@` alone would not see `-a`).
 
 Python is useful for complex script generation, but shell is simpler for most machines.
 
