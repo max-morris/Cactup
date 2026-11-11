@@ -182,6 +182,28 @@ An optionlist file of your own that you build from with `--optionlist` follows
 the same format: if its `[cactup]` header uses keys a newer generation moved,
 the next rebuild of that config stops and says where each key went.
 
+## Files written by another cactup
+
+cactup's own files (the installation list, simulation and build records, your
+configs) each carry a format version. A newer cactup reads every older file
+it ever wrote; it does not touch the file when it only reads, and the file
+is rewritten in the current format the next time cactup saves it. A cactup
+that is older than one that wrote a file keeps the keys it does not know when
+it saves, but refuses a file whose format it cannot read at all:
+
+```
+'/home/you/.cactup/database.json' was written by a newer cactup (database
+schema 2; this cactup, a1b2c3d, reads up to 1); upgrade cactup
+```
+
+Nothing is overwritten when you see this. Run `cactup update` (or use the
+newer cactup that wrote the file). A queued job runs the build it was
+submitted with, so it is not affected by an update in between.
+
+`~/.cactup/credentials`, which holds your Cactarium token, is always readable
+only by you (mode 0600), however cactup rewrites it. Other files keep the
+permissions they have, so a shared Cactus tree stays readable by its group.
+
 ## Offline hosts and firewalls
 
 - **Update checks** that cannot reach the server fail silently and are not
