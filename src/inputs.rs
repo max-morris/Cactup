@@ -79,69 +79,106 @@ impl SizePolicy {
 }
 
 /// The value of `input`'s knob, fetched: the downloaded file, or for an
-/// archive, the unpacked tree (or the file `path` names in it).
+/// archive, the unpacked tree (or the file `path` names in it). One line of
+/// progress for the whole input, named for its knob (downloading, checking,
+/// unpacking), left in the scrollback as one green line saying what
+/// happened; a size question comes first, before anything is drawn.
 pub fn fetch(dir: &Path, input: &Input, policy: &SizePolicy) -> Res<PathBuf> {
     let url = input.url.as_deref().ok_or_else(|| anyhow!("Input {} has no URL to fetch", input.knob))?;
-    if input.unpack {
-        unpacked(dir, input, url, policy)
-    } else {
-        fetch_file(dir, url, input.sha256.as_deref(), policy)
+    if let Some(done) = already_fetched(dir, input, url)? {
+        return Ok(done);
     }
+    let limit = confirm_size(url, policy)?;
+    let (progress, renderer) =
+        crate::manifest::setup_prodash_with(Some(crate::manifest::progress_level_filter(1)), true);
+    let layout = crate::progress::Layout::for_names([input.knob.as_str()]);
+    let mut line = crate::progress::Line::counting(progress.add_child(input.knob.clone()), &input.knob, layout);
+    let fetched = if input.unpack {
+        unpacked(dir, input, url, limit, &mut line)
+    } else {
+        fetch_file(dir, url, input.sha256.as_deref(), limit, &mut line)
+    };
+    if let Ok((_, done)) = &fetched {
+        line.succeeded(done.clone());
+    }
+    drop(line);
+    renderer.shutdown_and_wait();
+    let (value, _) = fetched?;
+    if input.sha256.is_none() {
+        println!("{}", format!("The .sim records no hash for {url}, so the download could not be checked").yellow());
+    }
+    Ok(value)
+}
+
+/// The input's value if a finished copy is already in `dir`: a file input
+/// at its hash, an archive's tree with its completion marker and `path`. An
+/// incomplete tree (a scratch purge removes files, not directories, or a
+/// crash came before the marker) is removed, to be made again.
+fn already_fetched(dir: &Path, input: &Input, url: &str) -> Res<Option<PathBuf>> {
+    if !input.unpack {
+        let cached = input.sha256.as_deref().map(|h| dir.join(h.to_ascii_lowercase()).join(file_name(url)));
+        return Ok(cached.filter(|c| c.is_file()));
+    }
+    let tree = dir.join("unpacked").join(tree_key(input));
+    if !tree.is_dir() {
+        return Ok(None);
+    }
+    let value = input.path.as_deref().map_or_else(|| tree.clone(), |p| tree.join(p));
+    if tree.join(COMPLETE_MARKER).is_file() && std::fs::symlink_metadata(&value).is_ok() {
+        return Ok(Some(value));
+    }
+    println!("{}", format!("'{}' is incomplete; unpacking it again", tree.display()).yellow());
+    std::fs::remove_dir_all(&tree).with_context(|| format!("Failed to remove '{}'", tree.display()))?;
+    Ok(None)
 }
 
 /// A file input at `<dir>/<sha256>/<file name>`, checked against the
-/// `.sim`'s hash when it records one. Already there: not downloaded again.
-fn fetch_file(dir: &Path, url: &str, sha256: Option<&str>, policy: &SizePolicy) -> Res<PathBuf> {
-    let file_name = file_name(url);
-    if let Some(hash) = sha256 {
-        let cached = dir.join(hash.to_ascii_lowercase()).join(&file_name);
-        if cached.is_file() {
-            return Ok(cached);
-        }
-    }
+/// `.sim`'s hash when it records one. Returns it and what to say of it.
+fn fetch_file(
+    dir: &Path,
+    url: &str,
+    sha256: Option<&str>,
+    limit: Option<u64>,
+    line: &mut crate::progress::Line,
+) -> Res<(PathBuf, String)> {
     std::fs::create_dir_all(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
-    let temp = download(dir, url, policy)?;
-    let actual = crate::update::sha256_hex(temp.path())?;
-    match sha256 {
-        Some(expected) if !expected.eq_ignore_ascii_case(&actual) => {
-            bail!("The download of {url} has SHA-256 {actual}, but the .sim records {expected}")
-        }
-        None => println!(
-            "{}",
-            format!("The .sim records no hash for {url}, so the download could not be checked").yellow()
-        ),
-        Some(_) => {}
+    let temp = download(dir, url, limit, line)?;
+    line.phase("checking");
+    let actual = crate::update::sha256_hex_counting(temp.path(), line)?;
+    if let Some(expected) = sha256
+        && !expected.eq_ignore_ascii_case(&actual)
+    {
+        bail!("The download of {url} has SHA-256 {actual}, but the .sim records {expected}");
     }
     let hash_dir = dir.join(&actual);
     std::fs::create_dir_all(&hash_dir).with_context(|| format!("Failed to create '{}'", hash_dir.display()))?;
-    let dest = hash_dir.join(&file_name);
+    let dest = hash_dir.join(file_name(url));
     temp.persist(&dest).with_context(|| format!("Failed to save '{}'", dest.display()))?;
-    println!("Downloaded {url} to '{}'", dest.display());
-    Ok(dest)
+    Ok((dest.clone(), format!("downloaded to '{}'", dest.display())))
 }
 
 /// An archive input: its tree at `<dir>/unpacked/<key>/`, made once — the
 /// archive downloaded beside it, verified, unpacked into a temporary
 /// directory, its fixups applied, then renamed into place (and the download
-/// removed: the tree is what is kept).
-fn unpacked(dir: &Path, input: &Input, url: &str, policy: &SizePolicy) -> Res<PathBuf> {
+/// removed: the tree is what is kept). Returns the knob's value and what to
+/// say of it.
+fn unpacked(
+    dir: &Path,
+    input: &Input,
+    url: &str,
+    limit: Option<u64>,
+    line: &mut crate::progress::Line,
+) -> Res<(PathBuf, String)> {
     let expected = input.sha256.as_deref().ok_or_else(|| anyhow!("Input {} unpacks an archive with no SHA-256", input.knob))?;
     let kind = ArchiveKind::of_url(url).ok_or_else(|| anyhow!("{url} is not an archive cactup can unpack"))?;
     let trees = dir.join("unpacked");
     let tree = trees.join(tree_key(input));
     let value = |tree: &Path| input.path.as_deref().map_or_else(|| tree.to_owned(), |p| tree.join(p));
-    if tree.is_dir() {
-        if tree.join(COMPLETE_MARKER).is_file() && std::fs::symlink_metadata(value(&tree)).is_ok() {
-            return Ok(value(&tree));
-        }
-        // Incomplete (purged, or left by a crash before the marker): made again.
-        println!("{}", format!("'{}' is incomplete; unpacking it again", tree.display()).yellow());
-        std::fs::remove_dir_all(&tree).with_context(|| format!("Failed to remove '{}'", tree.display()))?;
-    }
     std::fs::create_dir_all(&trees).with_context(|| format!("Failed to create '{}'", trees.display()))?;
 
-    let archive = download(&trees, url, policy)?;
-    let actual = hash_with_progress(archive.path(), &file_name(url))?;
+    let archive = download(&trees, url, limit, line)?;
+    line.phase("checking");
+    let actual = crate::update::sha256_hex_counting(archive.path(), line)?;
     if !actual.eq_ignore_ascii_case(expected) {
         bail!("The download of {url} has SHA-256 {actual}, but the .sim records {expected}; nothing was unpacked");
     }
@@ -149,9 +186,11 @@ fn unpacked(dir: &Path, input: &Input, url: &str, policy: &SizePolicy) -> Res<Pa
         .prefix(".unpacking-")
         .tempdir_in(&trees)
         .with_context(|| format!("Failed to create a directory in '{}'", trees.display()))?;
-    let entries = unpack(archive.path(), kind, staging.path(), &file_name(url))?;
+    line.phase("unpacking");
+    let entries = unpack(archive.path(), kind, staging.path(), &file_name(url), line)?;
     drop(archive);
     let tree_str = tree.to_str().ok_or_else(|| anyhow!("'{}' is not UTF-8", tree.display()))?;
+    let mut fixed = 0;
     for fixup in &input.fixups {
         // Through no link: the tree's links are checked to stay inside it,
         // but an edit must also never land on a file a link merely names.
@@ -172,7 +211,7 @@ fn unpacked(dir: &Path, input: &Input, url: &str, policy: &SizePolicy) -> Res<Pa
         temp.write_all(&edited).with_context(|| format!("Failed to edit '{}'", file.display()))?;
         temp.as_file().set_permissions(meta.permissions())?;
         temp.persist(&file).with_context(|| format!("Failed to edit '{}'", file.display()))?;
-        println!("  fixed {n} occurrence(s) of \"{}\" in {}", fixup.replace, fixup.file);
+        fixed += n;
     }
     if let Some(path) = &input.path {
         within(staging.path(), Path::new(path))
@@ -189,8 +228,8 @@ fn unpacked(dir: &Path, input: &Input, url: &str, policy: &SizePolicy) -> Res<Pa
             return Err(e).with_context(|| format!("Failed to move the unpacked archive to '{}'", tree.display()));
         }
     }
-    println!("Unpacked {url} ({entries} entries) into '{}'", tree.display());
-    Ok(value(&tree))
+    let fixes = if fixed == 0 { String::new() } else { format!(", {fixed} edit(s) made") };
+    Ok((value(&tree), format!("unpacked {entries} entries{fixes} into '{}'", tree.display())))
 }
 
 /// The directory name of an archive input's tree: a digest of the
@@ -218,20 +257,17 @@ fn file_name(url: &str) -> String {
     path.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or("input").to_owned()
 }
 
-/// Download `url` into a temporary file in `dir`, with progress, after the
-/// size check.
-fn download(dir: &Path, url: &str, policy: &SizePolicy) -> Res<tempfile::NamedTempFile> {
-    let limit = confirm_size(url, policy)?;
+/// Download `url` into a temporary file in `dir`, reporting on `line`, no
+/// more than `limit` bytes.
+fn download(
+    dir: &Path,
+    url: &str,
+    limit: Option<u64>,
+    line: &mut crate::progress::Line,
+) -> Res<tempfile::NamedTempFile> {
     let mut temp = tempfile::NamedTempFile::new_in(dir).context("Failed to create a download file")?;
-    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
-    let mut item = progress.add_child(file_name(url));
-    let downloaded =
-        crate::fetch::download::download_to_limited(crate::fetch::download::client(), url, temp.as_file_mut(), &mut item, limit);
-    drop(item);
-    if let Some(renderer) = renderer {
-        renderer.shutdown_and_wait();
-    }
-    downloaded?;
+    line.phase("downloading");
+    crate::fetch::download::download_to_limited(crate::fetch::download::client(), url, temp.as_file_mut(), line, limit)?;
     Ok(temp)
 }
 
@@ -268,45 +304,26 @@ fn confirm_size(url: &str, policy: &SizePolicy) -> Res<Option<u64>> {
     Ok(limit)
 }
 
-/// The SHA-256 of a download, with a line counting the bytes read: a large
-/// archive on a network filesystem takes a while.
-fn hash_with_progress(path: &Path, name: &str) -> Res<String> {
-    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
-    let mut item = progress.add_child(format!("check {name}"));
-    let hash = crate::update::sha256_hex_counting(path, &mut item);
-    drop(item);
-    if let Some(renderer) = renderer {
-        renderer.shutdown_and_wait();
-    }
-    hash
-}
-
 /// Unpack `archive` into the empty directory `dest`, refusing anything that
 /// could reach outside it: an absolute or `..` path, a link whose target
 /// leaves the tree, a device or FIFO, and a write through a link an earlier
 /// entry made. Returns the number of entries. Progress is the share of the
 /// archive read; the interrupt flag is polled per entry and per chunk.
-fn unpack(archive: &Path, kind: ArchiveKind, dest: &Path, name: &str) -> Res<u64> {
+fn unpack(archive: &Path, kind: ArchiveKind, dest: &Path, name: &str, progress: &mut impl prodash::Progress) -> Res<u64> {
     let len = std::fs::metadata(archive)?.len();
     let mut budget = Budget { bytes: MIN_UNPACKED_CAP.max(len.saturating_mul(UNPACKED_RATIO)), entries: MAX_ENTRIES };
     let file = std::fs::File::open(archive).with_context(|| format!("Failed to open '{}'", archive.display()))?;
-    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
-    let mut item = progress.add_child(format!("unpack {name}"));
-    item.init(
+    progress.init(
         Some(len as usize),
         Some(prodash::unit::dynamic_and_mode(prodash::unit::Bytes, prodash::unit::display::Mode::with_percentage())),
     );
-    let reader = Counting { inner: file, item: &mut item };
+    let reader = Counting { inner: file, progress };
     let result = match kind {
         ArchiveKind::Tar => unpack_tar(reader, dest, &mut budget),
         ArchiveKind::TarGz => unpack_tar(flate2::read::MultiGzDecoder::new(reader), dest, &mut budget),
         ArchiveKind::TarXz => unpack_tar(lzma_rust2::XzReader::new_mem_limit(reader, true, XZ_MEM_LIMIT_KIB), dest, &mut budget),
         ArchiveKind::Zip => unpack_zip(reader, dest, &mut budget),
     };
-    drop(item);
-    if let Some(renderer) = renderer {
-        renderer.shutdown_and_wait();
-    }
     let (n, links) = result.with_context(|| format!("Failed to unpack {name}"))?;
     make_links(dest, links).with_context(|| format!("Failed to unpack {name}"))?;
     Ok(n)
@@ -391,24 +408,24 @@ impl Budget {
     }
 }
 
-/// A reader that advances `item` by the bytes read through it.
-struct Counting<'a, R> {
+/// A reader that advances `progress` by the bytes read through it.
+struct Counting<'a, R, P> {
     inner: R,
-    item: &'a mut prodash::tree::Item,
+    progress: &'a mut P,
 }
 
-impl<R: Read> Read for Counting<'_, R> {
+impl<R: Read, P: prodash::Count> Read for Counting<'_, R, P> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = self.inner.read(buf)?;
-        prodash::Count::inc_by(self.item, n);
+        self.progress.inc_by(n);
         Ok(n)
     }
 }
 
-impl<R: std::io::Seek> std::io::Seek for Counting<'_, R> {
+impl<R: std::io::Seek, P: prodash::Count> std::io::Seek for Counting<'_, R, P> {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         let at = self.inner.seek(pos)?;
-        prodash::Count::set(self.item, at as usize);
+        self.progress.set(at as usize);
         Ok(at)
     }
 }
@@ -881,7 +898,7 @@ mod tests {
             std::fs::write(&file, &tar_bytes).unwrap();
             let dest = dir.path().join("out");
             std::fs::create_dir(&dest).unwrap();
-            let err = format!("{:#}", unpack(&file, ArchiveKind::Tar, &dest, "a.tar").unwrap_err());
+            let err = format!("{:#}", unpack(&file, ArchiveKind::Tar, &dest, "a.tar", &mut prodash::progress::Discard).unwrap_err());
             assert!(err.contains(expect), "{expect}: {err}");
         }
         // A link that stays inside is fine.
@@ -893,7 +910,7 @@ mod tests {
         std::fs::write(&file, b.into_inner().unwrap()).unwrap();
         let dest = dir.path().join("out");
         std::fs::create_dir(&dest).unwrap();
-        unpack(&file, ArchiveKind::Tar, &dest, "a.tar").unwrap();
+        unpack(&file, ArchiveKind::Tar, &dest, "a.tar", &mut prodash::progress::Discard).unwrap();
         assert_eq!(std::fs::read(dest.join("d/l")).unwrap(), b"x");
     }
 
@@ -966,7 +983,7 @@ mod tests {
             std::fs::write(&file, &bytes).unwrap();
             let dest = dir.path().join("out");
             std::fs::create_dir(&dest).unwrap();
-            unpack(&file, kind, &dest, "a").unwrap_or_else(|e| panic!("{kind:?}: {e:#}"));
+            unpack(&file, kind, &dest, "a", &mut prodash::progress::Discard).unwrap_or_else(|e| panic!("{kind:?}: {e:#}"));
             assert_eq!(std::fs::read(dest.join("bhns_gw230529_ID/X.info")).unwrap(), INFO, "{kind:?}");
         }
     }

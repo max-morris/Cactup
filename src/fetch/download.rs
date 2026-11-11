@@ -119,7 +119,7 @@ pub fn download_component(
     // replaces the file. Not retried: a different file is not a transient
     // failure. Hashed either way: the fetch record keeps every download's
     // hash, which is what a build freezes and `sim export` pins.
-    let actual = crate::update::sha256_hex(&tmp_path)?;
+    let actual = crate::update::sha256_hex_counting(&tmp_path, progress)?;
     if let Some(expected) = &component.checksum {
         if actual != *expected {
             let _ = std::fs::remove_file(&tmp_path);

@@ -226,7 +226,19 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String], allow_untrus
             }
             let scratch = tempfile::tempdir().context("Failed to create a scratch directory")?;
             gix::init_bare(scratch.path()).context("Failed to create a scratch repository")?;
-            label = Some(crate::fetch::git::remote_default_branch(scratch.path(), &url)?);
+            let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+            let line = crate::progress::Line::over(
+                progress.add_child(resolved.slug.clone()),
+                &resolved.slug,
+                crate::progress::Layout::for_names([resolved.slug.as_str()]),
+            );
+            line.phase("asking its repository for its default branch");
+            let branch = crate::fetch::git::remote_default_branch(scratch.path(), &url);
+            drop(line);
+            if let Some(renderer) = renderer {
+                renderer.shutdown_and_wait();
+            }
+            label = Some(branch?);
             tip_version = version;
             &tip_version
         } else {

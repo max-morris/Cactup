@@ -319,22 +319,21 @@ fn yanked_since(
     // Asked in passing: a registry that cannot be reached costs seconds, not
     // the default half minute.
     let client = crate::cactarium::Client::new(db).with_timeout(std::time::Duration::from_secs(5));
+    // One line per entry while it is asked; none stays behind (what is
+    // yanked is said in the output itself).
     let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
-    let item = progress.add_child("ask the Cactarium about yanked versions");
-    item.init(Some(asks.len()), Some(prodash::unit::label("entries")));
-    let item = std::sync::Mutex::new(item);
+    let layout = crate::progress::Layout::for_names(asks.iter().map(|(_, slug)| slug.as_str()));
     let answers = crate::par::parallel_map(&asks, |(kind, slug)| {
-        let current = item.lock().expect("show progress poisoned").add_child(slug.clone());
+        let line = crate::progress::Line::over(progress.add_child(slug.clone()), slug, layout.clone());
+        line.phase("asking the Cactarium whether it is yanked");
         let answer = (|| {
             let (entry, version) = slug.rsplit_once('@').ok_or_else(|| anyhow!("{slug} names no version"))?;
             let (owner, name) = entry.split_once('/').ok_or_else(|| anyhow!("{entry} is not owner/name"))?;
             client.yanked_since(*kind, owner, name, version)
         })();
-        drop(current);
-        item.lock().expect("show progress poisoned").inc();
+        drop(line);
         (slug.clone(), answer)
     });
-    drop(item);
     if let Some(renderer) = renderer {
         renderer.shutdown_and_wait();
     }
