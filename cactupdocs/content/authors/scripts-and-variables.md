@@ -370,6 +370,21 @@ knob refuses the run with the same message cactup would print for the token.
 `knobs` dict is there when you want `in`/`.get()`. Environment variables are
 plain `os.environ`. The same conventions hold for a `.py` **parfile**.
 
+An account directive never goes out empty: `#SBATCH -A ` with nothing after it
+makes sbatch read the next directive as the account. `ALLOCATION` is the `-a`
+flag, else the `allocation` knob, so the in-repo machines write
+`ALLOCATION or knob("allocation")` where the site rejects a job without an
+account (nothing set refuses the submit), and where it does not:
+
+```python
+allocation = ALLOCATION or knob("allocation", "")
+if allocation:
+    lines.append(f"#SBATCH -A {allocation}")
+```
+
+A `.sh` script has no conditional, so an optional account directive needs a
+`.py` script.
+
 Python is useful for complex script generation, but shell is simpler for most machines.
 
 #### Refusing a request

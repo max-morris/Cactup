@@ -20,7 +20,12 @@ lines = ["#! /bin/bash"]
 lines.append("#PBS -q {0}".format(queue_name))
 lines.append("#PBS -r n")
 lines.append("#PBS -l walltime={0}".format(WALLTIME))
-lines.append("#PBS -A {0}".format(ALLOCATION))
+# Account optional: not known to be required here. The -a flag, else the
+# allocation knob; with neither, the line is left out (an empty one makes the
+# scheduler read the next directive as the account).
+allocation = ALLOCATION or knob("allocation", "")
+if allocation:
+    lines.append("#PBS -A {0}".format(allocation))
 lines.append("#PBS -l nodes={0}:ppn={1}".format(NODES, MAX_CPUS_PER_NODE))
 if constraint:
     lines.append("#SBATCH --constraint={0}".format(constraint))

@@ -9,7 +9,10 @@
 # which cactup's literal-only @NAME@ engine (D7) cannot express.
 
 lines = ["#! /bin/bash"]
-lines.append("#SBATCH -A {0}".format(ALLOCATION))
+# Account required: LSU/LONI clusters reject a job without an allocation. The
+# -a flag, else the allocation knob; with neither, cactup refuses before
+# submitting.
+lines.append("#SBATCH -A {0}".format(ALLOCATION or knob("allocation")))
 lines.append("#SBATCH -p {0}".format(QUEUE))
 if QUEUE == "single" and typed['NODES'] > 1:
     raise CactupError(

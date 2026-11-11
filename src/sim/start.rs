@@ -2062,4 +2062,99 @@ mod tests {
         assert_eq!(r.meta.knobs["kadath-initial-data"], "/sim/id.info");
         assert_eq!(ctx.db.read().unwrap().knob("kadath-initial-data"), Some("/global/id.info"), "the global knob is untouched");
     }
+
+    /// The account directive of a scheduler header line (`#SBATCH -A x`,
+    /// `#SBATCH --account=x`, `#PBS -A x`), as its value — `Some("")` when
+    /// the directive is there with nothing after it.
+    fn account_directive(line: &str) -> Option<String> {
+        let line = line.trim();
+        if !line.starts_with("#SBATCH") && !line.starts_with("#PBS") {
+            return None;
+        }
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        tokens.iter().enumerate().find_map(|(i, t)| match *t {
+            "-A" | "--account" => Some(tokens.get(i + 1).copied().unwrap_or("").to_owned()),
+            _ => t.strip_prefix("--account=").map(str::to_owned),
+        })
+    }
+
+    /// The bug a real QB4 test hit: with no allocation, a script wrote
+    /// `#SBATCH -A ` and sbatch read the next directive as the account. Every
+    /// in-repo submit and build-submit script, rendered with no allocation,
+    /// must leave the directive out (a machine where it is optional) or
+    /// refuse through the allocation knob (one where it is required); given
+    /// one, whether by `-a` alone (`@ALLOCATION@`, no knob) or the knob,
+    /// every directive it writes carries it.
+    #[test]
+    fn no_mdb_script_writes_an_empty_account_directive() {
+        let mdb = crate::mdb::Mdb::with_roots(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"),
+            PathBuf::from("/nonexistent-user-mdb"),
+        );
+        let mut directives = 0;
+        for name in mdb.machines().unwrap().into_keys() {
+            let machine = mdb.load(&name).unwrap();
+            for kind in [ScriptKind::Submit, ScriptKind::BuildSubmit] {
+                for (script, route) in &machine.meta.scripts(kind).routes {
+                    let queue = route
+                        .queues
+                        .first()
+                        .cloned()
+                        .or_else(|| machine.meta.default_queue(None).map(str::to_owned))
+                        .or_else(|| machine.meta.queues.keys().next().cloned())
+                        .unwrap();
+                    let render = |flag: &str, knob: Option<&str>| {
+                        let mut v = VarSet::new();
+                        vars::set_machine_vars(&mut v, &machine, &queue, None).unwrap();
+                        for (var, n) in [
+                            ("NODES", 1u64), ("TASKS", 1), ("TASKS_PER_NODE", 1), ("CPUS_PER_TASK", 1),
+                            ("GPUS_PER_TASK", 1), ("RESTART_ID", 0), ("RESULTS_ID", 0), ("ATTEMPT_ID", 0),
+                            ("MAKEJOBS", 1),
+                        ] {
+                            v.set(var, n);
+                        }
+                        v.set("GPU", true);
+                        v.set("QUEUE", machine.meta.scheduler_queue_name(&queue).unwrap());
+                        v.set("ALLOCATION", flag);
+                        for var in ["EMAIL", "MAIL", "CHAINED_JOB_ID", "JOB_ID"] {
+                            v.set(var, "");
+                        }
+                        for var in [
+                            "STDOUT_FILE", "STDERR_FILE", "CACTUP", "SIMULATION_NAME", "SHORT_SIMULATION_NAME",
+                            "SIMULATION_DIR", "SOURCEDIR", "MACHINE", "ALIAS", "TEST_NAME", "TEST_DIR", "RUNDIR",
+                            "CONFIGURATION", "CONFIG_DIR", "JOB_NAME", "MAIL_TYPE", "USER", "HOSTNAME",
+                            "SCRIPTFILE", "SCRATCH_HOME", "EXECUTABLE", "PARFILE", "SIMULATION_ID",
+                        ] {
+                            v.set(var, format!("<{}>", var.to_lowercase()));
+                        }
+                        let hour = Walltime::parse("1:00:00").unwrap();
+                        vars::set_walltime_vars(&mut v, hour, Walltime::parse("0:05:00").unwrap());
+                        v.set_knobs(knob.map(|k| ("allocation".to_owned(), k.to_owned())).into_iter().collect());
+                        generate_script(&machine, kind, script, &v, Phase::Submit, None)
+                    };
+                    let what = format!("{name} {} script {script}", kind.dir_name());
+                    match render("", None) {
+                        Ok(text) => {
+                            if let Some(line) = text.lines().find(|l| account_directive(l).is_some()) {
+                                panic!("{what}: no allocation, yet it writes `{line}`");
+                            }
+                        }
+                        Err(e) => {
+                            let e = format!("{e:#}");
+                            assert!(e.contains("knob allocation is unset"), "{what}: {e}");
+                        }
+                    }
+                    for (flag, knob) in [("acct_x", None), ("acct_x", Some("acct_x"))] {
+                        let text = render(flag, knob).unwrap_or_else(|e| panic!("{what}: {e:#}"));
+                        for value in text.lines().filter_map(account_directive) {
+                            assert!(value.contains("acct_x"), "{what}: account directive `{value}`");
+                            directives += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // The sweep saw the scripts it is about.
+        assert!(directives > 50, "only {directives} account directives rendered");
+    }
 }

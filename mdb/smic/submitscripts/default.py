@@ -15,7 +15,10 @@
 # submitting user).
 
 lines = ["#! /bin/bash"]
-lines.append("#PBS -A {0}".format(ALLOCATION))
+# Account required: LSU/LONI clusters reject a job without an allocation. The
+# -a flag, else the allocation knob; with neither, cactup refuses before
+# submitting.
+lines.append("#PBS -A {0}".format(ALLOCATION or knob("allocation")))
 lines.append("#PBS -q {0}".format(QUEUE))
 lines.append("#PBS -r n")
 lines.append("#PBS -l walltime={0}".format(WALLTIME))
