@@ -400,7 +400,7 @@ fn stack_json(response: reqwest::blocking::Response) -> Res<FrozenStack> {
         bail!(
             "The Cactarium's stack release from {url} is format {found}, but this cactup, {}, reads up to format \
              {STACK_FORMAT}; upgrade cactup (`cactup update`)",
-            crate::VERSION
+            crate::build_info::LONG_VERSION
         );
     }
     serde_json::from_value(value).with_context(unexpected)

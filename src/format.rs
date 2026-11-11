@@ -100,7 +100,7 @@ impl std::fmt::Display for Newer {
             self.name,
             self.key,
             self.found,
-            crate::VERSION,
+            crate::build_info::LONG_VERSION,
             self.current
         )
     }
