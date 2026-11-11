@@ -207,9 +207,9 @@ impl Simulation {
     /// is warned about, since the simulation's silently wins.
     pub fn knob_snapshot(&self, db: &crate::database::Database) -> indexmap::IndexMap<String, String> {
         let mut snapshot = db.knob_snapshot();
-        let overrides = crate::database::knob_overrides();
         for (name, value) in &self.meta.knobs {
-            if overrides.contains_key(name) {
+            // The command line (`-K`, `-a`) outranks the simulation (§5.1).
+            if db.is_overlaid(name) {
                 continue;
             }
             if let Some(global) = db.knob(name).filter(|g| *g != value) {

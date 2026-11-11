@@ -253,6 +253,29 @@ pub(crate) struct Args {
     pub command: Commands,
 }
 
+impl Args {
+    /// This command's knob overlay (§5.1): every `-K NAME=VALUE`, plus `-a
+    /// ACCOUNT` as `allocation=ACCOUNT`, since `-a` is shorthand for `-K
+    /// allocation=…`. Both are equally explicit, so a command that gives
+    /// both with different values is refused before anything happens; the
+    /// same value given both ways is fine.
+    pub fn knob_overlay(&self) -> anyhow::Result<indexmap::IndexMap<String, String>> {
+        let mut overlay: indexmap::IndexMap<String, String> =
+            self.globals.knob.iter().map(|k| (k.name.clone(), k.value.clone())).collect();
+        if let Some(account) = self.command.topology().and_then(|t| t.allocation.as_deref()) {
+            match overlay.get("allocation") {
+                Some(other) if other != account => anyhow::bail!(
+                    "-a {account} and -K allocation={other} disagree; give the allocation one way"
+                ),
+                _ => {
+                    overlay.insert("allocation".to_owned(), account.to_owned());
+                }
+            }
+        }
+        Ok(overlay)
+    }
+}
+
 #[derive(clap::Args, Debug, Clone)]
 pub(crate) struct GlobalOpts {
     #[clap(short, long, global = true)]
@@ -635,7 +658,11 @@ impl UniverseFlags {
 /// The TOPOLOGY flag set, shared by `sim submit/run` and `test run/submit`.
 #[derive(clap::Args, Debug, Clone)]
 pub(crate) struct TopologyFlags {
-    /// Account/allocation to charge (default: knob).
+    /// Account/allocation to charge, for this command (default: the allocation knob).
+    ///
+    /// Shorthand for -K allocation=ACCOUNT: it outranks a simulation's own allocation
+    /// knob and the global one. Giving -K allocation= a different value as well is an
+    /// error.
     #[clap(short, long, value_name = "ACCOUNT")]
     pub allocation: Option<String>,
     /// Scheduler queue (default: knob, then the machine's default queue).
@@ -844,6 +871,21 @@ pub(crate) struct BuildSubmitArgs {
     // than one that simply never combines — and `--follow` already waits.
     #[clap(long, conflicts_with = "block")]
     pub follow: bool,
+}
+
+impl Commands {
+    /// The TOPOLOGY flags (§8.5) of a command that takes them.
+    pub fn topology(&self) -> Option<&TopologyFlags> {
+        match self {
+            Commands::Build { start, command: None } => Some(&start.topology),
+            Commands::Build { command: Some(BuildCommand::Run(start)), .. } => Some(&start.topology),
+            Commands::Build { command: Some(BuildCommand::Submit(submit)), .. } => Some(&submit.start.topology),
+            Commands::Sim(SimCommand::Submit(start)) => Some(&start.topology),
+            Commands::Sim(SimCommand::Run(run)) => Some(&run.start.topology),
+            Commands::Test(TestCommand::Run(start) | TestCommand::Submit(start)) => Some(&start.topology),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -1804,6 +1846,38 @@ mod tests {
             }
             other => panic!("expected a bare build command, got {other:?}"),
         }
+    }
+
+    /// `-a ACCOUNT` is shorthand for `-K allocation=ACCOUNT` (§5.1): it joins
+    /// the knob overlay on every command with TOPOLOGY flags; given both
+    /// ways it must agree.
+    #[test]
+    fn a_is_the_allocation_knob_for_this_command() {
+        let overlay = |argv: &[&str]| Args::try_parse_from(argv).unwrap().knob_overlay();
+        let alloc = |argv: &[&str]| overlay(argv).unwrap().get("allocation").cloned();
+        for argv in [
+            &["cactup", "sim", "submit", "s", "-a", "acct"][..],
+            &["cactup", "sim", "run", "s", "-a", "acct"],
+            &["cactup", "test", "submit", "-a", "acct"],
+            &["cactup", "test", "run", "-a", "acct"],
+            &["cactup", "build", "-a", "acct"],
+            &["cactup", "build", "run", "-a", "acct"],
+            &["cactup", "build", "submit", "-a", "acct"],
+        ] {
+            assert_eq!(alloc(argv).as_deref(), Some("acct"), "{argv:?}");
+        }
+        assert_eq!(alloc(&["cactup", "-K", "allocation=acct", "sim", "submit", "s"]).as_deref(), Some("acct"));
+        assert_eq!(alloc(&["cactup", "sim", "submit", "s"]), None);
+        // The same value both ways is fine; other knobs ride along.
+        let both = overlay(&["cactup", "-K", "allocation=acct", "-K", "queue=gpu", "sim", "submit", "s", "-a", "acct"])
+            .unwrap();
+        assert_eq!(both.get("allocation").map(String::as_str), Some("acct"));
+        assert_eq!(both.get("queue").map(String::as_str), Some("gpu"));
+        // Different values are refused, naming both.
+        let err = overlay(&["cactup", "-K", "allocation=other", "sim", "submit", "s", "-a", "acct"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("-a acct") && err.contains("-K allocation=other"), "{err}");
     }
 
     #[test]

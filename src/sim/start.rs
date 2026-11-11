@@ -307,6 +307,12 @@ fn submit_impl(
     let placement = vars::Placement::submit(machine);
     let mut topo =
         vars::resolve_topology(&args.topology, machine, db, Some(&fit), force_queue, placement)?;
+    // The effective knobs — global, then the simulation's own, then the
+    // command line's (`-K`, and `-a` as `-K allocation=`) — frozen with the
+    // vars so the compute node resolves @KNOB(…)@ without the DB (§5, D11).
+    // @ALLOCATION@ is an alias of the allocation knob in it.
+    let knobs = sim.knob_snapshot(db);
+    topo.allocation = knobs.get("allocation").filter(|a| !a.is_empty()).cloned();
     let sim_home = inst.meta()?.sim_home()?.to_owned();
     let sched = Scheduler::for_machine(machine);
 
@@ -515,10 +521,7 @@ fn submit_impl(
             debug: false,
             scratch_home: &scratch_home,
         })?;
-        // The effective knobs — global, then the simulation's own, then the
-        // `-K` overlay — frozen with the vars so the compute node resolves
-        // @KNOB(…)@ without the DB (§5, D11).
-        vset.set_knobs(sim.knob_snapshot(db));
+        vset.set_knobs(knobs.clone());
         // Before the restart dir exists: a parfile that cannot substitute
         // (a required knob unset, a typo'd token) or a script that refuses
         // (a required allocation unset) fails the submit here, leaving
@@ -700,6 +703,9 @@ fn run_interactive(
     let placement = vars::Placement::foreground(machine);
     let mut topo =
         vars::resolve_topology(&args.start.topology, machine, db, Some(&fit), force_queue, placement)?;
+    // As in submit: the effective knobs, @ALLOCATION@ their allocation.
+    let knobs = sim.knob_snapshot(db);
+    topo.allocation = knobs.get("allocation").filter(|a| !a.is_empty()).cloned();
     let sim_home = inst.meta()?.sim_home()?.to_owned();
     let sched = Scheduler::for_machine(machine);
 
@@ -775,7 +781,7 @@ fn run_interactive(
         debug: args.debug,
         scratch_home: &scratch_home,
     })?;
-    vset.set_knobs(sim.knob_snapshot(db));
+    vset.set_knobs(knobs);
     // As in submit: a parfile that cannot substitute, or a run script that
     // refuses, fails before any restart directory exists.
     check_parfile(sim, &vset)?;
@@ -2086,6 +2092,47 @@ mod tests {
         let r = Restart::load(&sim.dir, id).unwrap();
         assert_eq!(r.meta.knobs["kadath-initial-data"], "/sim/id.info");
         assert_eq!(ctx.db.read().unwrap().knob("kadath-initial-data"), Some("/global/id.info"), "the global knob is untouched");
+    }
+
+    /// The allocation a restart freezes, as `@KNOB(allocation)@` and as
+    /// `@ALLOCATION@` alike (§5.1): the command line (`-a`, shorthand for
+    /// `-K allocation=`) over the simulation's own knob over the global one.
+    #[test]
+    fn the_allocation_is_the_command_line_then_the_sim_then_the_global_knob() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        let parfile = tmp.path().join("bbh.par");
+        fs::write(&parfile, "A::b = 1\n").unwrap();
+        let mut sim = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
+        ctx.db
+            .update(|db| {
+                db.set_knob("allocation", "global_acct".to_owned());
+                Ok(())
+            })
+            .unwrap();
+        let frozen = |argv: &[&str], sim: &crate::sim::Simulation| {
+            let mut db = ctx.db.read().unwrap();
+            db.apply_overlay(&<crate::args::Args as clap::Parser>::try_parse_from(argv).unwrap().knob_overlay().unwrap());
+            submit_impl(&inst, &machine, &db, sim, &start_args("bbh", "1:00:00"), false, Some("testhost")).unwrap();
+            let id = *restart::list_ids(&sim.dir).unwrap().last().unwrap();
+            let meta = Restart::load(&sim.dir, id).unwrap().meta;
+            let var = meta.vars.get("ALLOCATION").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+            (meta.knobs.get("allocation").cloned().unwrap_or_default(), var, meta.allocation.unwrap_or_default())
+        };
+        let plain = ["cactup", "sim", "submit", "bbh"];
+        let with_a = ["cactup", "sim", "submit", "bbh", "-a", "cli_acct"];
+        let with_k = ["cactup", "-K", "allocation=cli_acct", "sim", "submit", "bbh"];
+        let all = |a: &str| (a.to_owned(), a.to_owned(), a.to_owned());
+
+        assert_eq!(frozen(&plain, &sim), all("global_acct"), "the global knob alone");
+        assert_eq!(frozen(&with_a, &sim), all("cli_acct"), "-a over the global knob");
+        sim.set_knobs([("allocation".to_owned(), "sim_acct".to_owned())].into_iter().collect()).unwrap();
+        let sim = crate::sim::Simulation::open("bbh", &sim.dir).unwrap();
+        assert_eq!(frozen(&plain, &sim), all("sim_acct"), "the simulation's own over the global knob");
+        assert_eq!(frozen(&with_a, &sim), all("cli_acct"), "-a over the simulation's own");
+        assert_eq!(frozen(&with_k, &sim), all("cli_acct"), "-K allocation= the same");
     }
 
     /// The account directive of a scheduler header line (`#SBATCH -A x`,

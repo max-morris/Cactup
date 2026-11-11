@@ -2034,8 +2034,13 @@ cactup state).
 For any value that can come from several places (mirrors `simfactory-docs.txt`
 §6.2, adapted):
 
-1. Explicit CLI flag (e.g. `-q/--queue`, `-a/--allocation`) — highest.
-2. `-K name=value` overlay (this command only).
+1. Explicit CLI flag (e.g. `-q/--queue`) — highest.
+2. `-K name=value` overlay (this command only). `-a/--allocation ACCOUNT` is
+   shorthand for `-K allocation=ACCOUNT`, not a flag of its own: it joins the
+   overlay (`Args::knob_overlay`), so `@ALLOCATION@` and `@KNOB(allocation)@`
+   can never disagree. The two spellings are equally explicit, so one command
+   giving both with different values is refused before anything runs, naming
+   both; the same value both ways is fine.
 3. Knob.
 4. Machine `meta.toml` value / default.
 5. Built-in default.
@@ -2065,7 +2070,11 @@ values that belong to that simulation rather than to the user — what
 `cactup import` sets for the inputs a `.sim`'s parfile needs (§8.9), such as
 `kadath-initial-data`. A restart of the simulation freezes the global snapshot
 with these laid over it, and the `-K` overlay over both (a knob `-K` names
-keeps its `-K` value): `-K` > the simulation's knobs > the global knobs. Import
+keeps its `-K` value): `-K` (and `-a`) > the simulation's knobs > the global
+knobs. Which knobs the overlay set travels with the snapshot
+(`Database::is_overlaid`), not a process global. `@ALLOCATION@` is the
+allocation knob of this effective map (a simulation's own included), so it
+too follows command line > simulation > global. Import
 never changes a global knob. When a stored global value contradicts the
 simulation's, submit and run warn, naming the `-K` that would choose
 otherwise. `sim show` lists them.
@@ -2379,7 +2388,8 @@ flags exactly** — this is the primary divergence from simfactory's names.
 **Topology (canonical — one variable per §8.5 flag):**
 `NODES` (`-n`), `TASKS` (`-T`, total MPI ranks), `TASKS_PER_NODE` (`-t`/tpn),
 `CPUS_PER_TASK` (`-c`/cpus), `GPU` (`-g`; `1`/`0`),
-`GPUS_PER_TASK` (`-G`/gpus-per-task; always `0` when `GPU` is `0`), `ALLOCATION` (`-a`),
+`GPUS_PER_TASK` (`-G`/gpus-per-task; always `0` when `GPU` is `0`), `ALLOCATION` (`-a`; an
+alias of the effective `allocation` knob, §5.1),
 `QUEUE` (`-q`; the scheduler-facing name — the selected queue's `name` override
 when set, else its `[queues.<q>]` key — §4.2), `MAIL` (`-m`), `MAIL_TYPE` (`-M`),
 `JOB_NAME` (`-J` — not `-j`; see below),
@@ -3705,7 +3715,7 @@ proc-distribution math. Flags (those passed through to submit scripts marked *):
 
 | Flag | Meaning | Default |
 |------|---------|---------|
-| `-a/--allocation` * | account | knob |
+| `-a/--allocation` * | account; shorthand for `-K allocation=` (§5.1) | knob (a simulation's own, else the global one) |
 | `-q/--queue` * | scheduler queue | `queue` knob (passed over when the binary may not run there) → the flavor's `runs-on.default-queue` → machine default queue (§4.4). A build job: `build-queue` knob → `[build].queue` → machine default (§7.9) |
 | `-m/--mail` * | notify address | knob |
 | `-M/--mail-type` * | notify type | knob (`all`) |
