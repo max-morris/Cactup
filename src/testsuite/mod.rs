@@ -12,8 +12,8 @@ pub mod manage;
 pub mod run;
 mod select;
 
-use crate::database::SCHEMA;
-use crate::installation::{write_toml, Installation};
+use crate::format::{self, Format, Toml};
+use crate::installation::Installation;
 use crate::lock::LinkLock;
 use crate::sim::restart::UniverseSpec;
 use crate::scheduler::{JobRef, Scheduler};
@@ -26,9 +26,23 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-fn default_schema() -> u32 {
-    SCHEMA
-}
+/// `test.toml`'s format: version 1, no migrations. Read and written by the
+/// compute-node binary of a queued test run, so it is `frozen_read`: a
+/// breaking change ships its down-step. `vars` and `knobs` are open maps
+/// written whole at submit, and `[results]` is replaced whole by each new
+/// run's summary (a key from the previous run's record says nothing about
+/// the new one); `[timestamps]` and `[universe]` are edited in place.
+pub static TEST: Format<Toml> = Format {
+    name: "test record",
+    key: "schema",
+    current: 1,
+    upgrades: &[],
+    downgrades: &[],
+    down_floor: 1,
+    frozen_read: true,
+    legacy: None,
+    replace_whole: &["vars", "knobs", "results"],
+};
 
 /// `[results]` in `test.toml` (§11.8): the parsed harness summary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,8 +76,6 @@ pub struct Timestamps {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct TestMeta {
-    #[serde(default = "default_schema")]
-    pub schema: u32,
     pub name: String,
     pub config: String,
     pub config_id: String,
@@ -195,18 +207,9 @@ impl TestRun {
         if !path.is_file() {
             bail!("'{}' is not a cactup test run", dir.display());
         }
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read '{}'", path.display()))?;
-        let meta: TestMeta =
-            toml::from_str(&text).with_context(|| format!("Failed to parse '{}'", path.display()))?;
-        if meta.schema > SCHEMA {
-            bail!(
-                "'{}' has schema {} but this cactup understands at most schema {SCHEMA}; \
-                 please upgrade cactup",
-                path.display(),
-                meta.schema
-            );
-        }
+        let Some(meta): Option<TestMeta> = format::read(&path, &TEST)? else {
+            bail!("'{}' is not a cactup test run", dir.display());
+        };
         Ok(TestRun { name: meta.name.clone(), dir: dir.to_owned(), meta })
     }
 
@@ -245,7 +248,7 @@ impl TestRun {
     }
 
     pub fn store_meta(&self) -> Res<()> {
-        write_toml(&Self::meta_path(&self.dir), &self.meta)
+        format::write(&Self::meta_path(&self.dir), &self.meta, &TEST)
     }
 
     /// `log.txt` in the same `[LOG:…]` format as a simulation's (§11.5, §12).
@@ -359,6 +362,73 @@ pub fn activate_results(run_dir: &Path, id: u32) -> Res<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every field set, every collection non-empty, and no `..`: a new field
+    /// fails to compile here, and the shape pin then says what to do.
+    fn exhaustive_sample() -> TestMeta {
+        let time = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        TestMeta {
+            name: "et-tests".to_owned(),
+            config: "sim".to_owned(),
+            config_id: "cfg-0123".to_owned(),
+            build_id: "build-0001".to_owned(),
+            machine: "workstation".to_owned(),
+            alias: "et".to_owned(),
+            test_run_id: "test-et-tests-workstation-host-user-20260501-120000-4242".to_owned(),
+            select: "all".to_owned(),
+            queue: "workq".to_owned(),
+            nodes: 1,
+            tasks: 4,
+            tpn: 4,
+            cpus: 1,
+            gpus_per_task: 1,
+            walltime: Walltime::parse("02:00:00").unwrap(),
+            allocation: Some("proj1".to_owned()),
+            job_id: "1234".to_owned(),
+            job_host: Some("login1".to_owned()),
+            job_start: Some(99887766),
+            status: Some("C".to_owned()),
+            universe: Some(UniverseSpec {
+                name: "container".to_owned(),
+                wrapper_argv: Some(["apptainer", "exec", "img.sif", "@COMMAND@"].map(String::from).to_vec()),
+                wrapper: Some("apptainer exec img.sif @COMMAND@".to_owned()),
+            }),
+            results: Some(ResultsSummary { passed: 40, failed: 2, results_id: 0 }),
+            timestamps: Timestamps {
+                created: Some(time("2026-05-01T12:00:00Z")),
+                submitted: Some(time("2026-05-01T12:01:00Z")),
+                finished: Some(time("2026-05-01T13:00:00Z")),
+                job_stopped: Some(time("2026-05-01T13:01:00Z")),
+            },
+            vars: [
+                ("SIMULATION_NAME".to_owned(), toml::Value::String("et-tests".to_owned())),
+                ("NUM_PROCS".to_owned(), toml::Value::Integer(8)),
+                ("FOREGROUND".to_owned(), toml::Value::Boolean(false)),
+            ]
+            .into_iter()
+            .collect(),
+            knobs: [("queue".to_owned(), "workq".to_owned())].into_iter().collect(),
+        }
+    }
+
+    #[test]
+    fn test_format_generic_tests() {
+        use crate::format::testing::*;
+        let fixtures = fixture_dir("test");
+        descriptor_is_consistent(&TEST);
+        assert!(TEST.frozen_read);
+        shape_is_pinned(&TEST, &fixtures, &exhaustive_sample());
+        every_fixture_loads::<TestMeta, _>(&TEST, &fixtures);
+        newer_is_refused::<TestMeta, _>(&TEST, "test.toml", "nodes = \"many\"\n", &exhaustive_sample());
+        unknown_keys_survive(
+            &TEST,
+            "test.toml",
+            &exhaustive_sample(),
+            &["timestamps"],
+            |m: &mut TestMeta| m.timestamps.finished = None,
+            &["timestamps", "finished"],
+        );
+    }
 
     #[test]
     fn results_naming_and_activation() {

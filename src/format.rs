@@ -271,8 +271,6 @@ enum DiskState<D> {
     Absent,
     /// Present but unusable (the raw document, its version key, or an upgrade
     /// failed): overwritten with nothing put back.
-    // Only `write` finds it; the TOML records start using `write` in P2a.
-    #[cfg_attr(not(test), allow(dead_code))]
     Unusable,
     /// The file's version and its document after `legacy` and the upgrades,
     /// version key stripped.
@@ -312,7 +310,6 @@ pub fn read_for_write<T: DeserializeOwned, D: Document>(
 }
 
 /// Write `value` to `path` as `f`: re-read the target, then [`write_over`].
-#[cfg_attr(not(test), allow(dead_code))] // the TOML records use it from P2a
 pub fn write<T: Serialize + DeserializeOwned, D: Document>(
     path: &Path,
     value: &T,
@@ -358,6 +355,13 @@ pub fn write_over<T: Serialize + DeserializeOwned, D: Document>(
     };
     let (version, doc) = f.express(doc, floor);
     write_atomic(path, &with_version_first(doc, f.key, version).render()?)
+}
+
+/// Atomic (temp + rename) write of a plain, unversioned TOML record: for the
+/// records not yet on a [`Format`] (the build records, until P2b).
+pub(crate) fn write_toml<T: Serialize>(path: &Path, value: &T) -> Res<()> {
+    let text = toml::to_string_pretty(value).context("Failed to serialize TOML")?;
+    write_atomic(path, &text)
 }
 
 /// Atomic write (temp file in the same directory + fsync + rename), so a

@@ -6,7 +6,7 @@ use crate::args::{SimRunArgs, SimStartArgs, UniverseFlags};
 use crate::build::ConfigMeta;
 use crate::commands::build as build_cmd;
 use crate::commands::Ctx;
-use crate::database::{Database, SCHEMA};
+use crate::database::Database;
 use crate::installation::Installation;
 use crate::lock::{LinkLock, HEARTBEAT_SECS};
 use crate::mdb::{discover, Machine, Phase, ScriptKind, Universe, WrappedCommand, HOST_UNIVERSE};
@@ -536,7 +536,6 @@ fn submit_impl(
             id,
             dir: rdir.clone(),
             meta: RestartMeta {
-                schema: SCHEMA,
                 created: Utc::now(),
                 started: None,
                 finished: None,
@@ -775,7 +774,6 @@ fn run_interactive(
         id,
         dir: rdir.clone(),
         meta: RestartMeta {
-            schema: SCHEMA,
             created: Utc::now(),
             started: None,
             finished: None,

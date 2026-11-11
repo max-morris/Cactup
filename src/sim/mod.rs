@@ -17,8 +17,8 @@ pub mod vars;
 use crate::build::{self, ConfigMeta};
 use crate::commands::build as build_cmd;
 use crate::commands::Ctx;
-use crate::database::SCHEMA;
-use crate::installation::{read_toml, write_toml, Installation, SimEntry};
+use crate::format::{self, Format, Toml};
+use crate::installation::{write_toml, Installation, SimEntry};
 use crate::lock::LinkLock;
 use crate::mdb::Machine;
 use crate::Res;
@@ -29,9 +29,22 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-fn default_schema() -> u32 {
-    SCHEMA
-}
+/// `simulation.toml`'s format: version 1, no migrations. Read by the
+/// compute-node binary of every queued restart for months, so it is
+/// `frozen_read`: a breaking change ships its down-step. `knobs` is an open
+/// string map that `set_knobs` replaces whole; everything else is edited in
+/// place, so a key a newer binary added anywhere else is put back.
+pub static SIMULATION: Format<Toml> = Format {
+    name: "simulation record",
+    key: "schema",
+    current: 1,
+    upgrades: &[],
+    downgrades: &[],
+    down_floor: 1,
+    frozen_read: true,
+    legacy: None,
+    replace_whole: &["knobs"],
+};
 
 /// Parfile basenames that would collide with the `.cactup/` metadata dir or
 /// its entries (§8.2 step 2) — the only naming restriction.
@@ -40,10 +53,9 @@ const RESERVED_NAMES: &[&str] = &[".cactup", "exe", "cfg", "par"];
 /// `<SimName>/.cactup/simulation.toml` (§9.3): the keys simfactory wrote at
 /// create, plus cactup's `alias`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
 #[serde(rename_all = "kebab-case")]
 pub struct SimulationMeta {
-    #[serde(default = "default_schema")]
-    pub schema: u32,
     pub machine: String,
     /// `simulation-<name>-<machine>-<hostname>-<user>-<timestamp>-<pid>` (§9.1).
     pub simulation_id: String,
@@ -71,28 +83,6 @@ pub struct SimulationMeta {
     /// knobs and are outranked by `-K`.
     #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
     pub knobs: indexmap::IndexMap<String, String>,
-}
-
-impl Default for SimulationMeta {
-    // Only exists so `read_toml` can be reused; a missing simulation.toml is
-    // handled before this could ever be observed.
-    fn default() -> Self {
-        SimulationMeta {
-            schema: SCHEMA,
-            machine: String::new(),
-            simulation_id: String::new(),
-            sourcedir: PathBuf::new(),
-            configuration: String::new(),
-            config_id: String::new(),
-            build_id: String::new(),
-            executable: PathBuf::new(),
-            optionlist: String::new(),
-            thornlist: String::new(),
-            parfile: String::new(),
-            alias: String::new(),
-            knobs: Default::default(),
-        }
-    }
 }
 
 /// A located simulation: name, directory, and its simulation-level metadata.
@@ -153,7 +143,9 @@ impl Simulation {
         if !path.is_file() {
             bail!("'{}' is not a cactup simulation", dir.display());
         }
-        let meta: SimulationMeta = read_toml(&path)?;
+        let Some(meta) = format::read(&path, &SIMULATION)? else {
+            bail!("'{}' is not a cactup simulation", dir.display());
+        };
         Ok(Simulation { name: name.to_owned(), dir: dir.to_owned(), meta })
     }
 
@@ -239,7 +231,7 @@ impl Simulation {
     }
 
     fn store_meta(&self) -> Res<()> {
-        write_toml(&self.cactup_dir().join("simulation.toml"), &self.meta)
+        format::write(&self.cactup_dir().join("simulation.toml"), &self.meta, &SIMULATION)
     }
 
     /// The config record frozen at create (§8.2 step 6): what the
@@ -451,7 +443,6 @@ pub fn create(
 
     let hostname = crate::mdb::discover::resolve_hostname(ctx.globals.hostname.as_deref());
     let meta = SimulationMeta {
-        schema: SCHEMA,
         machine: machine.name.clone(),
         simulation_id: simulation_id(name, &machine.name, &hostname),
         sourcedir: cactus_root.clone(),
@@ -489,6 +480,60 @@ pub fn create(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every field set, every collection non-empty, and no `..`: a new field
+    /// fails to compile here, and the shape pin then says what to do.
+    fn exhaustive_sample() -> SimulationMeta {
+        SimulationMeta {
+            machine: "workstation".to_owned(),
+            simulation_id: "simulation-bbh-workstation-host-user-20260501-120000-4242".to_owned(),
+            sourcedir: "/scratch/cacti/et/Cactus".into(),
+            configuration: "sim".to_owned(),
+            config_id: "cfg-0123".to_owned(),
+            build_id: "build-0001".to_owned(),
+            executable: "/scratch/sims/et/bbh/.cactup/exe".into(),
+            optionlist: "cactup-optionlist.cfg".to_owned(),
+            thornlist: "thornlist.th".to_owned(),
+            parfile: "bbh.par".to_owned(),
+            alias: "et".to_owned(),
+            knobs: [("queue".to_owned(), "workq".to_owned())].into_iter().collect(),
+        }
+    }
+
+    #[test]
+    fn simulation_format_generic_tests() {
+        use crate::format::testing::*;
+        let fixtures = fixture_dir("simulation");
+        descriptor_is_consistent(&SIMULATION);
+        assert!(SIMULATION.frozen_read);
+        shape_is_pinned(&SIMULATION, &fixtures, &exhaustive_sample());
+        every_fixture_loads::<SimulationMeta, _>(&SIMULATION, &fixtures);
+        newer_is_refused::<SimulationMeta, _>(&SIMULATION, "simulation.toml", "machine = 7\n", &exhaustive_sample());
+        unknown_keys_survive(
+            &SIMULATION,
+            "simulation.toml",
+            &exhaustive_sample(),
+            &[],
+            |m: &mut SimulationMeta| m.knobs.clear(),
+            &["knobs"],
+        );
+    }
+
+    /// A simulation made before the `schema` key existed still opens.
+    #[test]
+    fn a_simulation_without_a_schema_key_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let cactup = dir.path().join(".cactup");
+        fs::create_dir_all(&cactup).unwrap();
+        fs::copy(crate::format::testing::fixture_dir("simulation").join("v1-noschema.toml"), cactup.join("simulation.toml"))
+            .unwrap();
+        let sim = Simulation::open("bbh", dir.path()).unwrap();
+        assert_eq!(sim.meta.alias, "et");
+        assert!(sim.meta.thornlist.is_empty() && sim.meta.knobs.is_empty());
+        let empty = tempfile::tempdir().unwrap();
+        let err = format!("{:#}", Simulation::open("x", empty.path()).unwrap_err());
+        assert!(err.contains("is not a cactup simulation"), "{err}");
+    }
 
     #[test]
     fn parfile_stem_strips_one_extension() {

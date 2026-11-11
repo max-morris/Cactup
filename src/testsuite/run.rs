@@ -7,7 +7,7 @@ use crate::args::TestStartArgs;
 use crate::build::{self, ConfigMeta};
 use crate::commands::build as build_cmd;
 use crate::commands::{machine, Ctx};
-use crate::database::{Database, SCHEMA};
+use crate::database::Database;
 use crate::installation::{Installation, TestEntry};
 use crate::lock::LinkLock;
 use crate::mdb::meta::{Route, ScriptTable};
@@ -409,7 +409,6 @@ fn start_impl(
         name: name.clone(),
         dir: run_dir.clone(),
         meta: TestMeta {
-            schema: SCHEMA,
             name: name.clone(),
             config: cfg_name.clone(),
             config_id: cfg.config_id.clone(),

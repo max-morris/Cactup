@@ -12,7 +12,7 @@
 // Consumed by the Phase-3 CFG/SIM/TEST streams; unused until then.
 
 use crate::commands::Ctx;
-use crate::database::SCHEMA;
+use crate::format::{self, Format, Toml};
 use crate::lock::LinkLock;
 use crate::mdb::Machine;
 use crate::Res;
@@ -20,20 +20,62 @@ use anyhow::{anyhow, bail, Context};
 use chrono::{DateTime, Utc};
 use colored::Colorize;
 use indexmap::IndexMap;
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-fn default_schema() -> u32 {
-    SCHEMA
-}
+// The plain TOML write the build records still use (P2b moves them onto
+// `format::write`).
+pub(crate) use crate::format::write_toml;
+
+/// `installation.toml`'s format: version 1, no migrations. Only login
+/// binaries write it (D11), so it is not `frozen_read`. Every field is a
+/// scalar or an array (`added`, which put-back never enters), so nothing is
+/// replaced whole.
+pub static INSTALLATION: Format<Toml> = Format {
+    name: "installation record",
+    key: "schema",
+    current: 1,
+    upgrades: &[],
+    downgrades: &[],
+    down_floor: 1,
+    frozen_read: false,
+    legacy: None,
+    replace_whole: &[],
+};
+
+/// `simulations.toml`'s format. Entries are added and removed, never
+/// rewritten in place (`sim create` inserts a new name, `sim delete`
+/// removes one), so a key a newer binary put on an entry stays with it and
+/// nothing is replaced whole.
+pub static SIM_REGISTRY: Format<Toml> = Format {
+    name: "simulation registry",
+    key: "schema",
+    current: 1,
+    upgrades: &[],
+    downgrades: &[],
+    down_floor: 1,
+    frozen_read: false,
+    legacy: None,
+    replace_whole: &[],
+};
+
+/// `tests.toml`'s format; entries behave like `simulations.toml`'s.
+pub static TEST_REGISTRY: Format<Toml> = Format {
+    name: "test registry",
+    key: "schema",
+    current: 1,
+    upgrades: &[],
+    downgrades: &[],
+    down_floor: 1,
+    frozen_read: false,
+    legacy: None,
+    replace_whole: &[],
+};
 
 /// `installation.toml` (§8.1, §11.8).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct InstallationMeta {
-    #[serde(default = "default_schema")]
-    pub schema: u32,
     /// The active config; absent = the §7.1 null-config state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_config: Option<String>,
@@ -96,19 +138,6 @@ pub struct AddedThorn {
     pub repo_path: String,
 }
 
-impl Default for InstallationMeta {
-    fn default() -> Self {
-        InstallationMeta {
-            schema: SCHEMA,
-            active_config: None,
-            sim_home: None,
-            test_home: None,
-            root_dir: None,
-            added: Vec::new(),
-        }
-    }
-}
-
 impl InstallationMeta {
     /// The active config, failing fast in the null-config state (§7.1).
     pub fn active_config(&self) -> Res<&str> {
@@ -155,30 +184,26 @@ pub struct TestEntry {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct SimRegistry {
-    #[serde(default = "default_schema")]
-    pub schema: u32,
     #[serde(default)]
     pub simulations: IndexMap<String, SimEntry>,
 }
 
 impl Default for SimRegistry {
     fn default() -> Self {
-        SimRegistry { schema: SCHEMA, simulations: IndexMap::new() }
+        SimRegistry { simulations: IndexMap::new() }
     }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct TestRegistry {
-    #[serde(default = "default_schema")]
-    pub schema: u32,
     #[serde(default)]
     pub tests: IndexMap<String, TestEntry>,
 }
 
 impl Default for TestRegistry {
     fn default() -> Self {
-        TestRegistry { schema: SCHEMA, tests: IndexMap::new() }
+        TestRegistry { tests: IndexMap::new() }
     }
 }
 
@@ -451,15 +476,15 @@ impl Installation {
 
     /// Lock-free read (writes are atomic). Missing file = defaults.
     pub fn meta(&self) -> Res<InstallationMeta> {
-        read_toml(&self.meta_path())
+        Ok(format::read(&self.meta_path(), &INSTALLATION)?.unwrap_or_default())
     }
 
     pub fn simulations(&self) -> Res<SimRegistry> {
-        read_toml(&self.simulations_path())
+        Ok(format::read(&self.simulations_path(), &SIM_REGISTRY)?.unwrap_or_default())
     }
 
     pub fn tests(&self) -> Res<TestRegistry> {
-        read_toml(&self.tests_path())
+        Ok(format::read(&self.tests_path(), &TEST_REGISTRY)?.unwrap_or_default())
     }
 
     /// Acquire the per-installation lock (§2.3 item 5) for a mutation. Keep
@@ -545,7 +570,7 @@ impl LockedInstallation<'_> {
     }
 
     pub fn set_meta(&self, meta: &InstallationMeta) -> Res<()> {
-        write_toml(&self.inst.meta_path(), meta)
+        format::write(&self.inst.meta_path(), meta, &INSTALLATION)
     }
 
     pub fn simulations(&self) -> Res<SimRegistry> {
@@ -553,7 +578,7 @@ impl LockedInstallation<'_> {
     }
 
     pub fn set_simulations(&self, registry: &SimRegistry) -> Res<()> {
-        write_toml(&self.inst.simulations_path(), registry)
+        format::write(&self.inst.simulations_path(), registry, &SIM_REGISTRY)
     }
 
     pub fn tests(&self) -> Res<TestRegistry> {
@@ -561,39 +586,8 @@ impl LockedInstallation<'_> {
     }
 
     pub fn set_tests(&self, registry: &TestRegistry) -> Res<()> {
-        write_toml(&self.inst.tests_path(), registry)
+        format::write(&self.inst.tests_path(), registry, &TEST_REGISTRY)
     }
-}
-
-/// Read a schema-guarded cactup TOML, defaulting when the file is absent.
-/// (Shared with the SIM/TEST metadata files — same §9.3 schema policy.)
-pub(crate) fn read_toml<T: DeserializeOwned + Default>(path: &Path) -> Res<T> {
-    #[derive(Deserialize)]
-    struct SchemaOnly {
-        #[serde(default = "default_schema")]
-        schema: u32,
-    }
-
-    let text = match std::fs::read_to_string(path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
-        other => other.with_context(|| format!("Failed to read '{}'", path.display()))?,
-    };
-    let probe: SchemaOnly =
-        toml::from_str(&text).with_context(|| format!("Failed to parse '{}'", path.display()))?;
-    if probe.schema > SCHEMA {
-        bail!(
-            "'{}' has schema {} but this cactup understands at most schema {SCHEMA}; please upgrade cactup",
-            path.display(),
-            probe.schema
-        );
-    }
-    toml::from_str(&text).with_context(|| format!("Failed to parse '{}'", path.display()))
-}
-
-/// Atomic (temp + rename) TOML write, so readers never see a torn file.
-pub(crate) fn write_toml<T: Serialize>(path: &Path, value: &T) -> Res<()> {
-    let text = toml::to_string_pretty(value).context("Failed to serialize TOML")?;
-    crate::format::write_atomic(path, &text)
 }
 
 #[cfg(test)]
@@ -726,7 +720,6 @@ mod tests {
         let meta = inst.meta().unwrap();
         assert_eq!(meta.active_config().unwrap(), "sim");
         assert_eq!(meta.sim_home().unwrap(), Path::new("/work/et-dev"));
-        assert_eq!(meta.schema, SCHEMA);
     }
 
     #[test]
@@ -779,9 +772,113 @@ mod tests {
     fn schema_guard_refuses_newer_files() {
         let (_dir, inst) = inst();
         std::fs::create_dir_all(inst.cactup_dir()).unwrap();
-        std::fs::write(inst.meta_path(), format!("schema = {}\n", SCHEMA + 1)).unwrap();
+        std::fs::write(inst.meta_path(), "schema = 2\n").unwrap();
         let err = format!("{:#}", inst.meta().unwrap_err());
         assert!(err.contains("upgrade"), "{err}");
+    }
+
+    /// Every field set, every collection non-empty, and no `..`: a new field
+    /// fails to compile here, and the shape pin then says what to do.
+    fn exhaustive_meta() -> InstallationMeta {
+        InstallationMeta {
+            active_config: Some("sim".to_owned()),
+            sim_home: Some("/scratch/sims/et".into()),
+            test_home: Some("/scratch/tests/et".into()),
+            root_dir: Some("Cactus".to_owned()),
+            added: vec![AddedPackage {
+                package: "owner/pkg".to_owned(),
+                version: "1.2.3".to_owned(),
+                tag: Some("v1.2.3".to_owned()),
+                commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                url: "https://github.com/owner/pkg".to_owned(),
+                repo: "pkg".to_owned(),
+                thorns: vec![AddedThorn {
+                    checkout: "Arr/Thorn".to_owned(),
+                    repo_path: "Arr/Thorn".to_owned(),
+                }],
+                replaces: vec!["OldRepo".to_owned()],
+                contact: Some("https://github.com/owner/pkg/issues".to_owned()),
+            }],
+        }
+    }
+
+    fn exhaustive_sim_registry() -> SimRegistry {
+        let mut simulations = IndexMap::new();
+        for name in ["bbh", "gone"] {
+            simulations.insert(
+                name.to_owned(),
+                SimEntry {
+                    dir: format!("/scratch/sims/et/{name}").into(),
+                    config: "sim".to_owned(),
+                    created: "2026-05-01T12:00:00Z".parse().unwrap(),
+                },
+            );
+        }
+        SimRegistry { simulations }
+    }
+
+    fn exhaustive_test_registry() -> TestRegistry {
+        let mut tests = IndexMap::new();
+        for name in ["et-tests", "gone"] {
+            tests.insert(
+                name.to_owned(),
+                TestEntry {
+                    dir: format!("/scratch/tests/et/{name}").into(),
+                    config: "sim".to_owned(),
+                    created: "2026-05-01T12:00:00Z".parse().unwrap(),
+                },
+            );
+        }
+        TestRegistry { tests }
+    }
+
+    #[test]
+    fn installation_formats_generic_tests() {
+        use crate::format::testing::*;
+        let sample = exhaustive_meta();
+        descriptor_is_consistent(&INSTALLATION);
+        let fixtures = fixture_dir("installation");
+        shape_is_pinned(&INSTALLATION, &fixtures, &sample);
+        every_fixture_loads::<InstallationMeta, _>(&INSTALLATION, &fixtures);
+        newer_is_refused::<InstallationMeta, _>(&INSTALLATION, "installation.toml", "added = 7\n", &sample);
+        unknown_keys_survive(
+            &INSTALLATION,
+            "installation.toml",
+            &sample,
+            &[],
+            |m: &mut InstallationMeta| m.active_config = None,
+            &["active-config"],
+        );
+
+        let sample = exhaustive_sim_registry();
+        descriptor_is_consistent(&SIM_REGISTRY);
+        let fixtures = fixture_dir("simulations");
+        shape_is_pinned(&SIM_REGISTRY, &fixtures, &sample);
+        every_fixture_loads::<SimRegistry, _>(&SIM_REGISTRY, &fixtures);
+        newer_is_refused::<SimRegistry, _>(&SIM_REGISTRY, "simulations.toml", "simulations = 7\n", &sample);
+        unknown_keys_survive(
+            &SIM_REGISTRY,
+            "simulations.toml",
+            &sample,
+            &["simulations", "bbh"],
+            |r: &mut SimRegistry| drop(r.simulations.shift_remove("gone")),
+            &["simulations", "gone"],
+        );
+
+        let sample = exhaustive_test_registry();
+        descriptor_is_consistent(&TEST_REGISTRY);
+        let fixtures = fixture_dir("tests");
+        shape_is_pinned(&TEST_REGISTRY, &fixtures, &sample);
+        every_fixture_loads::<TestRegistry, _>(&TEST_REGISTRY, &fixtures);
+        newer_is_refused::<TestRegistry, _>(&TEST_REGISTRY, "tests.toml", "tests = 7\n", &sample);
+        unknown_keys_survive(
+            &TEST_REGISTRY,
+            "tests.toml",
+            &sample,
+            &["tests", "et-tests"],
+            |r: &mut TestRegistry| drop(r.tests.shift_remove("gone")),
+            &["tests", "gone"],
+        );
     }
 
     #[test]
