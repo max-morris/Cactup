@@ -239,8 +239,10 @@ pub fn download_hashes(install_root: &Path, list: &Thornlist) -> BTreeMap<String
         if !single || !matches!(c.ty, ComponentType::Http | ComponentType::Https | ComponentType::Ftp) {
             continue;
         }
-        let key = format!("{}/{}", c.target, download::derive_filename(c.name.as_deref(), &c.checkout));
-        if let Some(sum) = state.downloads.get(&key) {
+        // Built as `download_component` built the path it recorded, so a
+        // target spelled `$ROOT/dl/` or `./dl` finds its record too.
+        let path = install_root.join(&c.target).join(download::derive_filename(c.name.as_deref(), &c.checkout));
+        if let Some(sum) = state.downloads.get(&download_key(install_root, &path)) {
             out.insert(c.repo.clone(), sum.clone());
         }
     }
@@ -1610,6 +1612,24 @@ pub(crate) mod tests {
     /// never actually contains the nested path can't provide that after a
     /// real clone (unlike the working tree right after `commit_file`, a
     /// clone only ever materializes what the last commit's tree records).
+    /// A download's hash is found again however its target is spelled
+    /// (`$ROOT/dl/`, `./dl`): looked up by the same path it was recorded by.
+    #[test]
+    fn download_hashes_are_found_by_their_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        for target in ["Cactus/dl/", "./Cactus/dl", "Cactus//dl"] {
+            let list = crate::thornlist::parse(&format!(
+                "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!TARGET = {target}\n!TYPE = https\n!URL = https://x/zlib\n!CHECKOUT = zlib.tgz\n"
+            ))
+            .unwrap();
+            let c = &list.components()[0];
+            let path = tmp.path().join(&c.target).join("zlib.tgz");
+            let records = FetchRecords { repos: Vec::new(), downloads: vec![(download_key(tmp.path(), &path), "f".repeat(64))] };
+            FetchState::record(tmp.path(), &records).unwrap();
+            assert_eq!(download_hashes(tmp.path(), &list).get("zlib").map(String::as_str), Some(&*"f".repeat(64)), "{target}");
+        }
+    }
+
     pub(crate) fn commit_files(dir: &Path, files: &[(&str, &str)]) -> gix::ObjectId {
         let repo = gix::open(dir).expect("open repo");
 

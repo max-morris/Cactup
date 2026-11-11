@@ -79,7 +79,8 @@ impl Client {
         let unpinned = flag(UNPINNED_HEADER).unwrap_or(false);
         // A tip without the trust header (a registry that predates it, or
         // left it off) is taken as untrusted: the check fails closed.
-        let untrusted = flag(UNTRUSTED_HEADER).unwrap_or(unpinned);
+        let tip = matches!(version, "head" | "master");
+        let untrusted = flag(UNTRUSTED_HEADER).unwrap_or(unpinned || tip);
         let contact = response
             .headers()
             .get(CONTACT_HEADER)
@@ -140,10 +141,13 @@ impl Client {
                 bail!("The download of {owner}/{name}@{number} has SHA-256 {actual}, but the registry says {expected}");
             }
         }
-        if let Some(dir) = dest.parent() {
-            std::fs::create_dir_all(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
-        }
-        std::fs::write(dest, &bytes).with_context(|| format!("Failed to write '{}'", dest.display()))
+        let dir = dest.parent().unwrap_or(Path::new("."));
+        std::fs::create_dir_all(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
+        // Whole or not at all: the cached copy is used again, offline too.
+        let mut temp = tempfile::NamedTempFile::new_in(dir).with_context(|| format!("Failed to write '{}'", dest.display()))?;
+        std::io::Write::write_all(&mut temp, &bytes).with_context(|| format!("Failed to write '{}'", dest.display()))?;
+        temp.persist(dest).with_context(|| format!("Failed to write '{}'", dest.display()))?;
+        Ok(())
     }
 
     /// Publish a `.sim` file's bytes as the next version of sim `owner/name`.
@@ -460,6 +464,16 @@ mod tests {
         let err = format!("{:#}", client.download_sim("o", "n", 2, &tmp.path().join("bad.sim")).unwrap_err());
         assert!(err.contains("SHA-256"), "{err}");
         assert!(!tmp.path().join("bad.sim").exists());
+    }
+
+    /// A tip asked for, answered with neither header, is untrusted: the
+    /// check fails closed whatever the registry leaves out.
+    #[test]
+    fn a_tip_without_headers_is_untrusted() {
+        let body = r#"{"format":1,"stack":"et/et-stack@head","root":"Cactus","repo":[],
+            "thornlist":{"filename":"et.th","text":"!CRL_VERSION = 1.0\n"}}"#;
+        let (base, _) = serve_with(1, move |_| ("200 OK", String::new(), body.as_bytes().to_vec()));
+        assert!(Client::at(&base).stack_release("et", "et-stack", "head").unwrap().untrusted);
     }
 
     /// A tip response says whether its stack is trusted; an untrusted one is

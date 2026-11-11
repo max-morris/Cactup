@@ -1014,7 +1014,12 @@ impl prodash::Progress for Line {
             // Held, not applied, until this phase starts moving: see
             // `Shared::holds_bar`.
             Handle::Phase(token) => self.shared.announce(token, max, unit),
-            Handle::Root if self.shared.root_draws => self.shared.draw(max, unit),
+            // A new init is a new count: a line that downloads, then hashes,
+            // then unpacks re-inits for each, and must not add them up.
+            Handle::Root if self.shared.root_draws => {
+                self.scratch.store(0, Ordering::Relaxed);
+                self.shared.draw(max, unit)
+            }
             _ => {}
         }
     }

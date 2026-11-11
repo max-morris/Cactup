@@ -182,9 +182,16 @@ fn stop_sim(sim: &Simulation, sched: &Scheduler, name: &str, force: bool) -> Res
         sim.log("stop", &format!("stopped job {} ({})", r.meta.job_id, restart::dir_name(active)));
     }
 
-    // finish: mark terminated + deactivate (§8.6).
-    r.meta.terminated = true;
-    r.meta.finished = Some(chrono::Utc::now());
+    // finish: mark terminated + deactivate (§8.6). Read afresh first: the run
+    // records its own end meanwhile (without waiting for this lock), and the
+    // copy read before the wait would undo it.
+    if let Ok(fresh) = Restart::load(&sim.dir, active) {
+        r = fresh;
+    }
+    if !r.meta.terminated {
+        r.meta.terminated = true;
+        r.meta.finished = Some(chrono::Utc::now());
+    }
     r.store()?;
     restart::deactivate(&sim.dir)?;
     note_chained_after(sim, sched, active)

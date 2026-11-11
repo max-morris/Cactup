@@ -4203,7 +4203,10 @@ the config's own record only while that still describes the same `build-id`.
   under the installation), and `prepare` copies the hashes of the list's
   single-file downloads into the config record (`downloads`, beside
   `sources`), so a later refetch cannot change what a simulation of that
-  build records. Any other component is listed unpinned.
+  build records. A config built before hashes were recorded has none to
+  give: export leaves such a download unpinned and says to rebuild, rather
+  than hash a file the binary may not have been built from. Any other
+  component is listed unpinned.
 - **Dirty sources** (a state string with `+Nmod`, §7.4) are refused —
   no commit reproduces that binary — unless `--allow-dirty`, which marks them
   `dirty`.
@@ -4251,7 +4254,9 @@ only a thornlist and a parfile, with the same descriptive fields and checks.
 With `-I <installation>`, each repo is pinned to what that installation has
 checked out (its live HEAD and source state, checked like an export's; a
 checkout of a different repo than the list names is left unpinned, with a
-note), and each single download by the hash its fetch record keeps.
+note), and each single download by the hash its fetch record keeps, or,
+fetched before hashes were recorded, by hashing the installed file (pack
+pins the installation as it is now).
 Without, each is pinned to the commit its branch or tag names on the
 remote today (`git ls-remote`, no fetch), and the output says so; a remote
 that cannot be asked fails the whole pack, and a repo the list already pins

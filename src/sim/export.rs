@@ -61,6 +61,21 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
         |repo| config.sources.as_ref().and_then(|s| s.get(repo)).cloned(),
         |repo| hashes.get(repo).cloned(),
     );
+    // A download whose hash the build did not freeze (built before cactup
+    // recorded download hashes) stays unpinned: hashing it now could pin a
+    // file the binary was never built from.
+    for c in list.components().iter().filter(|c| single_download(&list, c) && c.checksum.is_none()) {
+        if !hashes.contains_key(&c.repo) {
+            println!(
+                "{}",
+                format!(
+                    "{} is not pinned: config {} was built before cactup recorded download hashes; rebuild it to pin it",
+                    c.checkout, sim.meta.configuration
+                )
+                .yellow()
+            );
+        }
+    }
     let checks = check_repos(&sim.meta.sourcedir.join("repos"), &repos, fetched.as_ref())?;
     refuse_unfetchable(&repos, &checks, args.allow_dirty, args.allow_unpushed, "when the binary was built")?;
 
@@ -320,7 +335,7 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
             if args.trim { trimmed(text, &list, &inst.cactus_root(), &parfile)? } else { (text, list) };
         let repos_dir = inst.cactus_root().join("repos");
         let states = installed_states(&repos_dir, &list)?;
-        let hashes = fetch::download_hashes(&inst.root, &list);
+        let hashes = installed_download_hashes(&inst.root, &list)?;
         let repos = repo_pins(&list, |repo| states.get(repo).cloned(), |repo| hashes.get(repo).cloned());
         let published = check_repos(&repos_dir, &repos, FetchState::read(&inst.root)?.as_ref())?;
         (repos, published, text, list)
@@ -538,6 +553,43 @@ fn repo_pins(
         });
     }
     pins
+}
+
+/// Each single download's hash as the installation at `install_root` has
+/// it: the fetch record's, else (fetched before cactup recorded hashes) the
+/// file's own, hashed now with a line of progress each — `pack -I` pins the
+/// installation as it is now.
+fn installed_download_hashes(
+    install_root: &Path,
+    list: &thornlist::Thornlist,
+) -> Res<std::collections::BTreeMap<String, String>> {
+    let mut hashes = fetch::download_hashes(install_root, list);
+    let missing: Vec<&thornlist::Component> = list
+        .components()
+        .iter()
+        .filter(|c| single_download(list, c) && c.checksum.is_none() && !hashes.contains_key(&c.repo))
+        .collect();
+    if missing.is_empty() {
+        return Ok(hashes);
+    }
+    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+    let layout = crate::progress::Layout::for_names(missing.iter().map(|c| c.checkout.as_str()));
+    let result = (|| -> Res<()> {
+        for c in missing {
+            let path = install_root.join(&c.target).join(fetch::download::derive_filename(c.name.as_deref(), &c.checkout));
+            if !path.is_file() {
+                continue;
+            }
+            let mut line = crate::progress::Line::counting(progress.add_child(c.checkout.clone()), &c.checkout, layout.clone());
+            line.phase("hashing");
+            hashes.insert(c.repo.clone(), crate::update::sha256_hex_counting(&path, &mut line)?);
+        }
+        Ok(())
+    })();
+    if let Some(renderer) = renderer {
+        renderer.shutdown_and_wait();
+    }
+    result.map(|()| hashes)
 }
 
 /// Whether `c` is a download, and the only file the list fetches from its

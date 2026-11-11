@@ -1478,6 +1478,34 @@ pub fn remote_default_branch(scratch: &Path, url: &str) -> Res<String> {
     Ok(head.strip_prefix("refs/heads/").unwrap_or(&head).to_owned())
 }
 
+/// [`remote_default_branch`] asked on a thread of its own, from a scratch
+/// repository it makes, while this one polls the interrupt flag: the gix
+/// connection takes no interrupt flag of its own, and a stalled remote must
+/// not outlast a Ctrl-C. On interrupt the thread is left to finish (or not)
+/// on its own; cactup is stopping.
+pub fn ask_remote_default_branch(url: &str) -> Res<String> {
+    let (send, recv) = std::sync::mpsc::channel();
+    let url = url.to_owned();
+    std::thread::spawn(move || {
+        let answer = (|| {
+            let scratch = tempfile::tempdir().context("Failed to create a scratch directory")?;
+            gix::init_bare(scratch.path()).context("Failed to create a scratch repository")?;
+            remote_default_branch(scratch.path(), &url)
+        })();
+        let _ = send.send(answer);
+    });
+    loop {
+        if gix::interrupt::is_triggered() {
+            bail!("Interrupted");
+        }
+        match recv.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(answer) => return answer,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => bail!("Asking for the default branch failed"),
+        }
+    }
+}
+
 /// What [`head_of`] names the branch of a detached HEAD.
 pub const DETACHED: &str = "(detached)";
 

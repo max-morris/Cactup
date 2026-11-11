@@ -128,6 +128,44 @@ fn reuse_base_clone(
     true
 }
 
+/// A package going into a clone the base already has (see
+/// [`reuse_base_clone`]): the base's other checkouts of that clone stay as the
+/// base has them, so the package must match their source.
+fn share_base_clone(base: &thornlist::Thornlist, repo: &str, w: &mut Wanted) -> Res<()> {
+    // One clone is at one commit: the base's other checkouts of it
+    // stay at the base's pin, so the package must be at the same one.
+    let claimed: BTreeSet<&str> = w.thorns.iter().map(|t| t.checkout.as_str()).collect();
+    let stay: Vec<&thornlist::Component> =
+        base.components().iter().filter(|c| c.repo == repo && !claimed.contains(c.checkout.as_str())).collect();
+    // The fetch planner wants one source per clone: URL, branch and
+    // commit alike. A tip follows a branch, so it must be the same
+    // branch, unpinned; a version must be at the same commit, and
+    // then takes the base's branch label (only a label beside a pin).
+    let tip = is_tip(&w.version);
+    let at = if tip { None } else { Some(w.commit.as_str()) };
+    if let Some(other) =
+        stay.iter().find(|c| c.commit.as_deref() != at || (tip && c.branch.as_deref() != w.tag.as_deref()))
+    {
+        let names: Vec<&str> = stay.iter().map(|c| c.checkout.as_str()).collect();
+        bail!(
+            "{} would share the clone {repo} with the base's {}, which stays at {}; one clone holds one \
+             commit. Add a version at that commit, or replace those thorns too",
+            w.slug,
+            names.join(", "),
+            other.commit.as_deref().map_or_else(
+                || format!("branch {}", other.branch.as_deref().unwrap_or("(default)")),
+                |c| c[..12.min(c.len())].to_owned()
+            )
+        );
+    }
+    if let Some(first) = stay.first()
+        && !tip
+    {
+        w.tag.clone_from(&first.branch);
+    }
+    Ok(())
+}
+
 /// Whether an added package's version is a branch tip (`head`, `master`):
 /// its default branch, followed rather than pinned.
 pub(crate) fn is_tip(version: &str) -> bool {
@@ -147,11 +185,39 @@ fn check_registry_names(slug: &str, arrangement: &str, thorn: &str, repo_path: &
     if !plain(arrangement) || !plain(thorn) {
         bail!("The Cactarium names a thorn of {slug} \"{arrangement}/{thorn}\", which is not a plain Arrangement/Thorn");
     }
-    let path_ok = repo_path.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-/$".contains(&b));
+    // `..` only as the leading `../<clone>` that reaches another clone by
+    // name; anywhere else it would climb out of the clone (or of `repos/`).
+    let segments: Vec<&str> = repo_path.split('/').collect();
+    let dots_ok = segments.iter().enumerate().all(|(i, seg)| *seg != ".." || (i == 0 && segments.len() > 1 && segments[1] != ".."));
+    let path_ok = dots_ok && repo_path.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-/$".contains(&b));
     let checkout = format!("{arrangement}/{thorn}");
     let clone = clone_of("package", &crate::installation::AddedThorn { checkout, repo_path: repo_path.to_owned() });
     if !path_ok || !plain(&clone) {
         bail!("The Cactarium gives {arrangement}/{thorn} of {slug} the repo-path \"{repo_path}\", which cactup will not write");
+    }
+    Ok(())
+}
+
+/// The source the Cactarium gives a package goes into its thornlist section,
+/// which GetComponents hands to a shell (`git clone --branch '<label>'`,
+/// `git checkout <label>` unquoted): the URL holds no whitespace, quote or
+/// control character, the commit is hex, and the label (the version's tag,
+/// or a tip's default branch, which the package's author controls) is plain
+/// ref characters.
+fn check_registry_source(slug: &str, url: &str, commit: &str, label: Option<&str>) -> Res<()> {
+    if url.is_empty() || url.chars().any(|c| c.is_whitespace() || c.is_control() || "'\"`$;\\".contains(c)) {
+        bail!("The Cactarium gives {slug} the repository \"{}\", which cactup will not write", url.escape_debug());
+    }
+    if commit.is_empty() || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("The Cactarium gives {slug} the commit \"{}\", which is not a commit id", commit.escape_debug());
+    }
+    if let Some(label) = label
+        && (label.is_empty()
+            || label.starts_with('-')
+            || label.contains("..")
+            || !label.bytes().all(|b| b.is_ascii_alphanumeric() || b"._/+-".contains(&b)))
+    {
+        bail!("{slug} names the branch or tag \"{}\", which cactup will not write", label.escape_debug());
     }
     Ok(())
 }
@@ -224,8 +290,6 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String], allow_untrus
             if untrusted {
                 crate::cactarium::confirm_untrusted(&resolved.slug, "package", allow_untrusted)?;
             }
-            let scratch = tempfile::tempdir().context("Failed to create a scratch directory")?;
-            gix::init_bare(scratch.path()).context("Failed to create a scratch repository")?;
             let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
             let line = crate::progress::Line::over(
                 progress.add_child(resolved.slug.clone()),
@@ -233,7 +297,7 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String], allow_untrus
                 crate::progress::Layout::for_names([resolved.slug.as_str()]),
             );
             line.phase("asking its repository for its default branch");
-            let branch = crate::fetch::git::remote_default_branch(scratch.path(), &url);
+            let branch = crate::fetch::git::ask_remote_default_branch(&url);
             drop(line);
             if let Some(renderer) = renderer {
                 renderer.shutdown_and_wait();
@@ -252,6 +316,7 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String], allow_untrus
                 .find(|v| v.version.version == resolved.version.version)
                 .ok_or_else(|| anyhow!("The Cactarium lists no thorns for {}", resolved.slug))?
         };
+        check_registry_source(&resolved.slug, &url, &commit, label.as_deref())?;
         let thorns: Vec<AddedThorn> = version
             .thorns
             .iter()
@@ -260,6 +325,11 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String], allow_untrus
             .collect();
         for t in &version.thorns {
             check_registry_names(&resolved.slug, &t.arrangement, &t.thorn, &t.repo_path)?;
+        }
+        // The package's own clone is named from its URL: a plain component too.
+        let clone = repo_name(&url);
+        if clone.is_empty() || clone == "." || clone == ".." || !clone.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)) {
+            bail!("The Cactarium gives {} the repository {url}, whose name cactup will not use as a directory", resolved.slug);
         }
         if let Some(t) = thorns.iter().find(|t| t.repo_path.trim().is_empty()) {
             bail!(
@@ -355,24 +425,9 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<
         let mut thorns = w.thorns;
         let mut url = w.url;
         let reused = reuse_base_clone(&base, &mut url, &mut repo, &mut thorns);
-        let w = Wanted { thorns, url, ..w };
+        let mut w = Wanted { thorns, url, ..w };
         if reused {
-            // One clone is at one commit: the base's other checkouts of it
-            // stay at the base's pin, so the package must be at the same one.
-            let claimed: BTreeSet<&str> = w.thorns.iter().map(|t| t.checkout.as_str()).collect();
-            let stay: Vec<&thornlist::Component> =
-                base.components().iter().filter(|c| c.repo == repo && !claimed.contains(c.checkout.as_str())).collect();
-            let at = if is_tip(&w.version) { None } else { Some(w.commit.as_str()) };
-            if let Some(other) = stay.iter().find(|c| c.commit.as_deref() != at) {
-                let names: Vec<&str> = stay.iter().map(|c| c.checkout.as_str()).collect();
-                bail!(
-                    "{} would share the clone {repo} with the base's {}, which stays at {}; one clone holds one \
-                     commit. Add a version at that commit, or replace those thorns too",
-                    w.slug,
-                    names.join(", "),
-                    other.commit.as_deref().map_or_else(|| "its branch".to_owned(), |c| c[..12.min(c.len())].to_owned())
-                );
-            }
+            share_base_clone(&base, &repo, &mut w)?;
         }
         let want: BTreeSet<&str> = w.thorns.iter().map(|t| t.checkout.as_str()).collect();
         let normalized = crate::fetch::git::normalize_url(&w.url);
@@ -710,11 +765,24 @@ mod tests {
     /// Registry names become paths and thornlist words: anything but plain
     /// components (and a repo-path implying a clone named `..`) is refused.
     #[test]
+    fn registry_sources_must_be_plain() {
+        let c = "a".repeat(40);
+        check_registry_source("x", "https://github.com/x/y.git", &c, Some("mixed-precision/v1.4.0")).unwrap();
+        check_registry_source("x", "file:///repos/y.git", &c, None).unwrap();
+        assert!(check_registry_source("x", "https://x/y\n!DEFINE ROOT = /", &c, None).is_err());
+        assert!(check_registry_source("x", "https://x/y'", &c, None).is_err());
+        assert!(check_registry_source("x", "https://x/y", "main", None).is_err(), "not a commit");
+        for label in ["x';touch${IFS}pwn;'", "a b", "-rf", "a..b", ""] {
+            assert!(check_registry_source("x", "https://x/y", &c, Some(label)).is_err(), "{label}");
+        }
+    }
+
+    #[test]
     fn registry_names_must_be_plain() {
         check_registry_names("et/x", "ExternalLibraries", "HDF5", "../$1-$2").unwrap();
         check_registry_names("et/x", "CarpetX", "Arith", "$2").unwrap();
         for (arr, thorn, path) in
-            [("..", "T", "$2"), ("A/B", "T", "$2"), ("A", "T'", "$2"), ("A", "T", "../.."), ("A", "T", "$2;rm"), ("A", "T", "a b")]
+            [("..", "T", "$2"), ("A/B", "T", "$2"), ("A", "T'", "$2"), ("A", "T", "../.."), ("A", "T", "x/../../.."), ("A", "T", "../$1-$2/../.."), ("A", "T", "$2;rm"), ("A", "T", "a b")]
         {
             assert!(check_registry_names("et/x", arr, thorn, path).is_err(), "{arr} {thorn} {path}");
         }
@@ -752,6 +820,62 @@ mod tests {
         let thorns: Vec<&str> = wanted[0].thorns.iter().map(|t| t.checkout.as_str()).collect();
         assert_eq!(thorns, ["CarpetX/Arith", "CarpetX/Loop"]);
         assert_eq!(wanted[0].tag.as_deref(), Some(branch.as_str()), "the default branch, by name");
+    }
+
+    /// A package sharing a clone the base keeps other thorns of must match
+    /// that clone's source as the fetch planner compares it: same commit
+    /// (taking the base's branch label, which used to fail planning), or for
+    /// a tip, the same branch unpinned. Anything else is refused up front.
+    #[test]
+    fn a_shared_clone_matches_the_base_s_source() {
+        let c = "c".repeat(40);
+        let base_text = format!(
+            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!TARGET = $ROOT/arrangements\n!TYPE = git\n\
+             !URL = https://x/carpetx.git\n!REPO_PATH = $2\n!REPO_BRANCH = master\n!REPO_COMMIT = {c}\n\
+             !CHECKOUT =\nCarpetX/Loop\nCarpetX/Arith\n"
+        );
+        let base = thornlist::parse(&base_text).unwrap();
+        let wanted = |version: &str, tag: &str, commit: &str| Wanted {
+            entry: "max/carpetx".into(),
+            slug: format!("max/carpetx@{version}"),
+            version: version.into(),
+            tag: Some(tag.into()),
+            commit: commit.into(),
+            url: "https://x/carpetx".into(),
+            thorns: vec![AddedThorn { checkout: "CarpetX/Arith".into(), repo_path: "$2".into() }],
+            contact: None,
+            only_named: true,
+        };
+        // Same commit, other label: takes the base's label, and plans.
+        let mut w = wanted("1.0.0", "v1.0.0", &c);
+        let (mut url, mut repo, mut thorns) = (w.url.clone(), String::new(), w.thorns.clone());
+        assert!(reuse_base_clone(&base, &mut url, &mut repo, &mut thorns));
+        w.url = url;
+        w.thorns = thorns;
+        share_base_clone(&base, &repo, &mut w).unwrap();
+        assert_eq!(w.tag.as_deref(), Some("master"));
+        let package = AddedPackage {
+            package: w.entry.clone(),
+            version: w.version.clone(),
+            tag: w.tag.clone(),
+            commit: w.commit.clone(),
+            url: w.url.clone(),
+            repo: repo.clone(),
+            thorns: w.thorns.clone(),
+            replaces: vec![repo.clone()],
+            contact: None,
+        };
+        let list = thornlist::parse(&compose(&base_text, &[package]).unwrap()).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("plan");
+        crate::fetch::plan(&list, tmp.path(), &mut progress).unwrap_or_else(|e| panic!("{e:#}"));
+
+        // Another commit: refused.
+        let mut other = wanted("1.1.0", "v1.1.0", &"d".repeat(40));
+        assert!(format!("{:#}", share_base_clone(&base, &repo, &mut other).unwrap_err()).contains("one clone holds one commit"));
+        // A tip over a pinned base clone: refused.
+        let mut tip = wanted("head", "master", "e");
+        assert!(share_base_clone(&base, &repo, &mut tip).is_err());
     }
 
     #[test]

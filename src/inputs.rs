@@ -28,6 +28,9 @@ use std::path::{Component, Path, PathBuf};
 
 /// A download bigger than this is confirmed first.
 const CONFIRM_ABOVE: u64 = 1 << 30;
+/// No download grows past this, `-y` or not: a server streaming without end
+/// must not fill the disk.
+const MAX_DOWNLOAD: u64 = 1 << 40;
 /// At most this many entries in one archive.
 const MAX_ENTRIES: u64 = 1_000_000;
 /// At most this many unpacked bytes: [`MIN_UNPACKED_CAP`], or this many
@@ -40,6 +43,11 @@ const MIN_UNPACKED_CAP: u64 = 4 << 30;
 /// The longest symlink target an archive may hold (a zip keeps it as the
 /// entry's content, which is otherwise unbounded).
 const MAX_LINK_TARGET: u64 = 4096;
+/// At most this many symlinks in one archive, each target at most this many
+/// components deep: checking where a link leads walks its target, so these
+/// bound how long that takes.
+const MAX_LINKS: usize = 100_000;
+const MAX_LINK_DEPTH: usize = 256;
 /// The memory an `.xz` stream may ask for, in KiB: `xz -9` needs 674 MiB.
 const XZ_MEM_LIMIT_KIB: u32 = 1 << 20;
 /// Written into a finished tree just before it is moved into place; a tree
@@ -124,11 +132,21 @@ fn already_fetched(dir: &Path, input: &Input, url: &str) -> Res<Option<PathBuf>>
         return Ok(None);
     }
     let value = input.path.as_deref().map_or_else(|| tree.clone(), |p| tree.join(p));
-    if tree.join(COMPLETE_MARKER).is_file() && std::fs::symlink_metadata(&value).is_ok() {
+    // The marker is read, not just looked at: its access time then moves
+    // with the tree's use, so a purge by access time does not take it first.
+    if std::fs::read(tree.join(COMPLETE_MARKER)).is_ok() && std::fs::symlink_metadata(&value).is_ok() {
         return Ok(Some(value));
     }
+    // Set aside, not deleted: simulations may still have files open in it,
+    // and another import may be doing the same. `cache inputs --clear`
+    // removes it.
     println!("{}", format!("'{}' is incomplete; unpacking it again", tree.display()).yellow());
-    std::fs::remove_dir_all(&tree).with_context(|| format!("Failed to remove '{}'", tree.display()))?;
+    let aside = tree.with_file_name(format!(".stale-{}-{}", tree.file_name().unwrap_or_default().to_string_lossy(), std::process::id()));
+    if let Err(e) = std::fs::rename(&tree, &aside)
+        && tree.exists()
+    {
+        return Err(e).with_context(|| format!("Failed to set '{}' aside", tree.display()));
+    }
     Ok(None)
 }
 
@@ -217,8 +235,13 @@ fn unpacked(
         within(staging.path(), Path::new(path))
             .with_context(|| format!("The archive has no usable {path}, which the .sim points input {} at", input.knob))?;
     }
-    std::fs::write(staging.path().join(COMPLETE_MARKER), b"")
-        .with_context(|| format!("Failed to finish '{}'", staging.path().display()))?;
+    // Written new: an archive member of that name (a link, say) is refused,
+    // not written through.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(staging.path().join(COMPLETE_MARKER))
+        .with_context(|| format!("The archive has a member named {COMPLETE_MARKER}, which cactup keeps for itself"))?;
     // Another import may have finished the same tree meanwhile: theirs is as
     // good as ours, so ours is dropped.
     let staged = staging.keep();
@@ -273,28 +296,32 @@ fn download(
 
 /// Ask the server how big `url` is (a HEAD request), and above
 /// [`SizePolicy::confirm_above`] ask the user. Returns the most the GET may
-/// then bring: what the server announced (with a little slack), or, when it
-/// would not say, the threshold itself unless `-y` was given — a server
-/// that answers small and streams without end is stopped either way.
+/// then bring: with `-y`, [`MAX_DOWNLOAD`] (an announced size is not held
+/// against a server that under-reports it); otherwise what the server
+/// announced, with a little slack, or the threshold itself when it would
+/// not say.
 fn confirm_size(url: &str, policy: &SizePolicy) -> Res<Option<u64>> {
+    // Bounded: a server that will not answer a HEAD must not hold up a
+    // Ctrl-C for the client's whole timeout.
     let size = crate::fetch::download::client()
         .head(url)
+        .timeout(std::time::Duration::from_secs(10))
         .send()
         .ok()
         .filter(|r| r.status().is_success())
         .and_then(|r| r.headers().get(reqwest::header::CONTENT_LENGTH)?.to_str().ok()?.parse::<u64>().ok());
-    let Some(size) = size else {
-        return Ok((!policy.yes).then_some(policy.confirm_above));
-    };
-    let limit = Some(size + (size / 100).max(1 << 20));
+    if policy.yes {
+        if let Some(size) = size.filter(|s| *s > policy.confirm_above) {
+            println!("Downloading {url} ({}).", crate::progress::bytes(size as usize));
+        }
+        return Ok(Some(MAX_DOWNLOAD));
+    }
+    let Some(size) = size else { return Ok(Some(policy.confirm_above)) };
+    let limit = Some(size.saturating_add((size / 100).max(1 << 20)).min(MAX_DOWNLOAD));
     if size <= policy.confirm_above {
         return Ok(limit);
     }
     let shown = crate::progress::bytes(size as usize);
-    if policy.yes {
-        println!("Downloading {url} ({shown}).");
-        return Ok(limit);
-    }
     if !policy.interactive {
         bail!("{url} is {shown}; pass -y to download it without asking");
     }
@@ -325,7 +352,7 @@ fn unpack(archive: &Path, kind: ArchiveKind, dest: &Path, name: &str, progress: 
         ArchiveKind::Zip => unpack_zip(reader, dest, &mut budget),
     };
     let (n, links) = result.with_context(|| format!("Failed to unpack {name}"))?;
-    make_links(dest, links).with_context(|| format!("Failed to unpack {name}"))?;
+    make_links(dest, links, progress).with_context(|| format!("Failed to unpack {name}"))?;
     Ok(n)
 }
 
@@ -335,16 +362,34 @@ fn unpack(archive: &Path, kind: ArchiveKind, dest: &Path, name: &str, progress: 
 /// it, to stay inside the tree. A later entry of the same name replaced an
 /// earlier one while unpacking, so a link still listed here wins over a
 /// file or directory only if it came last.
-fn make_links(dest: &Path, links: Vec<(PathBuf, PathBuf)>) -> Res<()> {
+fn make_links(dest: &Path, links: Links, progress: &mut impl prodash::Progress) -> Res<()> {
+    if links.is_empty() {
+        return Ok(());
+    }
+    // Made, then each checked: two steps per link, counted, the interrupt
+    // flag polled per link (many links on a network filesystem take a while).
+    progress.init(Some(2 * links.len()), Some(prodash::unit::label("link steps")));
     for (rel, target) in &links {
+        if gix::interrupt::is_triggered() {
+            bail!("Interrupted");
+        }
         let path = place(dest, rel)?;
         std::os::unix::fs::symlink(target, &path).with_context(|| format!("Failed to create '{}'", path.display()))?;
+        progress.inc();
     }
     let root = dest.canonicalize().with_context(|| format!("Failed to resolve '{}'", dest.display()))?;
     for (rel, target) in &links {
-        if !resolves_inside(&root, &dest.join(rel), target) {
-            bail!("The archive links {} to {}, outside its own tree", rel.display(), target.display());
+        if gix::interrupt::is_triggered() {
+            bail!("Interrupted");
         }
+        if !resolves_inside(&root, &dest.join(rel), target) {
+            bail!(
+                "The archive links {} to {}, which leads outside its own tree or round in a loop",
+                rel.display(),
+                target.display()
+            );
+        }
+        progress.inc();
     }
     Ok(())
 }
@@ -548,22 +593,70 @@ fn write_file(path: &Path, body: &mut impl Read, mode: Option<u32>, budget: &mut
 
 /// The symlinks an archive asks for, `(member, target)`, in archive order:
 /// [`make_links`] makes them once everything else is written.
-type Links = Vec<(PathBuf, PathBuf)>;
+type Links = indexmap::IndexMap<PathBuf, PathBuf>;
 
 /// A link entry, checked lexically now (a cheap early refusal) and made
 /// later; any earlier link or entry of the same name gives way to it.
 fn defer_link(links: &mut Links, rel: PathBuf, target: PathBuf) -> Res<()> {
-    if target.as_os_str().len() as u64 > MAX_LINK_TARGET || !link_stays_inside(&rel, &target) {
+    if target.as_os_str().len() as u64 > MAX_LINK_TARGET
+        || target.components().count() > MAX_LINK_DEPTH
+        || !link_stays_inside(&rel, &target)
+    {
         bail!("The archive links {} to {}, outside its own tree", rel.display(), target.display());
     }
-    links.retain(|(r, _)| *r != rel);
-    links.push((rel, target));
+    if links.len() >= MAX_LINKS && !links.contains_key(&rel) {
+        bail!("The archive has more than {MAX_LINKS} symlinks");
+    }
+    links.shift_remove(&rel);
+    links.insert(rel, target);
     Ok(())
 }
 
+/// The most a tar archive may read between two pieces of file data: its
+/// headers, and the long names and extended headers the tar reader takes in
+/// whole, in memory, before an entry reaches cactup.
+const MAX_TAR_HEADER_BYTES: u64 = 1 << 20;
+
+/// A reader that counts the bytes read through it since `since_data` was
+/// last reset, and fails past [`MAX_TAR_HEADER_BYTES`]; file data resets it
+/// as it is read ([`DataRead`]).
+struct HeaderGuard<R> {
+    inner: R,
+    since_data: std::rc::Rc<std::cell::Cell<u64>>,
+}
+
+impl<R: Read> Read for HeaderGuard<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        let since = self.since_data.get() + n as u64;
+        if since > MAX_TAR_HEADER_BYTES {
+            return Err(std::io::Error::other(
+                "the archive has a header (a long name or an extended header) bigger than cactup reads",
+            ));
+        }
+        self.since_data.set(since);
+        Ok(n)
+    }
+}
+
+/// An entry's data, read through [`HeaderGuard`]: each read resets its count.
+struct DataRead<'a, R> {
+    inner: R,
+    since_data: &'a std::cell::Cell<u64>,
+}
+
+impl<R: Read> Read for DataRead<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.since_data.set(0);
+        Ok(n)
+    }
+}
+
 fn unpack_tar(reader: impl Read, dest: &Path, budget: &mut Budget) -> Res<(u64, Links)> {
-    let mut archive = tar::Archive::new(reader);
-    let mut links: Links = Vec::new();
+    let since_data = std::rc::Rc::new(std::cell::Cell::new(0));
+    let mut archive = tar::Archive::new(HeaderGuard { inner: reader, since_data: since_data.clone() });
+    let mut links = Links::new();
     let mut n = 0;
     for entry in archive.entries().context("The archive is not a tar archive")? {
         budget.entry()?;
@@ -574,7 +667,7 @@ fn unpack_tar(reader: impl Read, dest: &Path, budget: &mut Budget) -> Res<(u64, 
         let ty = entry.header().entry_type();
         if !ty.is_symlink() {
             // A later entry of this name replaces a link asked for earlier.
-            links.retain(|(r, _)| *r != rel);
+            links.shift_remove(&rel);
         }
         if ty.is_dir() {
             place_dir(dest, &rel)?;
@@ -583,7 +676,7 @@ fn unpack_tar(reader: impl Read, dest: &Path, budget: &mut Budget) -> Res<(u64, 
         if ty.is_file() || ty == tar::EntryType::Continuous {
             let mode = entry.header().mode().ok();
             let path = place(dest, &rel)?;
-            write_file(&path, &mut entry, mode, budget)?;
+            write_file(&path, &mut DataRead { inner: &mut entry, since_data: &since_data }, mode, budget)?;
         } else if ty.is_symlink() || ty.is_hard_link() {
             let target = entry.link_name().context("A link has an unreadable target")?.ok_or_else(|| anyhow!("A link has no target"))?.into_owned();
             if ty.is_symlink() {
@@ -609,7 +702,7 @@ fn unpack_tar(reader: impl Read, dest: &Path, budget: &mut Budget) -> Res<(u64, 
 
 fn unpack_zip<R: Read + std::io::Seek>(reader: R, dest: &Path, budget: &mut Budget) -> Res<(u64, Links)> {
     let mut archive = zip::ZipArchive::new(reader).context("The archive is not a zip archive")?;
-    let mut links: Links = Vec::new();
+    let mut links = Links::new();
     let mut n = 0;
     for i in 0..archive.len() {
         budget.entry()?;
@@ -622,7 +715,7 @@ fn unpack_zip<R: Read + std::io::Seek>(reader: R, dest: &Path, budget: &mut Budg
         let Some(rel) = member_path(&name)? else { continue };
         n += 1;
         if !entry.is_symlink() {
-            links.retain(|(r, _)| *r != rel);
+            links.shift_remove(&rel);
         }
         if entry.is_dir() {
             place_dir(dest, &rel)?;
@@ -860,7 +953,7 @@ pub fn list_or_clear(dir: &Path, clear: bool) -> Res<()> {
     let leftover = |p: &Path| {
         p.file_name().is_some_and(|n| {
             let n = n.to_string_lossy();
-            n.starts_with(".unpacking-") || n.starts_with(".tmp")
+            n.starts_with(".unpacking-") || n.starts_with(".tmp") || n.starts_with(".stale-")
         })
     };
     for entry in read(dir) {
@@ -1204,6 +1297,79 @@ mod tests {
         let tree = value.parent().unwrap().parent().unwrap();
         let expected = format!("eos = {}/bhns_gw230529_ID/gam2.polytrope\nother = 1\n", tree.display());
         assert_eq!(std::fs::read_to_string(&value).unwrap(), expected);
+    }
+
+    /// `-y` is not held to a size the server under-reports (a HEAD saying
+    /// 0 bytes); without it, the announced size bounds the download.
+    #[test]
+    fn yes_lifts_an_announced_size() {
+        let dir = tempfile::tempdir().unwrap();
+        // Small enough to fit a socket buffer: the test server answers the
+        // HEAD with the body too, and a big one breaks its pipe.
+        let body = vec![b'x'; 48 << 10];
+        let (base, server) = crate::fetch::download::test_server::serve_with(4, move |_| {
+            ("200 OK", String::new(), body.clone())
+        });
+        let input = |sha: String| Input {
+            knob: "data".into(),
+            description: None,
+            url: Some(format!("{base}/data.bin")),
+            sha256: Some(sha),
+            unpack: false,
+            path: None,
+            fixups: vec![],
+        };
+        let want = sha(&vec![b'x'; 48 << 10]);
+        fetch(dir.path(), &input(want.clone()), &SizePolicy { interactive: false, yes: true, confirm_above: 10 }).unwrap();
+        // Without -y and above the threshold: refused before the GET.
+        let err = format!("{:#}", fetch(&dir.path().join("b"), &input(want), &SizePolicy { interactive: false, yes: false, confirm_above: 10 }).unwrap_err());
+        assert!(err.contains("pass -y"), "{err}");
+        drop(server);
+    }
+
+    /// A tar long name (read whole, in memory, by the tar reader) is cut off
+    /// past 1 MiB rather than taking gigabytes of memory.
+    #[test]
+    fn a_huge_tar_header_is_refused() {
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_size(1);
+        h.set_mode(0o644);
+        h.set_entry_type(tar::EntryType::Regular);
+        let long = "d/".repeat(1 << 20) + "f";
+        b.append_data(&mut h, &long, &b"x"[..]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.tar");
+        std::fs::write(&file, b.into_inner().unwrap()).unwrap();
+        let dest = dir.path().join("out");
+        std::fs::create_dir(&dest).unwrap();
+        let err = format!("{:#}", unpack(&file, ArchiveKind::Tar, &dest, "a.tar", &mut prodash::progress::Discard).unwrap_err());
+        assert!(err.contains("bigger than cactup reads"), "{}", &err[..err.len().min(300)]);
+    }
+
+    /// An archive member named like cactup's completion marker is refused,
+    /// not written through.
+    #[test]
+    fn the_marker_name_is_cactup_s() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_size(1);
+        h.set_mode(0o644);
+        h.set_entry_type(tar::EntryType::Regular);
+        b.append_data(&mut h, "data.txt", &b"x"[..]).unwrap();
+        let mut l = tar::Header::new_gnu();
+        l.set_size(0);
+        l.set_entry_type(tar::EntryType::Symlink);
+        b.append_link(&mut l, COMPLETE_MARKER, "data.txt").unwrap();
+        let archive = gz(&b.into_inner().unwrap());
+        let (base, server) = serve(vec![("*", archive.clone())], 2);
+        let mut input = input(format!("{base}/a.tar.gz"), &archive);
+        input.fixups.clear();
+        input.path = None;
+        let err = format!("{:#}", fetch(dir.path(), &input, &quiet()).unwrap_err());
+        assert!(err.contains("keeps for itself"), "{err}");
+        server.join().unwrap();
     }
 
     /// Every supported kind unpacks the same tree.
