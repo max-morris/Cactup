@@ -457,6 +457,15 @@ fn submit(ctx: &Ctx, args: BuildSubmitArgs) -> Res<()> {
     watch_build(&machine, &config_dir, attempt_id, mode)
 }
 
+/// Remove an attempt `prepare` staged for a submit that then refused,
+/// unless something has submitted it meanwhile: only an attempt no job
+/// knows about is ours to take back. Best-effort; the refusal is the error.
+fn discard_unsubmitted(attempt: &BuildAttempt) {
+    if BuildAttempt::open(&attempt.meta.config_dir, attempt.id).is_ok_and(|disk| !disk.meta.submitted) {
+        let _ = fs::remove_dir_all(&attempt.dir);
+    }
+}
+
 /// Resolve the reservation/topology BEFORE `prepare` runs (prepare stages
 /// the reservation into the attempt), then stage the attempt, generate the
 /// buildsubmitscript, and hand it to the scheduler. Mirrors
@@ -547,50 +556,64 @@ fn submit_impl(
         Prepared::Ready(a, _) => a,
     };
 
-    // §3: the build submit variable set — topology/walltime on top of what
-    // `prepare` already froze (MAKEJOBS, USER, SOURCEDIR, CONFIGURATION,
-    // SCRATCH_HOME, ALLOCATION, CACTUP, STDOUT_FILE, STDERR_FILE), plus the
-    // submit-only identity and script-plumbing names. Deliberately NOT
-    // `sim::vars::assemble` — that sets simulation-only names a build script
-    // must never see (§9.3's no-leak rule, mirrored here).
-    let identity = Identity::resolve(db, hostname_override);
-    let build_universe = attempt.meta.universe.as_ref().map(|u| u.name.as_str());
-    let mut vset = thaw_vars(&attempt.meta.vars, &attempt.meta.knobs)?;
-    set_topology_vars(&mut vset, &topo, &format!("build-{name}"));
-    set_wall_only_vars(&mut vset, topo.total_wall);
-    vset.set("SCRIPTFILE", attempt.submit_script_path().display().to_string());
-    vset.set("CONFIG_DIR", config_dir.display().to_string());
-    vset.set("ATTEMPT_ID", attempt.id as u64);
-    vset.set("ALIAS", inst.alias.as_str());
-    vset.set("MACHINE", machine.name.as_str());
-    vset.set("HOSTNAME", identity.hostname.as_str());
-    vset.set("USER", identity.user.as_str());
-    vset.set("EMAIL", identity.email.as_str());
-    vset.set("JOB_ID", "");
-    set_machine_vars(&mut vset, machine, &topo.queue, build_universe)?;
+    // Everything up to the rendered build-submit script, which may refuse
+    // the submit (a required allocation unset). A refusal discards the
+    // attempt `prepare` just staged, as `sim submit` and `test submit` leave
+    // nothing behind: a husk would show in `build list` and take the id.
+    let staged = (|| -> Res<_> {
+        // §3: the build submit variable set — topology/walltime on top of what
+        // `prepare` already froze (MAKEJOBS, USER, SOURCEDIR, CONFIGURATION,
+        // SCRATCH_HOME, ALLOCATION, CACTUP, STDOUT_FILE, STDERR_FILE), plus the
+        // submit-only identity and script-plumbing names. Deliberately NOT
+        // `sim::vars::assemble` — that sets simulation-only names a build script
+        // must never see (§9.3's no-leak rule, mirrored here).
+        let identity = Identity::resolve(db, hostname_override);
+        let build_universe = attempt.meta.universe.as_ref().map(|u| u.name.as_str());
+        let mut vset = thaw_vars(&attempt.meta.vars, &attempt.meta.knobs)?;
+        set_topology_vars(&mut vset, &topo, &format!("build-{name}"));
+        set_wall_only_vars(&mut vset, topo.total_wall);
+        vset.set("SCRIPTFILE", attempt.submit_script_path().display().to_string());
+        vset.set("CONFIG_DIR", config_dir.display().to_string());
+        vset.set("ATTEMPT_ID", attempt.id as u64);
+        vset.set("ALIAS", inst.alias.as_str());
+        vset.set("MACHINE", machine.name.as_str());
+        vset.set("HOSTNAME", identity.hostname.as_str());
+        vset.set("USER", identity.user.as_str());
+        vset.set("EMAIL", identity.email.as_str());
+        vset.set("JOB_ID", "");
+        set_machine_vars(&mut vset, machine, &topo.queue, build_universe)?;
 
-    // §4: buildsubmitscript + universe, generate + write, submit.
-    // Routed by the queue (filtered by the build universe the job's `make`
-    // runs in) and nothing else: the optionlist's `--flavor` names what is
-    // built, never which script queues it (§7.9).
-    let scripts = machine.meta.scripts(ScriptKind::BuildSubmit);
-    let cfg_universe = attempt.meta.config_meta.universe.as_deref().unwrap_or(HOST_UNIVERSE);
-    let (script_name, entry) = scripts.route(&topo.queue, cfg_universe, false)?;
-    let submit_uni =
-        resolve_submit_universe(machine, entry.universe.as_deref())?;
-    let submit_uni_name = submit_uni.as_ref().map(|(n, _)| n.as_str());
-    let script_name = script_name.to_owned();
-    // `set_machine_vars` hardcodes the RUN-phase env (§6.1 — it's shared by
-    // three subsystems that mostly want that); a submit script needs the
-    // SUBMIT-phase one, in the submit universe, the very block a `.sh`
-    // script gets prepended (`generate_script`), so a `.py` script prints
-    // the same — the same fix `sim submit` applies rather than changing the
-    // shared helper. Never the build universe's: that is where `make` runs,
-    // not the batch script.
-    vset.set("ENV_SETUP", machine.meta.phase_env(submit_uni_name, Phase::Submit));
+        // §4: buildsubmitscript + universe, generate + write, submit.
+        // Routed by the queue (filtered by the build universe the job's `make`
+        // runs in) and nothing else: the optionlist's `--flavor` names what is
+        // built, never which script queues it (§7.9).
+        let scripts = machine.meta.scripts(ScriptKind::BuildSubmit);
+        let cfg_universe = attempt.meta.config_meta.universe.as_deref().unwrap_or(HOST_UNIVERSE);
+        let (script_name, entry) = scripts.route(&topo.queue, cfg_universe, false)?;
+        let submit_uni =
+            resolve_submit_universe(machine, entry.universe.as_deref())?;
+        let submit_uni_name = submit_uni.as_ref().map(|(n, _)| n.as_str());
+        let script_name = script_name.to_owned();
+        // `set_machine_vars` hardcodes the RUN-phase env (§6.1 — it's shared by
+        // three subsystems that mostly want that); a submit script needs the
+        // SUBMIT-phase one, in the submit universe, the very block a `.sh`
+        // script gets prepended (`generate_script`), so a `.py` script prints
+        // the same — the same fix `sim submit` applies rather than changing the
+        // shared helper. Never the build universe's: that is where `make` runs,
+        // not the batch script.
+        vset.set("ENV_SETUP", machine.meta.phase_env(submit_uni_name, Phase::Submit));
 
-    let script =
-        generate_script(machine, ScriptKind::BuildSubmit, &script_name, &vset, Phase::Submit, submit_uni_name)?;
+        let script =
+            generate_script(machine, ScriptKind::BuildSubmit, &script_name, &vset, Phase::Submit, submit_uni_name)?;
+        Ok((vset, script, submit_uni))
+    })();
+    let (vset, script, submit_uni) = match staged {
+        Ok(staged) => staged,
+        Err(e) => {
+            discard_unsubmitted(&attempt);
+            return Err(e);
+        }
+    };
     write_executable(&attempt.submit_script_path(), &script)?;
     attempt.store_meta()?;
 
@@ -1875,6 +1898,34 @@ mod tests {
             assert!(setup.is_some() && setup < provisioning, "python {python}:\n{script}");
             assert!(!script.contains("FROM=bu") && !script.contains("PROV-BU"), "python {python}:\n{script}");
         }
+    }
+
+    /// A build-submit script that refuses (a machine requiring an allocation,
+    /// none set) leaves no attempt behind, so the next good submit is
+    /// attempt 0, as `sim submit` and `test submit` leave nothing either.
+    #[test]
+    fn a_refused_build_submit_leaves_no_attempt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = tmp.path().join("inst/Cactus");
+        let dir = tmp.path().join("mdb/fake");
+        let machine = fake_submit_machine(&dir, &completing_make_body(&cactus, "sim"), "make-jobs = 4", false);
+        fs::create_dir_all(cactus.join("thornlists")).unwrap();
+        fs::write(cactus.join("thornlists").join(crate::installation::LIVE_THORNLIST), "A/B\n").unwrap();
+        let inst = Installation::new("et", tmp.path().join("inst"));
+        let config_dir = cactus.join("configs/sim");
+
+        let scripts = dir.join("buildsubmitscripts");
+        fs::rename(scripts.join("default.sh"), scripts.join("default.sh.off")).unwrap();
+        fs::write(scripts.join("default.py"), "print(knob(\"allocation\"))\n").unwrap();
+        let err = submit_impl(&inst, &machine, &Database::new(), &submit_args("sim", bare_topology()), Some("subhost"))
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("knob allocation is unset"), "{err:#}");
+        assert!(!BuildAttempt::attempt_dir(&config_dir, 0).exists(), "no attempt left behind");
+
+        fs::remove_file(scripts.join("default.py")).unwrap();
+        fs::rename(scripts.join("default.sh.off"), scripts.join("default.sh")).unwrap();
+        submit_impl(&inst, &machine, &Database::new(), &submit_args("sim", bare_topology()), Some("subhost")).unwrap();
+        assert!(BuildAttempt::open(&config_dir, 0).unwrap().meta.submitted, "the good submit is attempt 0");
     }
 
     // ---- the build job's queue is not the binary's (§7.9) ------------------
