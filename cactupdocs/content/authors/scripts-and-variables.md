@@ -181,15 +181,20 @@ and a submit with none refuses before anything is queued. The rules:
   goes. The other tokens on it are still checked (an unknown `@NAME@` is
   still an error).
 - A drop-line token in a comment does nothing, like any token there.
-- They are an error in `[paths]` values and `wrapper-argv` words, which have
-  no lines.
+- They work in `.sh` scripts, optionlists and parfiles. They are an error in
+  a single command (the `[scheduler]` commands, `[build].make`, a universe
+  `wrapper`), where dropping the line would leave no command at all, and in
+  `[paths]` values and `wrapper-argv` words, which have no lines.
 - They are an error on a line that runs on into the next, or on a line that
-  continues one: a line ending in a backslash in a shell script or
-  optionlist, or a `"…"` string spanning lines in a parfile. Dropping half a
-  command breaks the rest, so give the token a line of its own.
+  continues one. In a shell script that is a line ending in a backslash, a
+  line ending inside a quoted string, a line ending in `|`, `&&` or `||`,
+  and a line that opens a heredoc (a heredoc's body lines may go). In an
+  optionlist it is a line ending in a backslash; in a parfile, a `"…"`
+  string spanning lines. Dropping half a command breaks the rest, so give
+  the token a line of its own.
 - A value in the middle of a line, such as `srun -A` inside a quoted command,
   can't use one. Use a shell expansion there instead:
-  `alloc='@ALLOCATION@'`, then `${alloc:+-A "$alloc"}`.
+  `alloc='@KNOB-OPTIONAL(allocation)@'`, then `${alloc:+-A "$alloc"}`.
 
 Drop-line tokens need MDB generation 5 or later.
 
