@@ -95,11 +95,12 @@ impl Client {
         json(self.send(crate::fetch::download::client().get(&url))?)
     }
 
-    /// A package's branch tip (`head` or `master`: both its default branch),
-    /// its thorns at the tip's commit, and whether the Cactarium does not
-    /// trust it (then nobody has reviewed that code).
-    pub fn package_tip(&self, owner: &str, name: &str, tip: &str) -> Res<(cactup_ecosystem_common::api::PackageVersion, bool)> {
-        let url = self.url(&format!("/packages/{owner}/{name}/versions/{tip}"));
+    /// A package read at something no published version names: a branch
+    /// tip (`head` or `master`: both its default branch) or a full commit
+    /// id. Its thorns there, and whether the Cactarium does not trust it
+    /// (then nobody has reviewed that code).
+    pub fn package_at(&self, owner: &str, name: &str, at: &str) -> Res<(cactup_ecosystem_common::api::PackageVersion, bool)> {
+        let url = self.url(&format!("/packages/{owner}/{name}/versions/{at}"));
         let response = self.send(crate::fetch::download::client().get(&url))?;
         // Missing: untrusted, as for a stack tip.
         let untrusted = response.headers().get(UNTRUSTED_HEADER).is_none_or(|v| v.as_bytes() == b"true");

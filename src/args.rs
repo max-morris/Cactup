@@ -292,9 +292,10 @@ pub(crate) struct GlobalOpts {
         action = ArgAction::Append
     )]
     pub knob: Vec<KnobOverride>,
-    /// Take a branch tip (@head, @master) of a stack or package the Cactarium
-    /// does not trust without asking. Nobody reviews those tips: they may
-    /// fetch and build arbitrary code. The warning is still printed.
+    /// Take a branch tip (@head, @master) of a stack or package, or a package
+    /// at a commit no published version names, from a source the Cactarium
+    /// does not trust, without asking. Nobody reviews those: they may fetch
+    /// and build arbitrary code. The warning is still printed.
     #[clap(long, global = true)]
     pub risky_allow_untrusted_artifacts: bool,
 }
@@ -323,7 +324,7 @@ pub(crate) enum Commands {
     // §8.11
     /// Add Cactarium packages' thorns to the active installation, at the commit the registry froze for each version
     Add {
-        /// The packages: owner/name for all its thorns, owner/name/Thorn for one (repeat for several), with @version or @track:range to choose.
+        /// The packages: owner/name for all its thorns, owner/name/Thorn for one (repeat for several), with @version, @track:range or @<full commit id> to choose.
         #[clap(required = true, value_name = "PACKAGE")]
         packages: Vec<String>,
         /// Use the package in place of a repo the installation's thornlist already has.

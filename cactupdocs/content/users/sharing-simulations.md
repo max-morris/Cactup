@@ -218,6 +218,7 @@ cactup add max/carpetx@mixed-precision:^1                # a whole package, from
 cactup add max/carpetx/TestReal4                         # one thorn of it
 cactup add max/carpetx/TestReal4 max/carpetx/Loop        # several thorns
 cactup add max/carpetx/Loop max/spacetimex               # several packages at once
+cactup add max/carpetx@3f2c9e1a00112233445566778899aabbccddeeff   # at one commit
 ```
 
 The package is fetched at the commit the Cactarium recorded for that version
@@ -226,6 +227,13 @@ by cactup; only its repository is fetched. If your thornlist already has that
 repository (or one of its thorns), pass `--replace` to use the package in its
 place. Packages you add survive moving the installation to a newer stack
 release. Rebuild a config to compile them.
+
+A full commit id (all 40 hex digits; an abbreviation is not enough) adds the
+package as it was at that commit. If a published version was cut there,
+that version is what you get. Otherwise nobody has reviewed that commit, so
+the same rule as for a branch tip applies to a package the Cactarium does not
+trust: it may refuse, or cactup asks you to type `yes`. `cactup inst show`
+lists such a package as `owner/name at commit 3f2c9e1a0011`.
 
 `cactup remove max/carpetx` takes a package out again, putting back any
 repository it replaced at the commit the base names.

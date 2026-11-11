@@ -101,8 +101,8 @@ fn added_package_hint(installation: &Installation, name: Option<&str>) {
         println!(
             "{}",
             format!(
-                "{checkout} comes from {}@{} (added with cactup add); problems with it? {contact}",
-                package.package, package.version
+                "{checkout} comes from {} (added with cactup add); problems with it? {contact}",
+                crate::commands::add::describe(&package.package, &package.version)
             )
             .yellow()
         );
