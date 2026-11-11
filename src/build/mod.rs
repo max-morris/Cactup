@@ -2199,7 +2199,7 @@ fn prepare_with_cache(
         // custom `make` key. A machine that sets its own `make` keeps full
         // control of parallelism.
         let make = vars
-            .substitute(machine.meta.build.make.as_deref().unwrap_or(DEFAULT_MAKE), Syntax::Shell)
+            .substitute(machine.meta.build.make.as_deref().unwrap_or(DEFAULT_MAKE), Syntax::ShellLine)
             .context("Substituting the machine make command")?;
         // Build-phase env for the resolved universe (§6.1): universe env keys
         // override the machine [environment] key-by-key. The provisioning

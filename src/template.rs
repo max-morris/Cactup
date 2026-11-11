@@ -59,12 +59,16 @@ pub enum Syntax {
     /// (`setup_configuration.pl` strips `#.*` before it even splits `NAME =
     /// value`).
     Hash,
-    /// POSIX shell (submitscripts, runscripts, `make` and scheduler command
-    /// lines). `#` at the start of a word, outside quotes and heredoc bodies,
-    /// starts a comment to the end of the line — except that a line whose
-    /// first non-blank character is a `#` glued straight to a word (`#SBATCH`,
-    /// `#PBS`, `#$`) is a scheduler directive and is substituted like code.
+    /// POSIX shell scripts (submitscripts, runscripts). `#` at the start of
+    /// a word, outside quotes and heredoc bodies, starts a comment to the end
+    /// of the line — except that a line whose first non-blank character is a
+    /// `#` glued straight to a word (`#SBATCH`, `#PBS`, `#$`) is a scheduler
+    /// directive and is substituted like code.
     Shell,
+    /// One shell command (`[scheduler]` commands, `[build].make`, a
+    /// universe `wrapper`): comments as in [`Syntax::Shell`], but a command
+    /// is not a script of lines, so `-OR-DROP-LINE` tokens are refused.
+    ShellLine,
     /// Cactus parameter file (`par.peg`): `#` outside a `"…"` string starts a
     /// comment to the end of the line. Inside a string, `#` on any line after
     /// the string's first also starts a comment (the grammar's
@@ -82,10 +86,30 @@ impl Syntax {
         match self {
             Syntax::Plain => Vec::new(),
             Syntax::Hash => hash_comments(text),
-            Syntax::Shell => shell_comments(text),
+            Syntax::Shell | Syntax::ShellLine => scan_shell(text).comments,
             Syntax::Parfile => parfile_comments(text),
         }
     }
+
+    /// Per source line, what an `-OR-DROP-LINE` token must not cut in two.
+    fn line_joins(self, text: &str, comments: &[Range<usize>]) -> Vec<LineJoin> {
+        match self {
+            Syntax::Plain => Vec::new(),
+            Syntax::Shell | Syntax::ShellLine => scan_shell(text).lines,
+            Syntax::Hash => hash_line_joins(text, comments),
+            Syntax::Parfile => parfile_line_joins(text),
+        }
+    }
+}
+
+/// How source line `n` hangs together with its neighbors (§6.1
+/// `-OR-DROP-LINE`): `joins_next` when line `n + 1` is the rest of the same
+/// construct (a continued command, a string still open, a pipeline);
+/// `opens_block` when the lines after it belong to it (a heredoc opener).
+#[derive(Debug, Default, Clone, Copy)]
+struct LineJoin {
+    joins_next: bool,
+    opens_block: bool,
 }
 
 /// End of the line that byte `i` is on (exclusive of the newline).
@@ -104,7 +128,8 @@ fn line_of(text: &str, pos: usize) -> usize {
 /// nonsense against a line that plainly starts with `#`.
 fn stray_at(text: &str, pos: usize, syntax: Syntax) -> anyhow::Error {
     let line_start = text[..pos].rfind('\n').map_or(0, |n| n + 1);
-    let directive_shaped = syntax == Syntax::Shell && text[line_start..].trim_start().starts_with('#');
+    let directive_shaped =
+        matches!(syntax, Syntax::Shell | Syntax::ShellLine) && text[line_start..].trim_start().starts_with('#');
     anyhow!(
         "Stray '@' on line {}: not an '@@' escape nor a well-formed @NAME@ token \
          (write a literal '@' as '@@'{})",
@@ -134,8 +159,15 @@ fn hash_comments(text: &str) -> Vec<Range<usize>> {
     spans
 }
 
-/// Shell comment scanner: tracks `'…'`, `"…"` (backslash-escaped), a
-/// backslash outside quotes, and heredoc bodies (`<<`/`<<-`, quoted or bare
+/// What [`scan_shell`] finds: the comment spans, and how each line hangs
+/// together with the next.
+struct ShellScan {
+    comments: Vec<Range<usize>>,
+    lines: Vec<LineJoin>,
+}
+
+/// Shell scanner: tracks `'…'`, `"…"` (backslash-escaped), a backslash
+/// outside quotes, and heredoc bodies (`<<`/`<<-`, quoted or bare
 /// delimiter), inside all of which `#` is just a character. Elsewhere a `#`
 /// that begins a word — at the start of the text, or after whitespace, `;`,
 /// `&`, `|` or `(` — opens a comment, unless it is a directive line (see
@@ -143,7 +175,13 @@ fn hash_comments(text: &str) -> Vec<Range<usize>> {
 /// whitespace inside them is a comment to the shell too, so treating it as
 /// one is right; one inside double quotes is (wrongly) scanned as code, which
 /// errs on the side of substituting.
-fn shell_comments(text: &str) -> Vec<Range<usize>> {
+///
+/// A line joins the next when it ends inside a quoted string, in a
+/// backslash-newline (outside single quotes; in a heredoc body only when
+/// the delimiter is unquoted), or in `|`, `&&` or `||` outside a comment. A
+/// scheduler directive line is a comment to the shell, so nothing on it
+/// joins anything. A line holding a heredoc opener opens a block.
+fn scan_shell(text: &str) -> ShellScan {
     #[derive(PartialEq)]
     enum St {
         Code,
@@ -151,23 +189,66 @@ fn shell_comments(text: &str) -> Vec<Range<usize>> {
         Double,
     }
     let b = text.as_bytes();
-    let mut spans = Vec::new();
+    let mut spans: Vec<Range<usize>> = Vec::new();
+    let mut lines = vec![LineJoin::default(); b.iter().filter(|&&c| c == b'\n').count() + 1];
     let mut st = St::Code;
     let mut i = 0;
+    // Where the current logical line starts (a backslash-newline does not
+    // start one: `#` after it is never a directive), and the physical one.
     let mut line_start = 0;
-    // Delimiters of heredocs opened on the current line, in order; their
-    // bodies start on the next line.
-    let mut heredocs: Vec<(Vec<u8>, bool)> = Vec::new();
+    let mut phys_start = 0;
+    let mut line = 0;
+    let mut escaped_newline = false;
+    let mut directive = false;
+    // Delimiters of heredocs opened on the current line, in order — (word,
+    // strip leading tabs, quoted) — whose bodies start on the next line.
+    let mut heredocs: Vec<(Vec<u8>, bool, bool)> = Vec::new();
 
     while i < b.len() {
         let c = b[i];
         if c == b'\n' {
-            i += 1;
-            if !heredocs.is_empty() {
-                i = skip_heredoc_bodies(b, i, &heredocs);
-                heredocs.clear();
+            match st {
+                St::Single | St::Double => lines[line].joins_next = true,
+                St::Code if !directive && !escaped_newline => {
+                    let code_end = spans.last().filter(|s| s.start >= phys_start).map_or(i, |s| s.start);
+                    let code = text[phys_start..code_end].trim_end();
+                    if code.ends_with('|') || code.ends_with("&&") {
+                        lines[line].joins_next = true;
+                    }
+                }
+                St::Code => {}
             }
-            line_start = i;
+            i += 1;
+            line += 1;
+            directive = false;
+            if !escaped_newline {
+                for (delim, strip_tabs, quoted) in heredocs.drain(..) {
+                    while i < b.len() {
+                        let end = end_of_line(b, i);
+                        let mut body = &b[i..end];
+                        if strip_tabs {
+                            while body.first() == Some(&b'\t') {
+                                body = &body[1..];
+                            }
+                        }
+                        let terminator = body == delim.as_slice();
+                        // Inside a quoted heredoc a backslash is literal.
+                        if !terminator && !quoted && b[i..end].iter().rev().take_while(|&&c| c == b'\\').count() % 2 == 1 {
+                            lines[line].joins_next = true;
+                        }
+                        i = (end + 1).min(b.len());
+                        if end < b.len() {
+                            line += 1;
+                        }
+                        if terminator {
+                            break;
+                        }
+                    }
+                }
+                line_start = i;
+            }
+            phys_start = i;
+            escaped_newline = false;
             continue;
         }
         match st {
@@ -177,18 +258,23 @@ fn shell_comments(text: &str) -> Vec<Range<usize>> {
                 }
                 i += 1;
             }
-            St::Double => {
-                if c == b'\\' {
-                    i += 2;
-                } else {
-                    if c == b'"' {
-                        st = St::Code;
-                    }
+            St::Double | St::Code if c == b'\\' => {
+                if b.get(i + 1) == Some(&b'\n') {
+                    // Land on the newline: it ends this physical line.
+                    lines[line].joins_next = true;
+                    escaped_newline = true;
                     i += 1;
+                } else {
+                    i += 2;
                 }
             }
+            St::Double => {
+                if c == b'"' {
+                    st = St::Code;
+                }
+                i += 1;
+            }
             St::Code => match c {
-                b'\\' => i += 2,
                 b'\'' => {
                     st = St::Single;
                     i += 1;
@@ -226,7 +312,8 @@ fn shell_comments(text: &str) -> Vec<Range<usize>> {
                     if word.is_empty() {
                         i += 2;
                     } else {
-                        heredocs.push((word.to_vec(), strip_tabs));
+                        heredocs.push((word.to_vec(), strip_tabs, quote.is_some()));
+                        lines[line].opens_block = true;
                         i = j;
                     }
                 }
@@ -234,11 +321,12 @@ fn shell_comments(text: &str) -> Vec<Range<usize>> {
                     let word_start = i == 0
                         || matches!(b[i - 1], b' ' | b'\t' | b'\n' | b';' | b'&' | b'|' | b'(');
                     let at_line_start = b[line_start..i].iter().all(|c| matches!(c, b' ' | b'\t'));
-                    let directive = at_line_start
+                    let is_directive = at_line_start
                         && matches!(b.get(i + 1), Some(c) if c.is_ascii_alphanumeric() || matches!(c, b'$' | b'@'));
-                    if directive {
+                    if is_directive {
                         // Code, the whole line — but a commented-out `#echo "hi`
                         // must not leave the rest of the file inside a string.
+                        directive = true;
                         i = end_of_line(b, i);
                     } else if word_start {
                         let end = end_of_line(b, i);
@@ -252,33 +340,49 @@ fn shell_comments(text: &str) -> Vec<Range<usize>> {
             },
         }
     }
-    spans
+    ShellScan { comments: spans, lines }
 }
 
-/// Advance past the heredoc bodies that begin at `i` (the start of a line),
-/// one per delimiter in order; each body ends at the first line equal to its
-/// delimiter (leading tabs stripped for `<<-`). Returns the start of the
-/// line after the last terminator, or the end of the text if one is missing.
-fn skip_heredoc_bodies(b: &[u8], mut i: usize, heredocs: &[(Vec<u8>, bool)]) -> usize {
-    for (delim, strip_tabs) in heredocs {
-        loop {
-            if i >= b.len() {
-                return b.len();
+/// Optionlist lines join with a backslash-newline outside a comment.
+fn hash_line_joins(text: &str, comments: &[Range<usize>]) -> Vec<LineJoin> {
+    let mut start = 0;
+    text.split('\n')
+        .map(|line| {
+            let range = start..start + line.len();
+            start = range.end + 1;
+            let commented = comments.iter().any(|c| c.start < range.end && c.end > range.start);
+            let trailing = line.bytes().rev().take_while(|&b| b == b'\\').count();
+            LineJoin { joins_next: !commented && trailing % 2 == 1, opens_block: false }
+        })
+        .collect()
+}
+
+/// Parfile lines join while a `"…"` string is open: `#` outside a string
+/// comments to the end of the line, a backslash inside one escapes the next
+/// byte, and a quote inside a string comment still closes the string
+/// (`parfile_comments`).
+fn parfile_line_joins(text: &str) -> Vec<LineJoin> {
+    let b = text.as_bytes();
+    let mut lines = Vec::new();
+    let mut open = false;
+    let mut i = 0;
+    while i < b.len() {
+        match (open, b[i]) {
+            (_, b'\n') => {
+                lines.push(LineJoin { joins_next: open, opens_block: false });
+                i += 1;
             }
-            let end = end_of_line(b, i);
-            let mut line = &b[i..end];
-            if *strip_tabs {
-                while line.first() == Some(&b'\t') {
-                    line = &line[1..];
-                }
+            (false, b'#') => i = end_of_line(b, i),
+            (true, b'\\') if b.get(i + 1) != Some(&b'\n') => i += 2,
+            (_, b'"') => {
+                open = !open;
+                i += 1;
             }
-            i = (end + 1).min(b.len());
-            if line == delim.as_slice() {
-                break;
-            }
+            _ => i += 1,
         }
     }
-    i
+    lines.push(LineJoin::default());
+    lines
 }
 
 fn parfile_comments(text: &str) -> Vec<Range<usize>> {
@@ -672,6 +776,8 @@ struct Pass<'a> {
     copied: Vec<(usize, usize)>,
     /// Source lines (1-based) an empty `-OR-DROP-LINE` token removes.
     drops: std::collections::BTreeSet<usize>,
+    /// [`Syntax::line_joins`], computed the first time a drop token needs it.
+    joins: std::cell::OnceCell<Vec<LineJoin>>,
 }
 
 impl Pass<'_> {
@@ -680,10 +786,10 @@ impl Pass<'_> {
         self.newlines.partition_point(|&n| n < pos) + 1
     }
 
-    /// Source line `line`'s bytes, without its newline.
-    fn line_range(&self, line: usize) -> Range<usize> {
-        let start = if line == 1 { 0 } else { self.newlines[line - 2] + 1 };
-        start..self.newlines.get(line - 1).copied().unwrap_or(self.text.len())
+    /// How 1-based source line `line` hangs together with the next.
+    fn join(&self, line: usize) -> LineJoin {
+        let joins = self.joins.get_or_init(|| self.syntax.line_joins(self.text, self.comments));
+        line.checked_sub(1).and_then(|n| joins.get(n)).copied().unwrap_or_default()
     }
 
     /// Copy `s`, the source text starting at byte `src`, to the output,
@@ -696,54 +802,40 @@ impl Pass<'_> {
         self.out.push_str(s);
     }
 
-    /// Whether source line `line` runs on into the next one, per the text's
-    /// syntax: a backslash-newline outside a comment for shell and
-    /// optionlist text, an unclosed `"…"` string in a parfile.
-    fn continues(&self, line: usize) -> bool {
-        if line == 0 || line > self.newlines.len() {
-            return false;
-        }
-        let range = self.line_range(line);
-        match self.syntax {
-            Syntax::Plain => false,
-            Syntax::Shell | Syntax::Hash => {
-                if self.comments.iter().any(|c| c.start < range.end && c.end > range.start) {
-                    return false;
-                }
-                let trailing = self.text[range].bytes().rev().take_while(|&b| b == b'\\').count();
-                trailing % 2 == 1
-            }
-            Syntax::Parfile => parfile_string_open_after(self.text, range.end),
-        }
-    }
-
     /// An `-OR-DROP-LINE` token at byte `pos` must sit on a whole line of
-    /// its own: there are no lines in a single value, and dropping half of a
-    /// continued command or string breaks what is left.
+    /// its own in a text made of lines: not in a single value or a single
+    /// command, and not on a line that a continued command, an open string,
+    /// a pipeline or a heredoc ties to its neighbors, which dropping it
+    /// would break.
     fn check_drop_line(&self, pos: usize, form: &str) -> Res<()> {
         let line = self.line_at(pos);
-        if self.syntax == Syntax::Plain {
-            bail!(
+        match self.syntax {
+            Syntax::Plain => bail!(
                 "@{form}(…)@ on line {line}: this value has no lines to drop (an argument, a \
                  path); use the plain or -OPTIONAL form"
-            );
+            ),
+            Syntax::ShellLine => bail!(
+                "@{form}(…)@ on line {line}: this is a single command, with no lines to drop (a \
+                 [scheduler] command, [build].make, a universe wrapper); use the plain or \
+                 -OPTIONAL form"
+            ),
+            _ => {}
         }
         let what = match self.syntax {
             Syntax::Parfile => "a string that spans lines",
-            _ => "a line continued with a backslash",
+            Syntax::Hash => "a line continued with a backslash",
+            _ => "a backslash-newline, an unclosed quote, or a trailing |, && or ||",
         };
-        if self.continues(line) {
-            bail!(
-                "@{form}(…)@ on line {line}: the line runs on into the next ({what}), so dropping \
-                 it would leave half of it behind; put the token on a line of its own"
-            );
+        let leave = "so dropping it would leave half of it behind; put the token on a line of its own";
+        let here = self.join(line);
+        if here.opens_block {
+            bail!("@{form}(…)@ on line {line}: the line opens a heredoc whose body follows, {leave}");
         }
-        if self.continues(line - 1) {
-            bail!(
-                "@{form}(…)@ on line {line}: the line continues line {} ({what}), so dropping it \
-                 would leave half of it behind; put the token on a line of its own",
-                line - 1
-            );
+        if here.joins_next {
+            bail!("@{form}(…)@ on line {line}: the line runs on into the next ({what}), {leave}");
+        }
+        if self.join(line - 1).joins_next {
+            bail!("@{form}(…)@ on line {line}: the line continues line {} ({what}), {leave}", line - 1);
         }
         Ok(())
     }
@@ -773,28 +865,6 @@ impl Pass<'_> {
         out.push_str(&self.out[done..]);
         out
     }
-}
-
-/// Whether a parfile `"…"` string is still open at byte `pos` (the end of a
-/// line): `#` outside a string comments to the end of the line, a backslash
-/// inside one escapes the next byte, and a quote inside a string comment
-/// still closes the string (`parfile_comments`).
-fn parfile_string_open_after(text: &str, pos: usize) -> bool {
-    let b = &text.as_bytes()[..pos];
-    let mut open = false;
-    let mut i = 0;
-    while i < b.len() {
-        match (open, b[i]) {
-            (false, b'#') => i = end_of_line(b, i),
-            (true, b'\\') => i += 2,
-            (_, b'"') => {
-                open = !open;
-                i += 1;
-            }
-            _ => i += 1,
-        }
-    }
-    open
 }
 
 impl VarSet {
@@ -862,6 +932,7 @@ impl VarSet {
             out: String::with_capacity(text.len()),
             copied: Vec::new(),
             drops: std::collections::BTreeSet::new(),
+            joins: std::cell::OnceCell::new(),
         };
         let mut done = 0;
         for span in &comments {
@@ -1442,6 +1513,72 @@ mod tests {
         assert_eq!(
             v.substitute("A::s = \"one\"\nB::t = \"@KNOB-OR-DROP-LINE(email)@\"\n", Syntax::Parfile).unwrap(),
             "A::s = \"one\"\n"
+        );
+    }
+
+    #[test]
+    fn drop_line_tokens_have_no_place_in_a_single_command() {
+        let v = vars_with_knobs();
+        for text in ["sbatch -A @KNOB-OR-DROP-LINE(allocation)@ @SCRIPTFILE@", "make @KNOB-OR-DROP-LINE(email)@\n"] {
+            let err = v.substitute(text, Syntax::ShellLine).unwrap_err().to_string();
+            assert!(err.contains("a single command, with no lines to drop"), "{err}");
+        }
+        // Otherwise a command template is shell: comments stay verbatim.
+        assert_eq!(v.substitute("make -j@NODES@ # @@x", Syntax::ShellLine).unwrap(), "make -j4 # @@x");
+    }
+
+    #[test]
+    fn drop_line_tokens_refuse_lines_shell_ties_together() {
+        let v = vars_with_knobs();
+        let refused = |text: &str, why: &str| {
+            for knob in ["allocation", "email"] {
+                let text = text.replace("KNOB", &format!("@KNOB-OR-DROP-LINE({knob})@"));
+                let err = v.substitute(&text, Syntax::Shell).unwrap_err().to_string();
+                assert!(err.contains(why), "{text:?}: {err}");
+            }
+        };
+        // A quoted string spanning lines, from either end.
+        refused("cmd='srun -A KNOB\n -p gpu'\n", "runs on into the next");
+        refused("cmd=\"srun\n -A KNOB\"\n", "continues line 1");
+        refused("cmd=\"srun\n -A KNOB\n -p gpu\"\n", "runs on into the next");
+        // A heredoc opener: its body follows.
+        refused("cat <<EOF > KNOB\nbody\nEOF\n", "opens a heredoc");
+        // A pipeline or list split after the operator.
+        refused("cmd |\n grep KNOB\n", "continues line 1");
+        refused("cmd &&\n echo KNOB\n", "continues line 1");
+        refused("cmd ||\n echo KNOB\n", "continues line 1");
+        refused("echo KNOB |\n grep x\n", "runs on into the next");
+        // In an unquoted heredoc a backslash-newline still continues.
+        refused("cat <<EOF\na \\\nKNOB\nEOF\n", "continues line 2");
+        // A trailing `&` backgrounds a command: the next line is its own.
+        assert_eq!(v.substitute("cmd &\nx @KNOB-OR-DROP-LINE(email)@\ny\n", Syntax::Shell).unwrap(), "cmd &\ny\n");
+        // An operator in a comment is no operator.
+        assert_eq!(v.substitute("cmd # a |\nx @KNOB-OR-DROP-LINE(email)@\n", Syntax::Shell).unwrap(), "cmd # a |\n");
+    }
+
+    #[test]
+    fn drop_line_tokens_allow_lines_shell_keeps_apart() {
+        let v = vars_with_knobs();
+        // Inside a quoted heredoc a trailing backslash is literal text.
+        assert_eq!(
+            v.substitute("cat <<'EOF'\nliteral \\\n@KNOB-OR-DROP-LINE(email)@ x\nEOF\n", Syntax::Shell).unwrap(),
+            "cat <<'EOF'\nliteral \\\nEOF\n"
+        );
+        // A heredoc body line is data: it may go, the first one included.
+        assert_eq!(
+            v.substitute("cat <<EOF\n@KNOB-OR-DROP-LINE(email)@\nkeep\nEOF\nnext\n", Syntax::Shell).unwrap(),
+            "cat <<EOF\nkeep\nEOF\nnext\n"
+        );
+        // The scheduler does not continue a directive with a backslash, and
+        // to the shell the directive is a comment.
+        assert_eq!(
+            v.substitute("#SBATCH --x=1 \\\n#SBATCH -A @KNOB-OR-DROP-LINE(email)@\nrun\n", Syntax::Shell).unwrap(),
+            "#SBATCH --x=1 \\\nrun\n"
+        );
+        // A string closed on its own line ties nothing.
+        assert_eq!(
+            v.substitute("a='x y'\nb=\"@KNOB-OR-DROP-LINE(email)@\"\nc\n", Syntax::Shell).unwrap(),
+            "a='x y'\nc\n"
         );
     }
 

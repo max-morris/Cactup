@@ -634,7 +634,7 @@ impl<'m> Scheduler<'m> {
         }
         if self.unknown_job(&output, job_id)? == Some(false) {
             let sched = &self.meta.scheduler;
-            let query = vars.substitute(sched.get_status.as_deref().unwrap_or_default(), Syntax::Shell).unwrap_or_default();
+            let query = vars.substitute(sched.get_status.as_deref().unwrap_or_default(), Syntax::ShellLine).unwrap_or_default();
             let status_pattern = sched.status_pattern.as_deref().unwrap_or("$^");
             let unknown_pattern = sched.unknown_job_pattern.as_deref().unwrap_or_default();
             let said = match output.trim() {
@@ -781,7 +781,7 @@ impl<'m> Scheduler<'m> {
     /// hand (without the environment setup cactup prepends).
     pub fn stop_command(&self, job_id: &str) -> Option<String> {
         let template = self.meta.scheduler.stop.as_deref()?;
-        Self::query_vars(job_id).substitute(template, Syntax::Shell).ok()
+        Self::query_vars(job_id).substitute(template, Syntax::ShellLine).ok()
     }
 
     /// Whether `job` is the job's own process here but its process group
@@ -1081,7 +1081,7 @@ impl<'m> Scheduler<'m> {
         let template = template
             .ok_or_else(|| anyhow!("This machine's meta.toml defines no [scheduler].{what} command"))?;
         let cmd = vars
-            .substitute(template, Syntax::Shell)
+            .substitute(template, Syntax::ShellLine)
             .with_context(|| format!("Substituting the [scheduler].{what} command"))?;
         let env = self.meta.effective_env(env_universe, Phase::Submit);
         Ok(if env.is_empty() { cmd } else { format!("{env}\n{cmd}") })

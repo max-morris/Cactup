@@ -2123,12 +2123,21 @@ next directive as the account). Rules:
 - Every other token on a dropped line is still substituted, and still fails
   (an unknown `@NAME@`, say); its output goes with the line.
 - A comment is opaque (§6.1), so a drop token in one does nothing.
-- They are an error in `Plain` text (a `[paths]` value, a `wrapper-argv`
-  word): a single value has no lines.
+- They are allowed only in texts made of lines: `.sh` scripts, the rendered
+  optionlist, `.par` parfiles. They are an error in `Plain` text (a `[paths]`
+  value, a `wrapper-argv` word) and in a single command template (`[scheduler]`
+  commands, `[build].make`, a universe `wrapper`: `Syntax::ShellLine`, shell
+  comments but no lines), where dropping the line would leave no command.
 - They are an error, set or not, on a line that runs on into the next or on
   the line that continues one, since dropping half of it breaks what is left.
-  What runs on depends on the syntax: a backslash-newline outside a comment
-  for shell and optionlist text, a `"…"` string spanning lines in a parfile.
+  What runs on depends on the syntax. In shell: a backslash-newline (outside
+  single quotes; in a heredoc body only when the delimiter is unquoted), a
+  line that ends inside a `'…'` or `"…"` string, a line ending in `|`, `&&`
+  or `||` outside a comment, and a line holding a heredoc opener (its body
+  follows). A heredoc body line is data and may go; a scheduler directive is
+  a comment to the shell, so a trailing backslash on one continues nothing.
+  In an optionlist: a backslash-newline outside a comment. In a parfile: a
+  `"…"` string spanning lines.
   A mid-line value inside a quoted command (the qbc/db1 runscripts' `srun -A`)
   is not a line to drop; those keep a shell `${alloc:+-A …}` instead.
 - `.py` scripts take no tokens: `knob(name, "")` and an `if` do the same.
@@ -2172,8 +2181,10 @@ environment can judge. `.py` parfiles are not checked.
    address, a `@NAME@` mentioned in prose) is not an error. What a comment
    *is* depends on what will read the substituted text, so every caller
    names the file kind (`template::Syntax`) — the engine does not guess:
-   - **Shell** (`.sh` submit/run/build-submit scripts, `[scheduler]` and
-     `[build].make` command lines, a universe `wrapper` string): a `#` that
+   - **Shell** (`.sh` submit/run/build-submit scripts; and, as
+     `ShellLine`, which differs only in refusing drop-line tokens, the
+     `[scheduler]` and `[build].make` command lines and a universe `wrapper`
+     string): a `#` that
      begins a word — at the start of the text or after whitespace, `;`,
      `&`, `|` or `(` — outside `'…'`/`"…"` quotes and heredoc bodies, to the
      end of the line. A **scheduler directive is not a comment**: a line

@@ -852,7 +852,7 @@ impl Universe {
                 let mut vars = vars.clone();
                 vars.set("COMMAND", shell_quote(inner));
                 Ok(WrappedCommand::Shell(
-                    vars.substitute(template, Syntax::Shell)
+                    vars.substitute(template, Syntax::ShellLine)
                         .context("Failed to substitute universe wrapper template")?,
                 ))
             }
@@ -1750,6 +1750,26 @@ mod tests {
             panic!("expected shell form");
         };
         assert_eq!(cmd, "ssh headnode 'cd /src && ''echo it'\\''s here'");
+
+        // A wrapper is one command: a drop-line token, which would drop the
+        // line holding @COMMAND@ and run nothing, is refused, as it is in a
+        // wrapper-argv word.
+        vars.set_knobs(Default::default());
+        for drop in [
+            Universe {
+                wrapper_argv: None,
+                wrapper: Some("ssh -l @KNOB-OR-DROP-LINE(user)@ headnode @COMMAND@".to_owned()),
+                environment: Environment::default(),
+            },
+            Universe {
+                wrapper_argv: Some(vec!["ssh".into(), "@KNOB-OR-DROP-LINE(user)@".into()]),
+                wrapper: None,
+                environment: Environment::default(),
+            },
+        ] {
+            let err = format!("{:#}", drop.wrap(&vars, "true").unwrap_err());
+            assert!(err.contains("no lines to drop"), "{err}");
+        }
     }
 
     /// A script table has no reserved keys: the old `default-universe`
