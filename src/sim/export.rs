@@ -80,6 +80,7 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
             repos,
             run: run_hints(&sim),
             provenance,
+            knobs: sim.meta.knobs.clone(),
         },
     )
 }
@@ -126,6 +127,9 @@ struct Parts {
     repos: Vec<RepoPin>,
     run: Option<RunHints>,
     provenance: Provenance,
+    /// The simulation's own knob values (over the global ones): an input's
+    /// value here, to compare a download with.
+    knobs: indexmap::IndexMap<String, String>,
 }
 
 fn refuse_overwrite(file: &Path, describe: &SimDescribeArgs) -> Res<()> {
@@ -165,7 +169,7 @@ fn refuse_unfetchable(repos: &[RepoPin], published: &[bool], allow_dirty: bool, 
 /// Settle the descriptive fields — flags, else defaults, offered for editing
 /// on a terminal — then write the file and say what it holds.
 fn finish(ctx: &Ctx, describe: &SimDescribeArgs, file: &Path, parts: Parts) -> Res<()> {
-    let Parts { default_name, fallback_summary, root, thornlist, parfile, repos, run, provenance } = parts;
+    let Parts { default_name, fallback_summary, root, thornlist, parfile, repos, run, provenance, knobs } = parts;
     warn_about_paths(&parfile);
     let (lead_summary, lead_description) = leading_comment(&parfile.text);
     let interactive = !describe.yes && std::io::stdin().is_terminal();
@@ -199,15 +203,57 @@ fn finish(ctx: &Ctx, describe: &SimDescribeArgs, file: &Path, parts: Parts) -> R
         cactup_ecosystem_common::manifest::validate_contact(contact).map_err(|e| anyhow!("{e}"))?;
     }
     let mut inputs = inputs(&parfile);
-    if interactive {
-        for input in &mut inputs {
+    let pairs = |given: &[String], what: &str| -> Res<indexmap::IndexMap<String, String>> {
+        let mut out = indexmap::IndexMap::new();
+        for pair in given {
+            let (knob, value) = pair.split_once('=').ok_or_else(|| anyhow!("--{what} wants KNOB=VALUE, not \"{pair}\""))?;
+            if !inputs.iter().any(|i| i.knob == knob) {
+                let known: Vec<&str> = inputs.iter().map(|i| i.knob.as_str()).collect();
+                bail!("The parfile has no input {knob} (its inputs: {})", known.join(", "));
+            }
+            out.insert(knob.to_owned(), value.to_owned());
+        }
+        Ok(out)
+    };
+    let urls = pairs(&describe.input_urls, "input-url")?;
+    let members = pairs(&describe.input_paths, "input-path")?;
+    let db = ctx.db.read()?;
+    for input in &mut inputs {
+        if interactive {
             let answer = crate::commands::prompt_with_default(
                 &format!("What does the parfile need in knob {}? (a description for whoever imports it)", input.knob),
                 "",
             )?;
             input.description = Some(answer).filter(|a| !a.is_empty());
         }
+        let url = match urls.get(&input.knob) {
+            Some(url) => Some(url.clone()),
+            None if interactive => Some(crate::commands::prompt_with_default(
+                &format!("Where can knob {}'s file be downloaded? (a URL, empty for nowhere)", input.knob),
+                "",
+            )?)
+            .filter(|u| !u.is_empty()),
+            None => None,
+        };
+        let Some(url) = url else {
+            if members.contains_key(&input.knob) {
+                bail!("--input-path {} needs an --input-url for that input too", input.knob);
+            }
+            continue;
+        };
+        let local = knobs.get(&input.knob).map(String::as_str).or_else(|| db.knob(&input.knob)).map(PathBuf::from);
+        let how = crate::inputs::Authoring {
+            url: &url,
+            local: local.as_deref().filter(|l| l.exists()),
+            member: members.get(&input.knob).map(String::as_str),
+            interactive,
+        };
+        let policy = crate::inputs::SizePolicy::new(interactive, describe.yes);
+        for note in crate::inputs::author(&crate::inputs::inputs_dir(ctx)?, input, &how, &policy)? {
+            println!("{}", note.yellow());
+        }
     }
+    drop(db);
 
     let sim_file = SimFile {
         format: cactup_ecosystem_common::SIM_FORMAT,
@@ -308,6 +354,7 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
             repos,
             run: None,
             provenance: exporter(),
+            knobs: Default::default(),
         },
     )
 }

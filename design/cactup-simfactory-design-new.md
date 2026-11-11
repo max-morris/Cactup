@@ -4218,7 +4218,18 @@ the config's own record only while that still describes the same `build-id`.
   from the shared crate's parfile lexer (`par::references`), which lexes as
   substitution does — comments (`par::comment_spans`) and `@@` skipped — and
   which the Cactarium's review uses too, so the registry flags exactly what
-  export declares. A `.py` parfile has neither. The absolute-path warning
+  export declares. A `.py` parfile has neither. An input can be given where
+  its file is downloaded (`--input-url KNOB=URL`, else asked on a terminal):
+  the file is downloaded once into the inputs directory and its `sha256`
+  recorded. An archive is recorded `unpack = true`, unpacked in a scratch
+  directory there: `path` is the member the knob's value here ends with
+  (else `--input-path KNOB=MEMBER`, else asked), the knob's value minus that
+  path is the author's unpack directory, and each text member (up to
+  16 MiB) whose copy there differs only on lines naming that directory
+  gives whole-line fixups, the directory written `{dir}` (asked about on a
+  terminal); any other difference is reported and not recorded. A plain
+  file's download is compared with the author's copy and a difference
+  said. The absolute-path warning
   looks only outside comments, likewise.
 - **Run hints** (`tasks`, `cpus-per-task`, `gpus-per-task`, `walltime`) come
   from the latest restart; machine-shaped settings stay out.

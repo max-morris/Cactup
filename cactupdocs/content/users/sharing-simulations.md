@@ -45,6 +45,20 @@ warning: whoever imports the simulation will not have that path. Use a knob
 instead — `@KNOB(my-initial-data)@` — and export records it as an **input**
 the importer must supply.
 
+If the input can be downloaded, say where, and `import` will fetch it:
+
+```sh
+cactup sim export mysim --input-url kadath-initial-data=https://einsteintoolkit.org/gallery/bhns/bhns_gw230529_ID.tar.gz
+```
+
+cactup downloads the file once and records its SHA-256. For an archive, it
+also works out which file inside it your knob points at (from the knob's
+value here; `--input-path KNOB=FILE` names it otherwise), and compares the
+archive's text files with your unpacked copy: a line you changed only to name
+where you unpacked it, such as a path to an equation-of-state file, is
+recorded as an edit `import` makes after unpacking, with the importer's own
+folder in its place. Any other difference is reported and left out.
+
 ### Only the thorns the parfile needs
 
 ```sh

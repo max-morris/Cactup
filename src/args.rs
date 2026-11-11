@@ -1117,6 +1117,19 @@ pub(crate) struct SimDescribeArgs {
     /// Where to go for help with the simulation: an https:// URL or a mailto: address (default: the default-contact knob, if set).
     #[clap(long, value_name = "URL")]
     pub contact: Option<String>,
+    /// Where an input's file can be downloaded (KNOB=URL; repeatable)
+    ///
+    /// The file is downloaded once and its SHA-256 recorded. An archive
+    /// (.tar, .tar.gz, .tar.xz, .zip) is recorded to be unpacked: the knob
+    /// points at the file of the archive its value here ends with (or
+    /// --input-path), and lines of the archive's text files that differ from
+    /// your copy only by naming where you unpacked it are recorded as edits
+    /// to make after unpacking.
+    #[clap(long = "input-url", value_name = "KNOB=URL")]
+    pub input_urls: Vec<String>,
+    /// The file of an input's archive the knob points at (KNOB=MEMBER; repeatable).
+    #[clap(long = "input-path", value_name = "KNOB=MEMBER")]
+    pub input_paths: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]

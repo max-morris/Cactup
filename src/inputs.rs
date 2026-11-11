@@ -21,7 +21,7 @@
 
 use crate::Res;
 use anyhow::{anyhow, bail, Context};
-use cactup_ecosystem_common::sim::{ArchiveKind, Input};
+use cactup_ecosystem_common::sim::{ArchiveKind, Fixup, Input};
 use colored::Colorize;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -660,6 +660,192 @@ fn replace_all(haystack: &[u8], needle: &[u8], with: &[u8]) -> (Vec<u8>, usize) 
     (out, n)
 }
 
+/// What an author's answers about one input come to, for `sim export` and
+/// `sim pack`: the knob, where its file can be downloaded, and the knob's
+/// value here (to compare the download with).
+pub struct Authoring<'a> {
+    pub url: &'a str,
+    /// The knob's current value on this machine, if it names something.
+    pub local: Option<&'a Path>,
+    /// The archive member the knob points at, when the author named it.
+    pub member: Option<&'a str>,
+    /// Questions may be asked (a terminal, no `-y`).
+    pub interactive: bool,
+}
+
+/// The largest member whose text is compared with the author's copy when
+/// looking for fixups; bigger ones (solution data) are compared by size.
+const MAX_COMPARED: u64 = 16 << 20;
+
+/// Fill `input` for an author who says its file can be downloaded from
+/// `how.url`: downloaded once (into `dir`, the inputs directory: archives
+/// are big) and hashed. An archive is unpacked in a scratch directory
+/// there: `path` is the member the knob's local value ends with (or the one
+/// named), and each text member that differs from the author's copy only on
+/// lines naming the author's unpack directory becomes a fixup, that
+/// directory written `{dir}`; any other difference is reported, not
+/// recorded. Returns what to tell the author.
+pub fn author(dir: &Path, input: &mut Input, how: &Authoring, policy: &SizePolicy) -> Res<Vec<String>> {
+    let url = how.url;
+    let mut notes = Vec::new();
+    let limit = confirm_size(url, policy)?;
+    std::fs::create_dir_all(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
+    let scratch = tempfile::Builder::new()
+        .prefix(".tmp-authoring-")
+        .tempdir_in(dir)
+        .with_context(|| format!("Failed to create a directory in '{}'", dir.display()))?;
+    let (progress, renderer) =
+        crate::manifest::setup_prodash_with(Some(crate::manifest::progress_level_filter(1)), true);
+    let layout = crate::progress::Layout::for_names([input.knob.as_str()]);
+    let mut line = crate::progress::Line::counting(progress.add_child(input.knob.clone()), &input.knob, layout);
+    let fetched = (|| -> Res<(String, Option<PathBuf>)> {
+        let download = download(scratch.path(), url, limit, &mut line)?;
+        line.phase("checking");
+        let sha = crate::update::sha256_hex_counting(download.path(), &mut line)?;
+        let Some(kind) = ArchiveKind::of_url(url) else {
+            if let Some(local) = how.local.filter(|l| l.is_file())
+                && crate::update::sha256_hex(local)? != sha
+            {
+                notes.push(format!("Your {} differs from the download", local.display()));
+            }
+            return Ok((sha, None));
+        };
+        let tree = scratch.path().join("tree");
+        std::fs::create_dir(&tree)?;
+        line.phase("unpacking");
+        unpack(download.path(), kind, &tree, &file_name(url), &mut line)?;
+        Ok((sha, Some(tree)))
+    })();
+    drop(line);
+    renderer.shutdown_and_wait();
+    let (sha, tree) = fetched?;
+    input.url = Some(url.to_owned());
+    input.sha256 = Some(sha);
+    let Some(tree) = tree else { return Ok(notes) };
+    input.unpack = true;
+
+    // The member the knob points at, and with it the author's unpack
+    // directory: the knob's value without that member's path.
+    let members = regular_members(&tree)?;
+    let member = match how.member {
+        Some(m) => {
+            within(&tree, Path::new(m)).with_context(|| format!("The archive at {url} has no usable {m}"))?;
+            Some(m.to_owned())
+        }
+        None => how
+            .local
+            .and_then(|local| members.iter().filter(|m| local.ends_with(m)).max_by_key(|m| m.components().count()))
+            .map(|m| m.to_string_lossy().into_owned()),
+    };
+    let member = match member {
+        Some(m) => Some(m),
+        None if how.interactive => {
+            let answer = crate::commands::prompt_with_default(
+                &format!("Which file of the archive does knob {} point at? (empty: the unpacked folder)", input.knob),
+                "",
+            )?;
+            if !answer.is_empty() {
+                within(&tree, Path::new(&answer)).with_context(|| format!("The archive has no usable {answer}"))?;
+            }
+            Some(answer).filter(|a| !a.is_empty())
+        }
+        None => None,
+    };
+    let root = match (&member, how.local) {
+        (Some(m), Some(local)) if local.ends_with(m) => local.ancestors().nth(Path::new(m).components().count()),
+        (None, Some(local)) if local.is_dir() => Some(local),
+        _ => None,
+    };
+    input.path = member;
+    let Some(root) = root else {
+        notes.push(format!("Knob {}'s value here is not inside an unpacked copy of the archive; no fixups looked for", input.knob));
+        return Ok(notes);
+    };
+    let root_str = root.to_string_lossy().into_owned();
+    for member in &members {
+        if gix::interrupt::is_triggered() {
+            bail!("Interrupted");
+        }
+        let (theirs, mine) = (tree.join(member), root.join(member));
+        let (Ok(their_meta), Ok(my_meta)) = (std::fs::metadata(&theirs), std::fs::metadata(&mine)) else { continue };
+        let name = member.display();
+        if their_meta.len() > MAX_COMPARED || my_meta.len() > MAX_COMPARED {
+            if their_meta.len() != my_meta.len() {
+                notes.push(format!("Your copy of {name} differs from the archive's; not recorded"));
+            }
+            continue;
+        }
+        let (a, b) = (std::fs::read(&theirs)?, std::fs::read(&mine)?);
+        if a == b {
+            continue;
+        }
+        match line_fixups(&a, &b, &root_str) {
+            Some(lines) => {
+                let offered = lines.iter().map(|(from, to)| format!("    {from}  ->  {to}")).collect::<Vec<_>>().join("\n");
+                let take = !how.interactive
+                    || crate::commands::confirm(&format!(
+                        "Your {name} differs from the archive's:\n{offered}\nRecord this as a fixup relative to the unpacked folder? [y/N] "
+                    ))?;
+                if take {
+                    for (from, to) in lines {
+                        input.fixups.push(Fixup { file: member.to_string_lossy().into_owned(), replace: from, with: to });
+                    }
+                    notes.push(format!("Recorded a fixup of {name}"));
+                }
+            }
+            None => notes.push(format!("Your copy of {name} differs from the archive's in more than its paths; not recorded")),
+        }
+    }
+    Ok(notes)
+}
+
+/// Each regular file under `tree`, relative to it, reached through no link.
+fn regular_members(tree: &Path) -> Res<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let mut stack = vec![PathBuf::new()];
+    while let Some(rel) = stack.pop() {
+        for entry in std::fs::read_dir(tree.join(&rel))? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            let child = rel.join(entry.file_name());
+            if kind.is_dir() {
+                stack.push(child);
+            } else if kind.is_file() {
+                out.push(child);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// The fixups that turn the archive's text `theirs` into the author's `mine`,
+/// one whole line each: every line that differs must name the author's unpack
+/// directory `root` in the author's copy, which becomes `{dir}`. `None` when
+/// the copies differ any other way (not text, other lines added or removed,
+/// a change that is not the path, or text a fixup cannot hold).
+fn line_fixups(theirs: &[u8], mine: &[u8], root: &str) -> Option<Vec<(String, String)>> {
+    let (theirs, mine) = (std::str::from_utf8(theirs).ok()?, std::str::from_utf8(mine).ok()?);
+    let (a, b): (Vec<&str>, Vec<&str>) = (theirs.lines().collect(), mine.lines().collect());
+    if a.len() != b.len() {
+        return None;
+    }
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (from, to) in a.iter().zip(&b).filter(|(x, y)| x != y) {
+        if from.is_empty() || !to.contains(root) {
+            return None;
+        }
+        let with = to.replace(root, "{dir}");
+        if with.replace("{dir}", "").contains(['{', '}']) || from.contains(['{', '}']) {
+            return None;
+        }
+        if !out.iter().any(|(f, _)| f == from) {
+            out.push(((*from).to_owned(), with));
+        }
+    }
+    Some(out)
+}
+
 /// `cactup cache inputs`: each input in `dir` with its size, or with
 /// `clear`, every one removed — and whatever an interrupted import left
 /// (an `.unpacking-*` directory, a `.tmp*` download), which is listed as
@@ -957,6 +1143,67 @@ mod tests {
         let err = format!("{:#}", fetch(dir.path(), &through, &quiet()).unwrap_err());
         assert!(err.contains("not a directory of the archive"), "{err}");
         server.join().unwrap();
+    }
+
+    /// Only a line that differs by naming the author's directory is a
+    /// fixup; anything else is not, and the whole line is what is replaced.
+    #[test]
+    fn line_fixups_take_only_path_differences() {
+        let root = "/work/max/bhns";
+        let theirs = b"a = 1\neos = /path/to/gam2.polytrope\n";
+        let mine = b"a = 1\neos = /work/max/bhns/bhns_gw230529_ID/gam2.polytrope\n";
+        assert_eq!(
+            line_fixups(theirs, mine, root).unwrap(),
+            [("eos = /path/to/gam2.polytrope".to_owned(), "eos = {dir}/bhns_gw230529_ID/gam2.polytrope".to_owned())]
+        );
+        assert!(line_fixups(b"a = 1\n", b"a = 2\n", root).is_none(), "not a path change");
+        assert!(line_fixups(b"a\n", b"a\nb\n", root).is_none(), "a line added");
+        assert!(line_fixups(&[0xff, 0xfe], b"x", root).is_none(), "not text");
+        assert!(line_fixups(b"x = 1\n", b"x = /work/max/bhns/{y}\n", root).is_none(), "a brace a fixup cannot hold");
+    }
+
+    /// The pretty-bhns case from the author's side: the gallery tarball, and
+    /// the author's own unpacked copy with the placeholder replaced. The
+    /// knob's member and the fixup are found, and fetching the input as an
+    /// importer reproduces the author's edit in the importer's own tree.
+    #[test]
+    fn an_author_s_copy_becomes_path_and_fixup() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = gz(&gallery_tar());
+        let mine = dir.path().join("work/bhns");
+        std::fs::create_dir_all(mine.join("bhns_gw230529_ID")).unwrap();
+        let edited = format!("eos = {}/bhns_gw230529_ID/gam2.polytrope\nother = 1\n", mine.display());
+        std::fs::write(mine.join("bhns_gw230529_ID/X.info"), &edited).unwrap();
+        std::fs::write(mine.join("bhns_gw230529_ID/gam2.polytrope"), b"polytrope\n").unwrap();
+        let local = mine.join("bhns_gw230529_ID/X.info");
+
+        let (base, server) = serve(vec![("*", archive.clone())], 2);
+        let url = format!("{base}/bhns_gw230529_ID.tar.gz");
+        let mut input = Input {
+            knob: "kadath-initial-data".into(),
+            description: None,
+            url: None,
+            sha256: None,
+            unpack: false,
+            path: None,
+            fixups: vec![],
+        };
+        let how = Authoring { url: &url, local: Some(&local), member: None, interactive: false };
+        let notes = author(&dir.path().join("inputs"), &mut input, &how, &quiet()).unwrap();
+        server.join().unwrap();
+        assert!(input.unpack);
+        assert_eq!(input.sha256.as_deref(), Some(sha(&archive).as_str()));
+        assert_eq!(input.path.as_deref(), Some("bhns_gw230529_ID/X.info"));
+        assert_eq!(input.fixups.len(), 1, "{notes:?}");
+        assert_eq!(input.fixups[0].with, "eos = {dir}/bhns_gw230529_ID/gam2.polytrope");
+
+        let (base, server) = serve(vec![("*", archive.clone())], 2);
+        input.url = Some(format!("{base}/bhns_gw230529_ID.tar.gz"));
+        let value = fetch(&dir.path().join("importer"), &input, &quiet()).unwrap();
+        server.join().unwrap();
+        let tree = value.parent().unwrap().parent().unwrap();
+        let expected = format!("eos = {}/bhns_gw230529_ID/gam2.polytrope\nother = 1\n", tree.display());
+        assert_eq!(std::fs::read_to_string(&value).unwrap(), expected);
     }
 
     /// Every supported kind unpacks the same tree.
