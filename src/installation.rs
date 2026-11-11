@@ -44,9 +44,10 @@ pub static INSTALLATION: Format<Toml> = Format {
 };
 
 /// `simulations.toml`'s format. Entries are added and removed, never
-/// rewritten in place (`sim create` inserts a new name, `sim delete`
-/// removes one), so a key a newer binary put on an entry stays with it and
-/// nothing is replaced whole.
+/// rewritten in place: `sim create` inserts a new name, `sim delete` removes
+/// one, and `sim create -f` records the removal of the old entry before it
+/// inserts the new one of the same name. So a key a newer binary put on an
+/// entry stays with that entry, and nothing is replaced whole.
 pub static SIM_REGISTRY: Format<Toml> = Format {
     name: "simulation registry",
     key: "schema",

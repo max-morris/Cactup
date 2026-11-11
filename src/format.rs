@@ -309,6 +309,24 @@ pub fn read_for_write<T: DeserializeOwned, D: Document>(
     Ok((Some(value), OnDisk { state: DiskState::Parsed { version, doc } }))
 }
 
+/// Write `value` over `path` as a record made anew, not an edit of the one
+/// there: as [`write`] (a newer file refused, the version sticky), but with
+/// nothing put back — a key a newer binary added to the old record says
+/// nothing about this one. For a writer that builds the record from scratch
+/// where one may already be (a test re-run in the same directory).
+pub fn replace<T: Serialize + DeserializeOwned, D: Document>(path: &Path, value: &T, f: &Format<D>) -> Res<()> {
+    let state = match read_text(path, f)? {
+        None => DiskState::Absent,
+        Some(text) => match decode(&text, path, f) {
+            // The version only: an empty document gives put-back nothing.
+            Ok((version, _)) => DiskState::Parsed { version, doc: D::default() },
+            Err(e) if e.downcast_ref::<Newer>().is_some() => return Err(e),
+            Err(_) => DiskState::Unusable,
+        },
+    };
+    write_over(path, value, f, &OnDisk { state })
+}
+
 /// Write `value` to `path` as `f`: re-read the target, then [`write_over`].
 pub fn write<T: Serialize + DeserializeOwned, D: Document>(
     path: &Path,
@@ -851,6 +869,23 @@ mod tests {
 
     fn written(path: &Path) -> String {
         std::fs::read_to_string(path).unwrap()
+    }
+
+    /// `replace` writes a record made anew: the file's version stays, a newer
+    /// file is still refused, but nothing of the old record is put back.
+    #[test]
+    fn replace_keeps_the_version_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("toy.toml");
+        std::fs::write(&path, "schema = 2\nname = \"old\"\nextra = 1\n\n[sub]\nn = 0\nfuture = 3\n").unwrap();
+        let fresh = Toy { name: "new".into(), ..Toy::default() };
+        replace(&path, &fresh, &TOY).unwrap();
+        let text = written(&path);
+        assert!(text.starts_with("schema = 2\nname = \"new\"\n"), "{text}");
+        assert!(!text.contains("extra") && !text.contains("future"), "{text}");
+        std::fs::write(&path, "schema = 9\nname = \"x\"\n").unwrap();
+        assert!(format!("{:#}", replace(&path, &fresh, &TOY).unwrap_err()).contains("newer cactup"));
+        assert_eq!(written(&path), "schema = 9\nname = \"x\"\n");
     }
 
     /// Sticky versions: a write keeps the file's version unless the content

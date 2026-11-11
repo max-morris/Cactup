@@ -384,6 +384,10 @@ pub fn create(
                 .with_context(|| format!("Failed to remove old simulation at '{}'", old_dir.display()))?;
         }
         registry.simulations.shift_remove(name);
+        // Recorded now, under the same lock: the new entry of this name is
+        // then written over a registry without the old one, so none of the
+        // old entry's keys are put back onto it.
+        locked.set_simulations(&registry)?;
     }
     if dir.exists() {
         if force {

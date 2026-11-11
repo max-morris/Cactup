@@ -545,6 +545,18 @@ pub fn reap_stale(sim: &Simulation, sched: &Scheduler) -> Res<bool> {
 mod tests {
     use super::*;
 
+    /// A restart written by a newer cactup is refused when loaded, before a
+    /// run does anything with it.
+    #[test]
+    fn a_newer_restart_is_refused_at_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let rdir = restart_dir(dir.path(), 0);
+        std::fs::create_dir_all(rdir.join(".cactup")).unwrap();
+        std::fs::write(rdir.join(".cactup").join("restart.toml"), "schema = 2\nwhatever = \"a newer shape\"\n").unwrap();
+        let err = format!("{:#}", Restart::load(dir.path(), 0).err().expect("refused"));
+        assert!(err.contains("newer cactup") && err.contains("restart.toml"), "{err}");
+    }
+
     /// Every field set, every collection non-empty, and no `..`: a new field
     /// fails to compile here, and the shape pin then says what to do.
     fn exhaustive_sample() -> RestartMeta {

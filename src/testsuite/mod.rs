@@ -28,10 +28,12 @@ use std::path::{Path, PathBuf};
 
 /// `test.toml`'s format: version 1, no migrations. Read and written by the
 /// compute-node binary of a queued test run, so it is `frozen_read`: a
-/// breaking change ships its down-step. `vars` and `knobs` are open maps
-/// written whole at submit, and `[results]` is replaced whole by each new
-/// run's summary (a key from the previous run's record says nothing about
-/// the new one); `[timestamps]` and `[universe]` are edited in place.
+/// breaking change ships its down-step. A new run builds its record anew
+/// over the previous run's ([`TestRun::store_fresh`], nothing put back);
+/// after that a run's own writes edit it, `[timestamps]` and `[universe]` in
+/// place, while `[results]` is replaced whole by the run's summary. `vars`
+/// and `knobs` are open maps: every key in them is known, so listing them
+/// changes nothing but says how they are written.
 pub static TEST: Format<Toml> = Format {
     name: "test record",
     key: "schema",
@@ -249,6 +251,12 @@ impl TestRun {
 
     pub fn store_meta(&self) -> Res<()> {
         format::write(&Self::meta_path(&self.dir), &self.meta, &TEST)
+    }
+
+    /// The first store of a run's record, built anew where an earlier run of
+    /// the same name left its own: nothing of the old record is put back.
+    pub fn store_fresh(&self) -> Res<()> {
+        format::replace(&Self::meta_path(&self.dir), &self.meta, &TEST)
     }
 
     /// `log.txt` in the same `[LOG:…]` format as a simulation's (§11.5, §12).
