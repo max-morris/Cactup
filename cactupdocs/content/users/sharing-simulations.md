@@ -149,7 +149,8 @@ copy, if any, stays.
 ## The Cactarium
 
 cactup talks to `https://cactarium.cct.lsu.edu` unless the `cactarium-url`
-knob or the `CACTARIUM_URL` environment variable names another.
+knob or the `CACTARIUM_URL` environment variable names another
+(`cactup knob cactarium-url https://registry.example.org`).
 
 ### Signing in
 

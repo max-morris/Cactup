@@ -26,6 +26,25 @@ pub const DEFAULT_URL: &str = "https://cactarium.cct.lsu.edu";
 /// The knob naming another registry (a test instance, a mirror).
 pub const URL_KNOB: &str = "cactarium-url";
 
+/// Check a `cactarium-url` value: an `http(s)://host[:port][/path]` URL with
+/// no query or fragment, stored without a trailing slash. Plain http is
+/// accepted for a test instance on a private network.
+pub fn validate_url(value: &str) -> Res<String> {
+    let url = value.trim().trim_end_matches('/');
+    let parsed = (!url.contains(char::is_whitespace)).then(|| reqwest::Url::parse(url).ok()).flatten();
+    match parsed {
+        Some(p)
+            if matches!(p.scheme(), "http" | "https")
+                && p.host_str().is_some_and(|h| !h.is_empty())
+                && p.query().is_none()
+                && p.fragment().is_none() =>
+        {
+            Ok(url.to_owned())
+        }
+        _ => bail!("Invalid {URL_KNOB} \"{value}\": give the registry's address, like {DEFAULT_URL}"),
+    }
+}
+
 /// A connection to one registry: its base URL and, for writes, the token.
 pub struct Client {
     base: String,
@@ -498,6 +517,16 @@ mod tests {
         let (base, _) = serve_with(1, |_| ("200 OK", "api-generation: 99\r\n".into(), b"{}".to_vec()));
         let err = format!("{:#}", Client::at(&base).resolve("a/b").unwrap_err());
         assert!(err.contains("generation 99") && err.contains("cactup update"), "{err}");
+    }
+
+    #[test]
+    fn the_url_knob_takes_a_registry_address() {
+        assert_eq!(validate_url("https://cactarium.example.org/").unwrap(), "https://cactarium.example.org");
+        assert_eq!(validate_url(" http://localhost:8000 ").unwrap(), "http://localhost:8000");
+        for bad in ["cactarium.example.org", "ftp://x.org", "https://x.org/?a=1", "https://x.org/#f", "https:// x.org", ""] {
+            assert!(validate_url(bad).is_err(), "{bad}");
+        }
+        assert!(crate::database::knob_spec(URL_KNOB).is_some(), "a built-in knob");
     }
 
     #[test]

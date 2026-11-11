@@ -1976,14 +1976,17 @@ ordinal `0`–`4`, and is always rendered as the name (`cactup knob` shows
 `normal`, `database.json` holds `"2"`). `wisdom-kind` accepts and stores
 `relevant|all`.
 
-Additionally three **maintenance** knobs for distribution (D14, §17):
+Additionally four **maintenance** knobs for distribution and the registry (D14, §17, §8.10):
 `autoupdate` (`auto`, the default, `|notify|off`; read leniently — garbage
 means `auto`), `update-url` (https base of the site serving `latest.json` —
 plain `http://` only for a loopback host, `127.0.0.1`/`localhost`/`[::1]`,
 since what it serves is installed unasked; trailing `/` stripped; default
 `https://max-morris.github.io/Cactup`) and
 `mdb-url` (git URL whose `mdb` branch is synced; default
-`https://github.com/max-morris/Cactup.git`). Their `KnobSpec` has
+`https://github.com/max-morris/Cactup.git`) and `cactarium-url` (the
+registry's base URL, `http(s)://`, no query or fragment, trailing `/`
+stripped; default `https://cactarium.cct.lsu.edu`; `CACTARIUM_URL`
+outranks it, §8.10). Their `KnobSpec` has
 `snapshot = false`: they configure the cactup installation, not a job, so
 `knob_snapshot()` never freezes them into restart/build/test metadata.
 
