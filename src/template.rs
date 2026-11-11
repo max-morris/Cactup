@@ -511,10 +511,12 @@ impl Source {
                 // A knob a command-line flag also sets says so: `-a` is
                 // shorthand for `-K allocation=…`.
                 let flag = if arg == "allocation" { "-a VALUE or " } else { "" };
-                format!(
-                    "; set it with `cactup knob {arg} VALUE` (`-c` first for a new custom knob) or \
-                     pass {flag}-K {arg}=VALUE for this command"
-                )
+                // A standard knob always exists; only a custom one needs `-c`.
+                let create = match crate::database::knob_spec(arg) {
+                    Some(_) => "",
+                    None => " (`-c` first for a new custom knob)",
+                };
+                format!("; set it with `cactup knob {arg} VALUE`{create} or pass {flag}-K {arg}=VALUE for this command")
             }
         }
     }
@@ -1460,7 +1462,7 @@ mod tests {
         let mut empty = VarSet::new();
         empty.set_knobs(IndexMap::new());
         let err = empty.substitute("-A @KNOB(allocation)@", Syntax::Shell).unwrap_err().to_string();
-        assert!(err.contains("pass -a VALUE or -K allocation=VALUE"), "{err}");
+        assert!(err.contains("set it with `cactup knob allocation VALUE` or pass -a VALUE or -K allocation=VALUE"), "{err}");
     }
 
     #[test]

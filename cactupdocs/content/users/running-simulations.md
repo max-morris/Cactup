@@ -234,7 +234,16 @@ Specify an account or allocation to charge:
 cactup sim submit mysim -a my_project
 ```
 
-(The default allocation comes from the `allocation` knob if you've set one.)
+The default allocation comes from the `allocation` knob if you've set one.
+`-a my_project` is shorthand for `-K allocation=my_project` (see below): it
+outranks a simulation's own `allocation` knob and the one you set with
+`cactup knob`, and scripts see the same value whichever way it was given.
+Passing both `-a` and `-K allocation=` with different values is an error.
+
+Some machines refuse to submit without an allocation (their scheduler rejects
+a job that names none); there, cactup stops before anything is queued and
+tells you to pass `-a` or set the knob. On the others an unset allocation just
+leaves the account out of the job script.
 
 ### Job name
 

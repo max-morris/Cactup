@@ -2128,7 +2128,10 @@ fn prepare_with_cache(
     // Several machines' make commands / build universes reference
     // @ALLOCATION@ (e.g. mike's and Deep Bayou's `srun … singularity exec`
     // build wrappers); bind it from the allocation knob the way the sim path
-    // does, empty when unset.
+    // does, empty when unset. The snapshot carries the command's overlay, so
+    // `build -a ACCOUNT` / `build submit -a ACCOUNT` reach it (§5.1), and it
+    // is frozen here, on the login node, for the wrapper `execute` renders
+    // on the compute node from `build.toml` alone (D11).
     let db = crate::database::Db::open().and_then(|db| db.read());
     // Resolve @USER@/@ENV()@ in scratch-home (§4.2), the user's knob over
     // the machine's — the raw template would otherwise leak `@USER@`

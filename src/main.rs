@@ -118,11 +118,10 @@ fn main() -> Res<()> {
     }
     let args = Args::parse_from(argv);
     shell::set_trace(args.globals.trace);
-    // The `-K` overlay (§5.1): every DB snapshot this command reads carries
-    // these values, nothing persists them.
-    database::set_knob_overrides(
-        args.globals.knob.iter().map(|k| (k.name.clone(), k.value.clone())).collect(),
-    );
+    // The `-K` overlay (§5.1), `-a` included: every DB snapshot this command
+    // reads carries these values, nothing persists them. A `-a`/`-K
+    // allocation=` disagreement stops the command here, before anything runs.
+    database::set_knob_overrides(args.knob_overlay()?);
 
     let ctx = Ctx {
         globals: args.globals,

@@ -208,7 +208,11 @@ pub fn resolve_topology(
         gpus_per_task,
         scheduler_queue: machine.meta.scheduler_queue_name(&queue)?.to_owned(),
         queue,
-        allocation: flags.allocation.clone().or_else(|| db.knob("allocation").map(str::to_owned)),
+        // `-a` reaches here through the knob overlay it is shorthand for
+        // (`Args::knob_overlay`, §5.1), never as a flag of its own, so
+        // @ALLOCATION@ and @KNOB(allocation)@ can never disagree. A
+        // simulation's own knob is laid over this by `sim::start`.
+        allocation: db.knob("allocation").filter(|a| !a.is_empty()).map(str::to_owned),
         mail: flags.mail.clone().or_else(|| db.knob("mail").map(str::to_owned)),
         mail_type: flags
             .mail_type
