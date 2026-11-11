@@ -233,6 +233,21 @@ pub fn resolve_topology(
 ) -> Res<Topology> {
     let m = &machine.name;
 
+    // `-a` is shorthand for `-K allocation=` (§5.1): `main` lays it into the
+    // knob overlay every snapshot carries, which is what the allocation is
+    // read from below. A flag the overlay never saw (a path that bypassed
+    // `Args::knob_overlay`) would be silently dropped, so it is refused.
+    let knob_allocation = db.knob("allocation").filter(|a| !a.is_empty());
+    if let Some(flag) = flags.allocation.as_deref().filter(|a| !a.is_empty())
+        && knob_allocation != Some(flag)
+    {
+        bail!(
+            "Internal error: --allocation {flag} did not reach the allocation knob for this command ({}); \
+             pass -K allocation={flag} instead",
+            knob_allocation.unwrap_or("unset")
+        );
+    }
+
     // The config's build universe gates which queues (and scripts) are
     // reachable (§4.4); configs recording none run in the implicit host.
     let cfg_universe = fit.map(|f| f.universe.as_deref().unwrap_or(HOST_UNIVERSE));
@@ -322,7 +337,7 @@ pub fn resolve_topology(
         // (`Args::knob_overlay`, §5.1), never as a flag of its own, so
         // @ALLOCATION@ and @KNOB(allocation)@ can never disagree. A
         // simulation's own knob is laid over this by `sim::start`.
-        allocation: db.knob("allocation").filter(|a| !a.is_empty()).map(str::to_owned),
+        allocation: knob_allocation.map(str::to_owned),
         mail: flags.mail.clone().or_else(|| db.knob("mail").map(str::to_owned)),
         mail_type: flags
             .mail_type

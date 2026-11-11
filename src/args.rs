@@ -265,7 +265,8 @@ impl Args {
         if let Some(account) = self.command.topology().and_then(|t| t.allocation.as_deref()) {
             match overlay.get("allocation") {
                 Some(other) if other != account => anyhow::bail!(
-                    "-a {account} and -K allocation={other} disagree; give the allocation one way"
+                    // `--allocation`: `cactup import` spells it only that way.
+                    "--allocation {account} and -K allocation={other} disagree; give the allocation one way"
                 ),
                 _ => {
                     overlay.insert("allocation".to_owned(), account.to_owned());
@@ -883,6 +884,8 @@ impl Commands {
             Commands::Sim(SimCommand::Submit(start)) => Some(&start.topology),
             Commands::Sim(SimCommand::Run(run)) => Some(&run.start.topology),
             Commands::Test(TestCommand::Run(start) | TestCommand::Submit(start)) => Some(&start.topology),
+            // What import passes to the `sim submit`/`sim run` it starts.
+            Commands::Import(args) => Some(&args.topology),
             _ => None,
         }
     }
@@ -1877,7 +1880,19 @@ mod tests {
         let err = overlay(&["cactup", "-K", "allocation=other", "sim", "submit", "s", "-a", "acct"])
             .unwrap_err()
             .to_string();
-        assert!(err.contains("-a acct") && err.contains("-K allocation=other"), "{err}");
+        assert!(err.contains("--allocation acct") && err.contains("-K allocation=other"), "{err}");
+        // `cactup import` passes its --allocation to the sim it starts, so
+        // the same holds there (where `-a` is the alias, not the account).
+        assert_eq!(alloc(&["cactup", "import", "s.sim", "--submit", "--allocation", "acct"]).as_deref(), Some("acct"));
+        assert_eq!(alloc(&["cactup", "import", "s.sim", "--submit", "-a", "mine"]), None);
+        assert_eq!(
+            alloc(&["cactup", "-K", "allocation=acct", "import", "s.sim", "--submit", "--allocation", "acct"]).as_deref(),
+            Some("acct")
+        );
+        let err = overlay(&["cactup", "-K", "allocation=other", "import", "s.sim", "--submit", "--allocation", "acct"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--allocation acct") && err.contains("-K allocation=other"), "{err}");
     }
 
     #[test]

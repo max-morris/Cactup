@@ -2040,7 +2040,10 @@ For any value that can come from several places (mirrors `simfactory-docs.txt`
    overlay (`Args::knob_overlay`), so `@ALLOCATION@` and `@KNOB(allocation)@`
    can never disagree. The two spellings are equally explicit, so one command
    giving both with different values is refused before anything runs, naming
-   both; the same value both ways is fine.
+   both; the same value both ways is fine. `cactup import`'s `--allocation`
+   (long only: its `-a` is `--alias`) joins the overlay the same way, for the
+   `sim submit`/`sim run` it starts. `resolve_topology` refuses an
+   `--allocation` that did not reach the overlay rather than drop it.
 3. Knob.
 4. Machine `meta.toml` value / default.
 5. Built-in default.

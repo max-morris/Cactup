@@ -118,17 +118,14 @@ pub fn dispatch(ctx: &Ctx, args: ImportArgs) -> Res<()> {
     }
 
     // 5. Started, or the command that starts it.
-    let topology = start_args(&sim_file, &args);
     if args.submit || args.run {
-        let verb = if args.submit { "submit" } else { "run" };
-        let mut command = vec!["sim".to_owned(), verb.to_owned(), sim_name.clone()];
-        command.extend(topology);
-        match parse(&command)? {
+        match started_command(&sim_file, &args, &sim_name)? {
             Commands::Sim(SimCommand::Submit(start)) => crate::sim::start::submit(&ctx, start),
             Commands::Sim(SimCommand::Run(run)) => crate::sim::start::run(&ctx, run),
             _ => unreachable!("parsed as sim submit/run"),
         }
     } else {
+        let topology = start_args(&sim_file, &args);
         let words = ["cactup", "-I", alias.as_str(), "sim", "submit", sim_name.as_str()]
             .into_iter()
             .map(str::to_owned)
@@ -537,6 +534,18 @@ fn start_args(sim: &SimFile, args: &ImportArgs) -> Vec<String> {
     words
 }
 
+/// The `sim submit` (with `--submit`) or `sim run` (with `--run`) that
+/// import starts for simulation `sim_name`, parsed like a typed command.
+/// Its `--allocation` was laid into this command's knob overlay with the
+/// rest of import's flags (`Commands::topology`, §5.1), so the started
+/// command sees it as the allocation knob.
+pub(crate) fn started_command(sim: &SimFile, args: &ImportArgs, sim_name: &str) -> Res<Commands> {
+    let verb = if args.submit { "submit" } else { "run" };
+    let mut command = vec!["sim".to_owned(), verb.to_owned(), sim_name.to_owned()];
+    command.extend(start_args(sim, args));
+    parse(&command)
+}
+
 /// Parse a cactup command line (without the program name), so the steps
 /// import chains get every default exactly as typed commands would.
 fn parse(words: &[String]) -> Res<Commands> {
@@ -837,6 +846,12 @@ mod tests {
         assert_eq!((args.alias.as_deref(), args.topology.allocation.as_deref()), (Some("mine"), None));
         let args = parse_import(&["--allocation".to_owned(), "acct".to_owned()]).unwrap();
         assert_eq!((args.alias.as_deref(), args.topology.allocation.as_deref()), (None, Some("acct")));
+        // Passed through like the rest, --allocation is also, as `-a` is
+        // elsewhere, this command's allocation knob (`Commands::topology`):
+        // the started command's resolve_topology reads it from there.
+        let argv = ["cactup", "import", "s.sim", "--submit", "--allocation", "acct"];
+        let overlay = Args::try_parse_from(argv).unwrap().knob_overlay().unwrap();
+        assert_eq!(overlay.get("allocation").map(String::as_str), Some("acct"));
     }
 
     /// `import` takes everything `sim submit` and `sim run` take, but for

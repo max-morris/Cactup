@@ -2135,6 +2135,90 @@ mod tests {
         assert_eq!(frozen(&with_k, &sim), all("cli_acct"), "-K allocation= the same");
     }
 
+    /// `cactup import x.sim --submit --allocation acct` on a machine that
+    /// requires an account: import's --allocation joins the knob overlay as
+    /// main installs it (`Args::knob_overlay`, through `Commands::topology`),
+    /// and the `sim submit` import starts renders it into the account line.
+    /// Without it the same submit refuses.
+    #[test]
+    fn imports_allocation_reaches_the_account_line() {
+        use crate::args::{Args, Commands, SimCommand};
+        use cactup_ecosystem_common::sim::{Parfile, ParfileKind, SimFile, SimMeta, ThornlistText};
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        fs::write(
+            machine.dir.join("submitscripts/default.sh"),
+            "#!/bin/sh\n#PBS -A @KNOB(allocation)@\nexec @CACTUP@ sim run @SIMULATION_NAME@ --installation=@ALIAS@ \
+             --sim-dir=@SIMULATION_DIR@ --machine=@MACHINE@ --restart-id=@RESTART_ID@\n",
+        )
+        .unwrap();
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        let parfile = tmp.path().join("bbh.par");
+        fs::write(&parfile, "A::b = 1\n").unwrap();
+        let sim = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
+        let sim_file = SimFile {
+            format: cactup_ecosystem_common::SIM_FORMAT,
+            sim: SimMeta {
+                name: "bbh".into(),
+                summary: None,
+                description: None,
+                authors: vec![],
+                license: None,
+                contact: None,
+                cactarium: None,
+                root: "Cactus".into(),
+            },
+            thornlist: ThornlistText { filename: "bbh.th".into(), text: String::new(), untracked: vec![] },
+            parfile: Parfile { filename: "bbh.par".into(), kind: ParfileKind::Par, vars: vec![], text: String::new() },
+            inputs: vec![],
+            repos: vec![],
+            run: None,
+            provenance: None,
+        };
+        // What main does with the command line, then what import does.
+        let import = |argv: &[&str]| {
+            let args = <Args as clap::Parser>::try_parse_from(argv).unwrap();
+            let mut db = ctx.db.read().unwrap();
+            db.apply_overlay(&args.knob_overlay().unwrap());
+            let Commands::Import(import) = args.command else { panic!("not an import") };
+            let Commands::Sim(SimCommand::Submit(start)) =
+                crate::commands::import::started_command(&sim_file, &import, "bbh").unwrap()
+            else {
+                panic!("not a sim submit")
+            };
+            submit_impl(&inst, &machine, &db, &sim, &start, false, Some("testhost"))
+        };
+
+        let err = import(&["cactup", "import", "bbh.sim", "--submit"]).unwrap_err();
+        assert!(format!("{err:#}").contains("pass -a VALUE or -K allocation=VALUE"), "{err:#}");
+        assert!(restart::list_ids(&sim.dir).unwrap().is_empty(), "the refusal left nothing");
+
+        import(&["cactup", "import", "bbh.sim", "--submit", "--allocation", "acct"]).unwrap();
+        let id = *restart::list_ids(&sim.dir).unwrap().last().unwrap();
+        let script = fs::read_to_string(restart::restart_dir(&sim.dir, id).join(".cactup/submit-script")).unwrap();
+        assert!(script.lines().any(|l| l == "#PBS -A acct"), "{script}");
+    }
+
+    /// The overlay is the one way `-a` reaches a command: a flag it never
+    /// saw is refused rather than silently dropped.
+    #[test]
+    fn an_allocation_flag_the_overlay_never_saw_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        let parfile = tmp.path().join("bbh.par");
+        fs::write(&parfile, "A::b = 1\n").unwrap();
+        let sim = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
+        let mut args = start_args("bbh", "1:00:00");
+        args.topology.allocation = Some("acct".to_owned());
+        let db = ctx.db.read().unwrap();
+        let err = submit_impl(&inst, &machine, &db, &sim, &args, false, Some("testhost")).unwrap_err();
+        assert!(format!("{err:#}").contains("--allocation acct did not reach the allocation knob"), "{err:#}");
+        assert!(restart::list_ids(&sim.dir).unwrap().is_empty());
+    }
+
     /// The account directive of a scheduler header line (`#SBATCH -A x`,
     /// `#SBATCH --account=x`, `#PBS -A x`), as its value — `Some("")` when
     /// the directive is there with nothing after it.
