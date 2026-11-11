@@ -1179,12 +1179,15 @@ pub(crate) enum SimCommand {
     /// Make a .sim file from a thornlist and a parfile, pinning each repo to what an installation fetched (-I) or to each branch's tip today
     Pack(SimPackArgs),
     // §8.10
-    /// Publish a .sim file to the Cactarium as the next version of owner/name
+    /// Publish a .sim file to the Cactarium as a version of owner/name
     Publish {
         /// The .sim file; it must be fully specified.
         file: PathBuf,
         /// Where to publish it: owner/name.
         target: String,
+        /// The version to publish it as, X.Y.Z (default: the next major version).
+        #[clap(long, value_name = "X.Y.Z")]
+        version: Option<String>,
     },
     // §8.9
     /// Unpack a .sim file into a thornlist (its pins as !REPO_COMMIT) and a parfile

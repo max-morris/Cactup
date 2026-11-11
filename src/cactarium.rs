@@ -130,15 +130,15 @@ impl Client {
 
     /// Download sim file `owner/name@number` to `dest`, checked against the
     /// hash the server sends with it.
-    pub fn download_sim(&self, owner: &str, name: &str, number: u32, dest: &Path) -> Res<()> {
-        let url = self.url(&format!("/sims/{owner}/{name}/{number}/download"));
+    pub fn download_sim(&self, owner: &str, name: &str, version: &str, dest: &Path) -> Res<()> {
+        let url = self.url(&format!("/sims/{owner}/{name}/{version}/download"));
         let response = self.send(crate::fetch::download::client().get(&url))?;
         let expected = response.headers().get(SHA256_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
         let bytes = response.bytes().with_context(|| format!("Failed to download {url}"))?;
         if let Some(expected) = expected {
             let actual = sha256_hex(&bytes);
             if !actual.eq_ignore_ascii_case(&expected) {
-                bail!("The download of {owner}/{name}@{number} has SHA-256 {actual}, but the registry says {expected}");
+                bail!("The download of {owner}/{name}@{version} has SHA-256 {actual}, but the registry says {expected}");
             }
         }
         let dir = dest.parent().unwrap_or(Path::new("."));
@@ -150,11 +150,16 @@ impl Client {
         Ok(())
     }
 
-    /// Publish a `.sim` file's bytes as the next version of sim `owner/name`.
-    pub fn publish_sim(&self, owner: &str, name: &str, body: Vec<u8>) -> Res<Published> {
+    /// Publish a `.sim` file's bytes as version `version` of sim
+    /// `owner/name` (`X.Y.Z`), or, without one, as the next major version.
+    pub fn publish_sim(&self, owner: &str, name: &str, body: Vec<u8>, version: Option<&str>) -> Res<Published> {
         let token = token_for(&self.base)?;
+        let path = match version {
+            Some(v) => format!("/sims/{owner}/{name}?version={}", query_escape(v)),
+            None => format!("/sims/{owner}/{name}"),
+        };
         let request = crate::fetch::download::client()
-            .post(self.url(&format!("/sims/{owner}/{name}")))
+            .post(self.url(&path))
             .bearer_auth(token)
             .header("content-type", "application/toml")
             .body(body);
@@ -455,13 +460,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let good = sha256_hex(b"format = 1\n");
         let (base, _) = serve_with(2, move |path| {
-            let hash = if path.contains("/1/") { good.clone() } else { "0".repeat(64) };
+            let hash = if path.contains("/1.0.0/") { good.clone() } else { "0".repeat(64) };
             ("200 OK", format!("x-sha256: {hash}\r\n"), b"format = 1\n".to_vec())
         });
         let client = Client::at(&base);
-        client.download_sim("o", "n", 1, &tmp.path().join("ok.sim")).unwrap();
+        client.download_sim("o", "n", "1.0.0", &tmp.path().join("ok.sim")).unwrap();
         assert_eq!(std::fs::read_to_string(tmp.path().join("ok.sim")).unwrap(), "format = 1\n");
-        let err = format!("{:#}", client.download_sim("o", "n", 2, &tmp.path().join("bad.sim")).unwrap_err());
+        let err = format!("{:#}", client.download_sim("o", "n", "2.0.0", &tmp.path().join("bad.sim")).unwrap_err());
         assert!(err.contains("SHA-256"), "{err}");
         assert!(!tmp.path().join("bad.sim").exists());
     }

@@ -661,7 +661,7 @@ fn inputs(parfile: &Parfile) -> Vec<Input> {
     refs.knobs
         .into_iter()
         .filter(|k| !k.optional && !KNOWN_KNOBS.iter().any(|s| s.name == k.name))
-        .map(|k| Input { knob: k.name, description: None, url: None, sha256: None, unpack: false, path: None, fixups: vec![] })
+        .map(|k| Input { knob: k.name, description: None, url: None, sha256: None, unpack: false, path: None, fixups: vec![], repo_file: None })
         .collect()
 }
 

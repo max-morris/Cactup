@@ -48,7 +48,8 @@ pub fn dispatch(ctx: &Ctx, args: ImportArgs) -> Res<()> {
     let interactive = !args.yes && std::io::stdin().is_terminal();
 
     // 1. The inputs, before anything long runs.
-    let knobs = settle_inputs(ctx, &sim_file.inputs, &args.inputs, interactive, args.yes)?;
+    let repo = repo_source(ctx, &sim_file, &args.inputs)?;
+    let knobs = settle_inputs(ctx, &sim_file.inputs, &args.inputs, interactive, args.yes, repo.as_ref())?;
 
     // 2. The sources, at their pins.
     if let Some(alias) = &existing {
@@ -254,21 +255,24 @@ fn differences(inst: &Installation, sim: &SimFile) -> Res<Vec<String>> {
 /// the registry sends.
 fn download_published(ctx: &Ctx, req: &str) -> Res<PathBuf> {
     use cactup_ecosystem_common::slug::Slug;
-    let slug: Slug = req.parse().map_err(|e| anyhow!("\"{req}\" is neither a file nor a sim (owner/name[@N]): {e}"))?;
+    let slug: Slug =
+        req.parse().map_err(|e| anyhow!("\"{req}\" is neither a file nor a sim (owner/name[@version]): {e}"))?;
     let client = crate::cactarium::Client::new(&ctx.db.read()?);
     let (owner, name) = (slug.owner.as_str(), slug.name.as_str());
-    let cached = |n: u32| crate::CACTUP_ROOT.join("simfiles").join(owner).join(name).join(format!("{n}.sim"));
-    // Resolved even for an exact `@N`: that is how a yanked version is told.
-    // An exact version already downloaded still imports offline, its yank
-    // status unknown.
-    let resolved = match (client.resolve(req), slug.number().map_err(|e| anyhow!("{e}"))?) {
+    let cached = |version: &str| crate::CACTUP_ROOT.join("simfiles").join(owner).join(name).join(format!("{version}.sim"));
+    // An exact version (`@=1.0.1`, or `@1.0.1` written out in full).
+    let exact = slug.at.as_deref().map(|at| at.trim_start_matches('=')).filter(|v| v.split('.').count() == 3);
+    // Resolved even for an exact version: that is how a yanked version is
+    // told. An exact version already downloaded still imports offline, its
+    // yank status unknown.
+    let resolved = match (client.resolve(req), exact) {
         (Ok(resolved), _) => resolved,
-        (Err(e), Some(n)) if cached(n).is_file() => {
+        (Err(e), Some(v)) if cached(v).is_file() => {
             println!(
                 "{}",
                 format!("Could not ask the Cactarium about {req} ({e:#}); using the copy downloaded before").dimmed()
             );
-            return Ok(cached(n));
+            return Ok(cached(v));
         }
         (Err(e), _) => return Err(e),
     };
@@ -276,15 +280,14 @@ fn download_published(ctx: &Ctx, req: &str) -> Res<PathBuf> {
         bail!("{} is a {}, not a sim", resolved.slug, resolved.kind);
     }
     crate::cactarium::warn_if_yanked(&resolved.slug, &resolved.version);
-    let number: u32 = resolved
-        .version
-        .version
-        .parse()
-        .map_err(|_| anyhow!("The Cactarium named sim version \"{}\"", resolved.version.version))?;
-    let dest = cached(number);
+    let version = resolved.version.version.clone();
+    if version.is_empty() || !version.bytes().all(|b| b.is_ascii_alphanumeric() || b".-+".contains(&b)) {
+        bail!("The Cactarium named sim version \"{}\"", version.escape_debug());
+    }
+    let dest = cached(&version);
     if !dest.is_file() {
-        client.download_sim(owner, name, number, &dest)?;
-        println!("Downloaded {owner}/{name}@{number} from {}", client.base());
+        client.download_sim(owner, name, &version, &dest)?;
+        println!("Downloaded {owner}/{name}@{version} from {}", client.base());
     }
     Ok(dest)
 }
@@ -313,11 +316,11 @@ pub fn login(ctx: &Ctx, token: Option<String>) -> Res<()> {
 /// `cactup sim publish <file.sim> <owner/name>` (§8.10): only a fully
 /// specified file — every repo pinned, nothing dirty or untracked — since
 /// the registry's promise is that anyone can reproduce it.
-pub fn publish(ctx: &Ctx, file: &std::path::Path, target: &str) -> Res<()> {
+pub fn publish(ctx: &Ctx, file: &std::path::Path, target: &str, version: Option<&str>) -> Res<()> {
     use cactup_ecosystem_common::slug::Slug;
     let slug: Slug = target.parse().map_err(|e| anyhow!("\"{target}\" is not owner/name: {e}"))?;
     if slug.at.is_some() || slug.thorn.is_some() {
-        bail!("Publish to owner/name; the Cactarium numbers the version");
+        bail!("Publish to owner/name, with --version X.Y.Z to choose the version");
     }
     let text = std::fs::read_to_string(file).with_context(|| format!("Failed to read '{}'", file.display()))?;
     let sim = SimFile::from_toml(&text).map_err(|e| anyhow!("'{}': {e}", file.display()))?;
@@ -327,7 +330,7 @@ pub fn publish(ctx: &Ctx, file: &std::path::Path, target: &str) -> Res<()> {
         bail!("'{}' is not fully specified, so it cannot be published: {}", file.display(), what.join("; "));
     }
     let client = crate::cactarium::Client::new(&ctx.db.read()?);
-    let published = client.publish_sim(slug.owner.as_str(), slug.name.as_str(), text.into_bytes())?;
+    let published = client.publish_sim(slug.owner.as_str(), slug.name.as_str(), text.into_bytes(), version)?;
     print_published(&published);
     for warning in &published.warnings {
         println!("{}", warning.yellow());
@@ -411,12 +414,33 @@ fn print_published(published: &cactup_ecosystem_common::api::Published) {
 /// the user's global knob has a value takes the global value at submit (the
 /// simulation records nothing for it); one with neither is an error now,
 /// not at submit.
+/// Where the `.sim`'s `repo-file` inputs come from, when it has any not
+/// given with `--input`: the repository the Cactarium publishes it from, at
+/// the commit of the version its `cactarium` stamp names.
+fn repo_source(ctx: &Ctx, sim: &SimFile, given: &[String]) -> Res<Option<crate::inputs::RepoSource>> {
+    let given_knob = |knob: &str| given.iter().any(|g| g.split_once('=').is_some_and(|(k, _)| k == knob));
+    let Some(first) = sim.inputs.iter().find(|i| i.repo_file.is_some() && !given_knob(&i.knob)) else { return Ok(None) };
+    let Some(slug) = &sim.sim.cactarium else {
+        bail!(
+            "Input {} is a file of the simulation's own repository, and this .sim names no Cactarium version to find \
+             that repository by; import it as owner/name, or give it with --input {}=VALUE",
+            first.knob,
+            first.knob
+        );
+    };
+    let resolved = crate::cactarium::Client::new(&ctx.db.read()?).resolve(&slug.to_string())?;
+    let url = resolved.url.ok_or_else(|| anyhow!("The Cactarium names no repository for {slug}"))?;
+    let commit = resolved.version.commit.ok_or_else(|| anyhow!("The Cactarium names no commit for {slug}"))?;
+    Ok(Some(crate::inputs::RepoSource { url, commit }))
+}
+
 fn settle_inputs(
     ctx: &Ctx,
     inputs: &[Input],
     given: &[String],
     interactive: bool,
     yes: bool,
+    repo: Option<&crate::inputs::RepoSource>,
 ) -> Res<IndexMap<String, String>> {
     let mut given_values = IndexMap::new();
     for pair in given {
@@ -439,12 +463,12 @@ fn settle_inputs(
         let what = input.description.as_deref().map(|d| format!(" ({d})")).unwrap_or_default();
         let value = if let Some(value) = given_values.shift_remove(&input.knob) {
             Some(value)
-        } else if input.url.is_some() {
+        } else if input.url.is_some() || input.repo_file.is_some() {
             println!("Input {}{what}", input.knob.bold());
             if dir.is_none() {
                 dir = Some(crate::inputs::inputs_dir(ctx)?);
             }
-            let value = crate::inputs::fetch(dir.as_deref().expect("set above"), input, &policy)
+            let value = crate::inputs::fetch(dir.as_deref().expect("set above"), input, &policy, repo)
                 .with_context(|| format!("Failed to fetch input {}", input.knob))?;
             println!("  {} = {}", input.knob, value.display());
             Some(value.display().to_string())
@@ -598,6 +622,7 @@ mod tests {
             unpack: false,
             path: None,
             fixups: vec![],
+            repo_file: None,
         }
     }
 
@@ -610,7 +635,7 @@ mod tests {
         let ctx = ctx(tmp.path());
         let inputs = [input("kadath-initial-data"), input("eos-table")];
 
-        let err = format!("{:#}", settle_inputs(&ctx, &inputs, &[], false, false).unwrap_err());
+        let err = format!("{:#}", settle_inputs(&ctx, &inputs, &[], false, false, None).unwrap_err());
         assert!(
             err.contains("kadath-initial-data") && err.contains("eos-table") && err.contains("--input"),
             "{err}"
@@ -623,13 +648,13 @@ mod tests {
             })
             .unwrap();
         let knobs =
-            settle_inputs(&ctx, &inputs, &["kadath-initial-data=/id/bhns.info".to_owned()], false, false)
+            settle_inputs(&ctx, &inputs, &["kadath-initial-data=/id/bhns.info".to_owned()], false, false, None)
                 .unwrap();
         assert_eq!(knobs.len(), 1, "the global eos-table is used as is, not copied: {knobs:?}");
         assert_eq!(knobs["kadath-initial-data"], "/id/bhns.info");
 
         let err =
-            format!("{:#}", settle_inputs(&ctx, &inputs, &["nope=1".to_owned()], false, false).unwrap_err());
+            format!("{:#}", settle_inputs(&ctx, &inputs, &["nope=1".to_owned()], false, false, None).unwrap_err());
         assert!(err.contains("no input nope"), "{err}");
     }
 

@@ -91,9 +91,19 @@ impl SizePolicy {
 /// progress for the whole input, named for its knob (downloading, checking,
 /// unpacking), left in the scrollback as one green line saying what
 /// happened; a size question comes first, before anything is drawn.
-pub fn fetch(dir: &Path, input: &Input, policy: &SizePolicy) -> Res<PathBuf> {
+pub fn fetch(dir: &Path, input: &Input, policy: &SizePolicy, repo: Option<&RepoSource>) -> Res<PathBuf> {
+    if let Some(file) = &input.repo_file {
+        let repo = repo.ok_or_else(|| {
+            anyhow!(
+                "Input {} is a file of the simulation's own repository ({file}); cactup fetches it only for a \
+                 simulation the Cactarium publishes from its repository: import it as owner/name",
+                input.knob
+            )
+        })?;
+        return fetch_from_repo(dir, input, file, repo);
+    }
     let url = input.url.as_deref().ok_or_else(|| anyhow!("Input {} has no URL to fetch", input.knob))?;
-    if let Some(done) = already_fetched(dir, input, url)? {
+    if let Some(done) = already_fetched(dir, input, url, input.sha256.as_deref().unwrap_or(""))? {
         return Ok(done);
     }
     let limit = confirm_size(url, policy)?;
@@ -102,7 +112,16 @@ pub fn fetch(dir: &Path, input: &Input, policy: &SizePolicy) -> Res<PathBuf> {
     let layout = crate::progress::Layout::for_names([input.knob.as_str()]);
     let mut line = crate::progress::Line::counting(progress.add_child(input.knob.clone()), &input.knob, layout);
     let fetched = if input.unpack {
-        unpacked(dir, input, url, limit, &mut line)
+        let expected = input.sha256.as_deref().unwrap_or("");
+        unpacked(dir, input, expected, url, &mut line, |trees, line| {
+            let archive = download(trees, url, limit, line)?;
+            line.phase("checking");
+            let actual = crate::update::sha256_hex_counting(archive.path(), line)?;
+            if !actual.eq_ignore_ascii_case(expected) {
+                bail!("The download of {url} has SHA-256 {actual}, but the .sim records {expected}; nothing was unpacked");
+            }
+            Ok(archive.into_temp_path())
+        })
     } else {
         fetch_file(dir, url, input.sha256.as_deref(), limit, &mut line)
     };
@@ -118,16 +137,61 @@ pub fn fetch(dir: &Path, input: &Input, policy: &SizePolicy) -> Res<PathBuf> {
     Ok(value)
 }
 
+/// Where a simulation's `repo-file` inputs come from: the repository the
+/// Cactarium publishes it from, at the version's commit.
+pub struct RepoSource {
+    pub url: String,
+    pub commit: String,
+}
+
+/// A `repo-file` input: that file of the simulation's repository at its
+/// commit (which pins the content: no hash), kept at
+/// `<dir>/repo/<commit>/<path>`, or unpacked like an archive download.
+fn fetch_from_repo(dir: &Path, input: &Input, file: &str, repo: &RepoSource) -> Res<PathBuf> {
+    let identity = format!("repo:{}:{file}", repo.commit);
+    let kept = dir.join("repo").join(&repo.commit).join(file);
+    if !input.unpack && kept.is_file() {
+        return Ok(kept);
+    }
+    if input.unpack
+        && let Some(done) = already_fetched(dir, input, file, &identity)?
+    {
+        return Ok(done);
+    }
+    let (progress, renderer) =
+        crate::manifest::setup_prodash_with(Some(crate::manifest::progress_level_filter(1)), true);
+    let layout = crate::progress::Layout::for_names([input.knob.as_str()]);
+    let mut line = crate::progress::Line::over(progress.add_child(input.knob.clone()), &input.knob, layout);
+    let fetched = if input.unpack {
+        unpacked(dir, input, &identity, file, &mut line, |trees, line| {
+            line.phase("fetching");
+            let temp = tempfile::NamedTempFile::new_in(trees).context("Failed to create a file for the archive")?.into_temp_path();
+            crate::fetch::git::file_at_commit(&repo.url, &repo.commit, file, &temp, line)?;
+            Ok(temp)
+        })
+    } else {
+        line.phase("fetching");
+        crate::fetch::git::file_at_commit(&repo.url, &repo.commit, file, &kept, &mut line)
+            .map(|()| (kept.clone(), format!("fetched {file} at {}", &repo.commit[..12.min(repo.commit.len())])))
+    };
+    if let Ok((_, done)) = &fetched {
+        line.succeeded(done.clone());
+    }
+    drop(line);
+    renderer.shutdown_and_wait();
+    fetched.map(|(value, _)| value)
+}
+
 /// The input's value if a finished copy is already in `dir`: a file input
 /// at its hash, an archive's tree with its completion marker and `path`. An
 /// incomplete tree (a scratch purge removes files, not directories, or a
 /// crash came before the marker) is removed, to be made again.
-fn already_fetched(dir: &Path, input: &Input, url: &str) -> Res<Option<PathBuf>> {
+fn already_fetched(dir: &Path, input: &Input, url: &str, identity: &str) -> Res<Option<PathBuf>> {
     if !input.unpack {
         let cached = input.sha256.as_deref().map(|h| dir.join(h.to_ascii_lowercase()).join(file_name(url)));
         return Ok(cached.filter(|c| c.is_file()));
     }
-    let tree = dir.join("unpacked").join(tree_key(input));
+    let tree = dir.join("unpacked").join(tree_key(identity, input));
     if !tree.is_dir() {
         return Ok(None);
     }
@@ -180,32 +244,31 @@ fn fetch_file(
 /// directory, its fixups applied, then renamed into place (and the download
 /// removed: the tree is what is kept). Returns the knob's value and what to
 /// say of it.
+/// `identity` is what names the archive's content (its SHA-256, or
+/// `repo:<commit>:<path>`), `name` where it comes from (its kind is told by
+/// its extension), and `obtain` puts the verified archive in a temporary
+/// file beside the trees.
 fn unpacked(
     dir: &Path,
     input: &Input,
-    url: &str,
-    limit: Option<u64>,
+    identity: &str,
+    name: &str,
     line: &mut crate::progress::Line,
+    obtain: impl FnOnce(&Path, &mut crate::progress::Line) -> Res<tempfile::TempPath>,
 ) -> Res<(PathBuf, String)> {
-    let expected = input.sha256.as_deref().ok_or_else(|| anyhow!("Input {} unpacks an archive with no SHA-256", input.knob))?;
-    let kind = ArchiveKind::of_url(url).ok_or_else(|| anyhow!("{url} is not an archive cactup can unpack"))?;
+    let kind = ArchiveKind::of_url(name).ok_or_else(|| anyhow!("{name} is not an archive cactup can unpack"))?;
     let trees = dir.join("unpacked");
-    let tree = trees.join(tree_key(input));
+    let tree = trees.join(tree_key(identity, input));
     let value = |tree: &Path| input.path.as_deref().map_or_else(|| tree.to_owned(), |p| tree.join(p));
     std::fs::create_dir_all(&trees).with_context(|| format!("Failed to create '{}'", trees.display()))?;
 
-    let archive = download(&trees, url, limit, line)?;
-    line.phase("checking");
-    let actual = crate::update::sha256_hex_counting(archive.path(), line)?;
-    if !actual.eq_ignore_ascii_case(expected) {
-        bail!("The download of {url} has SHA-256 {actual}, but the .sim records {expected}; nothing was unpacked");
-    }
+    let archive = obtain(&trees, line)?;
     let staging = tempfile::Builder::new()
         .prefix(".unpacking-")
         .tempdir_in(&trees)
         .with_context(|| format!("Failed to create a directory in '{}'", trees.display()))?;
     line.phase("unpacking");
-    let entries = unpack(archive.path(), kind, staging.path(), &file_name(url), line)?;
+    let entries = unpack(&archive, kind, staging.path(), &file_name(name), line)?;
     drop(archive);
     let tree_str = tree.to_str().ok_or_else(|| anyhow!("'{}' is not UTF-8", tree.display()))?;
     let mut fixed = 0;
@@ -255,16 +318,17 @@ fn unpacked(
     Ok((value(&tree), format!("unpacked {entries} entries{fixes} into '{}'", tree.display())))
 }
 
-/// The directory name of an archive input's tree: a digest of the
-/// archive's hash and of every fixup, in order.
-pub fn tree_key(input: &Input) -> String {
+/// The directory name of an archive input's tree: a digest of what names
+/// the archive's content (`identity`: its hash, or `repo:<commit>:<path>`)
+/// and of every fixup, in order.
+pub fn tree_key(identity: &str, input: &Input) -> String {
     let mut ctx = aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA256);
     let mut part = |bytes: &[u8]| {
         ctx.update(&(bytes.len() as u64).to_le_bytes());
         ctx.update(bytes);
     };
     part(b"cactup input tree 1");
-    part(input.sha256.as_deref().unwrap_or("").to_ascii_lowercase().as_bytes());
+    part(identity.to_ascii_lowercase().as_bytes());
     for f in &input.fixups {
         part(f.file.as_bytes());
         part(f.replace.as_bytes());
@@ -1057,6 +1121,7 @@ mod tests {
                 replace: "/path/to/gam2.polytrope".into(),
                 with: "{dir}/bhns_gw230529_ID/gam2.polytrope".into(),
             }],
+            repo_file: None,
         }
     }
 
@@ -1074,9 +1139,9 @@ mod tests {
         // HEAD for the size, then GET.
         let (base, server) = serve(vec![("*", archive.clone())], 2);
         let input = input(format!("{base}/bhns_gw230529_ID.tar.gz"), &archive);
-        let value = fetch(dir.path(), &input, &quiet()).unwrap();
+        let value = fetch(dir.path(), &input, &quiet(), None).unwrap();
         server.join().unwrap();
-        let tree = dir.path().join("unpacked").join(tree_key(&input));
+        let tree = dir.path().join("unpacked").join(tree_key(&sha(&archive), &input));
         assert_eq!(value, tree.join("bhns_gw230529_ID/X.info"));
         let info = std::fs::read_to_string(&value).unwrap();
         let want = format!("eos = {}/bhns_gw230529_ID/gam2.polytrope\nother = 1\n", tree.display());
@@ -1086,11 +1151,11 @@ mod tests {
         let leftovers: Vec<_> = std::fs::read_dir(dir.path().join("unpacked")).unwrap().flatten().map(|e| e.file_name()).collect();
         assert_eq!(leftovers.len(), 1, "{leftovers:?}");
         // Reused: nobody is listening any more.
-        assert_eq!(fetch(dir.path(), &input, &quiet()).unwrap(), value);
+        assert_eq!(fetch(dir.path(), &input, &quiet(), None).unwrap(), value);
         // Different fixups make a different tree.
         let mut other = input.clone();
         other.fixups.clear();
-        assert_ne!(tree_key(&other), tree_key(&input));
+        assert_ne!(tree_key(&sha(&archive), &other), tree_key(&sha(&archive), &input));
     }
 
     /// A wrong hash unpacks nothing; a fixup whose text is absent, or a
@@ -1103,7 +1168,7 @@ mod tests {
             let (base, server) = serve(vec![("*", archive.clone())], 2);
             let mut input = input(format!("{base}/id.tar.gz"), &archive);
             edit(&mut input);
-            let err = format!("{:#}", fetch(dir.path(), &input, &quiet()).unwrap_err());
+            let err = format!("{:#}", fetch(dir.path(), &input, &quiet(), None).unwrap_err());
             assert!(err.contains(expect), "{err}");
             server.join().unwrap();
             let trees: Vec<_> = std::fs::read_dir(dir.path().join("unpacked")).unwrap().flatten().map(|e| e.file_name()).collect();
@@ -1214,17 +1279,17 @@ mod tests {
 
         let (base, server) = serve(vec![("*", archive.clone())], 2);
         let good = input(format!("{base}/id.tar.gz"), &archive);
-        let value = fetch(dir.path(), &good, &quiet()).unwrap();
+        let value = fetch(dir.path(), &good, &quiet(), None).unwrap();
         server.join().unwrap();
         assert!(std::fs::read_to_string(&value).unwrap().contains("/bhns_gw230529_ID/gam2.polytrope"));
         assert_eq!(std::fs::metadata(&value).unwrap().permissions().mode() & 0o777, 0o444, "mode kept");
 
         // Purged: the files go, the directories stay; the next fetch redoes it.
-        let tree = dir.path().join("unpacked").join(tree_key(&good));
+        let tree = dir.path().join("unpacked").join(tree_key(&sha(&archive), &good));
         std::fs::remove_file(tree.join(COMPLETE_MARKER)).unwrap();
         let (base, server) = serve(vec![("*", archive.clone())], 2);
         let again = Input { url: Some(format!("{base}/id.tar.gz")), ..good.clone() };
-        assert_eq!(fetch(dir.path(), &again, &quiet()).unwrap(), value);
+        assert_eq!(fetch(dir.path(), &again, &quiet(), None).unwrap(), value);
         server.join().unwrap();
         assert!(tree.join(COMPLETE_MARKER).is_file());
 
@@ -1233,7 +1298,7 @@ mod tests {
         let mut through = input(format!("{base}/id.tar.gz"), &archive);
         through.fixups[0].file = "alias/X.info".into();
         through.path = None;
-        let err = format!("{:#}", fetch(dir.path(), &through, &quiet()).unwrap_err());
+        let err = format!("{:#}", fetch(dir.path(), &through, &quiet(), None).unwrap_err());
         assert!(err.contains("not a directory of the archive"), "{err}");
         server.join().unwrap();
     }
@@ -1280,6 +1345,7 @@ mod tests {
             unpack: false,
             path: None,
             fixups: vec![],
+            repo_file: None,
         };
         let how = Authoring { url: &url, local: Some(&local), member: None, interactive: false };
         let notes = author(&dir.path().join("inputs"), &mut input, &how, &quiet()).unwrap();
@@ -1292,7 +1358,7 @@ mod tests {
 
         let (base, server) = serve(vec![("*", archive.clone())], 2);
         input.url = Some(format!("{base}/bhns_gw230529_ID.tar.gz"));
-        let value = fetch(&dir.path().join("importer"), &input, &quiet()).unwrap();
+        let value = fetch(&dir.path().join("importer"), &input, &quiet(), None).unwrap();
         server.join().unwrap();
         let tree = value.parent().unwrap().parent().unwrap();
         let expected = format!("eos = {}/bhns_gw230529_ID/gam2.polytrope\nother = 1\n", tree.display());
@@ -1318,11 +1384,12 @@ mod tests {
             unpack: false,
             path: None,
             fixups: vec![],
+            repo_file: None,
         };
         let want = sha(&vec![b'x'; 48 << 10]);
-        fetch(dir.path(), &input(want.clone()), &SizePolicy { interactive: false, yes: true, confirm_above: 10 }).unwrap();
+        fetch(dir.path(), &input(want.clone()), &SizePolicy { interactive: false, yes: true, confirm_above: 10 }, None).unwrap();
         // Without -y and above the threshold: refused before the GET.
-        let err = format!("{:#}", fetch(&dir.path().join("b"), &input(want), &SizePolicy { interactive: false, yes: false, confirm_above: 10 }).unwrap_err());
+        let err = format!("{:#}", fetch(&dir.path().join("b"), &input(want), &SizePolicy { interactive: false, yes: false, confirm_above: 10 }, None).unwrap_err());
         assert!(err.contains("pass -y"), "{err}");
         drop(server);
     }
@@ -1367,9 +1434,52 @@ mod tests {
         let mut input = input(format!("{base}/a.tar.gz"), &archive);
         input.fixups.clear();
         input.path = None;
-        let err = format!("{:#}", fetch(dir.path(), &input, &quiet()).unwrap_err());
+        let err = format!("{:#}", fetch(dir.path(), &input, &quiet(), None).unwrap_err());
         assert!(err.contains("keeps for itself"), "{err}");
         server.join().unwrap();
+    }
+
+    /// A `repo-file` input comes from the simulation's own repository at the
+    /// version's commit: fetched by id, unpacked and fixed like a download,
+    /// or kept as it is; without a repository to fetch from it is refused.
+    #[test]
+    fn a_repo_file_comes_from_the_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_dir = dir.path().join("pretty-bhns");
+        crate::fetch::git::testrepo::init(&repo_dir);
+        // A plain tar is valid UTF-8 (headers are ASCII and NULs).
+        let tar_text = String::from_utf8(gallery_tar()).unwrap();
+        let commit = crate::fetch::tests::commit_files(&repo_dir, &[("data/id.tar", &tar_text), ("data/notes.txt", "hi\n")]);
+        let repo = RepoSource { url: repo_dir.to_string_lossy().into_owned(), commit: commit.to_string() };
+        let archive_input = Input {
+            knob: "kadath-initial-data".into(),
+            description: None,
+            url: None,
+            sha256: None,
+            unpack: true,
+            path: Some("bhns_gw230529_ID/X.info".into()),
+            fixups: vec![Fixup {
+                file: "bhns_gw230529_ID/X.info".into(),
+                replace: "/path/to/gam2.polytrope".into(),
+                with: "{dir}/bhns_gw230529_ID/gam2.polytrope".into(),
+            }],
+            repo_file: Some("data/id.tar".into()),
+        };
+        let value = fetch(&dir.path().join("inputs"), &archive_input, &quiet(), Some(&repo)).unwrap();
+        let text = std::fs::read_to_string(&value).unwrap();
+        assert!(text.contains("/bhns_gw230529_ID/gam2.polytrope") && !text.contains("/path/to/"), "{text}");
+        // Reused: no repository needed the second time... but asked for it is fine.
+        assert_eq!(fetch(&dir.path().join("inputs"), &archive_input, &quiet(), Some(&repo)).unwrap(), value);
+
+        let plain = Input { unpack: false, path: None, fixups: vec![], repo_file: Some("data/notes.txt".into()), ..archive_input.clone() };
+        let kept = fetch(&dir.path().join("inputs"), &plain, &quiet(), Some(&repo)).unwrap();
+        assert_eq!(std::fs::read_to_string(kept).unwrap(), "hi\n");
+
+        let err = format!("{:#}", fetch(&dir.path().join("inputs2"), &plain, &quiet(), None).unwrap_err());
+        assert!(err.contains("own repository"), "{err}");
+        let missing = Input { repo_file: Some("data/none.txt".into()), ..plain };
+        let err = format!("{:#}", fetch(&dir.path().join("inputs3"), &missing, &quiet(), Some(&repo)).unwrap_err());
+        assert!(err.contains("has no data/none.txt"), "{err}");
     }
 
     /// Every supported kind unpacks the same tree.
@@ -1410,12 +1520,12 @@ mod tests {
         let (base, server) = serve(vec![("*", archive.clone())], 1);
         let input = input(format!("{base}/id.tar.gz"), &archive);
         let strict = SizePolicy { interactive: false, yes: false, confirm_above: 10 };
-        let err = format!("{:#}", fetch(dir.path(), &input, &strict).unwrap_err());
+        let err = format!("{:#}", fetch(dir.path(), &input, &strict, None).unwrap_err());
         assert!(err.contains("pass -y"), "{err}");
         server.join().unwrap();
         let (base, server) = serve(vec![("*", archive.clone())], 2);
         let input = self::input(format!("{base}/id.tar.gz"), &archive);
-        fetch(dir.path(), &input, &SizePolicy { interactive: false, yes: true, confirm_above: 10 }).unwrap();
+        fetch(dir.path(), &input, &SizePolicy { interactive: false, yes: true, confirm_above: 10 }, None).unwrap();
         server.join().unwrap();
     }
 }

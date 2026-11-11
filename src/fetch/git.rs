@@ -1506,6 +1506,57 @@ pub fn ask_remote_default_branch(url: &str) -> Res<String> {
     }
 }
 
+/// The file `path` of `commit` in the repository at `url`, written to
+/// `dest` (atomically): the commit is fetched by its id at depth 1 into a
+/// scratch repository (a server must grant the want; GitHub and the
+/// Cactarium's hosts do), its tree walked to `path`, which must be a
+/// regular file. Interrupt-aware; reports on `progress`.
+pub fn file_at_commit(
+    url: &str,
+    commit: &str,
+    path: &str,
+    dest: &Path,
+    progress: &mut (impl prodash::NestedProgress<SubProgress: 'static> + 'static),
+) -> Res<()> {
+    let id = ObjectId::from_hex(commit.as_bytes()).with_context(|| format!("\"{commit}\" is not a commit id"))?;
+    let scratch = tempfile::tempdir().context("Failed to create a scratch directory")?;
+    let repo = gix::init_bare(scratch.path()).context("Failed to create a scratch repository")?;
+    let spec = format!("+{id}:{PIN_REF}");
+    repo.remote_at(url)
+        .with_context(|| format!("Invalid remote URL {url}"))?
+        .with_refspecs(Some(spec.as_str()), Direction::Fetch)
+        .context("Invalid refspec")?
+        .connect(Direction::Fetch)
+        .with_context(|| format!("Failed to connect to {url}"))?
+        .prepare_fetch(&mut *progress, Default::default())
+        .with_context(|| format!("Failed to prepare a fetch from {url}"))?
+        .with_shallow(depth_one())
+        .receive(&mut *progress, &gix::interrupt::IS_INTERRUPTED)
+        .with_context(|| format!("Failed to fetch commit {commit} from {url}"))?;
+    if gix::interrupt::is_triggered() {
+        bail!("Interrupted");
+    }
+    let tree = repo
+        .find_commit(id)
+        .with_context(|| format!("{url} did not send commit {commit}"))?
+        .tree()
+        .with_context(|| format!("Commit {commit} has no tree"))?;
+    let entry = tree
+        .lookup_entry_by_path(path)
+        .with_context(|| format!("Failed to look up {path} in commit {commit}"))?
+        .ok_or_else(|| anyhow!("Commit {commit} of {url} has no {path}"))?;
+    if !entry.mode().is_blob() {
+        bail!("{path} in commit {commit} of {url} is not a regular file");
+    }
+    let blob = entry.object().with_context(|| format!("Failed to read {path} from commit {commit}"))?;
+    let dir = dest.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
+    let mut temp = tempfile::NamedTempFile::new_in(dir).with_context(|| format!("Failed to write '{}'", dest.display()))?;
+    std::io::Write::write_all(&mut temp, &blob.data).with_context(|| format!("Failed to write '{}'", dest.display()))?;
+    temp.persist(dest).with_context(|| format!("Failed to write '{}'", dest.display()))?;
+    Ok(())
+}
+
 /// What [`head_of`] names the branch of a detached HEAD.
 pub const DETACHED: &str = "(detached)";
 

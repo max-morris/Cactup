@@ -4410,12 +4410,18 @@ What uses it, all on the login node (D11):
   `refetch --release` reach stack tips through
   `cactarium::stack_release_text`, `add` reaches package tips through the
   same `confirm_untrusted`.
-- `cactup import owner/name[@N]` downloads the published sim (the newest
-  version without `@N`) to `~/.cactup/simfiles/<owner>/<name>/<N>.sim`,
+- `cactup import owner/name[@range|=X.Y.Z]` downloads the published sim
+  (versions are semver, like packages and stacks; the newest matching, or
+  the newest at all) to `~/.cactup/simfiles/<owner>/<name>/<X.Y.Z>.sim`,
   checked against the registry's `x-sha256`, then imports it as a file. It
-  resolves even an exact `@N`, which is how a yank is told; an exact version
-  already downloaded still imports when the registry cannot be reached, its
-  yank status unknown.
+  resolves even an exact version, which is how a yank is told; an exact
+  version already downloaded still imports when the registry cannot be
+  reached, its yank status unknown. A sim the Cactarium publishes from its
+  repository (`cactarium-sim.toml`) may have `repo-file` inputs (`.sim`
+  format 3): files of that repository, fetched at the version's commit (by
+  id, at depth 1) from the URL and commit `/resolve` gives for the file's
+  `cactarium` stamp, kept at `<inputs>/repo/<commit>/<path>` or unpacked like
+  a download (the tree keyed by `repo:<commit>:<path>` and the fixups).
 - **Yanked versions.** A range never chooses a yanked version, so one cactup
   gets was asked for exactly: `add`, stack installs and refetches, and sim
   imports warn with the reason and go on (yanked is "not by default", not
@@ -4424,10 +4430,10 @@ What uses it, all on the login node (D11):
   refetch elsewhere) or any added package version is yanked now, in
   parallel, with progress and a 5 s limit per request, and only when there
   is something to ask about; a registry it cannot reach gets one dim note.
-- `cactup sim publish <file.sim> <owner/name>` uploads a fully specified file
-  (anything else is refused locally, naming what is unspecified) as the next
-  version; the registry numbers it and says whether it is public or pending
-  review. A pending release (new releases of a public entry wait for an
+- `cactup sim publish <file.sim> <owner/name> [--version X.Y.Z]` uploads a
+  fully specified file (anything else is refused locally, naming what is
+  unspecified) as that version, else the next major version; the registry
+  says whether it is public or pending review. A pending release (new releases of a public entry wait for an
   admin unless the entry, its owner or the publisher is trusted) is not
   served, listed or resolved until approved, and cactup says so.
 - `cactup stack publish <cactarium-stack.toml> <owner/name> --version V

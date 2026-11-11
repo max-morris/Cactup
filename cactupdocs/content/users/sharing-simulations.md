@@ -168,15 +168,17 @@ cactup sim publish bbh.sim me/bbh
 ```
 
 Only a **fully specified** file can be published: every repository pinned,
-nothing dirty. The Cactarium numbers the versions (`me/bbh@1`, `@2`, …).
+nothing dirty. Versions are semantic versions: `--version 1.2.0` chooses one,
+and without it the next major version is used (`me/bbh@1.0.0`, `@2.0.0`, …).
 A new version may wait for an admin's review before anyone can import it;
 cactup says so when it does.
 
 ### Importing from the Cactarium
 
 ```sh
-cactup import someone/bbh        # the newest version
-cactup import someone/bbh@3      # exactly version 3
+cactup import someone/bbh          # the newest version
+cactup import someone/bbh@1        # the newest 1.x.x
+cactup import someone/bbh@=1.0.1   # exactly version 1.0.1
 ```
 
 ### Installing a stack
