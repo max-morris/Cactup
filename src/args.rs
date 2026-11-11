@@ -577,7 +577,7 @@ pub(crate) struct RefetchArgs {
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct InstallArgs {
-    #[clap(help = "The release to install, or \"master\" for the tip of the manifest's master branch (default: the most recent release).")]
+    #[clap(help = "What to install: a release, \"master\" for the tip of the manifest's master branch, or a Cactarium stack (owner/stack, owner/stack@version or owner/stack@track:range). Default: the most recent release.")]
     pub release: Option<String>,
     #[clap(long, value_name = "PATH", conflicts_with = "release", help = "Install from this thornlist file instead of a release.")]
     pub thornlist: Option<PathBuf>,
