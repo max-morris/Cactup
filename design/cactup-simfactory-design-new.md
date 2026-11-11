@@ -4475,17 +4475,21 @@ of one package are refused. A later add of the same package updates it,
 adding named thorns to those already enabled. All the packages are fetched in
 one pass and recorded together.
 
-**At a commit.** `owner/name[/Thorn]@<commit>` names a full commit id (40 or
-64 lowercase hex digits; an abbreviation is not one, and reads as a track or
-version). When a published version was frozen at exactly that commit, the
-registry answers with that version and the add is an ordinary one. Otherwise
-it answers with the package read at that commit: version and commit both the
-commit id, no tag, and the registry's trust verdict, which cactup applies as
-for a branch tip (an untrusted package is refused or asked about,
-`--risky-allow-untrusted-artifacts`). The section is pinned by `!REPO_COMMIT`
-with no `!REPO_BRANCH`; `inst show` and `add` name it `owner/name at commit
-<first 12 digits>`, and the yank check skips it (no version to yank). An
-answer whose commit is not the one asked for is refused.
+**At a commit.** `owner/name[/Thorn]#<sha>` names only a commit: a full id or
+an abbreviation of at least 7 lowercase hex digits, which the registry
+resolves against the repository's history (an ambiguous or unknown prefix is
+its error). `owner/name@<x>` is read as a version, range or track first, and
+as a commit only when it names none of those. When a published version was
+frozen at that commit, the registry answers with that version
+(`owner/name@X.Y.Z`) and the add is an ordinary one. Otherwise it answers
+with the package read at that commit, `owner/name#<full id>`: no tag, and the
+registry's trust verdict, which cactup applies as for a branch tip (an
+untrusted package is refused or asked about,
+`--risky-allow-untrusted-artifacts`). cactup records it at the full id,
+pinned by `!REPO_COMMIT` with no `!REPO_BRANCH`; `inst show` and `add` name
+it `owner/name at commit <first 12 digits>`, and the yank check skips it (no
+version to yank). An answer whose commit does not start with what was asked
+for is refused.
 
 **The model.** `installation.toml` records each added package under
 `[[added]]` (package, exact version, tag, commit, URL, repo name, the

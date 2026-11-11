@@ -293,7 +293,7 @@ pub(crate) struct GlobalOpts {
     )]
     pub knob: Vec<KnobOverride>,
     /// Take a branch tip (@head, @master) of a stack or package, or a package
-    /// at a commit no published version names, from a source the Cactarium
+    /// at a commit no published version names (#commit), from a source the Cactarium
     /// does not trust, without asking. Nobody reviews those: they may fetch
     /// and build arbitrary code. The warning is still printed.
     #[clap(long, global = true)]
@@ -324,7 +324,7 @@ pub(crate) enum Commands {
     // §8.11
     /// Add Cactarium packages' thorns to the active installation, at the commit the registry froze for each version
     Add {
-        /// The packages: owner/name for all its thorns, owner/name/Thorn for one (repeat for several), with @version, @track:range or @<full commit id> to choose.
+        /// The packages: owner/name for all its thorns, owner/name/Thorn for one (repeat for several), with @version or @track:range to choose, or #commit (7 or more hex digits) for a commit.
         #[clap(required = true, value_name = "PACKAGE")]
         packages: Vec<String>,
         /// Use the package in place of a repo the installation's thornlist already has.

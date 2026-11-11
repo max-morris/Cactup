@@ -280,21 +280,12 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String], allow_untrus
             bail!("Interrupted");
         }
         let slug: Slug =
-            spec.parse().map_err(|e| anyhow!("\"{spec}\" is not a package (owner/name[/Thorn][@version]): {e}"))?;
+            spec.parse().map_err(|e| anyhow!("\"{spec}\" is not a package (owner/name[/Thorn][@version|#commit]): {e}"))?;
         let entry = slug.entry();
-        // Short hex reads as a version range, and fails as one; say what it
-        // most likely is instead.
-        if let Some(at) = slug.at.as_deref()
-            && at.len() >= 7
-            && slug.commit().is_none()
-            && at.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            && at.bytes().any(|b| b.is_ascii_alphabetic())
-        {
-            bail!("\"{at}\" looks like an abbreviated commit id; {entry} at a commit needs all of it (40 hex digits)");
-        }
-        let req = match &slug.at {
-            Some(at) => format!("{entry}@{at}"),
-            None => entry.clone(),
+        let req = match (&slug.at, slug.sha()) {
+            (Some(at), _) => format!("{entry}@{at}"),
+            (None, Some(sha)) => format!("{entry}#{sha}"),
+            (None, None) => entry.clone(),
         };
         let resolved = client.resolve(&req)?;
         if resolved.kind != "package" {
@@ -311,15 +302,20 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String], allow_untrus
         // default branch a tip follows, named so a refetch knows which branch
         // to move along (and never mistakes an earlier pin's tag for one).
         let mut label = resolved.version.tag.clone();
-        // A commit no published version was frozen at comes back as the
-        // package read there (its version the commit id itself); one that a
+        // `#<sha>` names only a commit (full or abbreviated); `@<x>` is read
+        // as one only when it names no version, range or track. A commit no
+        // published version was frozen at comes back as the package read
+        // there, `owner/pkg#<full id>`, recorded at that full id; one a
         // version was frozen at comes back as that version, added as any is.
-        let at_commit = slug.commit().filter(|_| is_commit(&resolved.version.version));
-        let version = if let Some(commit) = at_commit {
-            if resolved.version.commit.as_deref() != Some(commit) {
-                bail!("Asked the Cactarium for {entry} at commit {commit}, and it answered with {}", resolved.slug);
+        let read_at_commit = resolved.slug.contains('#') || is_commit(&resolved.version.version);
+        let wanted_version = if read_at_commit { commit.clone() } else { resolved.version.version.clone() };
+        let version = if read_at_commit {
+            // What was asked must be what came back: a prefix of the full id.
+            let asked = slug.sha().or_else(|| slug.commit_fallback());
+            if !is_commit(&commit) || !asked.is_some_and(|prefix| commit.starts_with(prefix)) {
+                bail!("Asked the Cactarium for {req}, and it answered with {} at commit {commit}", resolved.slug);
             }
-            let (version, untrusted) = client.package_at(slug.owner.as_str(), slug.name.as_str(), commit)?;
+            let (version, untrusted) = client.package_at(slug.owner.as_str(), slug.name.as_str(), &commit)?;
             if untrusted {
                 crate::cactarium::confirm_untrusted(&resolved.slug, "package", allow_untrusted)?;
             }
@@ -392,7 +388,7 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String], allow_untrus
         }
         let only_named = slug.thorn.is_some();
         match wanted.iter_mut().find(|w| w.entry == entry) {
-            Some(w) if w.version != resolved.version.version => bail!(
+            Some(w) if w.version != wanted_version => bail!(
                 "{} and {} are two versions of {entry}; name one",
                 w.slug,
                 resolved.slug
@@ -408,7 +404,7 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String], allow_untrus
             None => wanted.push(Wanted {
                 entry,
                 slug: resolved.slug.to_string(),
-                version: resolved.version.version.clone(),
+                version: wanted_version,
                 tag: label,
                 commit,
                 url,
@@ -867,17 +863,17 @@ mod tests {
     }
 
     /// A Cactarium serving `max/carpetx` read at commit `commit` (no
-    /// published version there), answering `untrusted` in the header and
-    /// `answered` as the commit the read is at.
-    fn serve_commit(commit: &str, answered: &str, untrusted: bool) -> String {
+    /// published version there, so it answers `max/carpetx#<commit>`),
+    /// answering `untrusted` in the header.
+    fn serve_commit(commit: &str, untrusted: bool) -> String {
         let facts = serde_json::to_string(&cactup_ecosystem_common::ccl::ThornFacts::default()).unwrap();
         let resolved = format!(
-            r#"{{"slug":"max/carpetx@{commit}","kind":"package","url":"https://x/carpetx.git","contact":null,
-            "version":"{commit}","track":null,"tag":null,"commit":"{answered}","tree":null,"yanked":false,
+            r#"{{"slug":"max/carpetx#{commit}","kind":"package","url":"https://x/carpetx.git","contact":null,
+            "version":"{commit}","track":null,"tag":null,"commit":"{commit}","tree":null,"yanked":false,
             "yank-reason":null,"state":"ok","curated":false,"published":0}}"#
         );
         let read = format!(
-            r#"{{"version":"{commit}","track":null,"tag":null,"commit":"{answered}","tree":null,"yanked":false,
+            r#"{{"version":"{commit}","track":null,"tag":null,"commit":"{commit}","tree":null,"yanked":false,
             "yank-reason":null,"state":"ok","curated":false,"published":0,"url":"https://x/carpetx.git","claims":[],
             "thorns":[{{"arrangement":"CarpetX","thorn":"Arith","repo-path":"$2","facts":{facts}}}]}}"#
         );
@@ -889,19 +885,25 @@ mod tests {
         base
     }
 
-    /// `owner/pkg@<commit>` that no published version was frozen at: the
-    /// package read there, pinned to that commit with no branch label, and
-    /// the untrusted confirmation applied as for a tip.
+    /// `owner/pkg#<sha>` (full or abbreviated), or `owner/pkg@<sha>` the
+    /// Cactarium reads as a commit, that no published version was frozen
+    /// at: the package read there, pinned to the full commit id with no
+    /// branch label, and the untrusted confirmation applied as for a tip.
     #[test]
     fn a_package_at_a_commit_is_pinned_there() {
         let commit = "0123456789abcdef0123456789abcdef01234567";
-        let spec = [format!("max/carpetx@{commit}")];
         let client = |base: &str| crate::cactarium::Client::at(base);
+        let add = |spec: &str, untrusted: bool| {
+            resolve_all(&client(&serve_commit(commit, untrusted)), &[spec.to_owned()], false)
+        };
 
-        let wanted = resolve_all(&client(&serve_commit(commit, commit, false)), &spec, false)
-            .unwrap_or_else(|e| panic!("{e:#}"));
-        let w = &wanted[0];
-        assert_eq!((w.version.as_str(), w.commit.as_str(), w.tag.as_deref()), (commit, commit, None));
+        let specs = [format!("max/carpetx#{commit}"), "max/carpetx#0123456".to_owned(), "max/carpetx@0123456789ab".to_owned()];
+        for spec in specs {
+            let wanted = add(&spec, false).unwrap_or_else(|e| panic!("{spec}: {e:#}"));
+            let w = &wanted[0];
+            assert_eq!((w.version.as_str(), w.commit.as_str(), w.tag.as_deref()), (commit, commit, None), "{spec}");
+        }
+        let w = &add("max/carpetx#0123456", false).unwrap()[0];
         let added = AddedPackage {
             package: "max/carpetx".to_owned(),
             version: w.version.clone(),
@@ -918,14 +920,11 @@ mod tests {
         assert!(text.contains(&format!("!REPO_COMMIT = {commit}")) && !text.contains("!REPO_BRANCH"), "{text}");
         assert_eq!(describe("max/carpetx", commit), "max/carpetx at commit 0123456789ab");
 
-        let err = format!("{:#}", resolve_all(&client(&serve_commit(commit, commit, true)), &spec, false).map(drop).unwrap_err());
+        let err = format!("{:#}", add("max/carpetx#0123456", true).map(drop).unwrap_err());
         assert!(err.contains("risky-allow-untrusted-artifacts"), "{err}");
-        let other = "f".repeat(40);
-        let err = format!("{:#}", resolve_all(&client(&serve_commit(commit, &other, false)), &spec, false).map(drop).unwrap_err());
+        // An answer at a commit the request does not name is refused.
+        let err = format!("{:#}", add("max/carpetx#fffffff", false).map(drop).unwrap_err());
         assert!(err.contains("answered with"), "{err}");
-        let short = ["max/carpetx@0123456789ab".to_owned()];
-        let err = format!("{:#}", resolve_all(&client("http://127.0.0.1:9"), &short, false).map(drop).unwrap_err());
-        assert!(err.contains("abbreviated commit id"), "{err}");
     }
 
     /// A package sharing a clone the base keeps other thorns of must match
