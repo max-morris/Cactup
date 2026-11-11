@@ -67,6 +67,7 @@ pub fn dispatch(ctx: &Ctx, args: ImportArgs) -> Res<()> {
                 no_symlink: args.no_symlink,
                 symlink_prefix: None,
                 symlink_name: None,
+                inputs_settled: true,
             },
         )?;
         // `install` reports some refusals (an alias taken meanwhile, say) and
@@ -250,8 +251,8 @@ fn differences(inst: &Installation, sim: &SimFile) -> Res<Vec<String>> {
 }
 
 /// Download published sim `req` (`owner/name`, the newest version, or
-/// `owner/name@N`) from the Cactarium (§8.10) to
-/// `~/.cactup/simfiles/<owner>/<name>/<N>.sim`, checked against the hash
+/// `owner/name@X.Y.Z`) from the Cactarium (§8.10) to
+/// `~/.cactup/simfiles/<owner>/<name>/<version>.sim`, checked against the hash
 /// the registry sends.
 fn download_published(ctx: &Ctx, req: &str) -> Res<PathBuf> {
     use cactup_ecosystem_common::slug::Slug;
@@ -281,6 +282,13 @@ fn download_published(ctx: &Ctx, req: &str) -> Res<PathBuf> {
     }
     crate::cactarium::warn_if_yanked(&resolved.slug, &resolved.version);
     let version = resolved.version.version.clone();
+    // An exact request answered with another version would import code the
+    // user did not ask for; refuse rather than trust the server's matching.
+    if let Some(wanted) = exact
+        && version != wanted
+    {
+        bail!("Asked the Cactarium for {owner}/{name}@{wanted}, and it answered with version {version}");
+    }
     if version.is_empty() || !version.bytes().all(|b| b.is_ascii_alphanumeric() || b".-+".contains(&b)) {
         bail!("The Cactarium named sim version \"{}\"", version.escape_debug());
     }

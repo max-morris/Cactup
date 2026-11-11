@@ -38,6 +38,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         no_symlink,
         symlink_prefix,
         symlink_name,
+        inputs_settled,
     } = args;
 
     // `owner/stack[@…]` names a Cactarium stack, never a manifest release
@@ -485,9 +486,11 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         }
         InstallSource::SimFile { path, sim, .. } => {
             println!("{}", format!("Success! Installed the sources of '{}' into '{}'", path.display(), installed_root.display()).bold().bright_green());
-            for input in &sim.inputs {
-                let what = input.description.as_deref().map(|d| format!(": {d}")).unwrap_or_default();
-                println!("Its parfile needs knob {}{what}", input.knob.bold());
+            if !inputs_settled {
+                for input in &sim.inputs {
+                    let what = input.description.as_deref().map(|d| format!(": {d}")).unwrap_or_default();
+                    println!("Its parfile needs knob {}{what}", input.knob.bold());
+                }
             }
         }
     }

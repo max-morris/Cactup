@@ -595,6 +595,10 @@ pub(crate) struct InstallArgs {
     pub symlink_prefix: Option<String>,
     #[clap(long, help = "The name of the symlink to create.")]
     pub symlink_name: Option<String>,
+    /// Set by `import`, which settles the .sim's inputs before installing: the
+    /// install then has no inputs left to point out.
+    #[clap(skip)]
+    pub inputs_settled: bool,
 }
 
 // §4.8
@@ -995,7 +999,7 @@ pub(crate) enum StackCommand {
 // §8.9
 #[derive(clap::Args, Debug)]
 pub(crate) struct ImportArgs {
-    /// The .sim file, or a sim published on the Cactarium (owner/name, or owner/name@N for one version).
+    /// The .sim file, or a sim published on the Cactarium (owner/name, or owner/name@X.Y.Z for one version).
     pub simfile: PathBuf,
     /// Alias of the new installation (default: the .sim's name).
     #[clap(short, long)]
