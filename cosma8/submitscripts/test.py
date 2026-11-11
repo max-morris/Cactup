@@ -19,10 +19,10 @@ if EMAIL:
     lines.append("#SBATCH --mail-user={0}".format(EMAIL))
 lines.append("#SBATCH -o {0}".format(STDOUT_FILE))
 lines.append("#SBATCH -e {0}".format(STDERR_FILE))
-# Account required: DiRAC COSMA rejects a job without a project. The -a flag,
-# else the allocation knob; with neither, cactup refuses before submitting,
-# naming both.
-allocation = ALLOCATION or knob("allocation", "")
+# Account required: DiRAC COSMA rejects a job without a project. The
+# allocation knob, which -a sets for one command; with none, cactup refuses
+# before submitting, naming both.
+allocation = knob("allocation", "")
 if not allocation:
     raise CactupError(
         "{0} needs an allocation: pass -a ACCOUNT, or set it once with "
