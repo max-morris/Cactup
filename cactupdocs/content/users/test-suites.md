@@ -100,7 +100,7 @@ cactup test run --gpu       # Enable GPU
 cactup test run -w 2:00:00  # Walltime limit
 ```
 
-By default, tests run on a single node with 2 MPI tasks (good for quick validation).
+By default, tests run on a single node with 2 MPI tasks (good for quick validation). Ask for more tasks than one node holds and `test submit` asks for as many nodes as they need, as `sim submit` does.
 
 ## Listing test runs
 

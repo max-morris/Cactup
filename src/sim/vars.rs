@@ -23,6 +23,9 @@ pub struct Topology {
     pub gpu: bool,
     /// GPUs per task (§8.5); always 0 on a non-GPU run.
     pub gpus_per_task: u32,
+    /// Whether a node count nobody gave follows from the rank count (§8.5):
+    /// so `apply_tasks_default` spreads a script's `tasks` the same way.
+    pub derive_nodes: bool,
     pub queue: String,
     /// The scheduler-facing queue name (§4.2): the queue's `name` override
     /// when set, else `queue` itself. `@QUEUE@` resolves to this; everything
@@ -83,18 +86,68 @@ impl BinaryFit {
     }
 }
 
+/// Where a job's ranks land, which decides what a missing `--nodes` means
+/// (§8.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// Handed to a batch system, which allocates as many nodes as the job
+    /// asks for: a missing node count is derived from the rank count, and a
+    /// layout that cannot fit on the nodes asked for is refused before
+    /// anything is submitted.
+    Scheduled,
+    /// Run here, inside a job allocation whose size cactup does not know: the
+    /// node count is derived as for a submit, but nothing is refused — what
+    /// fits is the allocation's business.
+    Allocation,
+    /// Run on this host alone — a login node, or a machine whose "jobs" are
+    /// processes on the submitting host (`job-ids = "pids"`): one node unless
+    /// `--nodes` says otherwise, and nothing refused, since oversubscribing
+    /// a single host's CPUs is a choice a user may make.
+    Host,
+}
+
+impl Placement {
+    /// A job handed to the machine's scheduler (`sim submit`, `test submit`,
+    /// `build submit`). On a `job-ids = "pids"` machine the "scheduler"
+    /// backgrounds the script on this host, so it is still one host.
+    pub fn submit(machine: &Machine) -> Self {
+        match machine.meta.scheduler.job_ids {
+            crate::mdb::meta::JobIds::Scheduler => Placement::Scheduled,
+            crate::mdb::meta::JobIds::Pids => Placement::Host,
+        }
+    }
+
+    /// A foreground run (`sim run`, `test run`): inside one of the machine's
+    /// job allocations (`allocation-env`) the ranks may span its nodes;
+    /// anywhere else they run on this host.
+    pub fn foreground(machine: &Machine) -> Self {
+        let batch = machine.meta.scheduler.job_ids == crate::mdb::meta::JobIds::Scheduler;
+        match (batch, machine.meta.in_allocation()) {
+            (true, Some(true)) => Placement::Allocation,
+            _ => Placement::Host,
+        }
+    }
+
+    fn derives_nodes(self) -> bool {
+        self != Placement::Host
+    }
+}
+
 /// Resolve the §8.5 topology: flag → knob → machine defaults, with the
 /// queue-compatibility and GPU cross-checks (§4.4 / D12).
 ///
 /// `fit` is what the job's binary can run on. A sim or test job passes its
 /// config's; a build job passes `None` — it runs `make`, not the binary, so
 /// the queue it lands on is checked against the machine only (§7.9).
+/// `placement` says where the ranks land, which is what a missing `--nodes`
+/// is derived from.
 pub fn resolve_topology(
     flags: &TopologyFlags,
     machine: &Machine,
     db: &Database,
     fit: Option<&BinaryFit>,
     force_queue: bool,
+    placement: Placement,
 ) -> Res<Topology> {
     let m = &machine.name;
 
@@ -155,43 +208,13 @@ pub fn resolve_topology(
     // Process layout (§8.5 derivation), from the queue-effective hardware
     // (per-queue overrides falling back to [hardware] — §4.2).
     let hw = machine.meta.effective_hardware(&queue)?;
-    let cpus_per_node = hw.max_cpus_per_node.unwrap_or(1);
     // Request-side CPUS_PER_TASK: -c wins, else the machine/queue
     // `default-cpus-per-task` (simfactory's num-threads), else 1.
     let cpus = flags.cpus.or(hw.default_cpus_per_task).unwrap_or(1).max(1);
     // GPUS_PER_TASK is settled before the rank count because a derived rank
     // count is bounded by it (below); it needs no layout of its own (§8.5).
     let gpus_per_task = derive_gpus_per_task(flags, &hw, gpu);
-    // Fill the node — but a fully *derived* TASKS_PER_NODE is also bounded by
-    // the node's GPU budget (§8.5): with GPUs indivisible and one per rank, a
-    // node holding fewer devices than the CPU split implies cannot run that
-    // many ranks, and the ceiling below would refuse the layout outright.
-    // Bounding it here is what lets a GPU machine declare a polite
-    // `default-cpus-per-task` (a rank wanting 8 of omnia's 72 cores) without
-    // the CPU rule inferring 9 ranks for its single MI210. GPUs still never
-    // *build* a layout: an explicit `--tpn` is authoritative, and an explicit
-    // `--tasks` is a requested rank count — on a single-node machine with no
-    // batch system every one of those ranks lands on the node, so shrinking
-    // tpn under it would only bless a layout the node cannot run. Both keep
-    // the un-bounded CPU-rule value and reach the ceiling check instead.
-    let mut tpn = flags.tpn.unwrap_or_else(|| {
-        let by_cpu = (cpus_per_node / cpus).max(1);
-        match hw.max_gpus_per_node {
-            Some(max) if gpu && flags.tasks.is_none() => by_cpu.min((max / gpus_per_task).max(1)),
-            _ => by_cpu,
-        }
-    });
-    let nodes = flags.nodes.unwrap_or(1);
-    let tasks = flags.tasks.unwrap_or(nodes * tpn);
-    // An explicit `--tasks` overrides the fill-the-node `TASKS`, so the derived
-    // fill-the-node `TASKS_PER_NODE` has to be capped to keep the layout
-    // self-consistent (`--tasks=1` must not report 2 tasks/node) — the same
-    // capping `apply_tasks_default` does for the script default. A
-    // user-given `--tpn` stays authoritative. No-op in the default case, where
-    // `tasks == nodes * tpn`.
-    if flags.tpn.is_none() {
-        tpn = tpn.min(tasks.div_ceil(nodes).max(1));
-    }
+    let (nodes, tasks, tpn) = derive_layout(flags, &hw, cpus, gpus_per_task, placement, &queue)?;
     check_gpus_per_node(gpus_per_task, tpn, &hw, &queue)?;
 
     let total_wall = match flags.wall_time {
@@ -206,6 +229,7 @@ pub fn resolve_topology(
         cpus,
         gpu,
         gpus_per_task,
+        derive_nodes: placement.derives_nodes() && hw.max_cpus_per_node.is_some(),
         scheduler_queue: machine.meta.scheduler_queue_name(&queue)?.to_owned(),
         queue,
         allocation: flags.allocation.clone().or_else(|| db.knob("allocation").map(str::to_owned)),
@@ -220,6 +244,101 @@ pub fn resolve_topology(
         out: flags.out.clone(),
         err: flags.err.clone(),
     })
+}
+
+/// The §8.5 process layout `(NODES, TASKS, TASKS_PER_NODE)` from whichever
+/// of `-n`/`-T`/`-t` were given and the room a node has for ranks.
+///
+/// A node's room is its CPUs split among ranks, `floor(MAX_CPUS_PER_NODE /
+/// CPUS_PER_TASK)` and at least 1, and on a GPU run whose queue declares
+/// `max-gpus-per-node` no more ranks than its GPUs can feed at
+/// `GPUS_PER_TASK` each. Then:
+///
+/// - no `--nodes`, no `--tasks`: one node, filled;
+/// - `--tasks` without `--nodes`, where the placement derives nodes: as many
+///   nodes as the ranks need at the room (or `--tpn`) per node, the ranks
+///   spread evenly over them; on a single host, one node as always;
+/// - `--nodes` without `--tasks`: that many nodes, filled;
+/// - both: the ranks spread evenly over the nodes, and a scheduled job they
+///   cannot fit on is refused here rather than by the scheduler.
+fn derive_layout(
+    flags: &TopologyFlags,
+    hw: &Hardware,
+    cpus: u32,
+    gpus_per_task: u32,
+    placement: Placement,
+    queue: &str,
+) -> Res<(u32, u32, u32)> {
+    let cpus_per_node = hw.max_cpus_per_node;
+    let by_cpu = (cpus_per_node.unwrap_or(1) / cpus).max(1);
+    // `gpus_per_task` is 0 exactly when this is not a GPU run.
+    let by_gpu = hw
+        .max_gpus_per_node
+        .filter(|_| gpus_per_task > 0)
+        .map(|max| (max / gpus_per_task).max(1));
+    // With GPUs indivisible and one per rank, a node holding fewer devices
+    // than the CPU split implies cannot run that many ranks. Bounding the
+    // room by them is what lets a GPU machine declare a polite
+    // `default-cpus-per-task` (a rank wanting 8 of omnia's 72 cores) without
+    // the CPU rule inferring 9 ranks for its single MI210. GPUs still never
+    // *build* a layout: an explicit `--tpn` is authoritative.
+    let room = by_gpu.map_or(by_cpu, |g| by_cpu.min(g));
+    // A node of unknown size (no `max-cpus-per-node`, nothing detected)
+    // gives nothing to derive a node count from.
+    let derive = placement.derives_nodes() && cpus_per_node.is_some();
+
+    if let (None, Some(tasks), true) = (flags.nodes, flags.tasks, derive) {
+        // §8.5: the node count follows from the rank count.
+        let per_node = flags.tpn.unwrap_or(room).max(1);
+        let nodes = tasks.max(1).div_ceil(per_node);
+        let tpn = flags.tpn.unwrap_or_else(|| tasks.div_ceil(nodes).max(1));
+        return Ok((nodes, tasks, tpn));
+    }
+
+    let nodes = flags.nodes.unwrap_or(1).max(1);
+    // An explicit `--tasks` on one host is a requested rank count: every one
+    // of those ranks lands on the node, so it keeps the CPU-rule room (not
+    // the GPU-bounded one) and meets the GPU ceiling instead of slipping
+    // past it on the strength of a quietly shrunk TASKS_PER_NODE. With
+    // `--nodes` given too, the same holds per node.
+    let fill = flags.tpn.unwrap_or(if flags.tasks.is_none() { room } else { by_cpu });
+    let tasks = flags.tasks.unwrap_or(nodes * fill);
+    // An explicit `--tasks` overrides the fill-the-node `TASKS`, so a derived
+    // `TASKS_PER_NODE` is capped to keep the layout self-consistent
+    // (`--tasks=1` must not report 2 tasks/node) — the same capping
+    // `apply_tasks_default` does for the script default. A user-given
+    // `--tpn` stays authoritative. No-op in the default case, where
+    // `tasks == nodes * tpn`.
+    let tpn = flags.tpn.unwrap_or_else(|| fill.min(tasks.div_ceil(nodes).max(1)));
+
+    // A batch system refuses a job whose ranks do not fit on the nodes it
+    // asks for, and does not say why; say so here, before anything is
+    // submitted.
+    if placement == Placement::Scheduled && tasks > nodes * tpn {
+        let needed = tasks.div_ceil(tpn);
+        let on = count(nodes, "node");
+        if flags.tpn.is_some() {
+            // §8.5
+            bail!(
+                "{tasks} tasks do not fit on {on} at {tpn} tasks per node (--tpn); \
+                 ask for -n {needed}, or leave out -n to have it derived"
+            );
+        }
+        if let Some(cpn) = cpus_per_node {
+            // §8.5
+            bail!(
+                "{tasks} tasks of {} each do not fit on {on}: a node of queue \"{queue}\" has {cpn} CPUs, \
+                 room for {by_cpu} such tasks; ask for -n {needed}, or leave out -n to have it derived",
+                count(cpus, "CPU"),
+            );
+        }
+    }
+    Ok((nodes, tasks, tpn))
+}
+
+/// `1 node`, `4 nodes`.
+fn count(n: u32, noun: &str) -> String {
+    if n == 1 { format!("1 {noun}") } else { format!("{n} {noun}s") }
 }
 
 /// Whether the binary `fit` describes may run on `queue` at all — the same
@@ -326,11 +445,11 @@ fn derive_gpus_per_task(flags: &TopologyFlags, hw: &Hardware, gpu: bool) -> u32 
 /// exceed `max-gpus-per-node`. Checked once the whole layout is settled, and
 /// only for a GPU run (`per_task` is 0 otherwise, so the product is 0).
 ///
-/// A fully *derived* `TASKS_PER_NODE` (no `--tpn`, no `--tasks`) is already
-/// bounded by the GPU budget in `resolve_topology`, so what reaches here and
-/// fails is an explicitly requested layout: `--tpn`/`--tasks` asking for more
-/// ranks than the node has devices for, or a
-/// `--gpus-per-task`/`default-gpus-per-task` above the node's count.
+/// A derived `TASKS_PER_NODE` (no `--tpn`, and no `--tasks` the node count
+/// cannot absorb) is already bounded by the GPU budget in `derive_layout`, so
+/// what reaches here and fails is an explicitly requested layout:
+/// `--tpn`/`--tasks` asking for more ranks than the nodes have devices for,
+/// or a `--gpus-per-task`/`default-gpus-per-task` above the node's count.
 fn check_gpus_per_node(per_task: u32, tpn: u32, hw: &Hardware, queue: &str) -> Res<()> {
     if per_task == 0 {
         return Ok(());
@@ -369,8 +488,10 @@ fn check_gpus_per_node(per_task: u32, tpn: u32, hw: &Hardware, queue: &str) -> R
 /// Apply the default-tasks chain to a resolved topology: the selected script
 /// script's `tasks` setting (§4.2) first, then the caller's fallback (2 for
 /// testsuite runs — §11.6), else keep the §8.5 fill-the-node value. Any
-/// explicit process-layout flag (-n/-T/-t) disables the whole chain; tpn is
-/// capped so the recorded layout stays self-consistent.
+/// explicit process-layout flag (-n/-T/-t) disables the whole chain. Where
+/// the placement derives nodes, the node count follows from the new rank
+/// count as from a `--tasks`; tpn is capped so the recorded layout stays
+/// self-consistent.
 ///
 /// `GPUS_PER_TASK` needs no revisiting here: it is per-*task*, so shrinking the
 /// rank count leaves it untouched, and `tpn` only ever shrinks below — which
@@ -387,7 +508,13 @@ pub fn apply_tasks_default(
     if let Some(t) = script_tasks.or(fallback) {
         let t = t.max(1);
         topo.tasks = t;
-        topo.tpn = topo.tpn.min(t);
+        // `topo.tpn` is still a full node's room here (no layout flag was
+        // given); where nodes are derived, they follow from the new rank
+        // count exactly as from a `--tasks` (§8.5).
+        if topo.derive_nodes {
+            topo.nodes = t.div_ceil(topo.tpn.max(1));
+        }
+        topo.tpn = topo.tpn.min(t.div_ceil(topo.nodes.max(1)));
     }
 }
 
@@ -574,7 +701,7 @@ pub fn assemble(input: &RestartVarsInput) -> Res<VarSet> {
 mod tests {
     use super::*;
     use crate::template::Syntax;
-    use crate::mdb::{Layer, Machine, Meta};
+    use crate::mdb::{Layer, Machine, Meta, ScriptKind};
     use crate::sim::SimulationMeta;
     use std::path::PathBuf;
 
@@ -667,6 +794,17 @@ mod tests {
 
     fn test_fit(gpu: bool, compat: &[&str]) -> BinaryFit {
         BinaryFit::from_config(&test_cfg(gpu, compat))
+    }
+
+    /// The submit path, which most tests here exercise: `Placement::submit`.
+    fn resolve_topology(
+        f: &TopologyFlags,
+        machine: &Machine,
+        db: &Database,
+        fit: Option<&BinaryFit>,
+        force_queue: bool,
+    ) -> Res<Topology> {
+        super::resolve_topology(f, machine, db, fit, force_queue, Placement::submit(machine))
     }
 
     fn flags() -> TopologyFlags {
@@ -1239,14 +1377,276 @@ mod tests {
         }
 
         // qbd's queues derive exactly their GPU count of ranks, so the GPU
-        // bound on a derived tpn is a no-op here — and an explicit --tasks
-        // skips it entirely: a two-node rank count keeps the per-node fill and
-        // passes the ceiling exactly as it always did.
+        // bound on a derived tpn is a no-op here: a two-node rank count keeps
+        // the per-node fill, on the two nodes it needs.
         let mut f = flags();
         f.queue = Some("gpu4".to_owned());
         f.tasks = Some(8);
         let t = resolve_topology(&f, &machine, &db, Some(&fit), false).unwrap();
-        assert_eq!((t.tasks, t.tpn, t.cpus, t.gpus_per_task), (8, 4, 16, 1));
+        assert_eq!((t.nodes, t.tasks, t.tpn, t.cpus, t.gpus_per_task), (2, 8, 4, 16, 1));
+    }
+
+    fn qbd() -> Machine {
+        let mdb = crate::mdb::Mdb::with_roots(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"),
+            PathBuf::from("/nonexistent-user-mdb"),
+        );
+        mdb.load("qbd").unwrap()
+    }
+
+    fn qbd_fit(gpu: bool) -> BinaryFit {
+        let cfg: ConfigMeta = toml::from_str(&format!(
+            "name=\"s\"\nflavor=\"default\"\nthornlist=\"t.th\"\n\
+             machine=\"qbd\"\nconfig-id=\"c\"\nbuild-id=\"b\"\n[runs-on]\ngpu={gpu}"
+        ))
+        .unwrap();
+        BinaryFit::from_config(&cfg)
+    }
+
+    /// `(nodes, tasks, tpn)` for `-q queue -T tasks -c cpus` on qbd, placed
+    /// as `placement`.
+    fn qbd_layout(queue: &str, tasks: u32, cpus: u32, placement: Placement) -> Res<(u32, u32, u32)> {
+        let mut f = flags();
+        f.queue = Some(queue.to_owned());
+        f.tasks = Some(tasks);
+        f.cpus = Some(cpus);
+        let machine = qbd();
+        let fit = qbd_fit(machine.meta.queue(queue).unwrap().gpu);
+        let t = super::resolve_topology(&f, &machine, &Database::new(), Some(&fit), false, placement)?;
+        Ok((t.nodes, t.tasks, t.tpn))
+    }
+
+    /// The QB4 report: `-T 256 -c 1` on a 64-core partition went out as one
+    /// node, which Slurm refuses. Without `-n` a submitted job gets as many
+    /// nodes as its ranks need.
+    #[test]
+    fn a_submit_without_nodes_gets_as_many_as_its_tasks_need() {
+        let s = Placement::Scheduled;
+        assert_eq!(Placement::submit(&qbd()), s, "qbd's jobs go to Slurm");
+        assert_eq!(qbd_layout("checkpt", 256, 1, s).unwrap(), (4, 256, 64));
+        // Not a multiple of a node: the ranks spread evenly over 2 nodes.
+        assert_eq!(qbd_layout("checkpt", 100, 1, s).unwrap(), (2, 100, 50));
+        // Threads count: 64 ranks of 2 CPUs fill 2 nodes.
+        assert_eq!(qbd_layout("workq", 64, 2, s).unwrap(), (2, 64, 32));
+        // A rank count that fits on one node stays on one.
+        assert_eq!(qbd_layout("checkpt", 64, 1, s).unwrap(), (1, 64, 64));
+        assert_eq!(qbd_layout("checkpt", 3, 1, s).unwrap(), (1, 3, 3));
+        // An uneven CPU split: 21 ranks of 3 CPUs fit a 64-core node, so 64
+        // of them need 4 nodes, not ceil(64 * 3 / 64) = 3.
+        assert_eq!(qbd_layout("checkpt", 64, 3, s).unwrap(), (4, 64, 16));
+
+        // An explicit --tpn sets the per-node count the nodes follow from.
+        let machine = qbd();
+        let mut f = flags();
+        f.queue = Some("checkpt".to_owned());
+        f.tasks = Some(256);
+        f.tpn = Some(32);
+        let t = super::resolve_topology(&f, &machine, &Database::new(), Some(&qbd_fit(false)), false, s)
+            .unwrap();
+        assert_eq!((t.nodes, t.tasks, t.tpn), (8, 256, 32));
+    }
+
+    /// The node size comes from the queue when it has its own
+    /// `max-cpus-per-node`, else from the machine.
+    #[test]
+    fn derived_nodes_use_the_queues_cpus_over_the_machines() {
+        let machine = test_machine();
+        let db = Database::new();
+        let mut f = flags();
+        f.tasks = Some(64);
+        f.cpus = Some(1);
+        // batch inherits [hardware]'s 16 CPUs: 4 nodes.
+        let t = resolve_topology(&f, &machine, &db, Some(&test_fit(false, &[])), false).unwrap();
+        assert_eq!((t.nodes, t.tpn), (4, 16));
+        // gpuq has 32 of its own (and declares no GPUs to bound it): 2 nodes.
+        f.queue = Some("gpuq".to_owned());
+        let t = resolve_topology(&f, &machine, &db, Some(&test_fit(true, &[])), false).unwrap();
+        assert_eq!((t.nodes, t.tpn), (2, 32));
+    }
+
+    /// On a GPU run a node holds no more ranks than its GPUs feed, so that is
+    /// what the node count follows from — and with `--tasks` too, now that
+    /// the nodes absorb the bound instead of the GPU ceiling refusing it.
+    #[test]
+    fn derived_nodes_on_a_gpu_run_follow_the_gpus() {
+        let s = Placement::Scheduled;
+        // gpu2: 2 GPUs a node; the queue default of 32 CPUs a rank agrees.
+        assert_eq!(qbd_layout("gpu2", 8, 32, s).unwrap(), (4, 8, 2));
+        // -c 8 leaves room for 8 ranks by CPU, but only 2 GPUs: still 4 nodes.
+        assert_eq!(qbd_layout("gpu2", 8, 8, s).unwrap(), (4, 8, 2));
+        // gpu4: 4 GPUs a node.
+        assert_eq!(qbd_layout("gpu4", 8, 8, s).unwrap(), (2, 8, 4));
+        // Two GPUs a rank on gpu4: 2 ranks a node.
+        let machine = qbd();
+        let mut f = flags();
+        f.queue = Some("gpu4".to_owned());
+        f.tasks = Some(8);
+        f.gpus_per_task = Some(2);
+        let t = super::resolve_topology(&f, &machine, &Database::new(), Some(&qbd_fit(true)), false, s)
+            .unwrap();
+        assert_eq!((t.nodes, t.tasks, t.tpn, t.gpus_per_task), (4, 8, 2, 2));
+    }
+
+    /// An explicit `-n` always wins; one the ranks cannot fit on is refused
+    /// before anything is submitted, naming the node count that would.
+    #[test]
+    fn explicit_nodes_win_and_an_impossible_count_is_refused() {
+        let machine = qbd();
+        let db = Database::new();
+        let fit = qbd_fit(false);
+        let resolve = |nodes: u32, tasks: u32, tpn: Option<u32>, placement: Placement| {
+            let mut f = flags();
+            f.queue = Some("checkpt".to_owned());
+            f.nodes = Some(nodes);
+            f.tasks = Some(tasks);
+            f.tpn = tpn;
+            f.cpus = Some(1);
+            super::resolve_topology(&f, &machine, &db, Some(&fit), false, placement)
+                .map(|t| (t.nodes, t.tasks, t.tpn))
+                .map_err(|e| e.to_string())
+        };
+        let s = Placement::Scheduled;
+        // More nodes than needed: as asked, ranks spread evenly.
+        assert_eq!(resolve(8, 256, None, s).unwrap(), (8, 256, 32));
+        assert_eq!(resolve(4, 256, None, s).unwrap(), (4, 256, 64));
+
+        // The QB4 case with -n 1: refused, not handed to Slurm.
+        let err = resolve(1, 256, None, s).unwrap_err();
+        assert!(err.contains("256 tasks of 1 CPU each do not fit on 1 node"), "{err}");
+        assert!(
+            err.contains("has 64 CPUs") && err.contains("room for 64") && err.contains("-n 4"),
+            "{err}"
+        );
+        let err = resolve(3, 256, None, s).unwrap_err();
+        assert!(err.contains("on 3 nodes") && err.contains("-n 4"), "{err}");
+        // An explicit --tpn that cannot hold the ranks contradicts itself.
+        let err = resolve(2, 256, Some(32), s).unwrap_err();
+        assert!(
+            err.contains("256 tasks do not fit on 2 nodes at 32 tasks per node") && err.contains("-n 8"),
+            "{err}"
+        );
+        // An explicit --tpn above the CPU room is still authoritative.
+        assert_eq!(resolve(2, 256, Some(128), s).unwrap(), (2, 256, 128));
+
+        // A run in an allocation or on this host refuses nothing: what fits
+        // there is not cactup's to know.
+        assert!(resolve(1, 256, None, Placement::Allocation).is_ok());
+        assert!(resolve(1, 256, None, Placement::Host).is_ok());
+    }
+
+    /// A run on this host (a login node, or a machine without a batch
+    /// system) keeps one node; inside an allocation the nodes are derived as
+    /// for a submit.
+    #[test]
+    fn nodes_are_derived_only_where_ranks_can_span_nodes() {
+        assert_eq!(qbd_layout("checkpt", 256, 1, Placement::Host).unwrap(), (1, 256, 64));
+        assert_eq!(qbd_layout("checkpt", 256, 1, Placement::Allocation).unwrap(), (4, 256, 64));
+
+        // A `job-ids = "pids"` machine's submit backgrounds the script here.
+        let mdb = crate::mdb::Mdb::with_roots(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"),
+            PathBuf::from("/nonexistent-user-mdb"),
+        );
+        let omnia = mdb.load("omnia").unwrap();
+        assert_eq!(Placement::submit(&omnia), Placement::Host);
+        assert_eq!(Placement::foreground(&omnia), Placement::Host);
+        // A batch machine's foreground run outside an allocation is on this
+        // host (qbd declares allocation-env; the test env has none of it set,
+        // or this is a compute node and the answer is Allocation).
+        let inside = qbd().meta.in_allocation() == Some(true);
+        let expect = if inside { Placement::Allocation } else { Placement::Host };
+        assert_eq!(Placement::foreground(&qbd()), expect);
+    }
+
+    /// A script's `tasks` setting is a rank count like `--tasks`: where nodes
+    /// are derived, they follow from it.
+    #[test]
+    fn a_script_tasks_default_derives_nodes_too() {
+        let machine = qbd();
+        let db = Database::new();
+        let mut f = flags();
+        f.queue = Some("checkpt".to_owned());
+        f.cpus = Some(1);
+        let fit = qbd_fit(false);
+        let at = |placement, script_tasks| {
+            let mut t =
+                super::resolve_topology(&f, &machine, &db, Some(&fit), false, placement).unwrap();
+            apply_tasks_default(&mut t, &f, Some(script_tasks), None);
+            (t.nodes, t.tasks, t.tpn)
+        };
+        assert_eq!(at(Placement::Scheduled, 256), (4, 256, 64));
+        assert_eq!(at(Placement::Scheduled, 100), (2, 100, 50));
+        assert_eq!(at(Placement::Scheduled, 2), (1, 2, 2));
+        assert_eq!(at(Placement::Host, 256), (1, 256, 64));
+    }
+
+    /// The QB4 report, rendered through qbd's own CPU submit script: the job
+    /// that went out as `-N 1 -n 256` (what a single host still gets) now goes
+    /// out on the 4 nodes it needs.
+    #[test]
+    fn qbd_submit_script_asks_for_the_nodes_the_tasks_need() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = qbd();
+        let sim = Simulation {
+            name: "bhns".to_owned(),
+            dir: tmp.path().join("bhns"),
+            meta: SimulationMeta {
+                parfile: "bhns.par".to_owned(),
+                configuration: "bhns".to_owned(),
+                simulation_id: "simulation-bhns-x".to_owned(),
+                alias: "bhns".to_owned(),
+                sourcedir: PathBuf::from("/work/u/bhns/Cactus"),
+                ..Default::default()
+            },
+        };
+        let render = |placement| {
+            let mut f = flags();
+            f.queue = Some("checkpt".to_owned());
+            f.tasks = Some(256);
+            f.cpus = Some(1);
+            let fit = qbd_fit(false);
+            let topo =
+                super::resolve_topology(&f, &machine, &Database::new(), Some(&fit), false, placement).unwrap();
+            let mut vars = assemble(&RestartVarsInput {
+                sim: &sim,
+                machine: &machine,
+                topo: &topo,
+                sim_home: tmp.path(),
+                restart_id: 0,
+                job_wall: Walltime::parse("24:00:00").unwrap(),
+                checkpt_buffer: Walltime(3600),
+                chained_job_id: "",
+                hostname: "qbd1",
+                user: "u",
+                email: "",
+                run_universe: None,
+                debug: false,
+                scratch_home: "",
+            })
+            .unwrap();
+            vars.set("ALLOCATION", "alloc");
+            let script = crate::sim::start::generate_script(
+                &machine,
+                ScriptKind::Submit,
+                "cpu",
+                &vars,
+                Phase::Submit,
+                None,
+            )
+            .unwrap();
+            let lines: Vec<String> = script
+                .lines()
+                .filter(|l| l.starts_with("#SBATCH -N") || l.starts_with("#SBATCH --ntasks-per-node"))
+                .map(str::to_owned)
+                .collect();
+            eprintln!("{placement:?}:\n{}", lines.join("\n"));
+            lines
+        };
+        assert_eq!(render(Placement::Host), ["#SBATCH -N 1 -n 256", "#SBATCH --ntasks-per-node=64"]);
+        assert_eq!(
+            render(Placement::Scheduled),
+            ["#SBATCH -N 4 -n 256", "#SBATCH --ntasks-per-node=64"]
+        );
     }
 
     /// db1 (Deep Bayou) has 2 GPUs per node and fills a node as 2 ranks of 24
@@ -1275,11 +1675,12 @@ mod tests {
         let t = resolve_topology(&flags(), &machine, &db, Some(&fit), false).unwrap();
         assert_eq!((t.tasks, t.tpn, t.cpus, t.gpus_per_task), (2, 2, 24, 1));
 
-        // Explicit rank counts resolve as they always did: 2 per node.
+        // Explicit rank counts resolve as they always did: 2 per node, on
+        // as many nodes as that takes.
         let mut f = flags();
         f.tasks = Some(4);
         let t = resolve_topology(&f, &machine, &db, Some(&fit), false).unwrap();
-        assert_eq!((t.tasks, t.tpn), (4, 2));
+        assert_eq!((t.nodes, t.tasks, t.tpn), (2, 4, 2));
 
         // 4 ranks of 12 cores on one node would put 4 ranks on its 2 GPUs.
         let mut f = flags();
@@ -1333,7 +1734,8 @@ mod tests {
         assert!(err.contains("needs 4 GPUs per node") && err.contains("--tpn/--tasks"), "{err}");
 
         // An explicit --tasks is a rank count too: on this no-batch single
-        // node every rank lands on the box, so it must not slip past the
+        // node (`job-ids = "pids"`, so no nodes are derived) every rank lands
+        // on the box, so it must not slip past the
         // ceiling on the strength of a quietly-bounded derived tpn (which
         // would let 10 ranks fight over the one MI210 via `mpirun -np 10`).
         let mut f = flags();

@@ -125,10 +125,18 @@ cactup sim submit mysim -t 32       # 32 tasks per node
 ```
 
 If you don't specify:
-- Tasks per node (`-t`) defaults to filling the node: `floor(MAX_CPUS_PER_NODE / CPUS_PER_TASK)` (one task per CPU when `-c` is 1)
+- Tasks per node (`-t`) defaults to filling the node: `floor(MAX_CPUS_PER_NODE / CPUS_PER_TASK)` (one task per CPU when `-c` is 1). On a GPU queue it is also no more than the node's GPUs can feed. With `-T`, the tasks spread evenly over the nodes.
 - Total tasks (`-T`) defaults to nodes × tasks-per-node (or the selected script's `tasks` setting when it declares one)
+- Nodes (`-n`) defaults to as many as the tasks need, `ceil(tasks / tasks-per-node)`, for `sim submit` and for a `sim run` inside a job allocation. Otherwise it is 1: a `sim run` on a login node, or on a machine without a batch system, runs on that one machine.
 
-For example, a 4-node submission with 32 CPUs per node and no `-T` or `-t` creates 4 × 32 = 128 tasks.
+For example, a 4-node submission with 32 CPUs per node and no `-T` or `-t` creates 4 × 32 = 128 tasks. The other way round, `-T 256 -c 1` on 64-CPU nodes is submitted on 4 nodes, and `-T 100 -c 1` on 2 nodes with 50 tasks each.
+
+An explicit `-n` always wins. If the tasks can't fit on the nodes you asked for, `sim submit` refuses before anything reaches the scheduler, and says how many nodes would work:
+
+```console
+$ cactup sim submit mysim -n 1 -T 256 -c 1 -q checkpt
+Error: 256 tasks of 1 CPU each do not fit on 1 node: a node of queue "checkpt" has 64 CPUs, room for 64 such tasks; ask for -n 4, or leave out -n to have it derived
+```
 
 ### CPUs per task
 
@@ -166,8 +174,8 @@ than the queue has, cactup refuses it up front rather than submitting a job that
 will never schedule:
 
 ```
-$ cactup sim submit mysim -q gpu2 -c 16
-error: this layout needs 4 GPUs per node (1 per task × 4 tasks/node) but queue
+$ cactup sim submit mysim -q gpu2 -c 16 -t 4
+Error: This layout needs 4 GPUs per node (1 per task × 4 tasks/node) but queue
 "gpu2" has 2; each rank already takes one GPU, so lower --tpn/--tasks to put at
 most 2 on a node
 ```

@@ -304,7 +304,9 @@ fn submit_impl(
     crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.silent)?;
     let force_queue = args.force_queue || args.force;
     let fit = vars::BinaryFit::for_config(machine, &cfg)?;
-    let mut topo = vars::resolve_topology(&args.topology, machine, db, Some(&fit), force_queue)?;
+    let placement = vars::Placement::submit(machine);
+    let mut topo =
+        vars::resolve_topology(&args.topology, machine, db, Some(&fit), force_queue, placement)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
     let sched = Scheduler::for_machine(machine);
 
@@ -689,7 +691,9 @@ fn run_interactive(
     crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.start.silent)?;
     let force_queue = args.start.force_queue || args.start.force;
     let fit = vars::BinaryFit::for_config(machine, &cfg)?;
-    let mut topo = vars::resolve_topology(&args.start.topology, machine, db, Some(&fit), force_queue)?;
+    let placement = vars::Placement::foreground(machine);
+    let mut topo =
+        vars::resolve_topology(&args.start.topology, machine, db, Some(&fit), force_queue, placement)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
     let sched = Scheduler::for_machine(machine);
 

@@ -209,9 +209,9 @@ pub struct Hardware {
     // §8.5
     /// CPUs/cores available per node — the availability fact the fill-the-node
     /// rule divides by `CPUS_PER_TASK` to get `TASKS_PER_NODE` (on a GPU run a
-    /// fully derived result — no `--tpn`/`--tasks` — is bounded by
-    /// `max-gpus-per-node`, so a machine may declare a `default-cpus-per-task`
-    /// that deliberately leaves CPUs idle).
+    /// derived one is also bounded by `max-gpus-per-node`, as §8.5 details, so a
+    /// machine may declare a `default-cpus-per-task` that deliberately leaves
+    /// CPUs idle), and that a missing `--nodes` is derived from.
     pub max_cpus_per_node: Option<u32>,
     /// Request-side default for `CPUS_PER_TASK` when `--cpus` is omitted.
     // §8.5

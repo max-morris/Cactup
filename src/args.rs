@@ -630,15 +630,18 @@ pub(crate) struct TopologyFlags {
     /// Notification type (default: knob, `all`).
     #[clap(short = 'M', long, value_name = "TYPE")]
     pub mail_type: Option<String>,
-    /// Node count (default: 1).
+    /// Node count. Default: for a job given to the scheduler, or a run inside
+    /// a job allocation, as many nodes as the tasks need, ceil(tasks /
+    /// tasks-per-node); otherwise 1.
     #[clap(short, long, value_name = "N")]
     pub nodes: Option<u32>,
     /// Total tasks (MPI ranks). Default: the run/submit script's `tasks` setting,
     /// else nodes * tasks-per-node; `test run`/`test submit` default to 2.
     #[clap(short = 'T', long, value_name = "N")]
     pub tasks: Option<u32>,
-    /// Tasks per node (default: fill the node, floor(MAX_CPUS_PER_NODE / cpus);
-    /// on a GPU run without --tasks, also bounded by the node's GPU count).
+    /// Tasks per node. Default: fill the node, floor(MAX_CPUS_PER_NODE / cpus),
+    /// and on a GPU run no more than the node's GPUs can feed; with --tasks,
+    /// the tasks spread evenly over the nodes.
     #[clap(short, long, value_name = "N")]
     pub tpn: Option<u32>,
     /// CPUs (threads) per task (default: the machine/queue `default-cpus-per-task`, else 1).
@@ -1025,6 +1028,9 @@ pub(crate) struct ImportArgs {
     /// Run the simulation in the foreground once it is created.
     #[clap(long)]
     pub run: bool,
+    /// Node count for --submit/--run (default: derived from the tasks, as `sim submit`/`sim run` do).
+    #[clap(short, long, value_name = "N")]
+    pub nodes: Option<u32>,
     /// Total tasks (MPI ranks) for --submit/--run (default: the .sim's suggestion).
     #[clap(short = 'T', long, value_name = "N")]
     pub tasks: Option<u32>,

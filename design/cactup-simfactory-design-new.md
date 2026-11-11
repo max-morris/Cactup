@@ -3669,7 +3669,7 @@ proc-distribution math. Flags (those passed through to submit scripts marked *):
 | `-q/--queue` * | scheduler queue | `queue` knob (passed over when the binary may not run there) → the flavor's `runs-on.default-queue` → machine default queue (§4.4). A build job: `build-queue` knob → `[build].queue` → machine default (§7.9) |
 | `-m/--mail` * | notify address | knob |
 | `-M/--mail-type` * | notify type | knob (`all`) |
-| `-n/--nodes` * | node count | 1 |
+| `-n/--nodes` * | node count | derived: `ceil(TASKS / TASKS_PER_NODE)` for a scheduled job or a run inside an allocation; 1 on a single host (see below) |
 | `-T/--tasks` | total tasks (MPI ranks) | inferred: `nodes * tpn` |
 | `-t/--tpn` * | tasks per node | full node (see below) |
 | `-c/--cpus` * | CPUs (threads) per task | 1 |
@@ -3708,38 +3708,63 @@ facts fill any topology the user left unset.
   `default-cpus-per-task` (simfactory's `num-threads`), else 1. This is the
   request-side default — e.g. Deep Bayou sets it to 24 so a no-`--cpus` job
   fills its 48-CPU nodes as 2 tasks × 24 CPUs.
-- `TASKS_PER_NODE` = `--tpn` if given, else
-  `floor(MAX_CPUS_PER_NODE / CPUS_PER_TASK)`, min 1 (fill the node — divide the
-  node's available CPUs among ranks) — using the queue-effective
-  `max-cpus-per-node` (§4.2) — and then, on a GPU run whose queue declares
+- **A node's room.** `floor(MAX_CPUS_PER_NODE / CPUS_PER_TASK)`, min 1 (fill
+  the node — divide the node's available CPUs among ranks), using the
+  queue-effective `max-cpus-per-node` (§4.2); on a GPU run whose queue declares
   `max-gpus-per-node`, additionally bounded by the node's GPU budget:
-  `min(that, max(1, floor(MAX_GPUS_PER_NODE / GPUS_PER_TASK)))`. The bound
-  applies **only to the fully derived value**: an explicit `--tpn` is
-  authoritative, and an explicit `--tasks` is a requested rank count — on a
-  single-node machine with no batch system every one of those ranks lands on
-  the node, so quietly shrinking `TASKS_PER_NODE` under it would bless a layout
-  the node cannot run. Both leave the CPU-rule value in place and are checked
-  against the ceiling below instead. With GPUs indivisible and one per rank, a
-  node holding fewer devices than the CPU split implies cannot run that many
-  ranks — deriving them anyway only produces a layout the ceiling refuses.
-  Bounding it here is what lets a GPU machine declare a *polite*
-  `default-cpus-per-task` (omnia: a rank wanting 8 of its 72 cores for the host
-  side of a single-MI210 job) without the CPU rule inferring 9 ranks for one
-  device. This costs the fill-the-node guarantee on such machines — CPUs may sit
-  idle, which is the machine's stated intent — and does not make GPUs *build* a
-  layout: the count comes from CPUs, GPUs only cap it.
-- `TASKS` = `--tasks` if given, else `NODES * TASKS_PER_NODE`. An explicit
-  `--tasks` replaces the fill-the-node total, so a *derived* `TASKS_PER_NODE` is
-  then capped to `ceil(TASKS / NODES)` to keep the layout self-consistent
-  (`--tasks=1` is 1 rank on 1 node, not `TASKS = 1, TASKS_PER_NODE = 2`); an
-  explicit `--tpn` is authoritative and never capped. This is a no-op in the
-  default case, where `TASKS == NODES * TASKS_PER_NODE` already.
+  `min(that, max(1, floor(MAX_GPUS_PER_NODE / GPUS_PER_TASK)))`. With GPUs
+  indivisible and one per rank, a node holding fewer devices than the CPU split
+  implies cannot run that many ranks — deriving them anyway only produces a
+  layout the ceiling refuses. Bounding the room is what lets a GPU machine
+  declare a *polite* `default-cpus-per-task` (omnia: a rank wanting 8 of its 72
+  cores for the host side of a single-MI210 job) without the CPU rule inferring
+  9 ranks for one device. This costs the fill-the-node guarantee on such
+  machines — CPUs may sit idle, which is the machine's stated intent — and does
+  not make GPUs *build* a layout: the count comes from CPUs, GPUs only cap it.
+- **Placement** decides what a missing `--nodes` means. A job handed to a batch
+  system (`sim submit`, `test submit`, `build submit` on a machine whose job ids
+  come from a scheduler) is *scheduled*: the scheduler allocates the nodes it
+  asks for. A foreground run (`sim run`, `test run`) inside one of the
+  machine's job allocations (`[scheduler].allocation-env` set) may span that
+  allocation's nodes. Anything else runs on a *single host*: a login node, or a
+  machine with `job-ids = "pids"`, whose "submit" backgrounds the script on the
+  submitting host.
+- `NODES` = `--nodes` if given. Else, when `--tasks` is given and the job is
+  scheduled or runs inside an allocation: `ceil(TASKS / per-node)`, where
+  per-node is `--tpn` if given, else the node's room — `--tasks 256 --cpus 1` on
+  qbd's 64-core nodes is 4 nodes, `--tasks 100` 2, `--tasks 64 --cpus 2` 2.
+  Dividing ranks rather than CPUs (`ceil(TASKS × CPUS_PER_TASK /
+  MAX_CPUS_PER_NODE)`) matters when the CPUs do not split evenly: a rank's
+  threads cannot straddle two nodes, so 64 ranks of 3 CPUs need 4 such nodes,
+  not 3. Otherwise 1. A node of unknown size (no `max-cpus-per-node`, nothing
+  detected) derives nothing either.
+- `TASKS_PER_NODE` = `--tpn` if given. Else, with no `--tasks`, the node's room
+  (fill the node). With `--tasks`, the ranks spread evenly over the nodes,
+  `ceil(TASKS / NODES)` — capped, on a single host whose node count was not
+  derived, at the CPU rule's room (not the GPU-bounded one). That cap is
+  deliberate: there an explicit `--tasks` is a requested rank count and every
+  one of those ranks lands on the node, so quietly shrinking
+  `TASKS_PER_NODE` under it would bless a layout the node cannot run; it meets
+  the GPU ceiling below instead. An explicit `--tpn` is authoritative and never
+  capped (`--tasks=1` with no `--tpn` is 1 rank on 1 node, not `TASKS = 1,
+  TASKS_PER_NODE = 2`).
+- `TASKS` = `--tasks` if given, else `NODES * TASKS_PER_NODE`.
+- **A scheduled layout that cannot fit is refused** before anything is
+  submitted: when `TASKS > NODES × TASKS_PER_NODE` — an explicit `--nodes`
+  with more ranks than its nodes have room for, or an explicit `--tpn` that
+  cannot hold them — cactup names the `--nodes` that would fit (or says to
+  leave it out) rather than hand the scheduler a job it refuses with
+  "Requested node configuration is not available". A run inside an allocation
+  or on a single host is never refused on this ground: what fits an allocation
+  cactup does not know, and oversubscribing one host's CPUs is a choice.
 - **Script-route default tasks (§4.2).** When *no* process-layout flag
   (`-n`/`-T`/`-t`) was given, the routed script's optional `tasks = N`
-  setting replaces the fill-the-node `TASKS` (capping `TASKS_PER_NODE` to keep
-  the layout self-consistent); for a submit the submitscript entry is consulted
-  first, then the runscript entry. Testsuite runs additionally fall back to
-  `TASKS = 2` when no route sets it (§11.6).
+  setting replaces the fill-the-node `TASKS`, and is treated as a `--tasks`
+  would be: `NODES` follows from it where nodes are derived, and
+  `TASKS_PER_NODE` is capped to keep the layout self-consistent. For a submit
+  the submitscript entry is consulted first, then the runscript entry.
+  Testsuite runs additionally fall back to `TASKS = 2` when no route sets it
+  (§11.6).
 - `GPU` = `1` if `--gpu` or the chosen queue's `gpu = true`, else `0` — checked
   **one-directionally** against the built binary's `runs-on.gpu` flag (§4.4 / D12):
   refused (absent `--force-queue`/`-f`) only when the binary's `gpu` flag is
@@ -3762,8 +3787,9 @@ facts fill any topology the user left unset.
   genuinely wants otherwise says so with `default-gpus-per-task`.
 
   Consequently GPUs never *build* a `TASKS_PER_NODE`: CPUs alone drive the
-  process layout, and GPUs only ever bound a derived rank count downward (see
-  the `TASKS_PER_NODE` bullet) or refuse an explicitly requested one (below).
+  process layout, and GPUs only ever bound a node's room downward (see the
+  node's-room bullet; on a scheduled job that spreads the ranks over more
+  nodes) or refuse an explicitly requested layout (below).
 - **GPUs are not oversubscribable.** `max-gpus-per-node` is therefore a
   **ceiling, never a target**: it does not set `GPUS_PER_TASK`, it bounds it.
   A layout needing more GPUs per node than the queue has — `GPUS_PER_TASK ×
@@ -4304,8 +4330,10 @@ kind of install-time provenance, `simfile`, beside `release` and `thornlist`;
 that name — in the foreground, or, on a machine that queues builds, submitted
 and blocked on (§7.9) — then `sim create` from the file's parfile, and with
 `--submit`/`--run` the simulation started, its topology the file's run hints
-unless `-T`/`-c`/`-w`/`-q` say otherwise. Without either it prints the submit
-command. The parfile's knob inputs are settled **first**, before anything
+unless `-T`/`-c`/`-w`/`-q` say otherwise. A `.sim` suggests no node count
+(nodes are machine shaped): `-n` passes one through, and without it the started
+command derives it from the tasks (§8.5). Without either flag it prints the
+submit command. The parfile's knob inputs are settled **first**, before anything
 long runs: `--input KNOB=VALUE`, else a download of the input's URL into
 `<inputs>/<sha256>/<file name>` (shared by every simulation needing
 the same bytes; checked against the recorded hash, and said so when there is

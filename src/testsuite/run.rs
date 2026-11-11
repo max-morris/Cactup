@@ -20,7 +20,7 @@ use crate::sim::start::{
 };
 use crate::sim::vars::{
     apply_tasks_default, default_checkpt_buffer, resolve_topology, set_machine_vars,
-    set_topology_vars, set_walltime_vars, BinaryFit, Topology,
+    set_topology_vars, set_walltime_vars, BinaryFit, Placement, Topology,
 };
 use crate::template::VarSet;
 use crate::testsuite::{
@@ -246,7 +246,10 @@ fn start_impl(
     // 2. Topology + queue/GPU guards (§4.4 / D12), exactly as a sim.
     let force_queue = args.force_queue || args.force;
     let fit = BinaryFit::for_config(machine, &cfg)?;
-    let mut topo = resolve_topology(&args.topology, machine, db, Some(&fit), force_queue)?;
+    // A submit hands the suite to the scheduler; a run is here, inside an
+    // allocation or not (§8.5 placement).
+    let placement = if submit { Placement::submit(machine) } else { Placement::foreground(machine) };
+    let mut topo = resolve_topology(&args.topology, machine, db, Some(&fit), force_queue, placement)?;
     let select = if args.tests.is_empty() { "all".to_owned() } else { args.tests.join(" ") };
     // Resolved before anything is created or registered: a selection that
     // names nothing fails here, not as a queued job that runs zero tests.

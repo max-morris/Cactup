@@ -506,7 +506,9 @@ fn settle_inputs(
 }
 
 /// The topology flags for `sim submit`/`run`: each one given to import, else
-/// the `.sim`'s suggestion.
+/// the `.sim`'s suggestion. A `.sim` suggests no node count (it is machine
+/// shaped), so without `-n` the started command derives one from the tasks
+/// (§8.5).
 fn topology(sim: &SimFile, args: &ImportArgs) -> Vec<String> {
     let hints = sim.run.as_ref();
     let mut flags = Vec::new();
@@ -515,6 +517,7 @@ fn topology(sim: &SimFile, args: &ImportArgs) -> Vec<String> {
             flags.extend([flag.to_owned(), value]);
         }
     };
+    add("-n", args.nodes.map(|n| n.to_string()));
     add("-T", args.tasks.or(hints.and_then(|h| h.tasks)).map(|n| n.to_string()));
     add("-c", args.cpus.or(hints.and_then(|h| h.cpus_per_task)).map(|n| n.to_string()));
     add("-G", hints.and_then(|h| h.gpus_per_task).map(|n| n.to_string()));
@@ -699,6 +702,10 @@ mod tests {
         };
         let args = ImportArgs::try_parse_from_args(&["s.sim", "-T", "64", "-q", "checkpt"]);
         assert_eq!(topology(&sim, &args), ["-T", "64", "-c", "8", "-w", "48:00:00", "-q", "checkpt"]);
+        // No node count of its own: `sim submit` derives it from the tasks.
+        // An explicit one is passed through.
+        let args = ImportArgs::try_parse_from_args(&["s.sim", "-n", "2"]);
+        assert_eq!(topology(&sim, &args), ["-n", "2", "-T", "256", "-c", "8", "-w", "48:00:00"]);
     }
 
     impl ImportArgs {
