@@ -2304,7 +2304,10 @@ fn prepare_with_cache(
         built: None,
         flags,
         sources: fresh_sources.as_ref().map(|s| s.heads.clone()),
-        downloads: parsed_list.as_ref().map(|l| crate::fetch::download_hashes(&installation.root, l)).unwrap_or_default(),
+        downloads: match parsed_list.as_ref() {
+            Some(list) => crate::fetch::download_hashes(&installation.root, list)?,
+            None => Default::default(),
+        },
         thorn_providers: fresh_providers.clone(),
         thorn_shapes: fresh_shapes.clone(),
         thorn_stamps: fresh_stamps.clone(),

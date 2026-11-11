@@ -209,7 +209,7 @@ const UPDATE_LOCK: &str = ".update.lock";
 /// **Never break this file.** Every deployed binary and the installer read
 /// it to update themselves; a `latest.json` one of them refuses would leave
 /// it unable to update, forever. It carries no version key on purpose: the
-/// path is the version. Keys may only be added, and the ones above keep
+/// path is the version. Keys may only be added, and the existing ones keep
 /// their names, types and meanings. A change that cannot be additive (a
 /// renamed key, a different shape) is published at a new path beside this
 /// one (for example `latest-2.json`), which binaries that understand it read instead.
@@ -890,9 +890,6 @@ pub(crate) fn mdb_generation_notice() -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Updating is the way out of "written by a newer cactup", so a newer
-    /// database reads as an empty one there (default update knobs), while
-    /// any other failure still fails.
     /// A manifest with keys this binary has never heard of (a later site's
     /// additions, at the top level, on a target and inside it) still parses:
     /// reading `latest.json` stays lenient.
@@ -908,6 +905,9 @@ mod tests {
         assert_eq!(latest.targets["x86_64-unknown-linux-musl"].size, 12);
     }
 
+    /// Updating is the way out of "written by a newer cactup", so a newer
+    /// database reads as an empty one there (default update knobs), while
+    /// any other failure still fails.
     #[test]
     fn a_newer_database_does_not_stop_an_update() {
         let dir = tempfile::tempdir().unwrap();

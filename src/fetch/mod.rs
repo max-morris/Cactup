@@ -232,8 +232,15 @@ pub fn download_key(install_root: &Path, path: &Path) -> String {
 /// Per repo of `list` that is one download (an http/https/ftp checkout that
 /// is the only one of its repo, so one file), its hash as the fetch record
 /// at `install_root` keeps it: what a build freezes and `sim export` pins.
-pub fn download_hashes(install_root: &Path, list: &Thornlist) -> BTreeMap<String, String> {
-    let Ok(Some(state)) = FetchState::read(install_root) else { return BTreeMap::new() };
+/// No record, or one that does not read, is no hashes; one a newer cactup
+/// wrote is an error, never silently no hashes (which would freeze a build,
+/// or export a simulation, without the pins it does have).
+pub fn download_hashes(install_root: &Path, list: &Thornlist) -> Res<BTreeMap<String, String>> {
+    let state = match FetchState::read(install_root) {
+        Ok(Some(state)) => state,
+        Err(e) if e.downcast_ref::<crate::format::Newer>().is_some() => return Err(e),
+        Ok(None) | Err(_) => return Ok(BTreeMap::new()),
+    };
     let mut out = BTreeMap::new();
     for c in list.components() {
         let single = list.components().iter().filter(|o| o.repo == c.repo).count() == 1;
@@ -247,7 +254,7 @@ pub fn download_hashes(install_root: &Path, list: &Thornlist) -> BTreeMap<String
             out.insert(c.repo.clone(), sum.clone());
         }
     }
-    out
+    Ok(out)
 }
 
 impl ExecReport {
@@ -1631,7 +1638,7 @@ pub(crate) mod tests {
             let path = tmp.path().join(&c.target).join("zlib.tgz");
             let records = FetchRecords { repos: Vec::new(), downloads: vec![(download_key(tmp.path(), &path), "f".repeat(64))] };
             FetchState::record(tmp.path(), &records).unwrap();
-            assert_eq!(download_hashes(tmp.path(), &list).get("zlib").map(String::as_str), Some(&*"f".repeat(64)), "{target}");
+            assert_eq!(download_hashes(tmp.path(), &list).unwrap().get("zlib").map(String::as_str), Some(&*"f".repeat(64)), "{target}");
         }
     }
 
@@ -1909,11 +1916,6 @@ pub(crate) mod tests {
         assert!(matches!(skipped.git[0].action, GitAction::Pin));
     }
 
-    /// `plan()` must place every repo under the thornlist's declared root,
-    /// not a hardcoded `Cactus` — before the fix, the fetcher already got
-    /// this right (it read `list.root()`), but nothing enforced it, so a
-    /// future regression here would silently reopen the exact same split
-    /// between where components are planned and where `install` looks.
     fn exhaustive_fetch_state() -> FetchState {
         let mut repos = indexmap::IndexMap::new();
         for (name, branch) in [("CarpetX", "main"), ("Cactus", "master")] {
@@ -2012,6 +2014,11 @@ pub(crate) mod tests {
         assert!(text.starts_with("schema = 1\n"), "{text}");
     }
 
+    /// `plan()` must place every repo under the thornlist's declared root,
+    /// not a hardcoded `Cactus` — before the fix, the fetcher already got
+    /// this right (it read `list.root()`), but nothing enforced it, so a
+    /// future regression here would silently reopen the exact same split
+    /// between where components are planned and where `install` looks.
     #[test]
     fn plan_places_every_repo_under_the_declared_root() {
         let tmp = tempfile::tempdir().unwrap();
