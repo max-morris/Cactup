@@ -259,7 +259,8 @@ is `~/.cactup/inputs`. A user's `inputs-home` knob still wins over it.
 be resolved fails only `cactup import`, never a build or a simulation. The
 in-repo machines whose `simulation-home` is on a work, scratch or project
 filesystem now set it beside their simulations (`/work/@USER@/inputs`,
-`@ENV(SCRATCH)@/inputs`, ...). Inputs are often large, and a simulation
+`@ENV(SCRATCH)@/inputs`, ...), except where that is one user's own
+directory, which would leave everyone else unable to import. Inputs are often large, and a simulation
 reads them where they were unpacked, so put it where the compute nodes see
 it and the home quota does not suffer.
 

@@ -184,6 +184,8 @@ pub struct ExecReport {
     pub links: Vec<(String, link::LinkOutcome)>,
     /// Files written by http/https downloads.
     pub downloads: Vec<PathBuf>,
+    /// Each download's [`download_key`] and SHA-256.
+    pub download_sums: Vec<(String, String)>,
     pub failures: Vec<Failure>,
 }
 
@@ -213,9 +215,45 @@ pub struct Failure {
     pub error: String,
 }
 
+/// What a fetch leaves in `fetch-state.toml`: a record per repo, and the
+/// hash of each download by [`download_key`].
+pub struct FetchRecords {
+    pub repos: Vec<(String, RepoRecord)>,
+    pub downloads: Vec<(String, String)>,
+}
+
+/// A download's key in the fetch record: its path under the installation's
+/// root, as the thornlist places it (`<target>/<file name>`).
+pub fn download_key(install_root: &Path, path: &Path) -> String {
+    path.strip_prefix(install_root).unwrap_or(path).to_string_lossy().into_owned()
+}
+
+/// Per repo of `list` that is one download (an http/https/ftp checkout that
+/// is the only one of its repo, so one file), its hash as the fetch record
+/// at `install_root` keeps it: what a build freezes and `sim export` pins.
+pub fn download_hashes(install_root: &Path, list: &Thornlist) -> BTreeMap<String, String> {
+    let Ok(Some(state)) = FetchState::read(install_root) else { return BTreeMap::new() };
+    let mut out = BTreeMap::new();
+    for c in list.components() {
+        let single = list.components().iter().filter(|o| o.repo == c.repo).count() == 1;
+        if !single || !matches!(c.ty, ComponentType::Http | ComponentType::Https | ComponentType::Ftp) {
+            continue;
+        }
+        let key = format!("{}/{}", c.target, download::derive_filename(c.name.as_deref(), &c.checkout));
+        if let Some(sum) = state.downloads.get(&key) {
+            out.insert(c.repo.clone(), sum.clone());
+        }
+    }
+    out
+}
+
 impl ExecReport {
     /// The `fetch-state.toml` records for everything successfully fetched.
-    pub fn records(&self) -> Vec<(String, RepoRecord)> {
+    pub fn records(&self) -> FetchRecords {
+        FetchRecords { repos: self.repo_records(), downloads: self.download_sums.clone() }
+    }
+
+    fn repo_records(&self) -> Vec<(String, RepoRecord)> {
         self.repos
             .iter()
             .map(|r| {
@@ -476,8 +514,12 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                         let mut report = report.lock().expect("fetch report poisoned");
                         match outcome {
                             // Kept as it was: nothing happened, so the line leaves nothing.
-                            Ok(download::Downloaded { path, fetched: false }) => report.downloads.push(path),
-                            Ok(download::Downloaded { path, fetched: true }) => {
+                            Ok(download::Downloaded { path, fetched: false, sha256 }) => {
+                                report.download_sums.push((download_key(install_root, &path), sha256));
+                                report.downloads.push(path)
+                            }
+                            Ok(download::Downloaded { path, fetched: true, sha256 }) => {
+                                report.download_sums.push((download_key(install_root, &path), sha256));
                                 let size = crate::progress::bytes(prodash::Count::step(&line));
                                 let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
                                 // The line is already named for the
@@ -623,6 +665,10 @@ pub struct FetchState {
     pub schema: u32,
     #[serde(default)]
     pub repos: indexmap::IndexMap<String, RepoRecord>,
+    /// Each download's SHA-256 as last fetched, by [`download_key`]. An
+    /// additive key: older binaries ignore it.
+    #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
+    pub downloads: indexmap::IndexMap<String, String>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -662,10 +708,16 @@ impl FetchState {
 
     /// Merge `records` over the existing state (repos not touched by this
     /// fetch keep their previous record) and write atomically.
-    pub fn record(install_root: &Path, records: &[(String, RepoRecord)]) -> Res<()> {
-        let mut state = Self::read(install_root)?
-            .unwrap_or_else(|| FetchState { schema: Self::SCHEMA, repos: Default::default() });
-        for (repo, record) in records {
+    pub fn record(install_root: &Path, records: &FetchRecords) -> Res<()> {
+        let mut state = Self::read(install_root)?.unwrap_or_else(|| FetchState {
+            schema: Self::SCHEMA,
+            repos: Default::default(),
+            downloads: Default::default(),
+        });
+        for (key, sum) in &records.downloads {
+            state.downloads.insert(key.clone(), sum.clone());
+        }
+        for (repo, record) in &records.repos {
             state.repos.insert(
                 repo.clone(),
                 RepoRecord {
@@ -1822,7 +1874,7 @@ pub(crate) mod tests {
         let mut progress = prodash::tree::Root::new().add_child("test checkout");
         git::pin(&repo_dir, None, c1, false, &mut progress).unwrap();
         let tip = RepoRecord { url: url.clone(), branch: Some(branch.clone()), head: c3.to_string(), commit: None };
-        FetchState::record(&root, &[("R".to_owned(), tip)]).unwrap();
+        FetchState::record(&root, &FetchRecords { repos: vec![("R".to_owned(), tip)], downloads: Vec::new() }).unwrap();
         let mut progress = prodash::tree::Root::new().add_child("test plan");
         let mut skipped = plan(&list(Some(&c3)), &root, &mut progress).unwrap();
         assert!(skipped.git.is_empty());

@@ -26,7 +26,7 @@ pub mod wisdom;
 use crate::args::GlobalOpts;
 use crate::database::Db;
 use crate::Res;
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use colored::Colorize;
 use std::path::PathBuf;
 
@@ -48,15 +48,43 @@ pub fn prompt_with_default(question: &str, default: &str) -> Res<String> {
     print!("{question} (default: {}): ", default.bold());
     io::stdout().flush()?;
 
-    let mut input = String::new();
-    let n = io::stdin().read_line(&mut input)?;
-
+    let input = read_line_interruptibly()?.unwrap_or_default();
     let input = input.trim();
-    Ok(if n == 0 || input.is_empty() {
-        default.to_owned()
-    } else {
-        input.to_owned()
-    })
+    Ok(if input.is_empty() { default.to_owned() } else { input.to_owned() })
+}
+
+/// One line from stdin (`None` at end of input), failing with "interrupted"
+/// as soon as Ctrl-C is pressed. The interrupt handler restarts the read a
+/// signal interrupts, so a plain `read_line` would sit there until Enter
+/// while cactup claims to be stopping; the read happens on a thread of its
+/// own instead, and this one polls the flag.
+pub fn read_line_interruptibly() -> Res<Option<String>> {
+    let (send, recv) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let read = std::io::stdin().read_line(&mut line).map(|n| (n > 0).then_some(line));
+        let _ = send.send(read);
+    });
+    loop {
+        if gix::interrupt::is_triggered() {
+            bail!("Interrupted");
+        }
+        match recv.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(read) => return Ok(read?),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
+        }
+    }
+}
+
+/// Ask a yes/no `question` on stderr; only `y`/`yes` is a yes, end of input
+/// is a no, and Ctrl-C fails with "interrupted".
+pub fn confirm(question: &str) -> Res<bool> {
+    use std::io::Write;
+    eprint!("{question}");
+    std::io::stderr().flush()?;
+    let answer = read_line_interruptibly()?.unwrap_or_default();
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes"))
 }
 
 /// Convert a `PathBuf` to an owned `String`, erroring on non-UTF-8 paths.

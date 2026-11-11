@@ -104,25 +104,56 @@ fn clone_of(package_repo: &str, t: &crate::installation::AddedThorn) -> String {
 /// keeps its clone: the package's thorns go into it, laid out as the base's
 /// section lays that repository out (its clone's name and `!REPO_PATH`),
 /// rather than into a second clone of the same repository.
-fn reuse_base_clone(base: &thornlist::Thornlist, url: &str, repo: &mut String, thorns: &mut [crate::installation::AddedThorn]) {
+fn reuse_base_clone(
+    base: &thornlist::Thornlist,
+    url: &mut String,
+    repo: &mut String,
+    thorns: &mut [crate::installation::AddedThorn],
+) -> bool {
     let normalized = crate::fetch::git::normalize_url(url);
     let Some(same) = base
         .components()
         .iter()
         .find(|c| c.url.as_deref().is_some_and(|u| crate::fetch::git::normalize_url(u) == normalized))
     else {
-        return;
+        return false;
     };
+    // The base's own spelling of the URL too: one clone has one source, and
+    // the fetch planner compares them as written.
+    url.clone_from(same.url.as_ref().expect("matched on it"));
     repo.clone_from(&same.repo);
     for t in thorns {
         t.repo_path = same.repo_path.clone().unwrap_or_default();
     }
+    true
 }
 
 /// Whether an added package's version is a branch tip (`head`, `master`):
 /// its default branch, followed rather than pinned.
 pub(crate) fn is_tip(version: &str) -> bool {
     matches!(version, "head" | "master")
+}
+
+/// The names the Cactarium gives a thorn become paths on disk and words in a
+/// thornlist (which GetComponents also hands to a shell, single-quoted), so
+/// they are checked before anything is written: an arrangement and a thorn
+/// are single plain path components; a `!REPO_PATH` is plain path
+/// characters, `$1`/`$2`, and whatever clone name it implies is a single
+/// plain component too.
+fn check_registry_names(slug: &str, arrangement: &str, thorn: &str, repo_path: &str) -> Res<()> {
+    let plain = |s: &str| {
+        !s.is_empty() && s != "." && s != ".." && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    };
+    if !plain(arrangement) || !plain(thorn) {
+        bail!("The Cactarium names a thorn of {slug} \"{arrangement}/{thorn}\", which is not a plain Arrangement/Thorn");
+    }
+    let path_ok = repo_path.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-/$".contains(&b));
+    let checkout = format!("{arrangement}/{thorn}");
+    let clone = clone_of("package", &crate::installation::AddedThorn { checkout, repo_path: repo_path.to_owned() });
+    if !path_ok || !plain(&clone) {
+        bail!("The Cactarium gives {arrangement}/{thorn} of {slug} the repo-path \"{repo_path}\", which cactup will not write");
+    }
+    Ok(())
 }
 
 /// Every clone a package is fetched into.
@@ -191,7 +222,7 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String], allow_untrus
         let version = if let Some(tip) = slug.at.as_deref().filter(|_| slug.tip().is_some()) {
             let (version, untrusted) = client.package_tip(slug.owner.as_str(), slug.name.as_str(), tip)?;
             if untrusted {
-                crate::cactarium::confirm_untrusted(&resolved.slug, allow_untrusted)?;
+                crate::cactarium::confirm_untrusted(&resolved.slug, "package", allow_untrusted)?;
             }
             let scratch = tempfile::tempdir().context("Failed to create a scratch directory")?;
             gix::init_bare(scratch.path()).context("Failed to create a scratch repository")?;
@@ -215,6 +246,9 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String], allow_untrus
             .filter(|t| slug.thorn.as_deref().is_none_or(|want| want.eq_ignore_ascii_case(&t.thorn)))
             .map(|t| AddedThorn { checkout: format!("{}/{}", t.arrangement, t.thorn), repo_path: t.repo_path.clone() })
             .collect();
+        for t in &version.thorns {
+            check_registry_names(&resolved.slug, &t.arrangement, &t.thorn, &t.repo_path)?;
+        }
         if let Some(t) = thorns.iter().find(|t| t.repo_path.trim().is_empty()) {
             bail!(
                 "The Cactarium gave no repo-path for {} in {}, so cactup cannot tell where it sits in the repository \
@@ -261,9 +295,11 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String], allow_untrus
         }
     }
     // A package named whole is all of its thorns, whatever else named some.
+    // (A tip's thorns came whole from the tip itself; it has no listing.)
     for w in &mut wanted {
-        if !w.only_named {
-            let listing = &listings[&w.entry];
+        if !w.only_named
+            && let Some(listing) = listings.get(&w.entry)
+        {
             if let Some(v) = listing.versions.iter().find(|v| v.version.version == w.version) {
                 w.thorns = v
                     .thorns
@@ -305,8 +341,27 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<
         // or a thorn it also checks out.
         let mut repo = repo_name(&w.url);
         let mut thorns = w.thorns;
-        reuse_base_clone(&base, &w.url, &mut repo, &mut thorns);
-        let w = Wanted { thorns, ..w };
+        let mut url = w.url;
+        let reused = reuse_base_clone(&base, &mut url, &mut repo, &mut thorns);
+        let w = Wanted { thorns, url, ..w };
+        if reused {
+            // One clone is at one commit: the base's other checkouts of it
+            // stay at the base's pin, so the package must be at the same one.
+            let claimed: BTreeSet<&str> = w.thorns.iter().map(|t| t.checkout.as_str()).collect();
+            let stay: Vec<&thornlist::Component> =
+                base.components().iter().filter(|c| c.repo == repo && !claimed.contains(c.checkout.as_str())).collect();
+            let at = if is_tip(&w.version) { None } else { Some(w.commit.as_str()) };
+            if let Some(other) = stay.iter().find(|c| c.commit.as_deref() != at) {
+                let names: Vec<&str> = stay.iter().map(|c| c.checkout.as_str()).collect();
+                bail!(
+                    "{} would share the clone {repo} with the base's {}, which stays at {}; one clone holds one \
+                     commit. Add a version at that commit, or replace those thorns too",
+                    w.slug,
+                    names.join(", "),
+                    other.commit.as_deref().map_or_else(|| "its branch".to_owned(), |c| c[..12.min(c.len())].to_owned())
+                );
+            }
+        }
         let want: BTreeSet<&str> = w.thorns.iter().map(|t| t.checkout.as_str()).collect();
         let normalized = crate::fetch::git::normalize_url(&w.url);
         let conflicts: BTreeSet<String> = base
@@ -612,13 +667,15 @@ mod tests {
         .unwrap();
         let mut repo = "hdf5-mirror".to_owned();
         let mut thorns = vec![AddedThorn { checkout: "ExternalLibraries/HDF5".into(), repo_path: "$2".into() }];
-        reuse_base_clone(&base, "https://github.com/EinsteinToolkit/ExternalLibraries-HDF5", &mut repo, &mut thorns);
+        let mut url = "https://github.com/EinsteinToolkit/ExternalLibraries-HDF5".to_owned();
+        assert!(reuse_base_clone(&base, &mut url, &mut repo, &mut thorns));
+        assert_eq!(url, "https://github.com/EinsteinToolkit/ExternalLibraries-HDF5.git", "the base's spelling");
         assert_eq!(repo, "ExternalLibraries-HDF5");
         assert_eq!(thorns[0].repo_path, "../$1-$2");
 
         let mut other = "carpetx".to_owned();
         let mut kept = vec![AddedThorn { checkout: "CarpetX/Arith".into(), repo_path: "$2".into() }];
-        reuse_base_clone(&base, "https://x/carpetx.git", &mut other, &mut kept);
+        assert!(!reuse_base_clone(&base, &mut "https://x/carpetx.git".to_owned(), &mut other, &mut kept));
         assert_eq!((other.as_str(), kept[0].repo_path.as_str()), ("carpetx", "$2"));
     }
 
@@ -636,6 +693,53 @@ mod tests {
         let arith = list.components().iter().find(|c| c.checkout == "CarpetX/Arith").unwrap();
         assert_eq!((arith.commit.as_deref(), arith.branch.as_deref()), (None, Some("main")));
         assert!(is_tip("master") && !is_tip("1.0.0"));
+    }
+
+    /// Registry names become paths and thornlist words: anything but plain
+    /// components (and a repo-path implying a clone named `..`) is refused.
+    #[test]
+    fn registry_names_must_be_plain() {
+        check_registry_names("et/x", "ExternalLibraries", "HDF5", "../$1-$2").unwrap();
+        check_registry_names("et/x", "CarpetX", "Arith", "$2").unwrap();
+        for (arr, thorn, path) in
+            [("..", "T", "$2"), ("A/B", "T", "$2"), ("A", "T'", "$2"), ("A", "T", "../.."), ("A", "T", "$2;rm"), ("A", "T", "a b")]
+        {
+            assert!(check_registry_names("et/x", arr, thorn, path).is_err(), "{arr} {thorn} {path}");
+        }
+    }
+
+    /// A whole package at `@head` takes every thorn of the tip (it used to
+    /// panic: a tip has no version listing to look the thorns up in), and
+    /// follows the remote's default branch, asked of the repository itself.
+    #[test]
+    fn a_whole_package_tip_resolves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("carpetx");
+        crate::fetch::git::testrepo::init(&repo);
+        crate::fetch::git::testrepo::commit_tree(&repo, &[("README", "x\n", false)]);
+        let (branch, _) = crate::fetch::git::head_of(&repo).unwrap();
+        let url = repo.to_string_lossy().into_owned();
+        let resolved = format!(
+            r#"{{"slug":"max/carpetx@head","kind":"package","url":"{url}","contact":null,"version":"head","track":null,
+            "tag":null,"commit":"4715","tree":null,"yanked":false,"yank-reason":null,"state":"ok","curated":false,"published":0}}"#
+        );
+        let facts = serde_json::to_string(&cactup_ecosystem_common::ccl::ThornFacts::default()).unwrap();
+        let tip = format!(
+            r#"{{"version":"head","track":null,"tag":null,"commit":"4715","tree":null,"yanked":false,"yank-reason":null,
+            "state":"ok","curated":false,"published":0,"url":"{url}","claims":[],
+            "thorns":[{{"arrangement":"CarpetX","thorn":"Arith","repo-path":"$2","facts":{facts}}},
+                      {{"arrangement":"CarpetX","thorn":"Loop","repo-path":"$2","facts":{facts}}}]}}"#
+        );
+        let (base, _) = crate::fetch::download::test_server::serve_with(2, move |path| {
+            let body = if path.contains("/resolve") { resolved.clone() } else { tip.clone() };
+            ("200 OK", "api-generation: 1\r\nx-cactarium-untrusted: false\r\n".into(), body.into_bytes())
+        });
+        let wanted = resolve_all(&crate::cactarium::Client::at(&base), &["max/carpetx@head".to_owned()], false)
+            .unwrap_or_else(|e| panic!("{e:#}"));
+        assert_eq!(wanted.len(), 1);
+        let thorns: Vec<&str> = wanted[0].thorns.iter().map(|t| t.checkout.as_str()).collect();
+        assert_eq!(thorns, ["CarpetX/Arith", "CarpetX/Loop"]);
+        assert_eq!(wanted[0].tag.as_deref(), Some(branch.as_str()), "the default branch, by name");
     }
 
     #[test]

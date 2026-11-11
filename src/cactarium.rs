@@ -29,6 +29,9 @@ pub const URL_KNOB: &str = "cactarium-url";
 /// A connection to one registry: its base URL and, for writes, the token.
 pub struct Client {
     base: String,
+    /// A whole-request limit: set for lookups a command makes in passing
+    /// (`inst show`), so a registry that cannot be reached costs seconds.
+    timeout: Option<std::time::Duration>,
 }
 
 impl Client {
@@ -44,7 +47,12 @@ impl Client {
     }
 
     pub fn at(base: &str) -> Client {
-        Client { base: base.trim_end_matches('/').to_owned() }
+        Client { base: base.trim_end_matches('/').to_owned(), timeout: None }
+    }
+
+    /// This client, giving up on any request after `timeout`.
+    pub fn with_timeout(self, timeout: std::time::Duration) -> Client {
+        Client { timeout: Some(timeout), ..self }
     }
 
     pub fn base(&self) -> &str {
@@ -67,9 +75,11 @@ impl Client {
     pub fn stack_release(&self, owner: &str, name: &str, version: &str) -> Res<StackResponse> {
         let url = self.url(&format!("/stacks/{owner}/{name}/releases/{version}"));
         let response = self.send(crate::fetch::download::client().get(&url))?;
-        let flag = |header: &str| response.headers().get(header).is_some_and(|v| v.as_bytes() == b"true");
-        let unpinned = flag(UNPINNED_HEADER);
-        let untrusted = flag(UNTRUSTED_HEADER);
+        let flag = |header: &str| response.headers().get(header).map(|v| v.as_bytes() == b"true");
+        let unpinned = flag(UNPINNED_HEADER).unwrap_or(false);
+        // A tip without the trust header (a registry that predates it, or
+        // left it off) is taken as untrusted: the check fails closed.
+        let untrusted = flag(UNTRUSTED_HEADER).unwrap_or(unpinned);
         let contact = response
             .headers()
             .get(CONTACT_HEADER)
@@ -90,7 +100,8 @@ impl Client {
     pub fn package_tip(&self, owner: &str, name: &str, tip: &str) -> Res<(cactup_ecosystem_common::api::PackageVersion, bool)> {
         let url = self.url(&format!("/packages/{owner}/{name}/versions/{tip}"));
         let response = self.send(crate::fetch::download::client().get(&url))?;
-        let untrusted = response.headers().get(UNTRUSTED_HEADER).is_some_and(|v| v.as_bytes() == b"true");
+        // Missing: untrusted, as for a stack tip.
+        let untrusted = response.headers().get(UNTRUSTED_HEADER).is_none_or(|v| v.as_bytes() == b"true");
         Ok((json(response)?, untrusted))
     }
 
@@ -176,6 +187,10 @@ impl Client {
     /// Send, then refuse a registry newer than this cactup speaks, and turn
     /// an error status into the message the registry wrote for it.
     fn send(&self, request: reqwest::blocking::RequestBuilder) -> Res<reqwest::blocking::Response> {
+        let request = match self.timeout {
+            Some(timeout) => request.timeout(timeout),
+            None => request,
+        };
         let response = request
             .header(API_GENERATION_HEADER, API_GENERATION.to_string())
             .send()
@@ -271,7 +286,7 @@ pub fn stack_release_text(db: &Database, req: &str, allow_untrusted: bool) -> Re
     let StackResponse { stack, unpinned, untrusted, contact } =
         client.stack_release(slug.owner.as_str(), slug.name.as_str(), &version)?;
     if untrusted {
-        confirm_untrusted(&stack.stack.to_string(), allow_untrusted)?;
+        confirm_untrusted(&stack.stack.to_string(), "stack", allow_untrusted)?;
     }
     let pin_failed = || format!("Failed to pin stack {}", stack.stack);
     let (pins, unchecked) = crate::thornlist::recorded_pins(&stack.thornlist.text, &stack.repos).with_context(pin_failed)?;
@@ -292,13 +307,19 @@ pub fn stack_release_text(db: &Database, req: &str, allow_untrusted: bool) -> Re
 /// The warning for an untrusted stack's branch tip, then the yes it needs:
 /// typed at a terminal, or given up front by the flag. Without either there
 /// is nobody to ask, so it is refused.
-pub(crate) fn confirm_untrusted(slug: &str, allow: bool) -> Res<()> {
-    use std::io::{IsTerminal, Write};
+pub(crate) fn confirm_untrusted(slug: &str, kind: &str, allow: bool) -> Res<()> {
+    use std::io::IsTerminal;
+    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    confirm_untrusted_on(slug, kind, allow, interactive)
+}
+
+/// [`confirm_untrusted`], told whether there is a terminal to ask on.
+fn confirm_untrusted_on(slug: &str, kind: &str, allow: bool, interactive: bool) -> Res<()> {
     eprintln!(
         "{}",
         format!(
-            "WARNING: {slug} is a branch tip of a stack the Cactarium does not trust. Branch tips of untrusted \
-             stacks are never reviewed: installing it may fetch and build arbitrary code."
+            "WARNING: {slug} is a branch tip of a {kind} the Cactarium does not trust. Branch tips of untrusted \
+             {kind}s are never reviewed: installing it may fetch and build arbitrary code."
         )
         .red()
         .bold()
@@ -307,21 +328,18 @@ pub(crate) fn confirm_untrusted(slug: &str, allow: bool) -> Res<()> {
         eprintln!("{}", "Going on anyway, as --risky-allow-untrusted-artifacts says.".yellow());
         return Ok(());
     }
-    if !std::io::stdin().is_terminal() {
+    if !interactive {
         bail!(
-            "Refusing the untrusted branch tip {slug} without a terminal to confirm it on; install a release \
-             (owner/stack@X.Y.Z or a range), or pass --risky-allow-untrusted-artifacts"
+            "Refusing the untrusted branch tip {slug} without a terminal to confirm it on; use a release \
+             (owner/name@X.Y.Z or a range), or pass --risky-allow-untrusted-artifacts"
         );
     }
+    use std::io::Write;
     eprint!("Type yes to fetch it anyway: ");
     std::io::stderr().flush()?;
-    let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
-    if gix::interrupt::is_triggered() {
-        bail!("Interrupted");
-    }
+    let answer = crate::commands::read_line_interruptibly()?.unwrap_or_default();
     if answer.trim() != "yes" {
-        bail!("Not fetching {slug}: install a release instead (owner/stack@X.Y.Z or a range)");
+        bail!("Not fetching {slug}: use a release instead (owner/name@X.Y.Z or a range)");
     }
     Ok(())
 }
@@ -460,11 +478,9 @@ mod tests {
         assert!(tip.unpinned && tip.untrusted);
         assert!(!response("max").untrusted);
 
-        confirm_untrusted("et/et-stack@head", true).unwrap();
-        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-            let err = format!("{:#}", confirm_untrusted("et/et-stack@head", false).unwrap_err());
-            assert!(err.contains("without a terminal") && err.contains("--risky-allow-untrusted-artifacts"), "{err}");
-        }
+        confirm_untrusted_on("et/et-stack@head", "stack", true, false).unwrap();
+        let err = format!("{:#}", confirm_untrusted_on("et/et-stack@head", "stack", false, false).unwrap_err());
+        assert!(err.contains("without a terminal") && err.contains("--risky-allow-untrusted-artifacts"), "{err}");
     }
 
     /// Whether an installed version was yanked since: from the package's

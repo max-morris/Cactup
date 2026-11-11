@@ -584,10 +584,25 @@ fn is_not_found(e: &anyhow::Error) -> bool {
 
 /// The lowercase hex SHA-256 of the file at `path`.
 pub(crate) fn sha256_hex(path: &Path) -> Res<String> {
+    sha256_hex_counting(path, &mut prodash::progress::Discard)
+}
+
+/// [`sha256_hex`], advancing `progress` by the bytes read (initialized in
+/// bytes from the file's size). Polls the interrupt flag per chunk: the
+/// file may be a many-gigabyte download on a network filesystem.
+pub(crate) fn sha256_hex_counting(path: &Path, progress: &mut impl prodash::Progress) -> Res<String> {
     let mut file = fs::File::open(path).with_context(|| format!("Failed to open '{}'", path.display()))?;
+    let len = file.metadata().map(|m| m.len() as usize).ok();
+    progress.init(
+        len,
+        Some(prodash::unit::dynamic_and_mode(prodash::unit::Bytes, prodash::unit::display::Mode::with_percentage())),
+    );
     let mut context = aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA256);
-    let mut buf = vec![0u8; 64 * 1024];
+    let mut buf = vec![0u8; 1 << 20];
     loop {
+        if gix::interrupt::is_triggered() {
+            bail!("Interrupted");
+        }
         let n = file
             .read(&mut buf)
             .with_context(|| format!("Failed to read '{}'", path.display()))?;
@@ -595,6 +610,7 @@ pub(crate) fn sha256_hex(path: &Path) -> Res<String> {
             break;
         }
         context.update(&buf[..n]);
+        progress.inc_by(n);
     }
     Ok(context.finish().as_ref().iter().map(|b| format!("{b:02x}")).collect())
 }

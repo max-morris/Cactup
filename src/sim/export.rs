@@ -5,11 +5,9 @@
 //! Everything is read from what the simulation froze at create (§8.2 step 6)
 //! — the config record with its per-repo commits, the source thornlist, the
 //! parfile — never from the installation as it is now, which may have moved
-//! on since the binary was built. The one exception is a download the list
-//! gives no checksum for: nothing froze its hash, so it is hashed as the
-//! installation has it, and only when the file is no newer than the build.
-//! The thornlist and parfile go in verbatim; the pins go in a per-repo table
-//! beside them.
+//! on since the binary was built (a download's hash included: the build
+//! froze it from the fetch record). The thornlist and parfile go in verbatim;
+//! the pins go in a per-repo table beside them.
 
 use super::Simulation;
 use crate::args::{SimDescribeArgs, SimExportArgs, SimPackArgs};
@@ -56,7 +54,8 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
 
     // The pins, and the checks that decide whether anyone else could fetch them.
     let fetched = FetchState::read(&inst.root)?;
-    let hashes = download_hashes(&inst.root, &list, config.built.map(std::time::SystemTime::from))?;
+    // The download hashes the build froze: what it compiled from.
+    let hashes = config.downloads.clone();
     let repos = repo_pins(
         &list,
         |repo| config.sources.as_ref().and_then(|s| s.get(repo)).cloned(),
@@ -275,7 +274,7 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
             if args.trim { trimmed(text, &list, &inst.cactus_root(), &parfile)? } else { (text, list) };
         let repos_dir = inst.cactus_root().join("repos");
         let states = installed_states(&repos_dir, &list)?;
-        let hashes = download_hashes(&inst.root, &list, None)?;
+        let hashes = fetch::download_hashes(&inst.root, &list);
         let repos = repo_pins(&list, |repo| states.get(repo).cloned(), |repo| hashes.get(repo).cloned());
         let published = check_repos(&repos_dir, &repos, FetchState::read(&inst.root)?.as_ref())?;
         (repos, published, text, list)
@@ -501,41 +500,6 @@ fn single_download(list: &thornlist::Thornlist, c: &thornlist::Component) -> boo
         && list.components().iter().filter(|o| o.repo == c.repo).count() == 1
 }
 
-/// The SHA-256 of each single download (see [`single_download`]) the list
-/// has no checksum for, as the installation at `install_root` has the file —
-/// unless it was written after `built`: refetch downloads anew, so a file
-/// newer than the build may not be the one the build used, and is left
-/// unpinned rather than recorded wrongly. Hashed with progress: a tarball on
-/// a network filesystem takes a while to read.
-fn download_hashes(
-    install_root: &Path,
-    list: &thornlist::Thornlist,
-    built: Option<std::time::SystemTime>,
-) -> Res<std::collections::BTreeMap<String, String>> {
-    let todo: Vec<&thornlist::Component> =
-        list.components().iter().filter(|c| single_download(list, c) && c.checksum.is_none()).collect();
-    if todo.is_empty() {
-        return Ok(Default::default());
-    }
-    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
-    let item = progress.add_child("hash downloads");
-    item.init(Some(todo.len()), Some(prodash::unit::label("files")));
-    let item = std::sync::Mutex::new(item);
-    let hashed = crate::par::parallel_map(&todo, |c| {
-        let current = item.lock().expect("export progress poisoned").add_child(c.checkout.clone());
-        let path = install_root.join(&c.target).join(fetch::download::derive_filename(c.name.as_deref(), &c.checkout));
-        let fresh = |p: &Path| built.is_none_or(|b| std::fs::metadata(p).and_then(|m| m.modified()).is_ok_and(|m| m <= b));
-        let hash = if path.is_file() && fresh(&path) { crate::update::sha256_hex(&path).ok() } else { None };
-        drop(current);
-        item.lock().expect("export progress poisoned").inc();
-        (c.repo.clone(), hash)
-    });
-    drop(item);
-    if let Some(renderer) = renderer {
-        renderer.shutdown_and_wait();
-    }
-    Ok(hashed?.into_iter().filter_map(|(repo, hash)| Some((repo, hash?))).collect())
-}
 
 /// Per pin, whether its commit is on the remote (true for anything unpinned:
 /// there is nothing to check). The repos are walked in parallel, with
@@ -736,15 +700,11 @@ mod tests {
     use super::*;
 
     /// A download is pinned by the checksum its list gives, else by the hash
-    /// of the file the installation has — unless that file is newer than the
-    /// build, which may not have used it. A repo of several files gets none.
+    /// the fetch record kept for it (what a build freezes); a repo of several
+    /// files gets none.
     #[test]
     fn downloads_are_pinned_by_their_hash() {
         let tmp = tempfile::tempdir().unwrap();
-        let dl = tmp.path().join("Cactus/dl");
-        std::fs::create_dir_all(&dl).unwrap();
-        std::fs::write(dl.join("zlib.tar.gz"), b"zlib").unwrap();
-        let zlib = crate::update::sha256_hex(&dl.join("zlib.tar.gz")).unwrap();
         let given = "e".repeat(64);
         let list = thornlist::parse(&format!(
             "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\
@@ -753,18 +713,17 @@ mod tests {
              !TARGET = $ROOT/dl\n!TYPE = https\n!URL = https://x/many\n!CHECKOUT = a.tgz b.tgz\n"
         ))
         .unwrap();
-        let sha = |pins: &[RepoPin], repo: &str| pins.iter().find(|p| p.name == repo).unwrap().sha256.clone();
-
-        let hashes = download_hashes(tmp.path(), &list, None).unwrap();
+        let fetched = "f".repeat(64);
+        let records = fetch::FetchRecords {
+            repos: Vec::new(),
+            downloads: vec![("Cactus/dl/zlib.tar.gz".into(), fetched.clone()), ("Cactus/dl/a.tgz".into(), "a".repeat(64))],
+        };
+        fetch::FetchState::record(tmp.path(), &records).unwrap();
+        let hashes = fetch::download_hashes(tmp.path(), &list);
         let pins = repo_pins(&list, |_| None, |repo| hashes.get(repo).cloned());
-        assert_eq!(sha(&pins, "zlib"), Some(zlib));
-        assert_eq!(sha(&pins, "hdf5"), Some(given.clone()));
-        assert_eq!(sha(&pins, "many"), None);
-
-        // Written after the build: left unpinned.
-        let hashes = download_hashes(tmp.path(), &list, Some(std::time::SystemTime::UNIX_EPOCH)).unwrap();
-        let pins = repo_pins(&list, |_| None, |repo| hashes.get(repo).cloned());
-        assert_eq!(sha(&pins, "zlib"), None);
-        assert_eq!(sha(&pins, "hdf5"), Some(given));
+        let sha = |repo: &str| pins.iter().find(|p| p.name == repo).unwrap().sha256.clone();
+        assert_eq!(sha("zlib"), Some(fetched));
+        assert_eq!(sha("hdf5"), Some(given));
+        assert_eq!(sha("many"), None, "one hash names no single file");
     }
 }

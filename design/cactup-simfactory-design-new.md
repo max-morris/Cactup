@@ -4198,11 +4198,12 @@ the config's own record only while that still describes the same `build-id`.
 - **Pins.** One `[[repo]]` per repo the list names (keyed by the derived repo
   name, not per section), `ref` = `!REPO_BRANCH` as a label. A download that
   is the only file of its repo gets a `sha256`: the list's
-  `!CHECKSUM_SHA256`, else the hash of the file the installation has — the
-  one input export reads from the installation as it is now, since nothing
-  froze a download's hash, so a file written after the config's `built` time
-  (a refetch downloads anew) is left unpinned rather than recorded wrong. Any
-  other component is listed unpinned.
+  `!CHECKSUM_SHA256`, else the hash the build froze. Every download's hash is
+  recorded in `fetch-state.toml` when it is fetched (`downloads`, by its path
+  under the installation), and `prepare` copies the hashes of the list's
+  single-file downloads into the config record (`downloads`, beside
+  `sources`), so a later refetch cannot change what a simulation of that
+  build records. Any other component is listed unpinned.
 - **Dirty sources** (a state string with `+Nmod`, §7.4) are refused —
   no commit reproduces that binary — unless `--allow-dirty`, which marks them
   `dirty`.
@@ -4239,7 +4240,7 @@ only a thornlist and a parfile, with the same descriptive fields and checks.
 With `-I <installation>`, each repo is pinned to what that installation has
 checked out (its live HEAD and source state, checked like an export's; a
 checkout of a different repo than the list names is left unpinned, with a
-note), and each single download by the hash of the file it has.
+note), and each single download by the hash its fetch record keeps.
 Without, each is pinned to the commit its branch or tag names on the
 remote today (`git ls-remote`, no fetch), and the output says so; a remote
 that cannot be asked fails the whole pack, and a repo the list already pins
@@ -4310,15 +4311,27 @@ interrupted import leaves no tree a later one would trust, and a finished
 tree is reused at once. The knob gets `<tree>/<path>`, or the tree itself.
 Kinds go by the URL's extension: `.tar`, `.tar.gz`/`.tgz`, `.tar.xz`/`.txz`,
 `.zip` (deflate), every decoder pure Rust (D13). Unpacking refuses an entry
-with an absolute or `..` path or a backslash, a symlink whose target leaves
-the tree, a hard link to anything but a file already unpacked, a device or
-FIFO, and any write through a link or a non-directory an earlier entry
-made; file modes keep only their permission bits. It stops past 1,000,000
-entries or `max(64 GiB, 32 × the archive)` bytes, and polls the interrupt
-flag per entry and per MiB. A download the server says is over 1 GiB (HEAD,
+with an absolute or `..` path or a backslash, a hard link to anything but a
+regular file already unpacked, a device or FIFO, and any write through a
+non-directory an earlier entry made; file modes keep only their permission
+bits. Symlinks are made **last**, after every file and directory, so nothing
+is ever written through one; each is then checked where it really resolves,
+through any link before it, to stay inside the tree (a dangling one through
+its deepest existing ancestor, with no `..` past it) — a lexical check alone
+is fooled by a chain of links (`x -> .`, `y -> x/x/../..`). A fixup's file,
+the `path` and a hard link's source are reached through no link at all, and
+a fixup writes a new file renamed over the old (so a read-only member can be
+edited, its mode kept). It stops past 1,000,000 entries or
+`max(4 GiB, 32 × the archive)` bytes, a 4 KiB link target, or an `.xz`
+stream asking for over 1 GiB of memory, and polls the interrupt flag per
+entry and per MiB. A finished tree carries a marker; one without it, or
+without its `path` (a scratch purge removes files, not directories), is
+unpacked again. A download the server says is over 1 GiB (HEAD,
 `Content-Length`) is asked about on a terminal, taken with `-y`, and refused
-otherwise. `cactup cache inputs` lists the inputs directory (`--clear`
-empties it). The values become the
+otherwise; the GET then stops past what was announced, or past 1 GiB when
+the server would not say (unless `-y`). The archive's hash is computed with
+progress. `cactup cache inputs` lists the inputs directory, what an
+interrupted import left included (`--clear` empties it). The values become the
 simulation's own knobs (§5.1) — a global knob is never changed — and an input
 left to an existing global knob records nothing. An input with no value at all
 fails the import before the install. The chained steps are parsed from
@@ -4371,16 +4384,30 @@ What uses it, all on the login node (D11):
   like `--simfile`, and the DB records the release as `stack` provenance.
   `@head`/`@master` are installed unpinned, and said not to be reproducible.
   A tip of a stack the Cactarium does not trust (`x-cactarium-untrusted:
-  true`; the server may instead refuse such tips with a 403, whose message is
-  printed as is) is code nobody reviewed: cactup says so loudly and takes it
-  only on `yes` typed at the terminal, or with the global
-  `--risky-allow-untrusted-artifacts`, which still prints the warning;
-  without a terminal and without the flag it refuses. Install and `refetch
-  --release` both reach tips through `cactarium::stack_release_text`, which
-  is where the check sits.
+  true`, or no such header on a tip at all: the check fails closed; the
+  server may instead refuse such tips with a 403, whose message is printed
+  as is) is code nobody reviewed: cactup says so loudly and takes it only on
+  `yes` typed at the terminal (stdin and stderr both terminals; the prompt
+  reads on a thread of its own, so the first Ctrl-C stops it), or with the
+  global `--risky-allow-untrusted-artifacts`, which still prints the
+  warning; without a terminal and without the flag it refuses. Install and
+  `refetch --release` reach stack tips through
+  `cactarium::stack_release_text`, `add` reaches package tips through the
+  same `confirm_untrusted`.
 - `cactup import owner/name[@N]` downloads the published sim (the newest
   version without `@N`) to `~/.cactup/simfiles/<owner>/<name>/<N>.sim`,
-  checked against the registry's `x-sha256`, then imports it as a file.
+  checked against the registry's `x-sha256`, then imports it as a file. It
+  resolves even an exact `@N`, which is how a yank is told; an exact version
+  already downloaded still imports when the registry cannot be reached, its
+  yank status unknown.
+- **Yanked versions.** A range never chooses a yanked version, so one cactup
+  gets was asked for exactly: `add`, stack installs and refetches, and sim
+  imports warn with the reason and go on (yanked is "not by default", not
+  "gone"). `inst show` asks whether the installation's stack release (the
+  one a refetch last took it to, else the installed one, never after a
+  refetch elsewhere) or any added package version is yanked now, in
+  parallel, with progress and a 5 s limit per request, and only when there
+  is something to ask about; a registry it cannot reach gets one dim note.
 - `cactup sim publish <file.sim> <owner/name>` uploads a fully specified file
   (anything else is refused locally, naming what is unspecified) as the next
   version; the registry numbers it and says whether it is public or pending

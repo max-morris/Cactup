@@ -113,6 +113,13 @@ pub struct ConfigMeta {
     /// may not precede scalar keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sources: Option<BTreeMap<String, String>>,
+    /// Repo -> SHA-256 of each single-file download the build's list
+    /// fetches, as the fetch record had it when the build was prepared: what
+    /// `sim export` pins a download to, frozen like `sources`, so a later
+    /// refetch cannot change what a simulation of this build records. A
+    /// table, so serialized after the scalars.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub downloads: BTreeMap<String, String>,
     /// Thorn name -> providing directory (from the processed thornlist,
     /// `Thornlist::thorn_providers`), as of this build — the §7.4 input that
     /// lets a rebuild notice a thorn name changing provider. The motivating
@@ -2225,6 +2232,7 @@ fn prepare_with_cache(
         built: None,
         flags,
         sources: fresh_sources.as_ref().map(|s| s.heads.clone()),
+        downloads: parsed_list.as_ref().map(|l| crate::fetch::download_hashes(&installation.root, l)).unwrap_or_default(),
         thorn_providers: fresh_providers.clone(),
         thorn_shapes: fresh_shapes.clone(),
         thorn_stamps: fresh_stamps.clone(),
@@ -2997,6 +3005,7 @@ mod tests {
             built: None,
             flags: BuildFlags::default(),
             sources: None,
+            downloads: Default::default(),
             thorn_providers: None,
             thorn_shapes: None,
             thorn_stamps: None,

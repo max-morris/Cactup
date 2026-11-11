@@ -256,9 +256,22 @@ fn download_published(ctx: &Ctx, req: &str) -> Res<PathBuf> {
     use cactup_ecosystem_common::slug::Slug;
     let slug: Slug = req.parse().map_err(|e| anyhow!("\"{req}\" is neither a file nor a sim (owner/name[@N]): {e}"))?;
     let client = crate::cactarium::Client::new(&ctx.db.read()?);
-    slug.number().map_err(|e| anyhow!("{e}"))?;
+    let (owner, name) = (slug.owner.as_str(), slug.name.as_str());
+    let cached = |n: u32| crate::CACTUP_ROOT.join("simfiles").join(owner).join(name).join(format!("{n}.sim"));
     // Resolved even for an exact `@N`: that is how a yanked version is told.
-    let resolved = client.resolve(req)?;
+    // An exact version already downloaded still imports offline, its yank
+    // status unknown.
+    let resolved = match (client.resolve(req), slug.number().map_err(|e| anyhow!("{e}"))?) {
+        (Ok(resolved), _) => resolved,
+        (Err(e), Some(n)) if cached(n).is_file() => {
+            println!(
+                "{}",
+                format!("Could not ask the Cactarium about {req} ({e:#}); using the copy downloaded before").dimmed()
+            );
+            return Ok(cached(n));
+        }
+        (Err(e), _) => return Err(e),
+    };
     if resolved.kind != "sim" {
         bail!("{} is a {}, not a sim", resolved.slug, resolved.kind);
     }
@@ -268,8 +281,7 @@ fn download_published(ctx: &Ctx, req: &str) -> Res<PathBuf> {
         .version
         .parse()
         .map_err(|_| anyhow!("The Cactarium named sim version \"{}\"", resolved.version.version))?;
-    let (owner, name) = (slug.owner.as_str(), slug.name.as_str());
-    let dest = crate::CACTUP_ROOT.join("simfiles").join(owner).join(name).join(format!("{number}.sim"));
+    let dest = cached(number);
     if !dest.is_file() {
         client.download_sim(owner, name, number, &dest)?;
         println!("Downloaded {owner}/{name}@{number} from {}", client.base());

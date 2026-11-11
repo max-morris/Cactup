@@ -214,6 +214,11 @@ release. Rebuild a config to compile them.
 `cactup remove max/carpetx` takes a package out again, putting back any
 repository it replaced at the commit the base names.
 
+If a version you install, add or import has been **yanked** on the
+Cactarium (still available, but no longer chosen by default), cactup says so
+with the reason and goes on; `cactup inst show` also says when the stack or a
+package an installation uses was yanked later.
+
 `cactup inst show` lists the packages you added, each with where to report
 problems with it (the package's contact, else its repository), and for an
 installation of a stack, the same for the stack. If a build

@@ -32,9 +32,20 @@ const CONFIRM_ABOVE: u64 = 1 << 30;
 const MAX_ENTRIES: u64 = 1_000_000;
 /// At most this many unpacked bytes: [`MIN_UNPACKED_CAP`], or this many
 /// times the archive's size if that is more. Generous for real data (a
-/// tarball of binary solution files barely compresses), fatal to a zip bomb.
+/// tarball of binary solution files barely compresses); a bomb is stopped
+/// after writing at most that much, so the floor is kept small enough that
+/// a home quota survives it.
 const UNPACKED_RATIO: u64 = 32;
-const MIN_UNPACKED_CAP: u64 = 64 << 30;
+const MIN_UNPACKED_CAP: u64 = 4 << 30;
+/// The longest symlink target an archive may hold (a zip keeps it as the
+/// entry's content, which is otherwise unbounded).
+const MAX_LINK_TARGET: u64 = 4096;
+/// The memory an `.xz` stream may ask for, in KiB: `xz -9` needs 674 MiB.
+const XZ_MEM_LIMIT_KIB: u32 = 1 << 20;
+/// Written into a finished tree just before it is moved into place; a tree
+/// without it (a scratch purge removes files but keeps directories) is
+/// unpacked again.
+const COMPLETE_MARKER: &str = ".cactup-unpacked";
 
 /// The inputs directory: the `inputs-home` knob, else the machine's
 /// `[paths] inputs-home` (`@USER@`/`@ENV(…)@` resolved), else
@@ -120,12 +131,17 @@ fn unpacked(dir: &Path, input: &Input, url: &str, policy: &SizePolicy) -> Res<Pa
     let tree = trees.join(tree_key(input));
     let value = |tree: &Path| input.path.as_deref().map_or_else(|| tree.to_owned(), |p| tree.join(p));
     if tree.is_dir() {
-        return Ok(value(&tree));
+        if tree.join(COMPLETE_MARKER).is_file() && std::fs::symlink_metadata(value(&tree)).is_ok() {
+            return Ok(value(&tree));
+        }
+        // Incomplete (purged, or left by a crash before the marker): made again.
+        println!("{}", format!("'{}' is incomplete; unpacking it again", tree.display()).yellow());
+        std::fs::remove_dir_all(&tree).with_context(|| format!("Failed to remove '{}'", tree.display()))?;
     }
     std::fs::create_dir_all(&trees).with_context(|| format!("Failed to create '{}'", trees.display()))?;
 
     let archive = download(&trees, url, policy)?;
-    let actual = crate::update::sha256_hex(archive.path())?;
+    let actual = hash_with_progress(archive.path(), &file_name(url))?;
     if !actual.eq_ignore_ascii_case(expected) {
         bail!("The download of {url} has SHA-256 {actual}, but the .sim records {expected}; nothing was unpacked");
     }
@@ -137,26 +153,33 @@ fn unpacked(dir: &Path, input: &Input, url: &str, policy: &SizePolicy) -> Res<Pa
     drop(archive);
     let tree_str = tree.to_str().ok_or_else(|| anyhow!("'{}' is not UTF-8", tree.display()))?;
     for fixup in &input.fixups {
-        let file = staging.path().join(&fixup.file);
-        let meta = std::fs::symlink_metadata(&file)
-            .with_context(|| format!("The archive has no {} for a fixup to edit", fixup.file))?;
+        // Through no link: the tree's links are checked to stay inside it,
+        // but an edit must also never land on a file a link merely names.
+        let (file, meta) = within(staging.path(), Path::new(&fixup.file))
+            .with_context(|| format!("A fixup cannot edit {}", fixup.file))?;
         if !meta.is_file() {
             bail!("{} in the archive is not a regular file, so no fixup can edit it", fixup.file);
         }
         let text = std::fs::read(&file).with_context(|| format!("Failed to read '{}'", file.display()))?;
-        let n = count(&text, fixup.replace.as_bytes());
+        let (edited, n) = replace_all(&text, fixup.replace.as_bytes(), fixup.replacement(tree_str).as_bytes());
         if n == 0 {
             bail!("A fixup of {} replaces \"{}\", which the file does not contain", fixup.file, fixup.replace);
         }
-        let edited = replace_all(&text, fixup.replace.as_bytes(), fixup.replacement(tree_str).as_bytes());
-        std::fs::write(&file, edited).with_context(|| format!("Failed to write '{}'", file.display()))?;
+        // A new file renamed over the old: works on a read-only member, keeps
+        // its mode, and a rename never follows a link.
+        let dir = file.parent().expect("a member has a directory");
+        let mut temp = tempfile::NamedTempFile::new_in(dir).with_context(|| format!("Failed to edit '{}'", file.display()))?;
+        temp.write_all(&edited).with_context(|| format!("Failed to edit '{}'", file.display()))?;
+        temp.as_file().set_permissions(meta.permissions())?;
+        temp.persist(&file).with_context(|| format!("Failed to edit '{}'", file.display()))?;
         println!("  fixed {n} occurrence(s) of \"{}\" in {}", fixup.replace, fixup.file);
     }
-    if let Some(path) = &input.path
-        && std::fs::symlink_metadata(staging.path().join(path)).is_err()
-    {
-        bail!("The archive has no {path}, which the .sim points input {} at", input.knob);
+    if let Some(path) = &input.path {
+        within(staging.path(), Path::new(path))
+            .with_context(|| format!("The archive has no usable {path}, which the .sim points input {} at", input.knob))?;
     }
+    std::fs::write(staging.path().join(COMPLETE_MARKER), b"")
+        .with_context(|| format!("Failed to finish '{}'", staging.path().display()))?;
     // Another import may have finished the same tree meanwhile: theirs is as
     // good as ours, so ours is dropped.
     let staged = staging.keep();
@@ -198,11 +221,12 @@ fn file_name(url: &str) -> String {
 /// Download `url` into a temporary file in `dir`, with progress, after the
 /// size check.
 fn download(dir: &Path, url: &str, policy: &SizePolicy) -> Res<tempfile::NamedTempFile> {
-    confirm_size(url, policy)?;
+    let limit = confirm_size(url, policy)?;
     let mut temp = tempfile::NamedTempFile::new_in(dir).context("Failed to create a download file")?;
     let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
     let mut item = progress.add_child(file_name(url));
-    let downloaded = crate::fetch::download::download_to(crate::fetch::download::client(), url, temp.as_file_mut(), &mut item);
+    let downloaded =
+        crate::fetch::download::download_to_limited(crate::fetch::download::client(), url, temp.as_file_mut(), &mut item, limit);
     drop(item);
     if let Some(renderer) = renderer {
         renderer.shutdown_and_wait();
@@ -211,35 +235,50 @@ fn download(dir: &Path, url: &str, policy: &SizePolicy) -> Res<tempfile::NamedTe
     Ok(temp)
 }
 
-/// Ask the server how big `url` is (a HEAD request; a server that will not
-/// say is taken at its word), and above [`CONFIRM_ABOVE`] ask the user.
-fn confirm_size(url: &str, policy: &SizePolicy) -> Res<()> {
+/// Ask the server how big `url` is (a HEAD request), and above
+/// [`SizePolicy::confirm_above`] ask the user. Returns the most the GET may
+/// then bring: what the server announced (with a little slack), or, when it
+/// would not say, the threshold itself unless `-y` was given — a server
+/// that answers small and streams without end is stopped either way.
+fn confirm_size(url: &str, policy: &SizePolicy) -> Res<Option<u64>> {
     let size = crate::fetch::download::client()
         .head(url)
         .send()
         .ok()
         .filter(|r| r.status().is_success())
         .and_then(|r| r.headers().get(reqwest::header::CONTENT_LENGTH)?.to_str().ok()?.parse::<u64>().ok());
-    let Some(size) = size.filter(|s| *s > policy.confirm_above) else { return Ok(()) };
+    let Some(size) = size else {
+        return Ok((!policy.yes).then_some(policy.confirm_above));
+    };
+    let limit = Some(size + (size / 100).max(1 << 20));
+    if size <= policy.confirm_above {
+        return Ok(limit);
+    }
     let shown = crate::progress::bytes(size as usize);
     if policy.yes {
         println!("Downloading {url} ({shown}).");
-        return Ok(());
+        return Ok(limit);
     }
     if !policy.interactive {
         bail!("{url} is {shown}; pass -y to download it without asking");
     }
-    print!("{url} is {shown}. Download it? [y/N] ");
-    std::io::stdout().flush()?;
-    let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
-    if gix::interrupt::is_triggered() {
-        bail!("Interrupted");
-    }
-    if !matches!(answer.trim(), "y" | "Y" | "yes") {
+    if !crate::commands::confirm(&format!("{url} is {shown}. Download it? [y/N] "))? {
         bail!("Not downloading {url}");
     }
-    Ok(())
+    Ok(limit)
+}
+
+/// The SHA-256 of a download, with a line counting the bytes read: a large
+/// archive on a network filesystem takes a while.
+fn hash_with_progress(path: &Path, name: &str) -> Res<String> {
+    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+    let mut item = progress.add_child(format!("check {name}"));
+    let hash = crate::update::sha256_hex_counting(path, &mut item);
+    drop(item);
+    if let Some(renderer) = renderer {
+        renderer.shutdown_and_wait();
+    }
+    hash
 }
 
 /// Unpack `archive` into the empty directory `dest`, refusing anything that
@@ -261,14 +300,79 @@ fn unpack(archive: &Path, kind: ArchiveKind, dest: &Path, name: &str) -> Res<u64
     let result = match kind {
         ArchiveKind::Tar => unpack_tar(reader, dest, &mut budget),
         ArchiveKind::TarGz => unpack_tar(flate2::read::MultiGzDecoder::new(reader), dest, &mut budget),
-        ArchiveKind::TarXz => unpack_tar(lzma_rust2::XzReader::new(reader, true), dest, &mut budget),
+        ArchiveKind::TarXz => unpack_tar(lzma_rust2::XzReader::new_mem_limit(reader, true, XZ_MEM_LIMIT_KIB), dest, &mut budget),
         ArchiveKind::Zip => unpack_zip(reader, dest, &mut budget),
     };
     drop(item);
     if let Some(renderer) = renderer {
         renderer.shutdown_and_wait();
     }
-    result.with_context(|| format!("Failed to unpack {name}"))
+    let (n, links) = result.with_context(|| format!("Failed to unpack {name}"))?;
+    make_links(dest, links).with_context(|| format!("Failed to unpack {name}"))?;
+    Ok(n)
+}
+
+/// The symlinks an archive asked for, made only after every file and
+/// directory is in place, so that nothing was ever written through one;
+/// then each is checked where it really resolves, through any link before
+/// it, to stay inside the tree. A later entry of the same name replaced an
+/// earlier one while unpacking, so a link still listed here wins over a
+/// file or directory only if it came last.
+fn make_links(dest: &Path, links: Vec<(PathBuf, PathBuf)>) -> Res<()> {
+    for (rel, target) in &links {
+        let path = place(dest, rel)?;
+        std::os::unix::fs::symlink(target, &path).with_context(|| format!("Failed to create '{}'", path.display()))?;
+    }
+    let root = dest.canonicalize().with_context(|| format!("Failed to resolve '{}'", dest.display()))?;
+    for (rel, target) in &links {
+        if !resolves_inside(&root, &dest.join(rel), target) {
+            bail!("The archive links {} to {}, outside its own tree", rel.display(), target.display());
+        }
+    }
+    Ok(())
+}
+
+/// Whether the link at `link` (pointing at `target`) resolves under `root`,
+/// following every link on the way. A dangling one resolves through its
+/// deepest existing ancestor, which must be under `root`, and must not climb
+/// back out (`..`) past it.
+fn resolves_inside(root: &Path, link: &Path, target: &Path) -> bool {
+    if let Ok(real) = link.canonicalize() {
+        return real.starts_with(root);
+    }
+    let mut existing = link.parent().unwrap_or(root).join(target);
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    while std::fs::symlink_metadata(&existing).is_err() {
+        let Some(name) = existing.file_name().map(ToOwned::to_owned) else { return false };
+        rest.push(name);
+        if !existing.pop() {
+            return false;
+        }
+    }
+    if existing.as_os_str().is_empty() || rest.iter().any(|c| c == "..") {
+        return false;
+    }
+    existing.canonicalize().is_ok_and(|real| real.starts_with(root))
+}
+
+/// `dest/rel` (a member path the `.sim` names), reached through no link:
+/// each directory on the way must be a real directory, and the path itself
+/// must exist. Returns it with its own metadata (not followed).
+fn within(dest: &Path, rel: &Path) -> Res<(PathBuf, std::fs::Metadata)> {
+    let mut at = dest.to_owned();
+    let parts: Vec<_> = rel.components().collect();
+    for (i, part) in parts.iter().enumerate() {
+        let Component::Normal(_) = part else { bail!("{} is not a plain path inside the archive", rel.display()) };
+        at.push(part);
+        let meta = std::fs::symlink_metadata(&at).with_context(|| format!("The archive has no {}", rel.display()))?;
+        if i + 1 == parts.len() {
+            return Ok((at, meta));
+        }
+        if !meta.is_dir() {
+            bail!("{} goes through {}, which is not a directory of the archive", rel.display(), at.strip_prefix(dest).unwrap_or(&at).display());
+        }
+    }
+    bail!("{} names the archive's root", rel.display())
 }
 
 /// What an archive may still unpack.
@@ -425,8 +529,24 @@ fn write_file(path: &Path, body: &mut impl Read, mode: Option<u32>, budget: &mut
     Ok(())
 }
 
-fn unpack_tar(reader: impl Read, dest: &Path, budget: &mut Budget) -> Res<u64> {
+/// The symlinks an archive asks for, `(member, target)`, in archive order:
+/// [`make_links`] makes them once everything else is written.
+type Links = Vec<(PathBuf, PathBuf)>;
+
+/// A link entry, checked lexically now (a cheap early refusal) and made
+/// later; any earlier link or entry of the same name gives way to it.
+fn defer_link(links: &mut Links, rel: PathBuf, target: PathBuf) -> Res<()> {
+    if target.as_os_str().len() as u64 > MAX_LINK_TARGET || !link_stays_inside(&rel, &target) {
+        bail!("The archive links {} to {}, outside its own tree", rel.display(), target.display());
+    }
+    links.retain(|(r, _)| *r != rel);
+    links.push((rel, target));
+    Ok(())
+}
+
+fn unpack_tar(reader: impl Read, dest: &Path, budget: &mut Budget) -> Res<(u64, Links)> {
     let mut archive = tar::Archive::new(reader);
+    let mut links: Links = Vec::new();
     let mut n = 0;
     for entry in archive.entries().context("The archive is not a tar archive")? {
         budget.entry()?;
@@ -435,6 +555,10 @@ fn unpack_tar(reader: impl Read, dest: &Path, budget: &mut Budget) -> Res<u64> {
         let Some(rel) = member_path(&name)? else { continue };
         n += 1;
         let ty = entry.header().entry_type();
+        if !ty.is_symlink() {
+            // A later entry of this name replaces a link asked for earlier.
+            links.retain(|(r, _)| *r != rel);
+        }
         if ty.is_dir() {
             place_dir(dest, &rel)?;
             continue;
@@ -445,19 +569,16 @@ fn unpack_tar(reader: impl Read, dest: &Path, budget: &mut Budget) -> Res<u64> {
             write_file(&path, &mut entry, mode, budget)?;
         } else if ty.is_symlink() || ty.is_hard_link() {
             let target = entry.link_name().context("A link has an unreadable target")?.ok_or_else(|| anyhow!("A link has no target"))?.into_owned();
-            let path = place(dest, &rel)?;
             if ty.is_symlink() {
-                if !link_stays_inside(&rel, &target) {
-                    bail!("The archive links {} to {}, outside its own tree", rel.display(), target.display());
-                }
-                std::os::unix::fs::symlink(&target, &path)?;
+                defer_link(&mut links, rel, target)?;
             } else {
-                // A hard link names another member by its path from the root.
+                // A hard link names another member by its path from the root:
+                // a regular file already unpacked, reached through no link.
                 let Some(source) = member_path(&target)? else { bail!("The archive hard-links {} to its root", rel.display()) };
-                let from = dest.join(&source);
-                if !std::fs::symlink_metadata(&from).is_ok_and(|m| m.is_file()) {
-                    bail!("The archive hard-links {} to {}, which is not a file it unpacked before", rel.display(), source.display());
-                }
+                let from = within(dest, &source).ok().filter(|(_, m)| m.is_file()).map(|(p, _)| p).ok_or_else(|| {
+                    anyhow!("The archive hard-links {} to {}, which is not a file it unpacked before", rel.display(), source.display())
+                })?;
+                let path = place(dest, &rel)?;
                 std::fs::hard_link(&from, &path)?;
             }
         } else if matches!(ty, tar::EntryType::XGlobalHeader | tar::EntryType::XHeader | tar::EntryType::GNULongName | tar::EntryType::GNULongLink) {
@@ -466,11 +587,12 @@ fn unpack_tar(reader: impl Read, dest: &Path, budget: &mut Budget) -> Res<u64> {
             bail!("The archive has {} of a kind cactup does not unpack (a device, FIFO or similar)", rel.display());
         }
     }
-    Ok(n)
+    Ok((n, links))
 }
 
-fn unpack_zip<R: Read + std::io::Seek>(reader: R, dest: &Path, budget: &mut Budget) -> Res<u64> {
+fn unpack_zip<R: Read + std::io::Seek>(reader: R, dest: &Path, budget: &mut Budget) -> Res<(u64, Links)> {
     let mut archive = zip::ZipArchive::new(reader).context("The archive is not a zip archive")?;
+    let mut links: Links = Vec::new();
     let mut n = 0;
     for i in 0..archive.len() {
         budget.entry()?;
@@ -482,48 +604,49 @@ fn unpack_zip<R: Read + std::io::Seek>(reader: R, dest: &Path, budget: &mut Budg
         let name = PathBuf::from(raw);
         let Some(rel) = member_path(&name)? else { continue };
         n += 1;
+        if !entry.is_symlink() {
+            links.retain(|(r, _)| *r != rel);
+        }
         if entry.is_dir() {
             place_dir(dest, &rel)?;
         } else if entry.is_symlink() {
+            // The target is the entry's content: bounded, since nothing else
+            // limits it.
             let mut target = String::new();
-            entry.read_to_string(&mut target).context("A link has an unreadable target")?;
-            let target = PathBuf::from(target);
-            if !link_stays_inside(&rel, &target) {
-                bail!("The archive links {} to {}, outside its own tree", rel.display(), target.display());
-            }
-            let path = place(dest, &rel)?;
-            std::os::unix::fs::symlink(&target, &path)?;
+            (&mut entry).take(MAX_LINK_TARGET + 1).read_to_string(&mut target).context("A link has an unreadable target")?;
+            defer_link(&mut links, rel, PathBuf::from(target))?;
         } else {
             let mode = entry.unix_mode();
             let path = place(dest, &rel)?;
             write_file(&path, &mut entry, mode, budget)?;
         }
     }
-    Ok(n)
+    Ok((n, links))
 }
 
-fn count(haystack: &[u8], needle: &[u8]) -> usize {
-    haystack.windows(needle.len()).filter(|w| *w == needle).count()
-}
-
-fn replace_all(haystack: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
+/// `haystack` with every non-overlapping `needle` (left to right) replaced
+/// by `with`, and how many there were.
+fn replace_all(haystack: &[u8], needle: &[u8], with: &[u8]) -> (Vec<u8>, usize) {
     let mut out = Vec::with_capacity(haystack.len());
+    let mut n = 0;
     let mut i = 0;
     while i < haystack.len() {
-        if haystack[i..].starts_with(needle) {
+        if !needle.is_empty() && haystack[i..].starts_with(needle) {
             out.extend_from_slice(with);
             i += needle.len();
+            n += 1;
         } else {
             out.push(haystack[i]);
             i += 1;
         }
     }
-    out
+    (out, n)
 }
 
 /// `cactup cache inputs`: each input in `dir` with its size, or with
-/// `clear`, every one removed. An unpacking still in progress (a
-/// `.unpacking-` directory) is left alone.
+/// `clear`, every one removed — and whatever an interrupted import left
+/// (an `.unpacking-*` directory, a `.tmp*` download), which is listed as
+/// such. Clearing while an import runs removes its work in progress too.
 pub fn list_or_clear(dir: &Path, clear: bool) -> Res<()> {
     let mut found: Vec<(PathBuf, String)> = Vec::new();
     let read = |d: &Path| -> Vec<PathBuf> {
@@ -531,11 +654,21 @@ pub fn list_or_clear(dir: &Path, clear: bool) -> Res<()> {
         paths.sort();
         paths
     };
+    let leftover = |p: &Path| {
+        p.file_name().is_some_and(|n| {
+            let n = n.to_string_lossy();
+            n.starts_with(".unpacking-") || n.starts_with(".tmp")
+        })
+    };
     for entry in read(dir) {
         let name = entry.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        if name == "unpacked" {
+        if leftover(&entry) {
+            found.push((entry, "interrupted".to_owned()));
+        } else if name == "unpacked" {
             for tree in read(&entry) {
-                if !tree.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
+                if leftover(&tree) {
+                    found.push((tree, "interrupted".to_owned()));
+                } else if !tree.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
                     found.push((tree, "unpacked archive".to_owned()));
                 }
             }
@@ -711,7 +844,36 @@ mod tests {
                 raw_entry(&mut b, b"l", tar::EntryType::Symlink, Some("sub"), b"");
                 raw_entry(&mut b, b"l/f", tar::EntryType::Regular, None, b"x");
                 b.into_inner().unwrap()
-            }, "not a directory"),
+            }, "both a directory and a file at l"),
+            // A chain of links, each lexically inside, that resolves outside
+            // (both reviewers' archives): caught where the links really lead.
+            ({
+                let mut b = tar::Builder::new(Vec::new());
+                raw_entry(&mut b, b"x", tar::EntryType::Symlink, Some("."), b"");
+                raw_entry(&mut b, b"y", tar::EntryType::Symlink, Some("x/x/../.."), b"");
+                b.into_inner().unwrap()
+            }, "outside its own tree"),
+            ({
+                let mut b = tar::Builder::new(Vec::new());
+                raw_entry(&mut b, b"y", tar::EntryType::Symlink, Some("."), b"");
+                raw_entry(&mut b, b"p1", tar::EntryType::Symlink, Some("y/.."), b"");
+                raw_entry(&mut b, b"p2", tar::EntryType::Symlink, Some("p1/.."), b"");
+                b.into_inner().unwrap()
+            }, "outside its own tree"),
+            // A dangling link that climbs out past its existing ancestor.
+            ({
+                let mut b = tar::Builder::new(Vec::new());
+                raw_entry(&mut b, b"x", tar::EntryType::Symlink, Some("."), b"");
+                raw_entry(&mut b, b"d", tar::EntryType::Symlink, Some("x/x/../../missing"), b"");
+                b.into_inner().unwrap()
+            }, "outside its own tree"),
+            // A hard link may only name a regular file already unpacked.
+            ({
+                let mut b = tar::Builder::new(Vec::new());
+                raw_entry(&mut b, b"x", tar::EntryType::Symlink, Some("."), b"");
+                raw_entry(&mut b, b"h", tar::EntryType::Link, Some("x/victim"), b"");
+                b.into_inner().unwrap()
+            }, "not a file it unpacked before"),
         ];
         for (tar_bytes, expect) in cases {
             let dir = tempfile::tempdir().unwrap();
@@ -733,6 +895,51 @@ mod tests {
         std::fs::create_dir(&dest).unwrap();
         unpack(&file, ArchiveKind::Tar, &dest, "a.tar").unwrap();
         assert_eq!(std::fs::read(dest.join("d/l")).unwrap(), b"x");
+    }
+
+    /// A fixup edits a read-only member (keeping its mode), refuses one it
+    /// would reach through a link, and an incomplete tree (a scratch purge
+    /// keeps directories) is unpacked again rather than reused.
+    #[test]
+    fn fixups_reach_only_real_members_and_purged_trees_are_redone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_size(INFO.len() as u64);
+        h.set_mode(0o444);
+        h.set_entry_type(tar::EntryType::Regular);
+        b.append_data(&mut h, "bhns_gw230529_ID/X.info", INFO).unwrap();
+        let mut l = tar::Header::new_gnu();
+        l.set_size(0);
+        l.set_entry_type(tar::EntryType::Symlink);
+        b.append_link(&mut l, "alias", "bhns_gw230529_ID").unwrap();
+        let archive = gz(&b.into_inner().unwrap());
+
+        let (base, server) = serve(vec![("*", archive.clone())], 2);
+        let good = input(format!("{base}/id.tar.gz"), &archive);
+        let value = fetch(dir.path(), &good, &quiet()).unwrap();
+        server.join().unwrap();
+        assert!(std::fs::read_to_string(&value).unwrap().contains("/bhns_gw230529_ID/gam2.polytrope"));
+        assert_eq!(std::fs::metadata(&value).unwrap().permissions().mode() & 0o777, 0o444, "mode kept");
+
+        // Purged: the files go, the directories stay; the next fetch redoes it.
+        let tree = dir.path().join("unpacked").join(tree_key(&good));
+        std::fs::remove_file(tree.join(COMPLETE_MARKER)).unwrap();
+        let (base, server) = serve(vec![("*", archive.clone())], 2);
+        let again = Input { url: Some(format!("{base}/id.tar.gz")), ..good.clone() };
+        assert_eq!(fetch(dir.path(), &again, &quiet()).unwrap(), value);
+        server.join().unwrap();
+        assert!(tree.join(COMPLETE_MARKER).is_file());
+
+        // A fixup that names the file through the link is refused.
+        let (base, server) = serve(vec![("*", archive.clone())], 2);
+        let mut through = input(format!("{base}/id.tar.gz"), &archive);
+        through.fixups[0].file = "alias/X.info".into();
+        through.path = None;
+        let err = format!("{:#}", fetch(dir.path(), &through, &quiet()).unwrap_err());
+        assert!(err.contains("not a directory of the archive"), "{err}");
+        server.join().unwrap();
     }
 
     /// Every supported kind unpacks the same tree.

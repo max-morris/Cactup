@@ -103,7 +103,7 @@ pub fn download_component(
         && dest_path.is_file()
         && crate::update::sha256_hex(&dest_path).is_ok_and(|actual| actual == *expected)
     {
-        return Ok(Downloaded { path: dest_path, fetched: false });
+        return Ok(Downloaded { path: dest_path, fetched: false, sha256: expected.clone() });
     }
 
     // Write to a same-directory temp file, then rename into place, so a
@@ -117,9 +117,10 @@ pub fn download_component(
     })?;
     // `!CHECKSUM_SHA256`: a download that is not what the list pins never
     // replaces the file. Not retried: a different file is not a transient
-    // failure.
+    // failure. Hashed either way: the fetch record keeps every download's
+    // hash, which is what a build freezes and `sim export` pins.
+    let actual = crate::update::sha256_hex(&tmp_path)?;
     if let Some(expected) = &component.checksum {
-        let actual = crate::update::sha256_hex(&tmp_path)?;
         if actual != *expected {
             let _ = std::fs::remove_file(&tmp_path);
             bail!(
@@ -132,7 +133,7 @@ pub fn download_component(
         format!("Failed to move '{}' to '{}'", tmp_path.display(), dest_path.display())
     })?;
 
-    Ok(Downloaded { path: dest_path, fetched: true })
+    Ok(Downloaded { path: dest_path, fetched: true, sha256: actual })
 }
 
 /// Where a download landed, and whether it was fetched (`false`: a
@@ -141,6 +142,8 @@ pub fn download_component(
 pub struct Downloaded {
     pub path: PathBuf,
     pub fetched: bool,
+    /// The file's SHA-256, lowercase hex.
+    pub sha256: String,
 }
 
 /// The shared download client ([`CLIENT`]): cactup's `User-Agent` and
@@ -163,11 +166,30 @@ pub(crate) fn download_to(
     dest: &mut std::fs::File,
     progress: &mut impl prodash::Progress,
 ) -> crate::Res<u64> {
+    download_to_limited(client, url, dest, progress, None)
+}
+
+/// [`download_to`], stopping with an error once more than `limit` bytes
+/// arrive (or the server announces more): a download whose size was agreed
+/// to never grows past it.
+pub(crate) fn download_to_limited(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    dest: &mut std::fs::File,
+    progress: &mut impl prodash::Progress,
+    limit: Option<u64>,
+) -> crate::Res<u64> {
+    let too_big = |limit: u64| anyhow!("{url} is bigger than {}; pass -y to download it anyway", crate::progress::bytes(limit as usize));
     let mut response = client
         .get(url)
         .send()
         .and_then(|r| r.error_for_status())
         .with_context(|| format!("Failed to download {url}"))?;
+    if let (Some(limit), Some(announced)) = (limit, response.content_length())
+        && announced > limit
+    {
+        return Err(too_big(limit));
+    }
     progress.init(
         response.content_length().map(|l| l as usize),
         Some(prodash::unit::dynamic_and_mode(
@@ -190,6 +212,11 @@ pub(crate) fn download_to(
         std::io::Write::write_all(dest, &buf[..n])
             .with_context(|| format!("Failed to save the download of {url}"))?;
         total += n as u64;
+        if let Some(limit) = limit
+            && total > limit
+        {
+            return Err(too_big(limit));
+        }
         progress.inc_by(n);
     }
     Ok(total)

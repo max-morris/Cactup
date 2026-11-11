@@ -292,9 +292,9 @@ pub(crate) struct GlobalOpts {
         action = ArgAction::Append
     )]
     pub knob: Vec<KnobOverride>,
-    /// Take a branch tip (@head, @master) of a stack the Cactarium does not
-    /// trust without asking. Nobody reviews those tips: they may fetch and
-    /// build arbitrary code. The warning is still printed.
+    /// Take a branch tip (@head, @master) of a stack or package the Cactarium
+    /// does not trust without asking. Nobody reviews those tips: they may
+    /// fetch and build arbitrary code. The warning is still printed.
     #[clap(long, global = true)]
     pub risky_allow_untrusted_artifacts: bool,
 }

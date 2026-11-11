@@ -988,17 +988,24 @@ fn execute_restart(sim: &Simulation, r: &mut Restart, tee: bool) -> Res<()> {
     }
 }
 
-/// Change restart `r` on disk by `edit` and nothing else: read afresh under
-/// the per-simulation lock, edited, stored, and `r` left holding what was
-/// stored. A run keeps its restart for days, and meanwhile login-side
-/// commands write to the same file (`sim stop`, the `job-stopped` record,
-/// the reaper); storing the copy read at the start would silently undo
-/// them. A lock that cannot be had in time does not lose the record: the
-/// file is still read afresh, only without the lock's guard against a
-/// writer at that very moment. A file that cannot be read at all gets the
-/// run's own copy, with a warning.
+/// Change restart `r` on disk by `edit` and nothing else: read afresh,
+/// edited, stored, and `r` left holding what was stored. A run keeps its
+/// restart for days, and meanwhile login-side commands write to the same
+/// file (`sim stop`, the `job-stopped` record, the reaper); storing the copy
+/// read at the start would silently undo them. The per-simulation lock is
+/// taken when it is free, but never waited for: `sim stop` holds it while it
+/// waits for this very run to end, so waiting would stall the stop (and the
+/// end of a job near its walltime). Without it the file is still read
+/// afresh, so only a write landing in the same instant could be lost. A file
+/// that cannot be read at all gets the run's own copy, with a warning.
 fn update_restart(sim: &Simulation, r: &mut Restart, edit: impl FnOnce(&mut restart::RestartMeta)) -> Res<()> {
-    let _lock = sim.lock_wait().ok();
+    let _lock = match sim.try_lock() {
+        Ok(lock) => lock,
+        Err(e) => {
+            eprintln!("{}", format!("Could not take the simulation's lock ({e:#}); recording without it").yellow());
+            None
+        }
+    };
     match Restart::load(&sim.dir, r.id) {
         Ok(fresh) => r.meta = fresh.meta,
         // Unreadable now: the run's own copy is recorded rather than nothing,
@@ -1299,6 +1306,13 @@ mod tests {
             m.status = Some("U".to_owned());
         })
         .unwrap();
+        // `sim stop` holds the lock while it waits for the run to end: the
+        // run's write must not wait for it (that stalled every graceful stop).
+        let held = sim.lock().unwrap();
+        let started = std::time::Instant::now();
+        update_restart(&sim, &mut run_copy, |m| m.terminated = true).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "the finish did not wait for the lock");
+        drop(held);
         let on_disk = Restart::load(&dir, 0).unwrap();
         assert_eq!(on_disk.meta.job_stopped, Some(stopped), "the login-side record survives the finish");
         assert!(on_disk.meta.terminated);

@@ -184,6 +184,11 @@ impl Simulation {
         LinkLock::acquire(&self.cactup_dir().join("sim.lock"))
     }
 
+    /// The same lock if it is free now: `None` while another holds it.
+    pub fn try_lock(&self) -> Res<Option<LinkLock>> {
+        LinkLock::try_acquire(&self.cactup_dir().join("sim.lock"))
+    }
+
     /// The same lock, but waiting for a live holder: the compute-node handoff
     /// can start while the login-side `submit` still holds it for its
     /// post-submission bookkeeping.

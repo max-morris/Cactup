@@ -277,7 +277,14 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
 /// took it, else what was installed. `None` for anything else, and for a
 /// branch tip (`@head`/`@master`), which has no release to yank.
 fn current_stack(entry: &CactusInstallation) -> Option<&str> {
-    let slug = entry.current_release.as_deref().filter(|c| c.contains('/')).or(entry.stack.as_deref())?;
+    // A refetch records where it took the tree: a stack (`owner/name@…`), a
+    // manifest release, or a thornlist; only before any is the install-time
+    // stack still the one it is on.
+    let slug = match (&entry.current_release, &entry.current_thornlist) {
+        (Some(current), _) => Some(current.as_str()).filter(|c| c.contains('/'))?,
+        (None, Some(_)) => return None,
+        (None, None) => entry.stack.as_deref()?,
+    };
     let version = slug.rsplit_once('@')?.1;
     (version != "head" && version != "master").then_some(slug)
 }
@@ -309,7 +316,9 @@ fn yanked_since(
     if asks.is_empty() {
         return Ok(Default::default());
     }
-    let client = crate::cactarium::Client::new(db);
+    // Asked in passing: a registry that cannot be reached costs seconds, not
+    // the default half minute.
+    let client = crate::cactarium::Client::new(db).with_timeout(std::time::Duration::from_secs(5));
     let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
     let item = progress.add_child("ask the Cactarium about yanked versions");
     item.init(Some(asks.len()), Some(prodash::unit::label("entries")));
