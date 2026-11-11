@@ -282,6 +282,16 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String], allow_untrus
         let slug: Slug =
             spec.parse().map_err(|e| anyhow!("\"{spec}\" is not a package (owner/name[/Thorn][@version]): {e}"))?;
         let entry = slug.entry();
+        // Short hex reads as a version range, and fails as one; say what it
+        // most likely is instead.
+        if let Some(at) = slug.at.as_deref()
+            && at.len() >= 7
+            && slug.commit().is_none()
+            && at.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && at.bytes().any(|b| b.is_ascii_alphabetic())
+        {
+            bail!("\"{at}\" looks like an abbreviated commit id; {entry} at a commit needs all of it (40 hex digits)");
+        }
         let req = match &slug.at {
             Some(at) => format!("{entry}@{at}"),
             None => entry.clone(),
@@ -913,6 +923,9 @@ mod tests {
         let other = "f".repeat(40);
         let err = format!("{:#}", resolve_all(&client(&serve_commit(commit, &other, false)), &spec, false).map(drop).unwrap_err());
         assert!(err.contains("answered with"), "{err}");
+        let short = ["max/carpetx@0123456789ab".to_owned()];
+        let err = format!("{:#}", resolve_all(&client("http://127.0.0.1:9"), &short, false).map(drop).unwrap_err());
+        assert!(err.contains("abbreviated commit id"), "{err}");
     }
 
     /// A package sharing a clone the base keeps other thorns of must match
