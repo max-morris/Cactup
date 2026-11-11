@@ -234,7 +234,9 @@ Cactarium lists them and you give more digits. If a published version was
 cut there, that version is what you get. Otherwise nobody has reviewed that commit, so
 the same rule as for a branch tip applies to a package the Cactarium does not
 trust: it may refuse, or cactup asks you to type `yes`. `cactup inst show`
-lists such a package as `owner/name at commit 3f2c9e1a0011`.
+lists such a package as `owner/name at commit 3f2c9e1a0011`. The package's
+repository must let a commit be fetched by its id, as GitHub, GitLab and other
+current git hosts do.
 
 `cactup remove max/carpetx` takes a package out again, putting back any
 repository it replaced at the commit the base names.

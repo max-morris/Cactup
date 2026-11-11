@@ -316,7 +316,7 @@ pub fn stack_release_text(db: &Database, req: &str, allow_untrusted: bool) -> Re
     let StackResponse { stack, unpinned, untrusted, contact } =
         client.stack_release(slug.owner.as_str(), slug.name.as_str(), &version)?;
     if untrusted {
-        confirm_untrusted(&stack.stack.to_string(), "stack", allow_untrusted)?;
+        confirm_untrusted(&stack.stack.to_string(), "stack", Unreviewed::Tip, allow_untrusted)?;
     }
     let pin_failed = || format!("Failed to pin stack {}", stack.stack);
     let (pins, unchecked) = crate::thornlist::recorded_pins(&stack.thornlist.text, &stack.repos).with_context(pin_failed)?;
@@ -334,34 +334,58 @@ pub fn stack_release_text(db: &Database, req: &str, allow_untrusted: bool) -> Re
     Ok(StackRelease { slug: stack.stack.to_string(), text, unpinned, contact })
 }
 
-/// The warning for an untrusted stack's branch tip, then the yes it needs:
-/// typed at a terminal, or given up front by the flag. Without either there
-/// is nobody to ask, so it is refused.
-pub(crate) fn confirm_untrusted(slug: &str, kind: &str, allow: bool) -> Res<()> {
+/// What an untrusted, unreviewed source is: a branch tip, or a commit no
+/// published version names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unreviewed {
+    Tip,
+    Commit,
+}
+
+impl Unreviewed {
+    fn noun(self) -> &'static str {
+        match self {
+            Unreviewed::Tip => "branch tip",
+            Unreviewed::Commit => "commit",
+        }
+    }
+}
+
+/// Whether there is a terminal to ask a question on.
+pub(crate) fn interactive() -> bool {
     use std::io::IsTerminal;
-    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-    confirm_untrusted_on(slug, kind, allow, interactive)
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// The warning for an untrusted stack's or package's unreviewed source,
+/// then the yes it needs: typed at a terminal, or given up front by the
+/// flag. Without either there is nobody to ask, so it is refused.
+pub(crate) fn confirm_untrusted(slug: &str, kind: &str, what: Unreviewed, allow: bool) -> Res<()> {
+    confirm_untrusted_on(slug, kind, what, allow, interactive())
 }
 
 /// [`confirm_untrusted`], told whether there is a terminal to ask on.
-fn confirm_untrusted_on(slug: &str, kind: &str, allow: bool, interactive: bool) -> Res<()> {
-    eprintln!(
-        "{}",
-        format!(
-            "WARNING: {slug} is a branch tip of a {kind} the Cactarium does not trust. Branch tips of untrusted \
-             {kind}s are never reviewed: installing it may fetch and build arbitrary code."
-        )
-        .red()
-        .bold()
-    );
+pub(crate) fn confirm_untrusted_on(slug: &str, kind: &str, what: Unreviewed, allow: bool, interactive: bool) -> Res<()> {
+    let why = match what {
+        Unreviewed::Tip => format!(
+            "{slug} is a branch tip of a {kind} the Cactarium does not trust. Branch tips of untrusted {kind}s \
+             are never reviewed"
+        ),
+        Unreviewed::Commit => format!(
+            "{slug} is a commit of a {kind} the Cactarium does not trust, and no published version names it, \
+             so nobody has reviewed it"
+        ),
+    };
+    eprintln!("{}", format!("WARNING: {why}: installing it may fetch and build arbitrary code.").red().bold());
     if allow {
         eprintln!("{}", "Going on anyway, as --risky-allow-untrusted-artifacts says.".yellow());
         return Ok(());
     }
     if !interactive {
         bail!(
-            "Refusing the untrusted branch tip {slug} without a terminal to confirm it on; use a release \
-             (owner/name@X.Y.Z or a range), or pass --risky-allow-untrusted-artifacts"
+            "Refusing the untrusted {} {slug} without a terminal to confirm it on; use a release \
+             (owner/name@X.Y.Z or a range), or pass --risky-allow-untrusted-artifacts",
+            what.noun()
         );
     }
     use std::io::Write;
@@ -528,8 +552,8 @@ mod tests {
         assert!(tip.unpinned && tip.untrusted);
         assert!(!response("max").untrusted);
 
-        confirm_untrusted_on("et/et-stack@head", "stack", true, false).unwrap();
-        let err = format!("{:#}", confirm_untrusted_on("et/et-stack@head", "stack", false, false).unwrap_err());
+        confirm_untrusted_on("et/et-stack@head", "stack", Unreviewed::Tip, true, false).unwrap();
+        let err = format!("{:#}", confirm_untrusted_on("et/et-stack@head", "stack", Unreviewed::Tip, false, false).unwrap_err());
         assert!(err.contains("without a terminal") && err.contains("--risky-allow-untrusted-artifacts"), "{err}");
     }
 

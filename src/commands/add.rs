@@ -271,7 +271,13 @@ struct Wanted {
 /// it (`owner/pkg/A owner/pkg/B`) are one add of those thorns, and naming
 /// the package whole anywhere adds all of them. Two specs that resolve to
 /// different versions of one package are an error, not a silent winner.
-fn resolve_all(client: &crate::cactarium::Client, specs: &[String], allow_untrusted: bool) -> Res<Vec<Wanted>> {
+fn resolve_all(
+    client: &crate::cactarium::Client,
+    specs: &[String],
+    allow_untrusted: bool,
+    interactive: bool,
+) -> Res<Vec<Wanted>> {
+    use crate::cactarium::Unreviewed;
     let mut wanted: Vec<Wanted> = Vec::new();
     let mut listings: std::collections::HashMap<String, cactup_ecosystem_common::api::PackageVersions> =
         std::collections::HashMap::new();
@@ -307,6 +313,13 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String], allow_untrus
         // published version was frozen at comes back as the package read
         // there, `owner/pkg#<full id>`, recorded at that full id; one a
         // version was frozen at comes back as that version, added as any is.
+        // A `#<sha>` answered with anything (the package there, or the
+        // version frozen there) must be at a commit that id names.
+        if let Some(sha) = slug.sha()
+            && !commit.starts_with(sha)
+        {
+            bail!("Asked the Cactarium for {req}, and it answered with {} at commit {commit}", resolved.slug);
+        }
         let read_at_commit = resolved.slug.contains('#') || is_commit(&resolved.version.version);
         let wanted_version = if read_at_commit { commit.clone() } else { resolved.version.version.clone() };
         let version = if read_at_commit {
@@ -316,8 +329,18 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String], allow_untrus
                 bail!("Asked the Cactarium for {req}, and it answered with {} at commit {commit}", resolved.slug);
             }
             let (version, untrusted) = client.package_at(slug.owner.as_str(), slug.name.as_str(), &commit)?;
+            // A version frozen at that commit since `/resolve` answers here as
+            // that version: not the read this was asked for, so start over.
+            if version.version.version != commit {
+                bail!(
+                    "The Cactarium published {}@{} at commit {commit} while it was being added; run the add again",
+                    entry,
+                    version.version.version
+                );
+            }
             if untrusted {
-                crate::cactarium::confirm_untrusted(&resolved.slug, "package", allow_untrusted)?;
+                let what = Unreviewed::Commit;
+                crate::cactarium::confirm_untrusted_on(&resolved.slug, "package", what, allow_untrusted, interactive)?;
             }
             // Pinned, so no branch to follow: no label beside the pin.
             label = None;
@@ -326,7 +349,8 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String], allow_untrus
         } else if let Some(tip) = slug.at.as_deref().filter(|_| slug.tip().is_some()) {
             let (version, untrusted) = client.package_at(slug.owner.as_str(), slug.name.as_str(), tip)?;
             if untrusted {
-                crate::cactarium::confirm_untrusted(&resolved.slug, "package", allow_untrusted)?;
+                let what = Unreviewed::Tip;
+                crate::cactarium::confirm_untrusted_on(&resolved.slug, "package", what, allow_untrusted, interactive)?;
             }
             let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
             let line = crate::progress::Line::over(
@@ -434,7 +458,8 @@ fn resolve_all(client: &crate::cactarium::Client, specs: &[String], allow_untrus
 
 pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<()> {
     let client = crate::cactarium::Client::new(&ctx.db.read()?);
-    let wanted = resolve_all(&client, specs, ctx.globals.risky_allow_untrusted_artifacts)?;
+    let wanted =
+        resolve_all(&client, specs, ctx.globals.risky_allow_untrusted_artifacts, crate::cactarium::interactive())?;
 
     let inst = Installation::resolve(ctx)?;
     let locked = inst.locked()?;
@@ -577,7 +602,7 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<
 /// back to the base's pin.
 pub fn remove(ctx: &Ctx, package: &str, force: bool) -> Res<()> {
     let slug: Slug = package.parse().map_err(|e| anyhow!("\"{package}\" is not a package (owner/name): {e}"))?;
-    if slug.at.is_some() || slug.thorn.is_some() {
+    if slug.at.is_some() || slug.sha.is_some() || slug.thorn.is_some() {
         bail!("Name the package as owner/name; remove takes the whole package");
     }
     let entry = format!("{}/{}", slug.owner, slug.name);
@@ -854,7 +879,7 @@ mod tests {
             let body = if path.contains("/resolve") { resolved.clone() } else { tip.clone() };
             ("200 OK", "api-generation: 1\r\nx-cactarium-untrusted: false\r\n".into(), body.into_bytes())
         });
-        let wanted = resolve_all(&crate::cactarium::Client::at(&base), &["max/carpetx@head".to_owned()], false)
+        let wanted = resolve_all(&crate::cactarium::Client::at(&base), &["max/carpetx@head".to_owned()], false, false)
             .unwrap_or_else(|e| panic!("{e:#}"));
         assert_eq!(wanted.len(), 1);
         let thorns: Vec<&str> = wanted[0].thorns.iter().map(|t| t.checkout.as_str()).collect();
@@ -894,7 +919,7 @@ mod tests {
         let commit = "0123456789abcdef0123456789abcdef01234567";
         let client = |base: &str| crate::cactarium::Client::at(base);
         let add = |spec: &str, untrusted: bool| {
-            resolve_all(&client(&serve_commit(commit, untrusted)), &[spec.to_owned()], false)
+            resolve_all(&client(&serve_commit(commit, untrusted)), &[spec.to_owned()], false, false)
         };
 
         let specs = [format!("max/carpetx#{commit}"), "max/carpetx#0123456".to_owned(), "max/carpetx@0123456789ab".to_owned()];
@@ -921,10 +946,25 @@ mod tests {
         assert_eq!(describe("max/carpetx", commit), "max/carpetx at commit 0123456789ab");
 
         let err = format!("{:#}", add("max/carpetx#0123456", true).map(drop).unwrap_err());
-        assert!(err.contains("risky-allow-untrusted-artifacts"), "{err}");
+        assert!(err.contains("untrusted commit") && err.contains("risky-allow-untrusted-artifacts"), "{err}");
         // An answer at a commit the request does not name is refused.
         let err = format!("{:#}", add("max/carpetx#fffffff", false).map(drop).unwrap_err());
         assert!(err.contains("answered with"), "{err}");
+
+        // A `#<sha>` answered with a version at an unrelated commit, too.
+        let resolved = format!(
+            r#"{{"slug":"max/carpetx@1.2.0","kind":"package","url":"https://x/carpetx.git","contact":null,
+            "version":"1.2.0","track":null,"tag":"v1.2.0","commit":"{}","tree":null,"yanked":false,
+            "yank-reason":null,"state":"ok","curated":false,"published":0}}"#,
+            "f".repeat(40)
+        );
+        let (base, _) = crate::fetch::download::test_server::serve_with(1, move |_| {
+            ("200 OK", "api-generation: 1\r\n".into(), resolved.clone().into_bytes())
+        });
+        let err = format!("{:#}", resolve_all(&client(&base), &["max/carpetx#0123456".to_owned()], false, false)
+            .map(drop)
+            .unwrap_err());
+        assert!(err.contains("answered with max/carpetx@1.2.0"), "{err}");
     }
 
     /// A package sharing a clone the base keeps other thorns of must match

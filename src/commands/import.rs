@@ -327,7 +327,7 @@ pub fn login(ctx: &Ctx, token: Option<String>) -> Res<()> {
 pub fn publish(ctx: &Ctx, file: &std::path::Path, target: &str, version: Option<&str>) -> Res<()> {
     use cactup_ecosystem_common::slug::Slug;
     let slug: Slug = target.parse().map_err(|e| anyhow!("\"{target}\" is not owner/name: {e}"))?;
-    if slug.at.is_some() || slug.thorn.is_some() {
+    if slug.at.is_some() || slug.sha.is_some() || slug.thorn.is_some() {
         bail!("Publish to owner/name, with --version X.Y.Z to choose the version");
     }
     let text = std::fs::read_to_string(file).with_context(|| format!("Failed to read '{}'", file.display()))?;
@@ -359,7 +359,7 @@ pub fn publish_stack(
 ) -> Res<()> {
     use cactup_ecosystem_common::slug::Slug;
     let slug: Slug = target.parse().map_err(|e| anyhow!("\"{target}\" is not owner/name: {e}"))?;
-    if slug.at.is_some() || slug.thorn.is_some() {
+    if slug.at.is_some() || slug.sha.is_some() || slug.thorn.is_some() {
         bail!("Name the stack as owner/name, and its version with --version");
     }
     let read = |path: &std::path::Path| {
@@ -385,7 +385,7 @@ pub fn publish_stack(
 pub fn refresh(ctx: &Ctx, target: &str) -> Res<()> {
     use cactup_ecosystem_common::slug::Slug;
     let slug: Slug = target.parse().map_err(|e| anyhow!("\"{target}\" is not owner/name: {e}"))?;
-    if slug.at.is_some() || slug.thorn.is_some() {
+    if slug.at.is_some() || slug.sha.is_some() || slug.thorn.is_some() {
         bail!("Name the package or stack as owner/name");
     }
     let client = crate::cactarium::Client::new(&ctx.db.read()?);
