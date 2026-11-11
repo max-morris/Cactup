@@ -23,9 +23,6 @@ hostname    = "cosma8"
 [paths]
 install-home    = "/cosma/home/dp411/dc-matu2/ET"
 simulation-home = "/cosma8/data/dp411/dc-matu2/simulations"
-# Where `cactup import` keeps the downloaded and unpacked inputs of shared
-# simulations: big, so beside the simulations, not in the home quota.
-inputs-home = "/cosma8/data/dp411/dc-matu2/inputs"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
 test-home       = "/cosma8/data/dp411/dc-matu2/tests"
 
