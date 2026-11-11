@@ -630,9 +630,10 @@ pub(crate) struct TopologyFlags {
     /// Notification type (default: knob, `all`).
     #[clap(short = 'M', long, value_name = "TYPE")]
     pub mail_type: Option<String>,
-    /// Node count. Default: for a job given to the scheduler, or a run inside
-    /// a job allocation, as many nodes as the tasks need, ceil(tasks /
-    /// tasks-per-node); otherwise 1.
+    /// Node count. Default: for a job given to the scheduler, as many as the
+    /// tasks need, ceil(tasks / tasks-per-node), where --tpn is given or the
+    /// machine database declares the node size; inside a job allocation, its
+    /// own node count (all of it without --tasks); otherwise 1.
     #[clap(short, long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     pub nodes: Option<u32>,
     /// Total tasks (MPI ranks). Default: the run/submit script's `tasks` setting,

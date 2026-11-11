@@ -152,10 +152,10 @@ impl RoomLimit {
         match self {
             RoomLimit::Tpn => "--tpn".to_owned(),
             RoomLimit::Cpus { per_node, per_task } => {
-                format!("{per_node} CPUs per node at {} per task", count(per_task, "CPU"))
+                format!("{} per node at {} per task", count(per_node, "CPU"), count(per_task, "CPU"))
             }
             RoomLimit::Gpus { per_node, per_task } => {
-                format!("{per_node} GPUs per node at {} per task", count(per_task, "GPU"))
+                format!("{} per node at {} per task", count(per_node, "GPU"), count(per_task, "GPU"))
             }
         }
     }
@@ -172,11 +172,13 @@ pub struct DerivedNodes {
 
 impl DerivedNodes {
     /// `NODES` for `tasks` ranks: as many as they need at `per_node`, and
-    /// inside an allocation of known size never more than it has.
+    /// inside an allocation of known size never more than it has — unless an
+    /// explicit `--tpn` sets `per_node`, which the ranks then keep.
     fn nodes_for(self, tasks: u32) -> u32 {
         let needed = tasks.max(1).div_ceil(self.per_node.max(1));
-        match self.placement {
-            Placement::Allocation { nodes: Some(a) } => needed.min(a.max(1)),
+        match (self.placement, self.limit) {
+            (_, RoomLimit::Tpn) => needed,
+            (Placement::Allocation { nodes: Some(a) }, _) => needed.min(a.max(1)),
             _ => needed,
         }
     }
@@ -198,14 +200,18 @@ impl Topology {
             && n == a
         {
             return Some(format!(
-                "{verb} {n} nodes, all of this job allocation's, for {tasks} tasks; pass -n to choose"
+                "{verb} {n} nodes, all of this job allocation's, for {}; pass -n to choose",
+                count(tasks, "task")
             ));
         }
         let per = match d.limit {
-            RoomLimit::Tpn => format!("{} tasks per node (--tpn)", d.per_node),
-            limit => format!("at most {} tasks per node (the queue's {})", d.per_node, limit.describe()),
+            RoomLimit::Tpn => format!("{} per node (--tpn)", count(d.per_node, "task")),
+            limit => {
+                let per_node = count(d.per_node, "task");
+                format!("at most {per_node} per node (the queue's {})", limit.describe())
+            }
         };
-        Some(format!("{verb} {n} nodes: {per} for {tasks} tasks; pass -n to choose"))
+        Some(format!("{verb} {n} nodes: {per} for {}; pass -n to choose", count(tasks, "task")))
     }
 }
 
@@ -290,6 +296,9 @@ pub fn resolve_topology(
     // GPUS_PER_TASK is settled before the rank count because a derived rank
     // count is bounded by it (below); it needs no layout of its own (§8.5).
     let gpus_per_task = derive_gpus_per_task(flags, &hw, gpu);
+    // More GPUs per task than a node has: no layout, and no node count, can
+    // help, so this is said before any is worked out.
+    check_gpus_per_task(gpus_per_task, &hw, &queue)?;
     let layout = derive_layout(flags, &hw, cpus, gpus_per_task, placement, &queue)?;
     let (nodes, tasks, tpn) = (layout.nodes, layout.tasks, layout.tpn);
     check_gpus_per_node(gpus_per_task, tpn, &hw, &queue, layout.nodes_that_fit)?;
@@ -365,6 +374,7 @@ fn derive_layout(
     // Zeros are refused by the parser; a zero from the MDB (`[build]
     // nodes`/`tasks`) or a script means "the least there is".
     let nodes_flag = flags.nodes.map(|n| n.max(1));
+    let tasks_flag = flags.tasks.map(|t| t.max(1));
     let tpn_flag = flags.tpn.map(|t| t.max(1));
     let cpus = cpus.max(1);
     let cpus_per_node = hw.max_cpus_per_node.unwrap_or(1).max(1);
@@ -385,12 +395,20 @@ fn derive_layout(
         }
         _ => (by_cpu, RoomLimit::Cpus { per_node: cpus_per_node, per_task: cpus }),
     };
-    let derived = (placement.derives_nodes() && declared).then(|| {
+    // Nodes follow from the ranks at an explicit `--tpn`, which needs no node
+    // size, or at the room of a declared one.
+    let derived = (placement.derives_nodes() && (declared || tpn_flag.is_some())).then(|| {
         let (per_node, limit) = tpn_flag.map_or((room, room_limit), |t| (t, RoomLimit::Tpn));
         DerivedNodes { per_node, limit, placement }
     });
+    // A known allocation's own size, which a run inside it with no `--nodes`
+    // uses even where the node size is unknown.
+    let allocation = match placement {
+        Placement::Allocation { nodes: Some(a) } => Some(a.max(1)),
+        _ => None,
+    };
 
-    match (nodes_flag, flags.tasks, derived) {
+    match (nodes_flag, tasks_flag, derived) {
         (None, Some(tasks), Some(d)) => {
             // §8.5: the node count follows from the rank count.
             let nodes = d.nodes_for(tasks);
@@ -398,24 +416,21 @@ fn derive_layout(
             return Ok(Layout { nodes, tasks, tpn, derived, nodes_that_fit: None });
         }
         (None, None, Some(d)) => {
-            let nodes = match placement {
-                Placement::Allocation { nodes: Some(a) } => a.max(1),
-                _ => 1,
-            };
+            let nodes = allocation.unwrap_or(1);
             let tasks = nodes.saturating_mul(d.per_node);
             return Ok(Layout { nodes, tasks, tpn: d.per_node, derived, nodes_that_fit: None });
         }
         _ => {}
     }
 
-    let nodes = nodes_flag.unwrap_or(1);
+    let nodes = nodes_flag.or(allocation).unwrap_or(1);
     // An explicit `--tasks` on one host is a requested rank count: every one
     // of those ranks lands on the node, so it keeps the CPU-rule room (not
     // the GPU-bounded one) and meets the GPU ceiling instead of slipping
     // past it on the strength of a quietly shrunk TASKS_PER_NODE. With
     // `--nodes` given too, the same holds per node.
-    let fill = tpn_flag.unwrap_or(if flags.tasks.is_none() { room } else { by_cpu });
-    let tasks = flags.tasks.unwrap_or_else(|| nodes.saturating_mul(fill));
+    let fill = tpn_flag.unwrap_or(if tasks_flag.is_none() { room } else { by_cpu });
+    let tasks = tasks_flag.unwrap_or_else(|| nodes.saturating_mul(fill));
     // An explicit `--tasks` overrides the fill-the-node `TASKS`, so a derived
     // `TASKS_PER_NODE` is capped to keep the layout self-consistent
     // (`--tasks=1` must not report 2 tasks/node) — the same capping
@@ -438,8 +453,9 @@ fn derive_layout(
         if tpn_flag.is_some() {
             // §8.5
             bail!(
-                "{tasks} tasks do not fit on {on} at {tpn} tasks per node (--tpn); \
-                 ask for -n {needed}, or leave out -n to have it derived"
+                "{tasks} tasks do not fit on {on} at {} per node (--tpn); \
+                 ask for -n {needed}, or leave out -n to have it derived",
+                count(tpn, "task"),
             );
         }
         if declared {
@@ -560,6 +576,27 @@ fn derive_gpus_per_task(flags: &TopologyFlags, hw: &Hardware, gpu: bool) -> u32 
     flags.gpus_per_task.or(hw.default_gpus_per_task).unwrap_or(1).max(1)
 }
 
+/// The per-task half of the §8.5 GPU ceiling: one task asking for more GPUs
+/// than a node of `queue` holds (or a GPU run on a queue declaring none).
+fn check_gpus_per_task(per_task: u32, hw: &Hardware, queue: &str) -> Res<()> {
+    match hw.max_gpus_per_node {
+        Some(max) if per_task > max => {
+            let fix = if max == 0 {
+                format!("queue \"{queue}\" has no GPUs at all; run without GPUs or pick another queue")
+            } else {
+                format!("--gpus-per-task {max} or lower fits this layout")
+            };
+            // §8.5
+            bail!(
+                "This layout needs {} per node for even one task, but queue \"{queue}\" has {max}; \
+                 {fix}",
+                count(per_task, "GPU"),
+            );
+        }
+        _ => Ok(()),
+    }
+}
+
 /// The GPUs-per-node ceiling (§8.5): `GPUS_PER_TASK × TASKS_PER_NODE` may not
 /// exceed `max-gpus-per-node`. Checked once the whole layout is settled, and
 /// only for a GPU run (`per_task` is 0 otherwise, so the product is 0).
@@ -644,14 +681,20 @@ pub fn apply_tasks_default(
     if let Some(t) = script_tasks.or(fallback) {
         let t = t.max(1);
         topo.tasks = t;
-        // Where nodes are derived, they follow from the new rank count
-        // exactly as from a `--tasks` (§8.5); else tpn is capped to match.
-        match topo.derived_nodes {
-            Some(d) => {
+        // A script's own `tasks` is a rank count like `--tasks`: where nodes
+        // are derived they follow from it (§8.5). The caller's fallback (a
+        // testsuite's 2) is not one — those ranks stay on one node, as they
+        // always have. Else tpn is capped to match.
+        match (topo.derived_nodes, script_tasks.is_some()) {
+            (Some(d), true) => {
                 topo.nodes = d.nodes_for(t);
                 topo.tpn = t.div_ceil(topo.nodes);
             }
-            None => topo.tpn = topo.tpn.min(t.div_ceil(topo.nodes.max(1))),
+            (_, false) => {
+                topo.nodes = 1;
+                topo.tpn = topo.tpn.min(t);
+            }
+            (None, true) => topo.tpn = topo.tpn.min(t.div_ceil(topo.nodes.max(1))),
         }
     }
 }
@@ -1757,7 +1800,8 @@ mod tests {
             f.tasks = Some(0);
             f.tpn = None;
             f.cpus = Some(0);
-            assert!(resolve_at(&f, &machine, &fit, placement).is_ok());
+            let t = resolve_at(&f, &machine, &fit, placement).unwrap();
+            assert_eq!((t.nodes, t.tasks, t.tpn, t.cpus), (1, 1, 1, 1), "{placement:?}");
         }
     }
 
@@ -1843,6 +1887,110 @@ mod tests {
         // Size unknown: derived as for a submit.
         let unknown = Placement::Allocation { nodes: None };
         assert_eq!(qbd_layout("checkpt", 256, 1, unknown).unwrap(), (4, 256, 64));
+    }
+
+    /// A testsuite's fallback of 2 ranks is no rank count to derive nodes
+    /// from: rostam's `spark` nodes hold one GPU, and a no-flag test run
+    /// stays on one node as it always did. A script's own `tasks` does derive.
+    #[test]
+    fn a_testsuite_fallback_stays_on_one_node() {
+        let mdb = crate::mdb::Mdb::with_roots(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"),
+            PathBuf::from("/nonexistent-user-mdb"),
+        );
+        let machine = mdb.load("rostam").unwrap();
+        let cfg: ConfigMeta = toml::from_str(
+            "name=\"s\"\nflavor=\"arm-cuda-native\"\nthornlist=\"t.th\"\nmachine=\"rostam\"\n\
+             config-id=\"c\"\nbuild-id=\"b\"\nuniverse=\"arm-conda\"\n[runs-on]\ngpu=true",
+        )
+        .unwrap();
+        let fit = BinaryFit::from_config(&cfg);
+        let mut f = flags();
+        f.queue = Some("spark".to_owned());
+        for placement in [Placement::Scheduled, Placement::Allocation { nodes: Some(4) }] {
+            let mut t = resolve_at(&f, &machine, &fit, placement).unwrap();
+            apply_tasks_default(&mut t, &f, None, Some(2));
+            assert_eq!((t.nodes, t.tasks, t.tpn), (1, 2, 1), "{placement:?}");
+            assert_eq!(t.nodes_note(), None);
+            let mut t = resolve_at(&f, &machine, &fit, placement).unwrap();
+            apply_tasks_default(&mut t, &f, Some(2), Some(2));
+            assert_eq!((t.nodes, t.tasks, t.tpn), (2, 2, 1), "{placement:?}");
+        }
+    }
+
+    /// Inside a known allocation an explicit `--tpn` sets the ranks per node
+    /// and the nodes follow from it, past the allocation's size if need be
+    /// (it is not refused there either); and the allocation's own size is the
+    /// default even where the node size is not declared.
+    #[test]
+    fn an_allocation_keeps_an_explicit_tpn_and_its_size_without_a_node_size() {
+        let two = Placement::Allocation { nodes: Some(2) };
+        let machine = qbd();
+        let fit = qbd_fit(false);
+        let mut f = flags();
+        f.queue = Some("checkpt".to_owned());
+        f.tasks = Some(256);
+        f.tpn = Some(32);
+        let t = resolve_at(&f, &machine, &fit, two).unwrap();
+        assert_eq!((t.nodes, t.tasks, t.tpn), (8, 256, 32));
+
+        let mut machine = qbd();
+        machine.meta.hardware.max_cpus_per_node_detected = true;
+        let mut f = flags();
+        f.queue = Some("checkpt".to_owned());
+        f.cpus = Some(1);
+        let t = resolve_at(&f, &machine, &fit, two).unwrap();
+        assert_eq!((t.nodes, t.tasks, t.tpn), (2, 128, 64), "all of it, filled");
+        // With ranks: still its size — capping by ranks needs a declared room.
+        f.tasks = Some(64);
+        let t = resolve_at(&f, &machine, &fit, two).unwrap();
+        assert_eq!((t.nodes, t.tasks, t.tpn), (2, 64, 32));
+        // Outside an allocation a detected size derives nothing.
+        let t = resolve_at(&f, &machine, &fit, Placement::Scheduled).unwrap();
+        assert_eq!(t.nodes, 1);
+        // An explicit --tpn needs no node size to derive from.
+        f.tpn = Some(16);
+        let t = resolve_at(&f, &machine, &fit, Placement::Scheduled).unwrap();
+        assert_eq!((t.nodes, t.tasks, t.tpn), (4, 64, 16));
+    }
+
+    /// More GPUs per task than a node has is said as that, with no `-n`
+    /// advice: no node count can help.
+    #[test]
+    fn too_many_gpus_per_task_is_said_first() {
+        let machine = qbd();
+        let fit = qbd_fit(true);
+        let mut f = flags();
+        f.queue = Some("gpu4".to_owned());
+        f.gpus_per_task = Some(5);
+        for (nodes, tasks) in [(None, None), (Some(1), Some(4)), (None, Some(4))] {
+            f.nodes = nodes;
+            f.tasks = tasks;
+            let e = resolve_at(&f, &machine, &fit, Placement::Scheduled).unwrap_err().to_string();
+            assert!(e.contains("needs 5 GPUs per node for even one task"), "{e}");
+            assert!(e.contains("has 4"), "{e}");
+            assert!(e.contains("--gpus-per-task 4 or lower") && !e.contains("-n "), "{e}");
+        }
+    }
+
+    /// Counts of one read as one.
+    #[test]
+    fn notes_and_refusals_say_one_in_the_singular() {
+        let machine = qbd();
+        let fit = qbd_fit(false);
+        let mut f = flags();
+        f.queue = Some("checkpt".to_owned());
+        f.tasks = Some(4);
+        f.tpn = Some(1);
+        let t = resolve_at(&f, &machine, &fit, Placement::Scheduled).unwrap();
+        let note = t.nodes_note().unwrap();
+        assert!(note.contains(": 1 task per node (--tpn) for 4 tasks"), "{note}");
+        f.nodes = Some(2);
+        let e = resolve_at(&f, &machine, &fit, Placement::Scheduled).unwrap_err().to_string();
+        assert!(e.contains("4 tasks do not fit on 2 nodes at 1 task per node"), "{e}");
+        // gpu2 at 1 GPU per task: "1 GPU per task".
+        let note = qbd_topo("gpu2", Some(8), 1, Placement::Scheduled).unwrap().nodes_note().unwrap();
+        assert!(note.contains("2 GPUs per node at 1 GPU per task"), "{note}");
     }
 
     /// A derived node count above 1 is said, with what decided it.

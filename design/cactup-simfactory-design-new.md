@@ -1619,6 +1619,9 @@ falls back to one core per thread and claims nothing about SMT.
 A detected `max-cpus-per-node` is marked as such: it still sizes the
 fill-the-node default, but §8.5 derives no node count from it and refuses no
 layout on it, since on a cluster it is the login node's, not a compute node's.
+A user overlay's top-level value counts as detected for the same reason
+(§4.7, §8.5). `max-gpus-per-node` filled here is not marked, and on a GPU run
+it bounds a node's room; see §14.
 
 This is the same detection simfactory's `CREATE_MACHINE` did at setup time
 (`simfactory-docs.txt` §20), but done at runtime so the built-in `generic`
@@ -1654,14 +1657,16 @@ cactup machine delete <name>
   the user may re-create to refresh). If the source no longer exists, the warning
   says so instead.
 - `<name>` defaults to the local hostname's short form.
-- **Autodetects and writes concrete hardware** the base lacks (`memory`,
-  `max-gpus-per-node`, and `max-cpus-per-node` for a base whose jobs run on this
-  host, `job-ids = "pids"`, via §4.6) so the persisted machine is stable rather
-  than re-detecting each run. What the base declares stays: it describes the
-  base's nodes, and the host running `machine create` (a login node) need not
-  be one of them. A batch machine's missing `max-cpus-per-node` is left to
-  load-time detection, which marks it detected, so no node count is derived
-  from a login node's cores (§8.5).
+- **Autodetects and writes concrete hardware** (`max-cpus-per-node`, `memory`,
+  `max-gpus-per-node` via §4.6) so the persisted machine is stable rather than
+  re-detecting each run — for a base whose jobs run on this host (`job-ids =
+  "pids"`: `generic`, a workstation), over whatever the base says, since this
+  host is the node. A batch machine keeps what its base declares, which
+  describes the base's nodes (the host running `machine create`, a login node,
+  need not be one of them), and gets only `memory`/`max-gpus-per-node` filled
+  where the base has none; a missing `max-cpus-per-node` is left to load-time
+  detection. Either way an overlay's top-level `max-cpus-per-node` counts as
+  detected, so no node count is derived from it (§8.5).
 - Sets `simulation-home`/`install-home` (prompted; defaults are the
   `~/.cactup/simulations` and `~/.cactup/cacti` fallbacks, §4.2) and prompts for
   `user`/`email`/`allocation` knobs unless `--silent` (which takes defaults — the
@@ -3740,26 +3745,37 @@ facts fill any topology the user left unset.
   machine with `job-ids = "pids"`, whose "submit" backgrounds the script on the
   submitting host.
 - `NODES` = `--nodes` if given. Else, for a scheduled job: `ceil(TASKS /
-  per-node)` when `--tasks` is given, where per-node is `--tpn` if given, else
-  the node's room — `--tasks 256 --cpus 1` on qbd's 64-core nodes is 4 nodes,
-  `--tasks 100` 2, `--tasks 64 --cpus 2` 2, and on qbd's 2-GPU `gpu2` nodes
-  `--tasks 100` is 50. Dividing ranks rather than CPUs (`ceil(TASKS ×
-  CPUS_PER_TASK / MAX_CPUS_PER_NODE)`) matters when the CPUs do not split
-  evenly: a rank's threads cannot straddle two nodes, so 64 ranks of 3 CPUs need
-  4 such nodes, not 3. Inside an allocation whose environment gives its node
-  count (`SLURM_JOB_NUM_NODES`/`SLURM_NNODES` beside a Slurm `allocation-env`
-  variable, `PBS_NUM_NODES` beside a PBS one), `NODES` is that count — all of
-  it with no `--tasks`, else never more nodes than the ranks need by the rule
-  above: the queue's node size is not necessarily the allocation's, so a one-node
-  `salloc` of a big node stays one node. An allocation of unknown size derives
-  like a scheduled job. Otherwise 1.
-  Nodes are derived only from a **declared** `max-cpus-per-node` (§4.2): one
-  filled from the OS at load (§4.6) is the login node's, which says nothing
-  about a compute node's, so with it `NODES` stays 1 and nothing below is
-  refused on its strength. Whenever a derived `NODES` is above 1, cactup says so
-  in one line before submitting or running, naming the count and what decided
-  it (`Asking for 50 nodes: at most 2 tasks per node (the queue's 2 GPUs per
-  node at 1 GPU per task) for 100 tasks; pass -n to choose`).
+  per-node)` when `--tasks` is given, where per-node is `--tpn` if given (which
+  needs no node size), else the node's room — `--tasks 256 --cpus 1` on qbd's
+  64-core nodes is 4 nodes, `--tasks 100` 2, `--tasks 64 --cpus 2` 2, and on
+  qbd's 2-GPU `gpu2` nodes `--tasks 100` is 50. Dividing ranks rather than CPUs
+  (`ceil(TASKS × CPUS_PER_TASK / MAX_CPUS_PER_NODE)`) matters when the CPUs do
+  not split evenly: a rank's threads cannot straddle two nodes, so 64 ranks of 3
+  CPUs need 4 such nodes, not 3. Inside an allocation whose environment gives
+  its node count (`SLURM_JOB_NUM_NODES`/`SLURM_NNODES` beside a Slurm
+  `allocation-env` variable; `PBS_NUM_NODES`, or for PBS Pro the distinct hosts
+  of `$PBS_NODEFILE`, beside a PBS one), `NODES` is that count — all of it with
+  no `--tasks`; with `--tasks`, never more nodes than the ranks need by the rule
+  above where the room is declared, since the queue's node size is not
+  necessarily the allocation's (a one-node `salloc` of a big node stays one
+  node). An explicit `--tpn` is the exception: the nodes follow from it, past
+  the allocation's size if need be, so `TASKS` never exceeds `NODES ×
+  TASKS_PER_NODE`. An allocation of unknown size derives like a scheduled job.
+  Otherwise 1.
+  Nodes are derived from the room only where `max-cpus-per-node` is
+  **declared**: by a queue, in either MDB layer, or at the top level of a
+  system-MDB machine. A value filled from the OS at load (§4.6) is the login
+  node's, and so, in practice, is the top-level value of a user overlay:
+  `machine create` long wrote this host's cores there for every clone (and still
+  does for a machine whose jobs run on this host), so an overlay made on a login
+  node holds a login node's count.
+  Both count as **detected**: they still size the fill-the-node default, but
+  with them `NODES` stays 1 (an allocation's own count and `--tpn` aside) and
+  nothing below is refused on their strength. An overlay that wants node counts
+  derived declares `max-cpus-per-node` per queue. Whenever a derived `NODES` is
+  above 1, cactup says so in one line before submitting or running, naming the
+  count and what decided it (`Asking for 50 nodes: at most 2 tasks per node (the
+  queue's 2 GPUs per node at 1 GPU per task) for 100 tasks; pass -n to choose`).
 - `TASKS_PER_NODE` = `--tpn` if given. Else, with no `--tasks`, the node's room
   (fill the node). With `--tasks` and a derived `NODES`, the ranks spread
   evenly over the nodes, `ceil(TASKS / NODES)`. With `--tasks` and a `NODES`
@@ -3783,8 +3799,9 @@ facts fill any topology the user left unset.
   GPU ceiling, refusing an explicit `--nodes` whose ranks fit its CPUs but not
   its GPUs, gives the same advice. A run inside an allocation or on a single
   host is never refused on the CPU ground: what fits an allocation cactup does
-  not know, and oversubscribing one host's CPUs is a choice. Counts of zero are
-  refused by the parser; a zero from the MDB counts as 1.
+  not know, and oversubscribing one host's CPUs is a choice. A task asking for
+  more GPUs than a node has is refused first, as that: no node count helps it.
+  Counts of zero are refused by the parser; a zero from the MDB counts as 1.
 - **Script-route default tasks (§4.2).** When *no* process-layout flag
   (`-n`/`-T`/`-t`) was given, the routed script's optional `tasks = N`
   setting replaces the fill-the-node `TASKS`, and is treated as a `--tasks`
@@ -3792,7 +3809,8 @@ facts fill any topology the user left unset.
   `TASKS_PER_NODE` is capped to keep the layout self-consistent. For a submit
   the submitscript entry is consulted first, then the runscript entry.
   Testsuite runs additionally fall back to `TASKS = 2` when no route sets it
-  (§11.6).
+  (§11.6); that fallback is no rank count to derive nodes from, so it stays on
+  one node (`TASKS_PER_NODE` capped to it), as it always has.
 - `GPU` = `1` if `--gpu` or the chosen queue's `gpu = true`, else `0` — checked
   **one-directionally** against the built binary's `runs-on.gpu` flag (§4.4 / D12):
   refused (absent `--force-queue`/`-f`) only when the binary's `gpu` flag is
@@ -5630,6 +5648,10 @@ Each is marked **ASSUMPTION** inline above; collected here:
     or opted out via the optionlist `[cactup].coerce-run-universe = false`.
     Flag if you'd prefer a different representation or want the temp-script-file
     (`@COMMAND_FILE@`) power-form instead of the `@COMMAND@` template.
+14. `max-gpus-per-node` filled from the login host at load (§4.6) is trusted
+    like a declared one: it bounds a GPU run's room per node (§8.5), and so
+    the node counts derived from it. Unlike `max-cpus-per-node` it is not
+    marked detected, because marking it would change existing defaults.
 
 ---
 

@@ -612,12 +612,13 @@ fn create_machine(
     machine_tbl.insert("hostname".into(), hostname.clone().into());
     machine_tbl.insert("status".into(), "personal".into());
 
-    // Hardware the base declares stays: it describes the base's nodes, which
-    // this host (a login node, say) need not be one of. Only what it lacks is
-    // filled from this host — and `max-cpus-per-node` only on a machine whose
-    // jobs run on this host (`job-ids = "pids"`): a compute node's cores are
-    // not the login node's, so there it is left to load-time detection, which
-    // marks it detected, and no node count is derived from it (§4.6, §8.5).
+    // A machine whose jobs run on this host (`job-ids = "pids"`: generic, a
+    // workstation) gets this host's hardware, whatever the base says — this
+    // host is the node. A batch machine keeps what its base declares: that
+    // describes the base's nodes, which this host (a login node) need not be
+    // one of. Only what it lacks is filled from here, and never
+    // `max-cpus-per-node`, which is left to load-time detection (§4.6). An
+    // overlay's top-level value counts as detected either way (§8.5).
     let jobs_here = table
         .get("scheduler")
         .and_then(|s| s.get("job-ids"))
@@ -626,18 +627,18 @@ fn create_machine(
     let hw = crate::mdb::autodetect::detect();
     let hardware_tbl = subtable(&mut table, "hardware");
     hardware_tbl.remove("autodetect");
-    if jobs_here && !hardware_tbl.contains_key("max-cpus-per-node") {
+    if jobs_here {
         hardware_tbl.insert("max-cpus-per-node".into(), (hw.cores as i64).into());
     }
     if let Some(memory) = hw.memory_mb
-        && !hardware_tbl.contains_key("memory")
+        && (jobs_here || !hardware_tbl.contains_key("memory"))
     {
         hardware_tbl.insert("memory".into(), (memory as i64).into());
     }
     // Only written when GPUs were actually found: the key's absence is a valid
     // state (§4.2), so a GPU-less host must not record a hard `0`.
     if let Some(gpus) = hw.gpus
-        && !hardware_tbl.contains_key("max-gpus-per-node")
+        && (jobs_here || !hardware_tbl.contains_key("max-gpus-per-node"))
     {
         hardware_tbl.insert("max-gpus-per-node".into(), (gpus as i64).into());
     }
@@ -956,12 +957,13 @@ mod tests {
 
         let machine = sb.mdb.load("mybox").unwrap();
         assert_eq!(machine.layer, Layer::User);
-        // Concrete hardware persisted; autodetect flag gone. mel5 declares
-        // its own, which the clone keeps.
+        // This host's hardware persisted (mel5's jobs run on the host they
+        // are submitted from, so this host is the node); autodetect flag gone.
         assert!(!machine.meta.hardware.autodetect);
-        let base = sb.mdb.load("mel5").unwrap();
-        assert_eq!(machine.meta.hardware.max_cpus_per_node, base.meta.hardware.max_cpus_per_node);
-        assert!(!machine.meta.hardware.max_cpus_per_node_detected);
+        let host = crate::mdb::autodetect::detect();
+        assert_eq!(machine.meta.hardware.max_cpus_per_node, Some(host.cores));
+        // An overlay's top-level node size counts as detected (§8.5).
+        assert!(machine.meta.hardware.max_cpus_per_node_detected);
         // Origin provenance recorded with the base's current hash.
         let origin = machine.meta.cactup.origin.as_ref().unwrap();
         assert_eq!(origin.from, "mel5");
@@ -991,9 +993,9 @@ mod tests {
         assert_eq!(cached(&sb), None);
     }
 
-    /// A clone keeps the hardware its base declares: a login node's cores are
-    /// no compute node's. Only a base with none gets this host's, and only
-    /// one whose jobs run here (generic).
+    /// A clone of a batch machine keeps the hardware its base declares: a
+    /// login node's cores are no compute node's. One whose jobs run here
+    /// (generic) gets this host's.
     #[test]
     fn create_keeps_the_bases_declared_hardware() {
         let sb = sandbox();
@@ -1002,13 +1004,13 @@ mod tests {
         let clone = sb.mdb.load("myqbd").unwrap();
         assert_eq!(clone.meta.hardware.max_cpus_per_node, Some(64));
         assert_eq!(clone.meta.hardware.memory, Some(514913));
-        assert!(!clone.meta.hardware.max_cpus_per_node_detected);
+        // Kept, but as an overlay's top-level value it counts as detected.
+        assert!(clone.meta.hardware.max_cpus_per_node_detected);
 
         create_machine(&sb.db, &sb.mdb, Some("mine".into()), None, true, true, Some("mine.example.org"))
             .unwrap();
         let mine = sb.mdb.load("mine").unwrap();
-        assert!(mine.meta.hardware.max_cpus_per_node.unwrap() >= 1);
-        assert!(!mine.meta.hardware.max_cpus_per_node_detected, "written, so declared");
+        assert_eq!(mine.meta.hardware.max_cpus_per_node, Some(crate::mdb::autodetect::detect().cores));
     }
 
     #[test]

@@ -214,10 +214,11 @@ pub struct Hardware {
     /// CPUs idle), and that a missing `--nodes` is derived from — when it is
     /// declared (`max_cpus_per_node_detected` below).
     pub max_cpus_per_node: Option<u32>,
-    /// Whether `max_cpus_per_node` was filled from this host at load (§4.6)
-    /// rather than declared. A login node's cores say nothing about a compute
-    /// node's, so no node count is derived, and no layout refused, on a
-    /// detected value (§8.5).
+    /// Whether `max_cpus_per_node` counts as detected rather than declared:
+    /// filled from this host at load (§4.6), or the top-level value of a
+    /// user-layer overlay, where `machine create` writes this host's cores. A
+    /// login node's cores say nothing about a compute node's, so no node count
+    /// is derived, and no layout refused, on a detected value (§8.5).
     #[serde(skip)]
     pub max_cpus_per_node_detected: bool,
     /// Request-side default for `CPUS_PER_TASK` when `--cpus` is omitted.
@@ -1105,21 +1106,35 @@ impl Meta {
     /// Torque's `PBS_NUM_NODES`. `None` outside an allocation, or when the
     /// family offers no count.
     pub fn allocation_nodes(&self) -> Option<u32> {
-        self.allocation_nodes_with(|name| std::env::var(name).ok())
+        let read = |path: &std::path::Path| std::fs::read_to_string(path).ok();
+        self.allocation_nodes_with(|name| std::env::var(name).ok(), read)
     }
 
-    /// The `allocation_nodes` core, taking the env lookup as a closure.
-    pub(crate) fn allocation_nodes_with(&self, get: impl Fn(&str) -> Option<String>) -> Option<u32> {
+    /// The `allocation_nodes` core, taking the env lookup and the file read
+    /// as closures.
+    pub(crate) fn allocation_nodes_with(
+        &self,
+        get: impl Fn(&str) -> Option<String>,
+        read: impl Fn(&std::path::Path) -> Option<String>,
+    ) -> Option<u32> {
         let set = |name: &str| get(name).is_some_and(|v| !v.is_empty());
+        let count = |name: &str| get(name)?.trim().parse::<u32>().ok().filter(|&n| n > 0);
         self.scheduler.allocation_env.iter().filter(|var| set(var)).find_map(|var| {
-            let counts: &[&str] = if var.starts_with("SLURM_") {
-                &["SLURM_JOB_NUM_NODES", "SLURM_NNODES"]
+            if var.starts_with("SLURM_") {
+                count("SLURM_JOB_NUM_NODES").or_else(|| count("SLURM_NNODES"))
             } else if var.starts_with("PBS_") {
-                &["PBS_NUM_NODES"]
+                // PBS Pro sets no PBS_NUM_NODES: its node file lists one line
+                // per slot, so the distinct host names are the nodes. A file
+                // missing or unreadable leaves the count unknown.
+                count("PBS_NUM_NODES").or_else(|| {
+                    let text = read(std::path::Path::new(&get("PBS_NODEFILE")?))?;
+                    let hosts: std::collections::BTreeSet<&str> =
+                        text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+                    u32::try_from(hosts.len()).ok().filter(|&n| n > 0)
+                })
             } else {
-                &[]
-            };
-            counts.iter().find_map(|c| get(c)?.trim().parse::<u32>().ok().filter(|&n| n > 0))
+                None
+            }
         })
     }
 
@@ -2408,7 +2423,7 @@ mod tests {
         let env = |vars: &'static [(&'static str, &'static str)]| {
             move |name: &str| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.to_string())
         };
-        let nodes = |vars| meta.allocation_nodes_with(env(vars));
+        let nodes = |vars| meta.allocation_nodes_with(env(vars), |_| None);
         assert_eq!(nodes(&[]), None);
         assert_eq!(nodes(&[("SLURM_JOB_ID", "7"), ("SLURM_JOB_NUM_NODES", "4")]), Some(4));
         assert_eq!(nodes(&[("SLURM_JOB_ID", "7"), ("SLURM_NNODES", "2")]), Some(2));
@@ -2417,6 +2432,15 @@ mod tests {
         assert_eq!(nodes(&[("SLURM_JOB_NUM_NODES", "4")]), None);
         assert_eq!(nodes(&[("SLURM_JOB_ID", "7"), ("SLURM_JOB_NUM_NODES", "0")]), None);
         assert_eq!(nodes(&[("PBS_JOBID", "7"), ("SLURM_NNODES", "2")]), None);
+        // PBS Pro: the distinct hosts of $PBS_NODEFILE; no file, no count.
+        let pro = env(&[("PBS_JOBID", "7"), ("PBS_NODEFILE", "/var/spool/pbs/aux/7")]);
+        let file = |p: &std::path::Path| {
+            let lines = "n1\nn1\nn2\n\nn3\nn2\n";
+            (p == std::path::Path::new("/var/spool/pbs/aux/7")).then(|| lines.to_owned())
+        };
+        assert_eq!(meta.allocation_nodes_with(pro, file), Some(3));
+        assert_eq!(meta.allocation_nodes_with(pro, |_| None), None);
+        assert_eq!(meta.allocation_nodes_with(pro, |_| Some(String::new())), None);
     }
 
     #[test]

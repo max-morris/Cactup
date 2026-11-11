@@ -136,7 +136,7 @@ $ cactup sim submit mysim -T 100 -c 1 -q gpu2
 Asking for 50 nodes: at most 2 tasks per node (the queue's 2 GPUs per node at 1 GPU per task) for 100 tasks; pass -n to choose
 ```
 
-Node counts are derived only from a node size the machine database declares. If cactup had to detect it from the machine it runs on (a login node), it keeps one node unless you give `-n`.
+Node counts are derived only from a node size the machine database declares (in a machine you created yourself, per queue). If cactup had to detect it from the machine it runs on (a login node), it keeps one node unless you give `-n` or `-t`.
 
 An explicit `-n` always wins. If the tasks can't fit on the nodes you asked for, `sim submit` refuses before anything reaches the scheduler, and says how many nodes would work:
 
