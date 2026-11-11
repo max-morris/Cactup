@@ -1391,6 +1391,8 @@ mod tests {
                     )
                     .unwrap();
                     set_topology_vars(&mut v, &topo, "job");
+                    // A script's set always carries the knob snapshot.
+                    v.set_knobs(Default::default());
                     for token in body.split('@').skip(1).step_by(2) {
                         // Fill everything this template names that isn't ours,
                         // so the assertion is about GPUS_PER_TASK alone.

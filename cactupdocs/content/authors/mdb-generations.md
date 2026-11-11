@@ -67,7 +67,7 @@ change can break one direction and not the other; either is enough.
 |---|---|
 | `meta.toml` schema | Any key or table the MDB starts using that the generation's first binary lacks, **even an optional one**; renaming, removing or retyping a key; a new required key; a changed default or meaning; stricter validation |
 | Scripts and flavors | The shape of a route in `[submitscripts]`, `[runscripts]` or `[buildsubmitscripts]`; the script-kind directories (`submitscripts/`, `runscripts/`, `buildsubmitscripts/`); how `.sh` and `.py` scripts are found; how flavors are discovered in `optionlists/` |
-| Templates | A new, renamed, removed or re-meant `@VAR@`; the `@ENV(…)@` and `@KNOB(…)@` forms; `@@`; how comments pass through; where the environment setup is placed |
+| Templates | A new, renamed, removed or re-meant `@VAR@`; the `@ENV(…)@` and `@KNOB(…)@` forms (`-OPTIONAL`, `-OR-DROP-LINE`, and any new one); `@@`; how comments pass through; where the environment setup is placed |
 | `.py` scripts | The preamble and the calling protocol |
 | Re-invocations | The flags generated scripts pass back to cactup: `sim run --sim-dir/--restart-id`, `test run --test-dir/--results-id`, `build run --config-dir/--attempt-id` |
 | Discovery | What `hostname.regexp` and `discover.py` mean |
@@ -111,7 +111,7 @@ generation it was written for in its `meta.toml`:
 
 ```toml
 [cactup]
-mdb-generation = 4
+mdb-generation = 5
 ```
 
 `cactup machine create` writes the current generation for you. A machine

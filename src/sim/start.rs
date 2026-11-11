@@ -2141,10 +2141,10 @@ mod tests {
     }
 
     /// A variable set broad enough for every in-repo submit and build-submit
-    /// script, and the runscripts that read `@ALLOCATION@`, on `queue`:
-    /// `flag` stands for `@ALLOCATION@` (the `-a` flag, else the global
-    /// knob), `knob` for the `allocation` knob in the snapshot.
-    fn sweep_vars(machine: &Machine, queue: &str, flag: &str, knob: Option<&str>) -> VarSet {
+    /// script, and the runscripts that pass an allocation to `srun`, on
+    /// `queue`, with `db`'s knobs: `@ALLOCATION@` and the snapshot, as the
+    /// submit paths bind them.
+    fn sweep_vars(machine: &Machine, queue: &str, db: &Database) -> VarSet {
         let mut v = VarSet::new();
         vars::set_machine_vars(&mut v, machine, queue, None).unwrap();
         for (var, n) in [
@@ -2155,7 +2155,7 @@ mod tests {
         }
         v.set("GPU", true);
         v.set("QUEUE", machine.meta.scheduler_queue_name(queue).unwrap());
-        v.set("ALLOCATION", flag);
+        v.set("ALLOCATION", db.knob("allocation").unwrap_or_default());
         for var in ["EMAIL", "MAIL", "CHAINED_JOB_ID", "JOB_ID"] {
             v.set(var, "");
         }
@@ -2169,8 +2169,19 @@ mod tests {
         }
         v.set("MACHINE", machine.name.as_str());
         vars::set_walltime_vars(&mut v, Walltime::parse("1:00:00").unwrap(), Walltime::parse("0:05:00").unwrap());
-        v.set_knobs(knob.map(|k| ("allocation".to_owned(), k.to_owned())).into_iter().collect());
+        v.set_knobs(db.knob_snapshot());
         v
+    }
+
+    /// The knobs of a command: none set; `-a acct_x` on the command line,
+    /// through the real overlay; or the stored knob.
+    fn sweep_dbs() -> [(&'static str, Database); 3] {
+        let mut by_flag = Database::new();
+        let argv = ["cactup", "sim", "submit", "s", "-a", "acct_x"];
+        by_flag.apply_overlay(&<crate::args::Args as clap::Parser>::try_parse_from(argv).unwrap().knob_overlay().unwrap());
+        let mut by_knob = Database::new();
+        by_knob.set_knob("allocation", "acct_x".to_owned());
+        [("no allocation", Database::new()), ("-a alone", by_flag), ("the knob alone", by_knob)]
     }
 
     /// The queue a script's route serves first, else the machine's default.
@@ -2195,10 +2206,9 @@ mod tests {
     /// `#SBATCH -A ` and sbatch read the next directive as the account. Every
     /// in-repo submit and build-submit script, rendered with no allocation,
     /// must leave the directive out (a machine where it is optional) or
-    /// refuse naming `-a` (one where it is required). Given one — by `-a`
-    /// alone (`@ALLOCATION@`, no knob), by a knob `@ALLOCATION@` does not
-    /// see (a simulation's own), or both — every render writes the same
-    /// account lines, each carrying it.
+    /// refuse naming `-a` (one where it is required). Given one, by `-a`
+    /// alone or by the knob alone — the same knob now, so the two agree
+    /// trivially — every account line it writes carries it.
     #[test]
     fn no_mdb_script_writes_an_empty_account_directive() {
         let mdb = sweep_mdb();
@@ -2208,36 +2218,45 @@ mod tests {
             for kind in [ScriptKind::Submit, ScriptKind::BuildSubmit] {
                 for (script, route) in &machine.meta.scripts(kind).routes {
                     let queue = sweep_queue(&machine, route);
-                    let render = |flag: &str, knob: Option<&str>| {
-                        generate_script(&machine, kind, script, &sweep_vars(&machine, &queue, flag, knob), Phase::Submit, None)
+                    let [(_, none), (_, by_flag), (_, by_knob)] = sweep_dbs();
+                    let render = |db: &Database| {
+                        generate_script(&machine, kind, script, &sweep_vars(&machine, &queue, db), Phase::Submit, None)
                     };
                     let what = format!("{name} {} script {script}", kind.dir_name());
-                    match render("", None) {
+                    match render(&none) {
                         Ok(text) => {
                             if let Some(line) = text.lines().find(|l| account_directive(l).is_some()) {
                                 panic!("{what}: no allocation, yet it writes `{line}`");
                             }
                         }
                         Err(e) => {
+                            // A .py script's own refusal, or @KNOB(allocation)@'s.
                             let e = format!("{e:#}");
                             assert!(
-                                e.contains(&format!("{name} needs an allocation: pass -a ACCOUNT, or set it once with")),
+                                e.contains(&format!("{name} needs an allocation: pass -a ACCOUNT, or set it once with"))
+                                    || e.contains("knob allocation is unset or empty; set it with `cactup knob \
+                                                   allocation VALUE` or pass -a VALUE"),
                                 "{what}: {e}"
                             );
                         }
                     }
-                    let lines = |flag: &str, knob: Option<&str>| -> Vec<String> {
-                        let text = render(flag, knob).unwrap_or_else(|e| panic!("{what}: {e:#}"));
+                    let lines = |db: &Database| -> Vec<String> {
+                        let text = render(db).unwrap_or_else(|e| panic!("{what}: {e:#}"));
                         text.lines().filter(|l| account_directive(l).is_some()).map(str::to_owned).collect()
                     };
-                    let both = lines("acct_x", Some("acct_x"));
-                    for line in &both {
+                    let given = lines(&by_flag);
+                    for line in &given {
                         let value = account_directive(line).unwrap();
                         assert!(value.contains("acct_x"), "{what}: account directive `{line}`");
                     }
-                    assert_eq!(lines("acct_x", None), both, "{what}: -a alone");
-                    assert_eq!(lines("", Some("acct_x")), both, "{what}: the knob alone");
-                    directives += both.len();
+                    // A script that reads the allocation at all (a knob
+                    // token, `knob(…)`, or the legacy alias) must write it.
+                    let template = fs::read_to_string(machine.script_path(kind, script).unwrap().path).unwrap();
+                    if ["(allocation)", "knob(\"allocation\"", "ALLOCATION"].iter().any(|r| template.contains(r)) {
+                        assert!(!given.is_empty(), "{what}: reads the allocation but writes no account line");
+                    }
+                    assert_eq!(lines(&by_knob), given, "{what}: -a alone and the knob alone");
+                    directives += given.len();
                 }
             }
         }
@@ -2245,10 +2264,11 @@ mod tests {
         assert!(directives > 25, "only {directives} account directives rendered");
     }
 
-    /// A runscript that hands `@ALLOCATION@` to `srun -A` (qbc, db1) runs
+    /// A runscript that hands the allocation to `srun -A` (qbc, db1) runs
     /// inside the job, which already has an account: with none set the `-A`
-    /// must vanish, not leave `srun -A -p …` taking `-p` as the account.
-    /// Each such runscript binds it as `alloc='@ALLOCATION@'` and passes
+    /// must vanish, not leave `srun -A -p …` taking `-p` as the account. The
+    /// `-A` sits mid-line, so a drop-line token cannot do it: each such
+    /// runscript binds `alloc='@KNOB-OPTIONAL(allocation)@'` and passes
     /// `${alloc:+-A …}`; the shell's own expansion is checked here.
     #[test]
     fn runscripts_pass_srun_a_only_with_an_allocation() {
@@ -2258,13 +2278,15 @@ mod tests {
             let machine = mdb.load(&name).unwrap();
             for (script, route) in &machine.meta.scripts(ScriptKind::Run).routes {
                 let file = machine.script_path(ScriptKind::Run, script).unwrap();
-                if !fs::read_to_string(&file.path).unwrap().contains("ALLOCATION") {
+                let template = fs::read_to_string(&file.path).unwrap();
+                if !template.contains("ALLOCATION") && !template.contains("(allocation") {
                     continue;
                 }
                 let what = format!("{name} runscript {script}");
                 let queue = sweep_queue(&machine, route);
-                for flag in ["", "acct_x"] {
-                    let v = sweep_vars(&machine, &queue, flag, None);
+                for (label, db) in sweep_dbs() {
+                    let flag = if label == "no allocation" { "" } else { "acct_x" };
+                    let v = sweep_vars(&machine, &queue, &db);
                     let text = generate_script(&machine, ScriptKind::Run, script, &v, Phase::Run, None)
                         .unwrap_or_else(|e| panic!("{what}: {e:#}"));
                     // No `-A` token followed by another flag or by nothing.
@@ -2284,7 +2306,7 @@ mod tests {
                         .output()
                         .unwrap();
                     let expect = if flag.is_empty() { "0:\n".to_owned() } else { format!("2:-A {flag}\n") };
-                    assert_eq!(String::from_utf8_lossy(&out.stdout), expect, "{what} with ALLOCATION={flag:?}");
+                    assert_eq!(String::from_utf8_lossy(&out.stdout), expect, "{what} with {label}");
                     // Each `-A` use goes through the guard, never the bare value.
                     assert!(!text.contains("-A acct_x") && !text.contains("-A  "), "{what}: an unguarded -A");
                     let code = text.lines().filter(|l| !l.trim_start().starts_with('#'));
