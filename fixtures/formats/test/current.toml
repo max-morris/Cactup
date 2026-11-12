@@ -1,0 +1,45 @@
+schema = 1
+name = "et-tests"
+config = "sim"
+config-id = "cfg-0123"
+build-id = "build-0001"
+machine = "workstation"
+alias = "et"
+test-run-id = "test-et-tests-workstation-host-user-20260501-120000-4242"
+select = "all"
+queue = "workq"
+nodes = 1
+tasks = 4
+tpn = 4
+cpus = 1
+gpus-per-task = 1
+walltime = "02:00:00"
+allocation = "proj1"
+job-id = "1234"
+job-host = "login1"
+job-start = 99887766
+status = "C"
+
+[universe]
+name = "container"
+wrapper-argv = ["apptainer", "exec", "img.sif", "@COMMAND@"]
+wrapper = "apptainer exec img.sif @COMMAND@"
+
+[results]
+passed = 40
+failed = 2
+results-id = 0
+
+[timestamps]
+created = "2026-05-01T12:00:00Z"
+submitted = "2026-05-01T12:01:00Z"
+finished = "2026-05-01T13:00:00Z"
+job-stopped = "2026-05-01T13:01:00Z"
+
+[vars]
+SIMULATION_NAME = "et-tests"
+NUM_PROCS = 8
+FOREGROUND = false
+
+[knobs]
+queue = "workq"

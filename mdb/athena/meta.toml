@@ -61,6 +61,9 @@ hostname    = "athena.nic.uoregon.edu"
 # mixed-precision tree lives there — so it is written out, not changed.
 install-home    = "/storage/users/@USER@/.cactup/cacti"
 simulation-home = "/storage/users/@USER@/simulations"
+# Where `cactup import` keeps the downloaded and unpacked inputs of shared
+# simulations: big, so beside the simulations, not in the home quota.
+inputs-home = "/storage/users/@USER@/inputs"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
 test-home       = "/storage/users/@USER@/tests"
 

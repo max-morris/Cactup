@@ -12,8 +12,8 @@ pub mod manage;
 pub mod run;
 mod select;
 
-use crate::database::SCHEMA;
-use crate::installation::{write_toml, Installation};
+use crate::format::{self, Format, Toml};
+use crate::installation::Installation;
 use crate::lock::LinkLock;
 use crate::sim::restart::UniverseSpec;
 use crate::scheduler::{JobRef, Scheduler};
@@ -26,9 +26,25 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-fn default_schema() -> u32 {
-    SCHEMA
-}
+/// `test.toml`'s format: version 1, no migrations. Read and written by the
+/// compute-node binary of a queued test run, so it is `frozen_read`: a
+/// breaking change ships its down-step. A new run builds its record anew
+/// over the previous run's ([`TestRun::store_fresh`], nothing put back);
+/// after that a run's own writes edit it, `[timestamps]` and `[universe]` in
+/// place, while `[results]` is replaced whole by the run's summary. `vars`
+/// and `knobs` are open maps: every key in them is known, so listing them
+/// changes nothing but says how they are written.
+pub static TEST: Format<Toml> = Format {
+    name: "test record",
+    key: "schema",
+    current: 1,
+    upgrades: &[],
+    downgrades: &[],
+    down_floor: 1,
+    frozen_read: true,
+    legacy: None,
+    replace_whole: &["vars", "knobs", "results"],
+};
 
 /// `[results]` in `test.toml` (§11.8): the parsed harness summary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,8 +78,6 @@ pub struct Timestamps {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct TestMeta {
-    #[serde(default = "default_schema")]
-    pub schema: u32,
     pub name: String,
     pub config: String,
     pub config_id: String,
@@ -193,20 +207,11 @@ impl TestRun {
     pub fn open(dir: &Path) -> Res<TestRun> {
         let path = Self::meta_path(dir);
         if !path.is_file() {
-            bail!("{} is not a cactup test run ({} does not exist)", dir.display(), path.display());
+            bail!("'{}' is not a cactup test run", dir.display());
         }
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read {}", path.display()))?;
-        let meta: TestMeta =
-            toml::from_str(&text).with_context(|| format!("Failed to parse {}", path.display()))?;
-        if meta.schema > SCHEMA {
-            bail!(
-                "{} has schema {} but this cactup understands at most schema {SCHEMA}; \
-                 please upgrade cactup",
-                path.display(),
-                meta.schema
-            );
-        }
+        let Some(meta): Option<TestMeta> = format::read(&path, &TEST)? else {
+            bail!("'{}' is not a cactup test run", dir.display());
+        };
         Ok(TestRun { name: meta.name.clone(), dir: dir.to_owned(), meta })
     }
 
@@ -215,14 +220,14 @@ impl TestRun {
         let registry = inst.tests()?;
         let entry = registry.tests.get(name).ok_or_else(|| {
             anyhow!(
-                "no test run named \"{name}\" in installation \"{}\" (see `cactup test list`)",
+                "No test run named \"{name}\" in installation \"{}\" (see `cactup test list`)",
                 inst.alias
             )
         })?;
         if !entry.dir.is_dir() {
             bail!(
-                "test run \"{name}\" is registered at {} but that directory is missing;\n\
-                 run `cactup test delete {name}` to drop the stale registry entry",
+                "Test run \"{name}\" is registered at '{}', which is missing; \
+                 run `cactup test delete {name}` to remove it",
                 entry.dir.display()
             );
         }
@@ -245,7 +250,13 @@ impl TestRun {
     }
 
     pub fn store_meta(&self) -> Res<()> {
-        write_toml(&Self::meta_path(&self.dir), &self.meta)
+        format::write(&Self::meta_path(&self.dir), &self.meta, &TEST)
+    }
+
+    /// The first store of a run's record, built anew where an earlier run of
+    /// the same name left its own: nothing of the old record is put back.
+    pub fn store_fresh(&self) -> Res<()> {
+        format::replace(&Self::meta_path(&self.dir), &self.meta, &TEST)
     }
 
     /// `log.txt` in the same `[LOG:…]` format as a simulation's (§11.5, §12).
@@ -292,7 +303,7 @@ pub fn list_results_ids(run_dir: &Path) -> Res<Vec<u32>> {
     let mut ids = Vec::new();
     let entries = match fs::read_dir(run_dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ids),
-        other => other.with_context(|| format!("Failed to read {}", run_dir.display()))?,
+        other => other.with_context(|| format!("Failed to read '{}'", run_dir.display()))?,
     };
     for entry in entries {
         let entry = entry?;
@@ -319,7 +330,7 @@ pub fn active_results_id(run_dir: &Path) -> Res<Option<u32>> {
     let mut found = Vec::new();
     let entries = match fs::read_dir(run_dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        other => other.with_context(|| format!("Failed to read {}", run_dir.display()))?,
+        other => other.with_context(|| format!("Failed to read '{}'", run_dir.display()))?,
     };
     for entry in entries {
         let name = entry?.file_name();
@@ -334,7 +345,7 @@ pub fn active_results_id(run_dir: &Path) -> Res<Option<u32>> {
         [] => Ok(None),
         [one] => Ok(Some(*one)),
         several => bail!(
-            "test run at {} has more than one active result set ({:?}) — repair by hand",
+            "Test run at '{}' has more than one active result set ({:?}); fix it by hand",
             run_dir.display(),
             several
         ),
@@ -353,12 +364,79 @@ pub fn activate_results(run_dir: &Path, id: u32) -> Res<()> {
     }
     let link = run_dir.join(format!("{}-active", results_name(id)));
     std::os::unix::fs::symlink(results_name(id), &link)
-        .with_context(|| format!("Failed to create active symlink {}", link.display()))
+        .with_context(|| format!("Failed to create active symlink '{}'", link.display()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every field set, every collection non-empty, and no `..`: a new field
+    /// fails to compile here, and the shape pin then says what to do.
+    fn exhaustive_sample() -> TestMeta {
+        let time = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        TestMeta {
+            name: "et-tests".to_owned(),
+            config: "sim".to_owned(),
+            config_id: "cfg-0123".to_owned(),
+            build_id: "build-0001".to_owned(),
+            machine: "workstation".to_owned(),
+            alias: "et".to_owned(),
+            test_run_id: "test-et-tests-workstation-host-user-20260501-120000-4242".to_owned(),
+            select: "all".to_owned(),
+            queue: "workq".to_owned(),
+            nodes: 1,
+            tasks: 4,
+            tpn: 4,
+            cpus: 1,
+            gpus_per_task: 1,
+            walltime: Walltime::parse("02:00:00").unwrap(),
+            allocation: Some("proj1".to_owned()),
+            job_id: "1234".to_owned(),
+            job_host: Some("login1".to_owned()),
+            job_start: Some(99887766),
+            status: Some("C".to_owned()),
+            universe: Some(UniverseSpec {
+                name: "container".to_owned(),
+                wrapper_argv: Some(["apptainer", "exec", "img.sif", "@COMMAND@"].map(String::from).to_vec()),
+                wrapper: Some("apptainer exec img.sif @COMMAND@".to_owned()),
+            }),
+            results: Some(ResultsSummary { passed: 40, failed: 2, results_id: 0 }),
+            timestamps: Timestamps {
+                created: Some(time("2026-05-01T12:00:00Z")),
+                submitted: Some(time("2026-05-01T12:01:00Z")),
+                finished: Some(time("2026-05-01T13:00:00Z")),
+                job_stopped: Some(time("2026-05-01T13:01:00Z")),
+            },
+            vars: [
+                ("SIMULATION_NAME".to_owned(), toml::Value::String("et-tests".to_owned())),
+                ("NUM_PROCS".to_owned(), toml::Value::Integer(8)),
+                ("FOREGROUND".to_owned(), toml::Value::Boolean(false)),
+            ]
+            .into_iter()
+            .collect(),
+            knobs: [("queue".to_owned(), "workq".to_owned())].into_iter().collect(),
+        }
+    }
+
+    #[test]
+    fn test_format_generic_tests() {
+        use crate::format::testing::*;
+        let fixtures = fixture_dir("test");
+        descriptor_is_consistent(&TEST);
+        assert!(TEST.frozen_read);
+        shape_is_pinned(&TEST, &fixtures, &exhaustive_sample());
+        every_fixture_loads::<TestMeta, _>(&TEST, &fixtures);
+        newer_is_refused::<TestMeta, _>(&TEST, "test.toml", "nodes = \"many\"\n", &exhaustive_sample());
+        unknown_keys_survive(
+            &TEST,
+            "test.toml",
+            &exhaustive_sample(),
+            &["timestamps"],
+            |m: &mut TestMeta| m.timestamps.finished = None,
+            &["timestamps", "finished"],
+        );
+    }
 
     #[test]
     fn results_naming_and_activation() {

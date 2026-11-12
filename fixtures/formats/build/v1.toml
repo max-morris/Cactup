@@ -1,0 +1,95 @@
+schema = 1
+attempt-id = 0
+config = "sim"
+flavor = "cuda"
+machine = "mike"
+alias = "et-dev"
+config-dir = "/home/user/Cactus/configs/sim"
+cactus-root = "/home/user/Cactus"
+install-root = "/home/user/et"
+submitted = true
+job-id = "12345"
+job-host = "login1"
+job-start = 99887766
+status = "R"
+decision = "optionlist changed"
+full-rebuild = true
+make = "make -j4"
+build-env = "module load gcc"
+build-provisioning = "spack install foo"
+
+[reservation]
+queue = "checkpt"
+nodes = 1
+tasks = 1
+tpn = 1
+cpus = 4
+gpus-per-task = 0
+walltime = "01:00:00"
+allocation = "proj1"
+
+[universe]
+name = "et-sif"
+wrapper-argv = [
+    "singularity",
+    "exec",
+]
+wrapper = "singularity exec img.sif @COMMAND@"
+
+[config-meta]
+schema = 2
+name = "sim"
+flavor = "cuda"
+thornlist = "/home/user/et/thornlists/sim.th"
+machine = "workstation"
+universe = "et-sif"
+coerce-run-universe = false
+config-id = "config-sim-workstation-20260501-120000"
+build-id = "build-sim-workstation-20260501-120000"
+built = "2026-05-01T13:00:00Z"
+
+[config-meta.flags]
+debug = true
+optimize = true
+unsafe = false
+profile = false
+
+[config-meta.runs-on]
+queues = [
+    "gpu",
+    "gpu-debug",
+]
+gpu = true
+default-queue = "gpu"
+
+[config-meta.sources]
+Cactus = "0123456789abcdef0123456789abcdef01234567"
+
+[config-meta.downloads]
+ExternalLibraries-Data = "sha256-of-the-download"
+
+[config-meta.thorn-providers]
+CarpetX = "repos/cactusamrex/CarpetX"
+
+[config-meta.thorn-shapes]
+CarpetX = "shape-fingerprint"
+
+[config-meta.thorn-stamps]
+CarpetX = "stamp-fingerprint"
+
+[vars]
+MAKEJOBS = 4
+SOURCEBASEDIR = "/home/user/Cactus"
+
+[knobs]
+
+[timestamps]
+created = "2026-05-01T12:00:00Z"
+submitted = "2026-05-01T12:01:00Z"
+started = "2026-05-01T12:05:00Z"
+finished = "2026-05-01T13:00:00Z"
+job-stopped = "2026-05-01T13:01:00Z"
+
+[outcome]
+exit-status = 0
+complete = true
