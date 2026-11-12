@@ -3038,7 +3038,7 @@ mod tests {
         // know: an error for `-f` and `build stop`, no outcome recorded.
         fs::write(&refuse, transient).unwrap();
         let err = guard_no_live_attempt(&config_dir, "sim", &sched, true).unwrap_err().to_string();
-        assert!(err.contains("the stop command for job 4242 failed") && err.contains("Unable to contact"), "{err}");
+        assert!(err.contains("The stop command for job 4242 failed") && err.contains("Unable to contact"), "{err}");
         assert!(stop_impl(&listing, &inst, Some("sim"), false).is_err());
         assert!(BuildAttempt::open(&config_dir, 0).unwrap().meta.outcome.is_none(), "a failed stop recorded an outcome");
         // Refused as a job the scheduler does not know: taken as ended.
