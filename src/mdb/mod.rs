@@ -174,6 +174,11 @@ impl Mdb {
 
     /// The winning directory for `name`, if the machine exists in either layer.
     pub fn machine_dir(&self, name: &str) -> Option<(PathBuf, Layer)> {
+        // A hidden directory is no machine (see `machines`), so a parked
+        // `.<name>.old` is never loaded, let alone migrated.
+        if name.starts_with('.') {
+            return None;
+        }
         for (root, layer) in [(&self.user_root, Layer::User), (&self.system_root, Layer::System)] {
             let dir = root.join(name);
             if dir.join("meta.toml").is_file() {
@@ -965,10 +970,13 @@ mod tests {
         // `generic` is always present via the embedded built-in fallback, even
         // though neither temp root defines it.
         assert_eq!(machines.keys().cloned().collect::<Vec<_>>(), ["box", "generic", "solo"]);
-        // A hidden directory is set aside, not a machine.
+        // A hidden directory is set aside, not a machine: never listed, and
+        // never loaded by name either.
         fs::create_dir_all(user.path().join(".box.old")).unwrap();
         fs::copy(user.path().join("box/meta.toml"), user.path().join(".box.old/meta.toml")).unwrap();
         assert_eq!(mdb.machines().unwrap().len(), 3);
+        assert!(mdb.machine_dir(".box.old").is_none());
+        assert!(mdb.load(".box.old").is_err());
         assert_eq!(machines["box"], Layer::User);
         assert_eq!(machines["generic"], Layer::System);
         assert_eq!(machines["solo"], Layer::System);

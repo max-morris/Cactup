@@ -141,7 +141,10 @@ telling whether a job is still alive.
   round, the submit universe's keys (the route's `universe`, else a
   declared `host` universe) now reach it, where before they did not. Put
   what the batch script needs in the machine's `submit-env-setup` (or the
-  submit universe's).
+  submit universe's). The same goes for `@ENV_SETUP@` written inline in a
+  `.sh` build-submit script: it expanded to the build universe's block and
+  now expands to the submit universe's (the block cactup puts at the top of
+  a `.sh` script was already the submit universe's).
 - New, optional, in `[scheduler]`: `job-ids = "scheduler" | "pids"` (default
   `"scheduler"`; `"pids"` declares that a job id is the pid of a process on
   the host the job was submitted from, as on a machine whose `get-status` is
@@ -238,9 +241,9 @@ To bring a generation-2 overlay forward:
    moved into `provision`, `submit-provision` or `run-provision` now stops
    the submit or run script whenever it fails, in any shell. Make sure it
    succeeds wherever it runs, or end what may fail with `|| true`.
-3. If a `.py` build-submit script of yours prints `ENV_SETUP`: it now gets
-   the submit universe's block, as a `.sh` one always did, not the build
-   universe's. If it relied on a build universe's `env-setup` or
+3. If a `.py` build-submit script of yours prints `ENV_SETUP`, or a `.sh`
+   one has `@ENV_SETUP@` inline: it now gets the submit universe's block (the
+   one a `.sh` script always had at its top), not the build universe's. If it relied on a build universe's `env-setup` or
    `submit-env-setup` reaching it, move what the batch script needs into
    `submit-env-setup` (the machine's, or the submit universe's); and check
    that the submit universe (the route's `universe`, else a declared `host`

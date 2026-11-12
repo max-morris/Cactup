@@ -139,11 +139,17 @@ fn generation_2_to_3(overlay: &mut Overlay) -> Result<Vec<String>, Stop> {
             }
         }
     }
-    // The ENV_SETUP check needs the typed result; one that does not parse
-    // is reported by the verification after the last step.
-    if let Ok(meta) = toml::from_str::<Meta>(&overlay.meta.doc.to_string()) {
-        check_py_env_setup(overlay, &meta)?;
-    }
+    // The ENV_SETUP check needs the typed result. The later steps only
+    // raise the number, so a renamed file today's schema rejects would fail
+    // the final verification anyway: refuse here rather than skip the check.
+    let meta = toml::from_str::<Meta>(&overlay.meta.doc.to_string())
+        .map_err(|e| {
+            // serde's "unknown field `x`, expected one of …" without the list.
+            let message = e.message();
+            let message = message.split_once(", expected").map_or(message, |(head, _)| head);
+            Stop::Found(format!("the renamed meta.toml would not load ({message})"))
+        })?;
+    check_env_setup_scripts(overlay, &meta)?;
     let mut notes = Vec::new();
     if !suspects.is_empty() {
         let shown = suspects.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
@@ -160,33 +166,48 @@ fn generation_2_to_3(overlay: &mut Overlay) -> Result<Vec<String>, Stop> {
 fn provisioning_hits(text: &str) -> Vec<&'static str> {
     static PATTERNS: std::sync::OnceLock<Vec<(&str, regex::Regex)>> = std::sync::OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| {
+        // A command position: the start of a line, or after `;`, `&`, `|`,
+        // `(` or `{`, or a `then`/`do`/`else` (never an argument such as
+        // `module load curl`, or a path such as `/opt/curl/bin`).
+        let command = r"(?m)(?:^|[;&|({]|\bthen\b|\bdo\b|\belse\b)\s*(?:sudo\s+)?";
         [
-            ("mkdir", r"\bmkdir\b"),
-            ("download", r"\b(curl|wget)\b"),
-            ("pip install", r"\bpip3?\s+install\b"),
-            ("conda install", r"\b(conda|mamba|micromamba)\s+(create|install)\b"),
-            ("git clone", r"\bgit\s+clone\b"),
-            ("activate", r"\bactivate\b"),
+            ("mkdir", r"mkdir\b"),
+            ("download", r"(?:curl|wget)\b"),
+            ("pip install", r"(?:python3?\s+-m\s+)?pip3?\s+install\b"),
+            ("conda install", r"(?:conda|mamba|micromamba)\s+(?:create|install)\b"),
+            ("git clone", r"git\s+clone\b"),
+            // Activating in a subshell would lose its effect: the hint is
+            // to set what it sets instead.
+            (
+                "activate: replace it with the exports it makes",
+                r"(?:(?:\.|source)\s+\S*activate\b|(?:conda|mamba|micromamba)\s+activate\b)",
+            ),
         ]
         .into_iter()
-        .map(|(what, pattern)| (what, regex::Regex::new(pattern).expect("valid pattern")))
+        .map(|(what, pattern)| (what, regex::Regex::new(&format!("{command}{pattern}")).expect("valid pattern")))
         .collect()
     });
     patterns.iter().filter(|(_, re)| re.is_match(text)).map(|(what, _)| *what).collect()
 }
 
-/// A `.py` build-submit script that prints `ENV_SETUP` got the submit
-/// phase's block in the build universe in generation 2, and gets it in the
-/// submit universe from generation 3 on. Refuse when the two differ for any
-/// build universe the route can serve: the batch build would quietly get a
-/// different environment.
-// Mirrors commands/build.rs `submit_impl`: the build universe is the
-// flavor header's `universe`, else `[build].universe`, else a declared host
-// (build::resolve_build_universe; an explicit `--universe` is the user's own
-// choice and not considered), the route is filtered by it (`host` for
-// none), and the submit universe is the route's `universe`, else a declared
-// host (sim::start::resolve_submit_universe).
-fn check_py_env_setup(overlay: &Overlay, meta: &Meta) -> Result<(), Stop> {
+/// A build-submit script that uses `ENV_SETUP` (a `.py` one printing it, a
+/// `.sh` one with `@ENV_SETUP@` inline) got the submit phase's block in the
+/// build universe in generation 2, and gets it in the submit universe from
+/// generation 3 on. Refuse when the two differ for any build universe the
+/// route can serve: the batch build would quietly get a different
+/// environment. (The block a `.sh` script has prepended was already the
+/// submit universe's.)
+// Generation 2 (17ef80f^ commands/build.rs `submit_impl`) set ENV_SETUP to
+// effective_env(build universe, Submit) before routing, and both a `.py`
+// script and `@ENV_SETUP@` in a `.sh` one read that; today it is
+// phase_env(submit universe, Submit), the submit universe being the route's
+// `universe`, else a declared host (sim::start::resolve_submit_universe).
+// The build universe can be any declared one (`build submit --universe`, a
+// flavor's or a sticky `--optionlist`'s header, `[build].universe`, a
+// declared host) or none (`--no-universe`, routed as `host`), so every one
+// the route is compatible with is a candidate: a false refusal costs a hand
+// edit, a missed one a quietly different build.
+fn check_env_setup_scripts(overlay: &Overlay, meta: &Meta) -> Result<(), Stop> {
     // The flavors' own build universes first, so a refusal names the one a
     // plain `build submit` uses.
     let host = meta.declared_host().map(|_| super::HOST_UNIVERSE.to_owned());
@@ -195,19 +216,27 @@ fn check_py_env_setup(overlay: &Overlay, meta: &Meta) -> Result<(), Stop> {
     for header in headers {
         candidates.push(header.universe.or_else(|| meta.build.universe.clone()).or_else(|| host.clone()));
     }
-    candidates.extend([meta.build.universe.clone(), host.clone()]);
+    candidates.extend([meta.build.universe.clone(), host.clone(), None]);
+    candidates.extend(meta.universes.keys().cloned().map(Some));
     let mut seen = Vec::new();
     candidates.retain(|c| !seen.contains(c) && {
         seen.push(c.clone());
         true
     });
     for (script, route) in &meta.scripts(super::ScriptKind::BuildSubmit).routes {
-        let rel = format!("buildsubmitscripts/{script}.py");
-        let prints = overlay.scripts.contains(&rel)
-            && fs::read_to_string(overlay.dir.join(&rel)).is_ok_and(|text| text.contains("ENV_SETUP"));
-        if !prints {
-            continue;
+        let mut uses = None;
+        for file in [format!("{script}.py"), format!("{script}.sh")] {
+            let rel = format!("buildsubmitscripts/{file}");
+            if !overlay.scripts.contains(&rel) {
+                continue;
+            }
+            let text = fs::read_to_string(overlay.dir.join(&rel))
+                .map_err(|e| Stop::Found(format!("its build-submit script '{rel}' could not be read ({e})")))?;
+            if text.contains("ENV_SETUP") {
+                uses = Some(file);
+            }
         }
+        let Some(file) = uses else { continue };
         let submit = route.universe.clone().or_else(|| host.clone());
         let now = meta.effective_env(submit.as_deref(), super::Phase::Submit);
         for build in &candidates {
@@ -218,7 +247,7 @@ fn check_py_env_setup(overlay: &Overlay, meta: &Meta) -> Result<(), Stop> {
             if before != now {
                 let name = |u: &Option<String>| u.as_ref().map_or("none".to_owned(), |u| format!("\"{u}\""));
                 return Err(Stop::Found(format!(
-                    "its build-submit script \"{script}.py\" prints ENV_SETUP, which now comes from the submit \
+                    "its build-submit script \"{file}\" uses ENV_SETUP, which now comes from the submit \
                      universe ({}) instead of the build universe ({}): {}",
                     name(&submit),
                     name(build),
@@ -550,6 +579,10 @@ pub struct OverlayGenerationError {
     /// The `machine create` command that starts this machine over, when its
     /// base still exists (`None`: there is nothing to start over from).
     pub recreate: Option<String>,
+    /// Where starting over parks the old files: a hidden sibling of the
+    /// overlay (`.<name>.old`, or `.2`, `.3`, … past ones already there),
+    /// which `Mdb::machines` never lists.
+    pub aside: PathBuf,
     pub why: Why,
 }
 
@@ -592,7 +625,7 @@ impl OverlayGenerationError {
 
 impl std::fmt::Display for OverlayGenerationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self { name, path, found, want, guide, recreate, why } = self;
+        let Self { name, path, found, want, guide, recreate, aside, why } = self;
         match why {
             Why::Newer { kept } => {
                 write!(f, "user-MDB machine \"{name}\" is MDB generation {found}, and this cactup reads {want}: run `cactup update`")?;
@@ -640,11 +673,9 @@ impl std::fmt::Display for OverlayGenerationError {
             path.display()
         )?;
         // Starting over moves the old files aside rather than deleting
-        // them: a refusal before the first step takes no backup. A hidden
-        // directory is no machine (`Mdb::machines`).
+        // them: a refusal before the first step takes no backup.
         let Some(recreate) = recreate else { return Ok(()) };
         let dir = path.parent().unwrap_or(path);
-        let aside = dir.with_file_name(format!(".{name}.old"));
         write!(
             f,
             "\n  Or start over without your edits, keeping the old files: mv '{}' '{}' && {recreate}",
@@ -716,8 +747,20 @@ impl Place<'_> {
             want,
             guide: self.guide.to_owned(),
             recreate: self.recreate(origin),
+            aside: self.aside(),
             why,
         }
+    }
+
+    /// The first free `.<name>.old`, `.<name>.old.2`, … beside the overlay.
+    fn aside(&self) -> PathBuf {
+        (1..)
+            .map(|k| {
+                let suffix = if k == 1 { String::new() } else { format!(".{k}") };
+                self.dir.with_file_name(format!(".{}.old{suffix}", self.name))
+            })
+            .find(|dir| fs::symlink_metadata(dir).is_err())
+            .expect("an unbounded range")
     }
 
     /// The command that re-creates this machine from the base it records,
@@ -1361,6 +1404,8 @@ pub(crate) mod tests {
                 block,
                 "{label}: {phase:?} in {universe:?}"
             );
+            // What scripts get: no provisioning step was added, so the same.
+            assert_eq!(machine.meta.phase_env(universe.as_deref(), phase), block, "{label}: {phase:?} in {universe:?}");
         }
     }
 
@@ -1442,13 +1487,106 @@ pub(crate) mod tests {
         write("[\"local\"]");
         let e = home.mdb.load("two").unwrap_err();
         let text = e.to_string();
-        assert!(text.contains("\"build.py\" prints ENV_SETUP"), "{text}");
+        assert!(text.contains("\"build.py\" uses ENV_SETUP"), "{text}");
         assert!(text.contains("submit universe (none) instead of the build universe (\"img\")"), "{text}");
         assert!(text.contains("drops `module load apptainer`"), "{text}");
         assert_older_refusal_shape(&text, "two", 2, 3);
         // A route that only serves the host's builds never saw "img".
         write("{ queues = [\"local\"], build-universes = [\"host\"] }");
         home.mdb.load("two").unwrap();
+    }
+
+    /// A `.sh` build-submit script with `@ENV_SETUP@` inline expanded the
+    /// build universe's block in generation 2, as a `.py` one did; one that
+    /// only has the block prepended (the submit universe's, then and now) is
+    /// unaffected.
+    #[test]
+    fn a_sh_build_submit_using_env_setup_inline_is_refused() {
+        let home = Home::new();
+        let dir = home.overlay("two", 2);
+        let meta = fs::read_to_string(dir.join("meta.toml")).unwrap();
+        fs::create_dir_all(dir.join("buildsubmitscripts")).unwrap();
+        let extra = "[build]\nuniverse = \"img\"\n[universes.img]\nwrapper-argv = [\"env\"]\n\
+                     env-submit-setup = \"module load apptainer\"\n[buildsubmitscripts]\nbuild = [\"local\"]\n[cactup]";
+        fs::write(dir.join("meta.toml"), meta.replace("[cactup]", extra)).unwrap();
+        fs::write(dir.join("buildsubmitscripts/build.sh"), "#!/bin/sh\n#SBATCH -J x\nexec cactup\n").unwrap();
+        home.mdb.load("two").unwrap();
+
+        let dir = home.overlay("inline", 2);
+        let meta = fs::read_to_string(dir.join("meta.toml")).unwrap();
+        fs::create_dir_all(dir.join("buildsubmitscripts")).unwrap();
+        fs::write(dir.join("meta.toml"), meta.replace("[cactup]", extra)).unwrap();
+        fs::write(dir.join("buildsubmitscripts/build.sh"), "#!/bin/sh\n@ENV_SETUP@\nexec cactup\n").unwrap();
+        let text = home.mdb.load("inline").unwrap_err().to_string();
+        assert!(text.contains("\"build.sh\" uses ENV_SETUP"), "{text}");
+        assert!(text.contains("build universe (\"img\")") && text.contains("drops `module load apptainer`"), "{text}");
+    }
+
+    /// Any declared universe can be a build's (`build submit --universe`),
+    /// so one no flavor names still counts.
+    #[test]
+    fn every_declared_universe_is_a_possible_build_universe() {
+        let home = Home::new();
+        let dir = home.overlay("two", 2);
+        let meta = fs::read_to_string(dir.join("meta.toml")).unwrap();
+        fs::create_dir_all(dir.join("buildsubmitscripts")).unwrap();
+        fs::write(dir.join("buildsubmitscripts/build.py"), "print(ENV_SETUP)\n").unwrap();
+        let extra = "[universes.spare]\nwrapper-argv = [\"env\"]\nenv-setup = \"export SPARE=1\"\n\
+                     [buildsubmitscripts]\nbuild = [\"local\"]\n[cactup]";
+        fs::write(dir.join("meta.toml"), meta.replace("[cactup]", extra)).unwrap();
+        let text = home.mdb.load("two").unwrap_err().to_string();
+        assert!(text.contains("build universe (\"spare\")") && text.contains("drops `export SPARE=1`"), "{text}");
+    }
+
+    #[test]
+    fn an_unreadable_build_submit_script_is_refused_not_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = Home::new();
+        let dir = home.overlay("two", 2);
+        let meta = fs::read_to_string(dir.join("meta.toml")).unwrap();
+        fs::create_dir_all(dir.join("buildsubmitscripts")).unwrap();
+        let script = dir.join("buildsubmitscripts/build.py");
+        fs::write(&script, "print(ENV_SETUP)\n").unwrap();
+        fs::write(dir.join("meta.toml"), meta.replace("[cactup]", "[buildsubmitscripts]\nbuild = [\"local\"]\n[cactup]")).unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&script).is_ok() {
+            eprintln!("skipping: permissions do not bind here (root?)");
+            return;
+        }
+        let result = home.mdb.load("two");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o644)).unwrap();
+        let text = result.unwrap_err().to_string();
+        assert!(text.contains("buildsubmitscripts/build.py' could not be read"), "{text}");
+    }
+
+    #[test]
+    fn a_renamed_file_todays_schema_rejects_is_refused() {
+        let home = Home::new();
+        let dir = home.overlay("two", 2);
+        let meta = fs::read_to_string(dir.join("meta.toml")).unwrap();
+        fs::write(dir.join("meta.toml"), meta.replace("[queues.local]", "[queues.local]\nretired-key = 1")).unwrap();
+        let hash = hash_machine_dir(&dir).unwrap();
+        let text = home.mdb.load("two").unwrap_err().to_string();
+        assert!(text.contains("the renamed meta.toml would not load") && text.contains("retired-key"), "{text}");
+        assert_eq!(hash_machine_dir(&dir).unwrap(), hash);
+    }
+
+    #[test]
+    fn provisioning_hints_need_a_command() {
+        let hits = |text: &str| provisioning_hits(text);
+        assert!(hits("module load curl wget git").is_empty());
+        assert!(hits("export PATH=/opt/curl/bin:/opt/mkdir:$PATH").is_empty());
+        assert!(hits("export CONDA_ACTIVATE=1\nmodule load miniconda").is_empty());
+        assert_eq!(hits("curl -sSLo x https://example.org/x"), ["download"]);
+        assert_eq!(hits("[ -d \"$d\" ] || mkdir -p \"$d\""), ["mkdir"]);
+        assert_eq!(hits("if true; then git clone u; fi"), ["git clone"]);
+        assert_eq!(hits("python3 -m pip install --user x"), ["pip install"]);
+        assert_eq!(hits("micromamba create -y -n e"), ["conda install"]);
+        for line in [". ~/venv/bin/activate", "source $HOME/env/bin/activate", "conda activate e"] {
+            let found = hits(line);
+            assert_eq!(found.len(), 1, "{line}");
+            assert!(found[0].contains("exports it makes"), "{line}");
+        }
     }
 
     #[test]
@@ -1482,6 +1620,11 @@ pub(crate) mod tests {
         fs::write(dir.join("meta.toml"), with_origin("mine")).unwrap();
         let text = home.mdb.load("old").unwrap_err().to_string();
         assert!(text.ends_with("--from-existing mine"), "{text}");
+
+        // Starting over again picks a free name beside the first copy.
+        fs::create_dir_all(home.mdb.user_root.join(".old.old")).unwrap();
+        let text = home.mdb.load("old").unwrap_err().to_string();
+        assert!(text.contains(&format!("'{}'", home.mdb.user_root.join(".old.old.2").display())), "{text}");
 
         // A base that is gone (retired, or the overlay itself) offers no
         // fresh start: following it would only lose the machine.

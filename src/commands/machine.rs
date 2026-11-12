@@ -560,6 +560,11 @@ fn create_machine(
     let hostname = discover::resolve_hostname(hostname_override);
     let short = hostname.split('.').next().unwrap_or(&hostname).to_owned();
     let name = name.unwrap_or_else(|| short.clone());
+    // Hidden directories are not machines: one by that name would never be
+    // listed, discovered or loaded.
+    if name.starts_with('.') {
+        bail!("A machine name may not start with '.': \"{name}\"");
+    }
 
     // The base to clone: generic, a named machine, or the detected one (§4.7).
     let base = match &from_existing {
@@ -1105,6 +1110,14 @@ mod tests {
         };
         list(&ctx, &sb.mdb).unwrap();
         assert!(sb.mdb.load("old").is_err());
+    }
+
+    #[test]
+    fn a_machine_name_may_not_be_hidden() {
+        let sb = sandbox();
+        let e = create_machine(&sb.db, &sb.mdb, Some(".hid".into()), None, true, true, Some("h.example")).unwrap_err();
+        assert!(e.to_string().contains("may not start with '.'"), "{e:#}");
+        assert!(!sb.mdb.user_root.join(".hid").exists());
     }
 
     #[test]
