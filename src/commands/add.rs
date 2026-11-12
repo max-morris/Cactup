@@ -239,6 +239,18 @@ fn check_registry_source(slug: &str, url: &str, commit: &str, label: Option<&str
 }
 
 /// Every clone a package is fetched into.
+/// The refusal for a repo the plan skipped, named by `subject`, with `and`
+/// (what else the refusal has to say) worked in. A repo whose remote did not
+/// answer has nothing of the user's in the way: it says so, and that trying
+/// again later is the fix.
+fn left_alone(skipped: &crate::fetch::SkippedRepo, subject: &str, and: &str) -> String {
+    let why = skipped.reason.describe();
+    match skipped.reason.remote_did_not_answer() {
+        true => format!("{subject} was not fetched{and}: {why}; try again once the remote answers"),
+        false => format!("{subject} has {why}; it was left alone{and}"),
+    }
+}
+
 fn package_repos(a: &AddedPackage) -> BTreeSet<String> {
     a.thorns.iter().map(|t| clone_of(&a.repo, t)).collect()
 }
@@ -561,7 +573,7 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<
     drop(classify);
     renderer.shutdown_and_wait();
     if let Some(skipped) = plan.skipped.iter().find(|s| repos.contains(s.repo.as_str())) {
-        bail!("Repo {} in the installation has {}; it was left alone", skipped.repo, skipped.reason.describe());
+        bail!("{}", left_alone(skipped, &format!("Repo {} in the installation", skipped.repo), ""));
     }
     plan.git.retain(|g| repos.contains(g.repo.as_str()));
     plan.links.retain(|c| repos.contains(c.repo.as_str()));
@@ -651,7 +663,8 @@ pub fn remove(ctx: &Ctx, package: &str, force: bool) -> Res<()> {
         drop(classify);
         renderer.shutdown_and_wait();
         if let Some(skipped) = plan.skipped.iter().find(|s| touched.contains(s.repo.as_str())) {
-            bail!("Repo {} has {}; it was left alone, and {entry} is still added", skipped.repo, skipped.reason.describe());
+            let and = format!(", and {entry} is still added");
+            bail!("{}", left_alone(skipped, &format!("Repo {}", skipped.repo), &and));
         }
         plan.git.retain(|g| touched.contains(g.repo.as_str()));
         plan.links.retain(|c| touched.contains(c.repo.as_str()));

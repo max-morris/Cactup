@@ -62,6 +62,14 @@ pub enum DirtyReason {
 }
 
 impl DirtyReason {
+    /// Whether the repo was skipped because its remote did not answer
+    /// ([`DirtyReason::DefaultUnknown`]), not for anything on disk: a failure
+    /// to report as one, which retrying later fixes, and nothing to back up
+    /// or to preserve.
+    pub fn remote_did_not_answer(&self) -> bool {
+        matches!(self, DirtyReason::DefaultUnknown { .. })
+    }
+
     /// One-line user-facing description.
     pub fn describe(&self) -> String {
         match self {
@@ -88,8 +96,8 @@ impl DirtyReason {
                 s
             }
             DirtyReason::DefaultUnknown { head, why } => {
-                let what = "no answer from its remote on which branch is its default";
-                format!("{what}, so {head} is left alone ({why})")
+                let what = "its remote did not say which branch is its default";
+                format!("{what}, so cactup cannot tell whether {head} is the one to follow ({why})")
             }
             DirtyReason::Unknown(err) => format!("could not inspect the repo ({err})"),
         }

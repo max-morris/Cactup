@@ -192,6 +192,10 @@ impl Plan {
                     Err(_) => (None, false, false),
                 },
             };
+            // A repo skipped only because its remote did not answer has
+            // nothing on disk to overwrite: forcing it is an ordinary fetch
+            // to the default, and its line names the branch it left.
+            let forced = (!s.reason.remote_did_not_answer()).then(|| s.reason.describe());
             moved.push(s.repo.clone());
             self.git.push(GitRepoPlan {
                 repo: s.repo,
@@ -203,7 +207,7 @@ impl Plan {
                 commit: s.commit,
                 action,
                 checkouts: s.checkouts,
-                forced: Some(s.reason.describe()),
+                forced,
                 retarget,
             });
         }
@@ -1205,8 +1209,10 @@ enum Asked {
 /// branch, for a repo whose thornlist entry names no branch and no pin and
 /// that cactup may move: a clean one, or one detached where cactup's last
 /// fetch left it. `defaults` says whether the fetch record can spare that
-/// question. A clean repo whose remote does not answer stays where it is,
-/// with a warning on its line of `progress`. `progress` is init'ed to the
+/// question. A clean repo whose remote does not answer stays where it is:
+/// on a branch its record vouches for, it is updated there, with a warning
+/// on its line of `progress`; on any other, it is skipped
+/// ([`DirtyReason::DefaultUnknown`]). `progress` is init'ed to the
 /// repo count once the group map is built, then incremented as each repo's
 /// probe — a plain gix status walk, plus that question where there is one —
 /// finishes. The probes run on the
@@ -2348,19 +2354,22 @@ pub(crate) mod tests {
     /// branch switch, so nothing moves it, and no fast-forward lands on it
     /// in the remote's stead. Its skip says why. Forced, it goes to the
     /// remote's default, which `execute` asks again: still unanswered, the
-    /// repo fails, left where it was.
+    /// repo fails, left where it was; answered this time, the repo lands on
+    /// the default and follows it, its line naming the branch it left and
+    /// claiming nothing was overwritten.
     #[test]
     fn an_unanswered_lookup_skips_a_branch_cactup_cannot_vouch_for() {
-        for old_record in [false, true] {
+        for (old_record, answers_again) in [(false, false), (true, false), (false, true), (true, true)] {
             let tmp = tempfile::tempdir().unwrap();
-            let (root, upstream, default, _) = cloned_on_a_release_branch(tmp.path());
+            let (root, upstream, default, tip) = cloned_on_a_release_branch(tmp.path());
             let dir = root.join("Cactus/repos/R");
             let before = git::head_of(&dir).unwrap();
             match old_record {
                 true => record_fetch(&root, &upstream, "rel", false, false),
                 false => record_fetch(&root, &upstream, &default, true, false),
             }
-            std::fs::remove_dir_all(&upstream).unwrap();
+            let away = tmp.path().join("away");
+            std::fs::rename(&upstream, &away).unwrap();
 
             let (mut plan, messages) = plan_with_messages(&list_without_a_branch(&upstream), &root);
             assert!(plan.git.is_empty(), "{:?}", plan.git);
@@ -2372,17 +2381,36 @@ pub(crate) mod tests {
                 }
                 other => panic!("expected DefaultUnknown, got {other:?}"),
             }
+            assert!(plan.skipped[0].reason.remote_did_not_answer());
             let said = plan.skipped[0].reason.describe();
-            assert!(said.contains("so rel is left alone"), "{said}");
+            assert!(said.contains("cannot tell whether rel is the one to follow"), "{said}");
 
             plan.force_where(|s| s.repo == "R");
             assert!(matches!(plan.git[0].action, GitAction::Align));
             assert_eq!(plan.git[0].branch, None);
             assert!(plan.git[0].follows_default);
+            // Nothing on disk was in the way: nothing to overwrite.
+            assert_eq!(plan.git[0].forced, None);
+            if !answers_again {
+                let report = execute(&plan, &root).unwrap();
+                assert!(report.repos.is_empty(), "{:?}", report.repos);
+                assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+                assert_eq!(git::head_of(&dir).unwrap(), before);
+                continue;
+            }
+            std::fs::rename(&away, &upstream).unwrap();
             let report = execute(&plan, &root).unwrap();
-            assert!(report.repos.is_empty(), "{:?}", report.repos);
-            assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
-            assert_eq!(git::head_of(&dir).unwrap(), before);
+            assert!(report.failures.is_empty(), "{:?}", report.failures);
+            assert_eq!(git::head_of(&dir).unwrap(), (default.clone(), tip));
+            let records = report.records();
+            assert_eq!(records.repos[0].1.branch.as_deref(), Some(default.as_str()));
+            assert!(records.repos[0].1.follows_default);
+            assert!(!records.repos[0].1.named_branch);
+            let (what, warned) =
+                announce_text(&plan.git[0], Some(&default), tip, report.repos[0].changed, Some("rel"))
+                    .unwrap();
+            assert_eq!(what, format!("{default} now at {}, off rel", &tip.to_string()[..12]));
+            assert!(!warned, "{what}");
         }
     }
 
