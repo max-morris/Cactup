@@ -1627,9 +1627,10 @@ pub fn head_of(repo_dir: &Path) -> Res<(String, ObjectId)> {
     Ok((branch, id))
 }
 
-/// Whether the repo has `origin`'s `branch` locally
-/// (`refs/remotes/origin/<branch>`): false for a branch created locally, or
-/// a repo that cannot be opened.
+/// Whether `branch` has a remote-tracking ref (`refs/remotes/origin/<branch>`)
+/// in the repo: false for a branch created locally, or a repo that cannot be
+/// opened. A local check, no network: cactup's clones are single-branch, so
+/// a branch the remote does have may have no remote-tracking ref either.
 pub fn tracks_origin(repo_dir: &Path, branch: &str) -> bool {
     let tracking = format!("refs/remotes/origin/{branch}");
     gix::open(repo_dir).is_ok_and(|repo| repo.find_reference(&tracking).is_ok())

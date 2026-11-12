@@ -171,9 +171,9 @@ impl Plan {
             // asks), as an unforced fetch of the clean repo would — staying
             // put would record a branch no later plan could vouch for, and
             // skip it again. On any other branch, the user's, it stays there
-            // (the next plan asks for the default), unless origin has no
-            // such branch (one made locally): aligning to it would fail
-            // every time, so it goes to the default too. Detached — a
+            // (the next plan asks for the default), unless the branch has no
+            // remote-tracking ref (one made locally): aligning to it would
+            // fail every time, so it goes to the default too. Detached — a
             // branchless pin the list dropped, say — it has no branch to
             // stay on, and goes to the default. A HEAD that cannot be read
             // (not a repo, an unborn branch: a probe that failed) is
@@ -1566,8 +1566,8 @@ pub fn plan(
                 // on (local edits, say, or a re-pointed `origin`) is still
                 // cactup's: forcing it goes to the remote's default, as the
                 // list asks. Any other branch is the user's: forced, it stays
-                // there, unless origin lacks it; detached, it goes to the
-                // default; a HEAD that cannot be read fails (see
+                // there, unless it has no remote-tracking ref; detached, it
+                // goes to the default; a HEAD that cannot be read fails (see
                 // `force_where`). The next plan asks for the default.
                 let vouched = |r: &RepoRecord| git::head_of(&dir).is_ok_and(|(head, _)| r.put_there(&head));
                 let ours = group.branch.is_none() && commit.is_none() && record.is_some_and(vouched);
@@ -1757,7 +1757,8 @@ pub(crate) mod tests {
         git::testrepo::init(&b_dir);
         git::testrepo::commit(&b_dir, "initial");
         // A clone has origin's branch: plant it in A, whose branch a forced
-        // refetch then keeps (one origin lacks goes to the default instead).
+        // refetch then keeps (one with no remote-tracking ref goes to the
+        // default instead).
         let (a_branch, a_head) = git::head_of(&a_dir).unwrap();
         let a_tracking = format!("refs/remotes/origin/{a_branch}");
         gix::open(&a_dir)

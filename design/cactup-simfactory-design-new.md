@@ -824,24 +824,31 @@ time, so a remote that moves its default — or renames the branch the repo
 was on — is followed by the next refetch. A remote that does not answer
 leaves a repo on a branch its record vouches for where it is, following
 what the record says it followed, with a warning on its line; its fetch, to
-the same remote, reports the failure. On any other branch the repo is
-skipped (`no answer from its remote on which branch is its default`), the
-branch left alone: an update is not known to be what the list asks, and a
-fast-forward must not land on the user's branch in the remote's stead.
-`fetch-state.toml` records `follows-default = true`
-for a repo fetched this way and `named-branch = true` for one on the branch
-its list named; commands that fetch only part of a list (`add`) or start
-from nothing (`install`) take the record's word for a repo it found on its
-default branch rather than asking every remote. A forced refetch of such a
-repo goes to the remote's default (asked again; the repo fails if the remote
-still does not answer) when it was skipped as a branch switch or for an
-unanswered ask, when it sits on a branch its record vouches for (skipped
-for local edits, say, or a re-pointed `origin`: forcing it does what the
-list asks, and leaves no claim behind that would skip it again), from a
-detached HEAD, and from a branch origin does not have (one made locally,
-which an align could never reach). A repo skipped for anything else on the
-user's own branch stays on that branch, and one whose HEAD cannot be read
-fails, saying why.
+the same remote, reports the failure. On any other branch, and on any
+branch at all when its record is an older cactup's (even the default), the
+repo is not fetched (`its remote did not say which branch is its
+default`), the branch left alone: an update is not known to be what the
+list asks, and a fast-forward must not land on the user's branch in the
+remote's stead. The remote, not local state, is what stopped it, so
+`refetch` reports it among its failures and exits nonzero, and records it
+in `unfetched-repos` as failed, not skipped; `-f` is not offered as the
+remedy, since refetching once the remote answers is (`add` and `install`
+refuse, saying the same). `fetch-state.toml` records `follows-default =
+true` for a repo fetched this way and `named-branch = true` for one on the
+branch its list named; commands that fetch only part of a list (`add`) or
+start from nothing (`install`) take the record's word for a repo it found
+on its default branch rather than asking every remote. A forced refetch of
+a skipped repo whose list names no branch and no pin goes to the remote's
+default (asked again; the repo fails if the remote still does not answer)
+when it was skipped as a branch switch or for an unanswered ask (with
+nothing on disk to overwrite, its line names only the branch it left), when
+it sits on a branch its record vouches for (skipped for local edits, say,
+or a re-pointed `origin`: forcing it does what the list asks, and leaves no
+claim behind that would skip it again), from a detached HEAD, and from a
+branch with no remote-tracking ref (one made locally, which an align could
+never reach; the check is local, and clones are single-branch). A repo
+skipped for anything else on the user's own branch stays on that branch,
+and one whose HEAD cannot be read fails, saying why.
 
 **Pinned repos: `!REPO_COMMIT`.** A git section may carry
 `!REPO_COMMIT = <full commit id>` (40 hex digits, or 64 for a SHA-256 repo;

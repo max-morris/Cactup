@@ -197,7 +197,10 @@ release or thornlist that names a branch the repo already has locally:
 such a repo is skipped as a switched branch, and `--overwrite <repo>` moves
 it. When the repository cannot be asked which branch is its default (the
 server is unreachable, say), a repo on a branch cactup put it on stays
-there, and one on a branch you checked out is skipped, left alone.
+there. One on a branch you checked out is not fetched, left alone, and so
+is one whose fetch record an older version of cactup wrote, even on the
+default branch: refetch reports each as a failure and exits nonzero, and
+refetching once the server answers again fetches them.
 
 ### Switching release or thornlist
 
