@@ -351,19 +351,19 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
                 _ => StopCase::Listed,
             };
             match sched.stop_judged(job.job(), case)? {
-                EndedStop::Sent if unanswered => println!(
-                    "Could not query test job {}; asked the scheduler to stop it in case it was \
-                     queued again",
-                    job_id.bold()
-                ),
-                EndedStop::Sent => println!(
-                    "Asked the scheduler to stop test job {}, still listed after the run ended ({})",
-                    job_id.bold(),
-                    match &state {
-                        Job::Listed(status) => crate::scheduler::listed_state_words(*status),
-                        _ => "queued again, or leaving the queue",
-                    }
-                ),
+                EndedStop::Sent => match &state {
+                    Job::Listed(status) => println!(
+                        "Asked the scheduler to stop test job {}, still listed after the run ended ({})",
+                        job_id.bold(),
+                        crate::scheduler::listed_state_words(*status)
+                    ),
+                    // Unanswered.
+                    _ => println!(
+                        "Could not query test job {}; asked the scheduler to stop it in case it was \
+                         queued again",
+                        job_id.bold()
+                    ),
+                },
                 // After a failed query, a stop the scheduler refuses as a job
                 // it does not know (by `unknown-job-pattern`) is taken as the
                 // job ended; the run's end stands.
