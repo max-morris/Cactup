@@ -79,7 +79,8 @@ pub struct GitRepoPlan {
     /// repo, the branch or tag the pin was taken from: a label, and where to
     /// look for the commit when the server will not send it by id.
     pub branch: Option<String>,
-    /// The thornlist names no branch and `branch` is the remote's default:
+    /// The thornlist names no branch and `branch` is the remote's default
+    /// (with `branch: None`, `execute` asks the remote which that is):
     /// recorded, so a plan that trusts the record need not ask again (see
     /// [`DefaultBranches`]).
     pub follows_default: bool,
@@ -154,16 +155,21 @@ impl Plan {
                 }
             };
             // A skipped repo with no !REPO_BRANCH has `branch: None`; unlike
-            // `plan()`'s clean-repo path, nothing has resolved it to the
-            // repo's actual head branch yet. Do that here too, or `execute`
-            // errors out with "no branch resolved for existing repo" for any
-            // dirty repo that was never given an explicit branch.
+            // `plan()`'s clean-repo path, nothing has resolved it yet. On a
+            // branch, it stays there (the next plan asks for the default).
+            // Detached — a branchless pin the list dropped, say — it has no
+            // branch to stay on: `branch` stays `None`, and `execute` asks
+            // the remote for its default branch and switches to that.
             // A pinned repo needs no branch: it is checked out by commit.
-            let branch = match s.commit {
-                Some(_) => s.branch,
-                None => s.branch.or_else(|| {
-                    git::head_of(&s.dir).ok().map(|(b, _)| b).filter(|b| b != git::DETACHED)
-                }),
+            let (branch, follows_default) = match (s.commit, s.branch) {
+                (Some(_), branch) => (branch, false),
+                (None, Some(branch)) => (Some(branch), s.follows_default),
+                (None, None) => {
+                    match git::head_of(&s.dir).ok().map(|(b, _)| b).filter(|b| b != git::DETACHED) {
+                        Some(head) => (Some(head), false),
+                        None => (None, true),
+                    }
+                }
             };
             moved.push(s.repo.clone());
             self.git.push(GitRepoPlan {
@@ -171,7 +177,7 @@ impl Plan {
                 dir: s.dir,
                 url: s.url,
                 branch,
-                follows_default: s.follows_default,
+                follows_default,
                 commit: s.commit,
                 action,
                 checkouts: s.checkouts,
@@ -303,10 +309,18 @@ impl ExecReport {
 /// typical refetch that is most of the tree, and eighty lines of "already up
 /// to date" would bury the handful that moved. The caller's summary reports
 /// how many were already current; the scrollback is for what happened.
-fn announce_repo(line: &crate::progress::Line, item: &GitRepoPlan, head: gix::ObjectId, changed: bool) {
+/// `branch` is the one the repo went to: the item's, or the default branch
+/// `execute` asked the remote for.
+fn announce_repo(
+    line: &crate::progress::Line,
+    item: &GitRepoPlan,
+    branch: Option<&str>,
+    head: gix::ObjectId,
+    changed: bool,
+) {
     let head = head.to_string();
     let short = &head[..12.min(head.len())];
-    let what = match (&item.action, item.branch.as_deref()) {
+    let what = match (&item.action, branch) {
         (GitAction::Clone, _) if item.commit.is_some() => format!("cloned, pinned at {short}"),
         (GitAction::Pin, _) if changed => format!("pinned at {short}"),
         (GitAction::Clone, Some(branch)) => format!("cloned {branch} at {short}"),
@@ -443,10 +457,31 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                             GitAction::Clone => None,
                             _ => git::head_of(&item.dir).ok().map(|(_, id)| id),
                         };
+                        // An existing repo with neither a branch nor a pin
+                        // (forced off a detached HEAD, or detached by a
+                        // branchless pin the list dropped): it goes to the
+                        // remote's default branch, which only the remote
+                        // knows. A clone without a branch lands there on its
+                        // own.
+                        let branch = match (&item.action, &item.branch, item.commit) {
+                            (GitAction::Update | GitAction::Align, None, None) => {
+                                line.phase("asking for the default branch".to_string());
+                                git::ask_remote_default_branch(&item.url).map(|default| {
+                                    line.phase(format!("switching to {default}"));
+                                    Some(default)
+                                })
+                            }
+                            _ => Ok(item.branch.clone()),
+                        };
+                        let (branch, asked) = match branch {
+                            Ok(branch) => (branch, Ok(())),
+                            Err(e) => (None, Err(e)),
+                        };
                         // Forced (backed-up local edits) or repointed: only
                         // a full overwrite is right there.
                         let force = item.forced.is_some() || item.retarget.is_some();
-                        let outcome = match (&item.action, item.branch.as_deref(), item.commit) {
+                        let wanted = (&item.action, branch.as_deref(), item.commit);
+                        let outcome = asked.and_then(|()| match wanted {
                             (GitAction::Clone, branch, Some(commit)) => {
                                 git::clone_pinned(&item.url, branch, commit, &item.dir, &mut line)
                             }
@@ -462,19 +497,19 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                             }
                             (_, Some(branch), _) => git::align(&item.dir, branch, force, &mut line),
                             (_, None, _) => {
-                                // plan() always fills in the probed head
-                                // branch for existing repos; this is a bug
-                                // guard, not a reachable path.
+                                // Resolved just above for every existing
+                                // repo; this is a bug guard, not a reachable
+                                // path.
                                 Err(anyhow::anyhow!("No branch resolved for existing repo"))
                             }
-                        };
+                        });
                         // Assert the repo actually landed on its expected
                         // branch: an independent read of HEAD on disk, taken
                         // here (outside the report lock) so it runs in
                         // parallel with the other workers.
                         // A pinned repo has no branch to be on: it must sit at
                         // its commit instead.
-                        let wrong_branch = match (&outcome, &item.branch, item.commit) {
+                        let wrong_branch = match (&outcome, &branch, item.commit) {
                             (Ok(_), _, Some(pin)) => match git::head_of(&item.dir) {
                                 Ok((_, actual)) if actual != pin => {
                                     Some(format!("post-fetch HEAD is at {actual}, expected the pin {pin}"))
@@ -491,17 +526,17 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                         };
                         // A clone without a branch lands on the remote's
                         // default: record which branch that is.
-                        let landed = match (&outcome, &item.branch) {
+                        let landed = match (&outcome, &branch) {
                             (Ok(_), None) if item.commit.is_none() => {
                                 git::head_of(&item.dir).ok().map(|(b, _)| b)
                             }
-                            _ => item.branch.clone(),
+                            _ => branch.clone(),
                         };
                         let mut report = report.lock().expect("fetch report poisoned");
                         match outcome {
                             Ok(head) => {
                                 let changed = before != Some(head);
-                                announce_repo(&line, item, head, changed);
+                                announce_repo(&line, item, branch.as_deref(), head, changed);
                                 report.repos.push(RepoResult {
                                     repo: item.repo.clone(),
                                     url: item.url.clone(),
@@ -1045,8 +1080,9 @@ pub enum DefaultBranches {
 /// Classify every component of `list` against the tree at `install_root`
 /// (the directory that contains `<root>/`, i.e. the installation root).
 /// Read-only. The network is touched only to ask a remote for its default
-/// branch, for a clean repo whose thornlist entry names no branch and no
-/// pin. `defaults` says whether the fetch record can spare that
+/// branch, for a repo whose thornlist entry names no branch and no pin and
+/// that cactup may move: a clean one, or one detached where cactup's last
+/// fetch left it. `defaults` says whether the fetch record can spare that
 /// question. `progress` is init'ed to the repo count once the group map is
 /// built, then incremented as each repo's probe — a plain gix status walk,
 /// plus that question where there is one — finishes. The probes run on the
@@ -1181,7 +1217,9 @@ pub fn plan(
         // remote knows: ask it (a clean repo's `origin` is the thornlist's
         // URL — the probe classifies any other as changed). `None`: the
         // remote did not answer, or there was nothing to ask. A pinned repo
-        // sits at its commit, with no branch to follow.
+        // sits at its commit, with no branch to follow; a repo detached
+        // anywhere but where cactup's last fetch left it is the user's,
+        // skipped whatever the default is.
         let record = fetch_state.as_ref().and_then(|s| s.repos.get(repo));
         let default = match (&probe.state, &group.branch) {
             _ if group.commit.is_some() => None,
@@ -1194,6 +1232,11 @@ pub fn plan(
                 } else {
                     git::ask_remote_default_branch(&group.url).ok()
                 }
+            }
+            (RepoState::Detached { head }, None)
+                if record.is_some_and(|r| r.head == head.to_string()) =>
+            {
+                git::ask_remote_default_branch(&group.url).ok()
             }
             _ => None,
         };
@@ -1248,13 +1291,13 @@ pub fn plan(
                 };
                 // Off the default branch with no !REPO_BRANCH: switch only if
                 // cactup put the repo there (an earlier thornlist named that
-                // branch), or if it cloned the repo and recorded no branch.
-                // A branch the user checked out is theirs to keep, as with a
-                // named branch.
-                let ours = fetch_state
-                    .as_ref()
-                    .and_then(|s| s.repos.get(&repo))
-                    .is_some_and(|r| r.branch.as_deref().is_none_or(|b| b == head_branch));
+                // branch), or if it cloned the repo unpinned and recorded no
+                // branch. A branch the user checked out is theirs to keep, as
+                // with a named branch — after a pin too, which cactup left
+                // detached, whatever branch the pin's record names.
+                let ours = record.is_some_and(|r| {
+                    r.commit.is_none() && r.branch.as_deref().is_none_or(|b| b == head_branch)
+                });
                 if follows_default && head_branch != wanted && !ours {
                     plan.skipped.push(SkippedRepo {
                         repo,
@@ -1293,23 +1336,31 @@ pub fn plan(
                 // pin itself.
                 let ours = record.is_some_and(|r| r.head == head.to_string());
                 let action = match commit {
-                    Some(pin) if pin == head || ours => Some((GitAction::Pin, group.branch.clone())),
-                    None if ours => group
-                        .branch
-                        .clone()
-                        .or_else(|| record.and_then(|r| r.branch.clone()))
-                        .map(|branch| (GitAction::Align, Some(branch))),
+                    Some(pin) if pin == head || ours => {
+                        Some((GitAction::Pin, group.branch.clone(), false))
+                    }
+                    // Off the pin, onto the branch the list names; with none,
+                    // the remote's default; only when the remote did not say,
+                    // the branch the pin was taken from. A branchless pin's
+                    // record names no branch either: then `execute` asks the
+                    // remote itself, and fails the repo if it cannot say.
+                    None if ours => Some(match (group.branch.clone(), default) {
+                        (Some(branch), _) => (GitAction::Align, Some(branch), false),
+                        (None, Some(default)) => (GitAction::Align, Some(default), true),
+                        (None, None) => match record.and_then(|r| r.branch.clone()) {
+                            Some(branch) => (GitAction::Align, Some(branch), false),
+                            None => (GitAction::Align, None, true),
+                        },
+                    }),
                     _ => None,
                 };
                 match action {
-                    Some((action, branch)) => plan.git.push(GitRepoPlan {
+                    Some((action, branch, follows_default)) => plan.git.push(GitRepoPlan {
                         repo,
                         dir,
                         url: group.url,
                         branch,
-                        // Off a pin onto the recorded branch: whether that is
-                        // still the remote's default, the next plan asks.
-                        follows_default: false,
+                        follows_default,
                         commit,
                         action,
                         checkouts: group.checkouts,
@@ -1334,7 +1385,8 @@ pub fn plan(
                 // is set; that cannot occur (probe compares against the head
                 // branch then), but guard the invariant anyway. A forced
                 // refetch of a repo with no !REPO_BRANCH stays on its current
-                // branch (see `force_where`); the next plan asks for the
+                // branch, or goes to the remote's default from a detached
+                // HEAD (see `force_where`); the next plan asks for the
                 // default.
                 plan.skipped.push(SkippedRepo {
                     repo,
@@ -1701,6 +1753,138 @@ pub(crate) mod tests {
                 deref: false,
             })
             .unwrap();
+    }
+
+    /// An [`upstream_with_a_release_branch`], and an installation whose repo
+    /// `R` cactup cloned pinned at `rel`'s commit with no `!REPO_BRANCH` —
+    /// what `cactup add owner/name#<sha>` and `sim export` write — and
+    /// recorded. Returns the installation root, the upstream, its default
+    /// branch, the pin and the default's tip.
+    fn cloned_on_a_branchless_pin(
+        tmp: &Path,
+    ) -> (PathBuf, PathBuf, String, gix::ObjectId, gix::ObjectId) {
+        let (upstream, release, default, tip) = upstream_with_a_release_branch(tmp);
+        let root = tmp.join("install");
+        refetch_once(&list_naming(&upstream, None, Some(release)), &root);
+        (root, upstream, default, release, tip)
+    }
+
+    /// A pin with no `!REPO_BRANCH` is cloned detached at its commit, and its
+    /// record names no branch: there is none to follow while it is pinned.
+    #[test]
+    fn a_branchless_pin_is_cloned_with_no_branch_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let upstream = tmp.path().join("upstream");
+        git::testrepo::init(&upstream);
+        let pin = git::testrepo::commit(&upstream, "pinned");
+        git::testrepo::commit(&upstream, "after the pin");
+        let root = tmp.path().join("install");
+
+        let (plan, _) = refetch_once(&list_naming(&upstream, None, Some(pin)), &root);
+        assert!(matches!(plan.git[0].action, GitAction::Clone));
+        assert!(!plan.git[0].follows_default);
+        assert_eq!(git::head_of(&root.join("Cactus/repos/R")).unwrap(), (git::DETACHED.to_owned(), pin));
+        let record = &FetchState::read(&root).unwrap().unwrap().repos["R"];
+        assert_eq!(record.branch, None);
+        assert!(!record.follows_default);
+        assert_eq!(record.commit.as_deref(), Some(pin.to_string().as_str()));
+    }
+
+    /// Dropping a branchless pin puts the repo on the remote's default
+    /// branch, in one refetch: it is cactup's detached HEAD to move, and the
+    /// default is the branch the list now asks for.
+    #[test]
+    fn a_branchless_pin_dropped_goes_to_the_default_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, upstream, default, _, tip) = cloned_on_a_branchless_pin(tmp.path());
+
+        let (plan, _) = refetch_once(&list_without_a_branch(&upstream), &root);
+        assert!(matches!(plan.git[0].action, GitAction::Align));
+        assert_eq!(plan.git[0].branch.as_deref(), Some(default.as_str()));
+        assert!(plan.git[0].follows_default);
+        assert_eq!(git::head_of(&root.join("Cactus/repos/R")).unwrap(), (default.clone(), tip));
+        let record = &FetchState::read(&root).unwrap().unwrap().repos["R"];
+        assert_eq!((record.branch.as_deref(), record.follows_default), (Some(default.as_str()), true));
+        assert_eq!(record.commit, None);
+    }
+
+    /// The same repo moved off its pin by hand is the user's: skipped. Forced
+    /// (`refetch --overwrite R`), with no branch to stay on, it goes to the
+    /// remote's default — `execute` asks — never to an error.
+    #[test]
+    fn a_forced_branchless_repo_off_its_pin_goes_to_the_default_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, upstream, default, _, tip) = cloned_on_a_branchless_pin(tmp.path());
+        let dir = root.join("Cactus/repos/R");
+        let mut progress = prodash::tree::Root::new().add_child("test checkout");
+        git::pin(&dir, None, tip, false, &mut progress).unwrap();
+
+        let mut plan = plan_for(&list_without_a_branch(&upstream), &root);
+        assert!(matches!(plan.skipped[0].reason, DirtyReason::DetachedHead(id) if id == tip));
+        plan.force_where(|s| s.repo == "R");
+        assert!(matches!(plan.git[0].action, GitAction::Align));
+        assert_eq!(plan.git[0].branch, None);
+        assert!(plan.git[0].follows_default);
+        let report = execute(&plan, &root).unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(git::head_of(&dir).unwrap(), (default.clone(), tip));
+        let records = report.records();
+        assert_eq!(records.repos[0].1.branch.as_deref(), Some(default.as_str()));
+        assert!(records.repos[0].1.follows_default);
+    }
+
+    /// Dropping a pin and its `!REPO_BRANCH` together reaches the remote's
+    /// default in one refetch, not the branch the pin was taken from.
+    #[test]
+    fn a_pin_and_its_branch_dropped_together_reach_the_default_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (upstream, release, default, tip) = upstream_with_a_release_branch(tmp.path());
+        let root = tmp.path().join("install");
+        refetch_once(&list_naming(&upstream, Some("rel"), Some(release)), &root);
+
+        let (plan, _) = refetch_once(&list_without_a_branch(&upstream), &root);
+        assert_eq!(plan.git[0].branch.as_deref(), Some(default.as_str()));
+        assert!(plan.git[0].follows_default);
+        assert_eq!(git::head_of(&root.join("Cactus/repos/R")).unwrap(), (default.clone(), tip));
+    }
+
+    /// A clean repo on a branch, newly pinned with no `!REPO_BRANCH`: pinned,
+    /// following no branch.
+    #[test]
+    fn a_clean_repo_newly_pinned_without_a_branch_is_pinned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, upstream, _, tip) = cloned_on_a_release_branch(tmp.path());
+        record_fetch(&root, &upstream, "rel", false);
+
+        let plan = plan_for(&list_naming(&upstream, None, Some(tip)), &root);
+        assert!(plan.skipped.is_empty(), "{:?}", plan.skipped);
+        assert!(matches!(plan.git[0].action, GitAction::Pin));
+        assert_eq!(plan.git[0].branch, None);
+        assert!(!plan.git[0].follows_default);
+    }
+
+    /// A branch the user checked out after a branchless pin is theirs: the
+    /// pin's record names no branch, and that must not read as "cactup's".
+    #[test]
+    fn a_branch_checked_out_after_a_branchless_pin_is_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, upstream, default, release, _) = cloned_on_a_branchless_pin(tmp.path());
+        let dir = root.join("Cactus/repos/R");
+        // `git checkout -b rel --track origin/rel`, at the pin's own commit.
+        let repo = gix::open(&dir).unwrap();
+        for name in ["refs/heads/rel", "refs/remotes/origin/rel"] {
+            repo.reference(name, release, gix::refs::transaction::PreviousValue::Any, "test").unwrap();
+        }
+        point_head_at(&dir, "rel");
+
+        let plan = plan_for(&list_without_a_branch(&upstream), &root);
+        assert!(plan.git.is_empty(), "{:?}", plan.git);
+        match &plan.skipped[0].reason {
+            DirtyReason::BranchSwitched { head, expected } => {
+                assert_eq!((head.as_str(), expected.as_str()), ("rel", default.as_str()));
+            }
+            other => panic!("expected BranchSwitched, got {other:?}"),
+        }
     }
 
     /// A repo that follows its remote's default keeps following it: when the
