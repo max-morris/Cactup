@@ -23,9 +23,14 @@ mdb-generation = 3
 ```
 
 `cactup machine create` writes that line. An overlay without it is assumed
-to match the running cactup's generation, with a warning. An overlay from an
-older generation is refused when it is loaded; the entry for each newer
-generation below says what to change to bring it forward.
+to match the running cactup's generation, with a warning. A cactup newer than
+an overlay brings it forward itself where it can, the first time it loads it,
+and keeps the old files in `~/.cactup/machine-backups/<name>/generation-<N>/`.
+Where it cannot, it refuses the overlay and names the one entry below to
+follow by hand; set `mdb-generation` to that entry's number afterward and
+cactup goes on from there. (cactup builds older than this feature refuse
+every older overlay; the entries below say what to change for each newer
+generation.)
 
 ## Generation 1
 

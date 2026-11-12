@@ -117,8 +117,11 @@ mdb-generation = 5
 `cactup machine create` writes the current generation for you. A machine
 without the key loads with a warning that cactup is assuming its own
 generation; add the key to silence it. A machine written for an older
-generation is refused until it is brought forward; one written for a newer
-generation asks for `cactup update`.
+generation is brought forward the first time a newer cactup loads it, with
+its old files kept under `~/.cactup/machine-backups/<name>/`; where that
+cannot be done automatically, cactup refuses the machine and names the one
+`GENERATIONS.md` entry to follow by hand. One written for a newer generation
+asks for `cactup update`.
 
 ### Updating an overlay machine
 
