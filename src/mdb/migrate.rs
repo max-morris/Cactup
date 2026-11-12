@@ -525,7 +525,11 @@ fn bring_forward_with(place: &Place, found: u32, steps: &[Step], want: u32) -> R
     overlay.stamp(reached)?;
 
     // 5. Back up, then commit, `meta.toml` last.
-    let backup = back_up(place, found).map_err(|e| stopped(found, origin.clone(), format!("{e:#}")))?;
+    let backup = match back_up(place, found) {
+        Ok(backup) => backup,
+        Err(e) if gix::interrupt::is_triggered() => return Err(e),
+        Err(e) => return Err(stopped(found, origin, format!("{e:#}")).into()),
+    };
     if gix::interrupt::is_triggered() {
         bail!("Interrupted");
     }
@@ -1181,7 +1185,7 @@ pub(crate) mod tests {
     }
 
     /// The snapshots must exist for every older generation: a bump without
-    /// one fails here. (Fails until the fixtures land.)
+    /// one fails here.
     #[test]
     fn every_older_generation_has_snapshots() {
         let missing: Vec<u32> = (1..MDB_GENERATION)
