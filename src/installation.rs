@@ -23,21 +23,58 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// `installation.toml`'s format: version 1, no migrations. Only login
-/// binaries write it (D11), so it is not `frozen_read`. Every field is a
-/// scalar or an array (`added`, which put-back never enters), so nothing is
-/// replaced whole.
+/// `installation.toml`'s format. Only login binaries write it (D11), so it is
+/// not `frozen_read`. Every field is a scalar or an array (`added`, which
+/// put-back never enters), so nothing is replaced whole.
+///
+/// Version 2 added `[[added.libraries]]`. Inside an array element, an older
+/// writer would drop it, and losing it is not harmless: which links to
+/// remove is decided by comparing the placements recorded before and after
+/// a command (`unplace_dropped`, `dropped`), and `PutBack` undoes only what
+/// the run recorded, so a library link a v1 rewrite forgot (and its
+/// `.git/info/exclude` entry) would never be cleaned up, and prune's
+/// hidden-files check would keep flagging its path. So the bump: the
+/// down-step writes v1 whenever no package has libraries (an older binary
+/// keeps reading those installations), and only an installation that uses
+/// libraries gets v2, which an older binary refuses rather than corrupts.
+// Spec §2.5 matrix; the v1 shape is fixtures/formats/installation/v1.toml.
 pub static INSTALLATION: Format<Toml> = Format {
     name: "installation record",
     key: "schema",
-    current: 1,
-    upgrades: &[],
-    downgrades: &[],
+    current: 2,
+    upgrades: &[installation_up_1],
+    downgrades: &[installation_down_2],
     down_floor: 1,
     frozen_read: false,
     legacy: None,
     replace_whole: &[],
 };
+
+/// v1 → v2: nothing to change (v1 has no libraries).
+fn installation_up_1(_doc: &mut Toml) -> Res<()> {
+    Ok(())
+}
+
+/// v2 → v1: unchanged, unless some added package has libraries, which v1
+/// cannot hold.
+fn installation_down_2(doc: &mut Toml) -> Result<(), format::CannotExpress> {
+    let uses_libraries = doc
+        .get("added")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_table)
+        .any(|package| match package.get("libraries") {
+            None => false,
+            Some(toml::Value::Array(libraries)) => !libraries.is_empty(),
+            // Not an array: nothing v1 can hold either.
+            Some(_) => true,
+        });
+    if uses_libraries {
+        return Err(format::CannotExpress);
+    }
+    Ok(())
+}
 
 /// `simulations.toml`'s format. Entries are added and removed, never
 /// rewritten in place: `sim create` inserts a new name, `sim delete` removes
@@ -804,7 +841,7 @@ mod tests {
     fn schema_guard_refuses_newer_files() {
         let (_dir, inst) = inst();
         std::fs::create_dir_all(inst.cactup_dir()).unwrap();
-        std::fs::write(inst.meta_path(), "schema = 2\n").unwrap();
+        std::fs::write(inst.meta_path(), "schema = 3\n").unwrap();
         let err = format!("{:#}", inst.meta().unwrap_err());
         assert!(err.contains("upgrade"), "{err}");
     }
@@ -830,6 +867,15 @@ mod tests {
                 }],
                 replaces: vec!["OldRepo".to_owned()],
                 contact: Some("https://github.com/owner/pkg/issues".to_owned()),
+                libraries: vec![AddedLibrary {
+                    package: "owner/lib".to_owned(),
+                    version: "0.4.1".to_owned(),
+                    tag: Some("v0.4.1".to_owned()),
+                    commit: "89abcdef0123456789abcdef0123456789abcdef".to_owned(),
+                    url: "https://github.com/owner/lib".to_owned(),
+                    inside: "pkg".to_owned(),
+                    into: "src/lib".to_owned(),
+                }],
             }],
         }
     }
@@ -911,6 +957,77 @@ mod tests {
             |r: &mut TestRegistry| drop(r.tests.shift_remove("gone")),
             &["tests", "gone"],
         );
+    }
+
+    /// Only libraries need version 2: an installation without them is written
+    /// as v1, one with them as v2, and a v1 file that gains a library moves
+    /// up. Once at v2 a file stays there (sticky), even without libraries.
+    #[test]
+    fn only_libraries_make_an_installation_record_v2() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installation.toml");
+        let schema = || {
+            let doc: Toml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            doc["schema"].as_integer().unwrap()
+        };
+        let mut plain = exhaustive_meta();
+        plain.added[0].libraries.clear();
+
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        assert_eq!(schema(), 1);
+        let back: InstallationMeta = format::read(&path, &INSTALLATION).unwrap().unwrap();
+        assert_eq!(back.added, plain.added);
+
+        format::write(&path, &exhaustive_meta(), &INSTALLATION).unwrap();
+        assert_eq!(schema(), 2);
+        let back: InstallationMeta = format::read(&path, &INSTALLATION).unwrap().unwrap();
+        assert_eq!(back.added, exhaustive_meta().added);
+
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        assert_eq!(schema(), 2);
+
+        // A new file without libraries, and one with no packages at all.
+        std::fs::remove_file(&path).unwrap();
+        format::write(&path, &InstallationMeta::default(), &INSTALLATION).unwrap();
+        assert_eq!(schema(), 1);
+    }
+
+    /// What a binary from before version 2 makes of the files this one
+    /// writes: it reads one without libraries, and refuses one with them
+    /// (asking for an upgrade) instead of dropping them on its next write.
+    #[test]
+    fn an_older_binary_refuses_only_installations_with_libraries() {
+        // `INSTALLATION` as it shipped at version 1.
+        static V1: Format<Toml> = Format {
+            name: "installation record",
+            key: "schema",
+            current: 1,
+            upgrades: &[],
+            downgrades: &[],
+            down_floor: 1,
+            frozen_read: false,
+            legacy: None,
+            replace_whole: &[],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installation.toml");
+        let mut plain = exhaustive_meta();
+        plain.added[0].libraries.clear();
+
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        let old: InstallationMeta = format::read(&path, &V1).unwrap().unwrap();
+        assert_eq!(old.added, plain.added);
+
+        format::write(&path, &exhaustive_meta(), &INSTALLATION).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let err = format::read::<InstallationMeta, _>(&path, &V1).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+        let err = format::write(&path, &plain, &V1).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "the libraries survive");
+
+        let fixture = crate::format::testing::fixture_dir("installation").join("v2.toml");
+        assert!(format::read::<InstallationMeta, _>(&fixture, &V1).is_err());
     }
 
     #[test]

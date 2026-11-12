@@ -555,7 +555,7 @@ written older).
 | File | Descriptor | Key | Current | `frozen_read` |
 |---|---|---|---|---|
 | `~/.cactup/database.json` | `database::DATABASE` (JSON; `legacy`: bare `detected-machine`) | `schema` | 1 | no |
-| `<inst>/.cactup/installation.toml` | `installation::INSTALLATION` | `schema` | 1 | no |
+| `<inst>/.cactup/installation.toml` | `installation::INSTALLATION` (chain `[1 → 2]`, a no-op; down-step `[2 → 1]` unless some `[[added]]` has `libraries`, which an older writer would drop) | `schema` | 2 | no |
 | `simulations.toml` | `installation::SIM_REGISTRY` | `schema` | 1 | no |
 | `tests.toml` | `installation::TEST_REGISTRY` | `schema` | 1 | no |
 | `<inst>/.cactup/fetch-state.toml` | `fetch::FETCH_STATE` | `schema` | 1 | no |
@@ -4847,7 +4847,9 @@ commit, as any spec; a commit no version names gets the same trust check),
 checks the target really is a library, and follows the library's own
 `into`-dependencies down the chain (a cycle is refused). Each is recorded
 under the package (`[[added.libraries]]`: package, version, tag, commit, URL,
-the clone it goes `inside`, and `into`) and composed as one whole-repo
+the clone it goes `inside`, and `into`; `installation.toml` schema 2, written
+only when some package has libraries, since an older writer would drop them:
+§2.5) and composed as one whole-repo
 section, pinned, with `!CHECKOUT = .` on the `!` line (never a thorn):
 
 ```
