@@ -274,3 +274,69 @@ To bring an overlay machine forward:
    is on a work or scratch filesystem. Without it, inputs go to
    `~/.cactup/inputs` unless your `inputs-home` knob says otherwise.
 2. Set `mdb-generation = 4` under `[cactup]` in `meta.toml`.
+
+## Generation 5
+
+Templates gain two drop-line tokens, `@KNOB-OR-DROP-LINE(name)@` and
+`@ENV-OR-DROP-LINE(NAME)@`. Set and non-empty, each is replaced exactly as
+`@KNOB(name)@` or `@ENV(NAME)@` would be; unset or empty, the whole line
+holding it is removed, newline included. They are for a line that must not
+go out with an empty value: a bare `#SBATCH -A ` makes sbatch read the next
+directive as the account. One empty drop token on a line drops it; a drop
+token in a comment does nothing. They work in `.sh` scripts, optionlists
+and parfiles only: they are an error in a single command (`[scheduler]`
+commands, `[build].make`, a universe `wrapper`), in `[paths]` values and
+`wrapper-argv` words, and on a line tied to the next or the one before it.
+In a shell script that is a line ending in a backslash, inside a quoted
+string, or in `|`, `&&` or `||`, or one opening a heredoc (a heredoc's body
+lines may go); in an optionlist, a line ending in a backslash; in a
+parfile, a string spanning lines.
+
+`-a ACCOUNT` is now shorthand for `-K allocation=ACCOUNT`, so every script
+reads one `allocation` knob: the command line (`-a` or `-K`), else the
+simulation's own `allocation` knob, else the global one. `@ALLOCATION@` and
+the `.py` global `ALLOCATION` still work, as aliases of that value. Before,
+`ALLOCATION` saw `-a` but not a simulation's own knob, and
+`@KNOB(allocation)@` and `knob("allocation")` saw a simulation's own knob but
+not `-a`.
+
+The in-repo machines now say whether they need an account. Where the site
+rejects a job without one (the LSU/LONI machines, crux, frontier,
+perlmutter-p1, delta, expanse, supermucng, leonardo-DCGP, marconiA3,
+cosma8), a submit with no allocation is refused before anything is queued:
+`.sh` scripts write `@KNOB(allocation)@`, `.py` scripts raise `CactupError`.
+Elsewhere (frontera, graham, nibi-gpu, golub, tianhe1a, anvil, rostam,
+wheeler) the account line is left out: `.sh` scripts write
+`@KNOB-OR-DROP-LINE(allocation)@`, `.py` scripts write the line only when the
+knob is set. The qbc and db1 runscripts pass `srun -A` only when an
+allocation is set, with a shell `${alloc:+-A "$alloc"}` over
+`alloc='@KNOB-OPTIONAL(allocation)@'`, since that `-A` sits in the middle of
+a line.
+
+To bring an overlay machine forward:
+
+1. Set `mdb-generation = 5` under `[cactup]` in `meta.toml`. Nothing else is
+   required: a generation-4 machine is a valid generation-5 machine, and
+   `@ALLOCATION@` and `ALLOCATION` still work, now following `-a` and a
+   simulation's own `allocation` knob alike.
+
+Optionally, and recommended where a script can write an empty account
+directive (`#SBATCH -A ` with no allocation set):
+
+2. Find every account directive in your scripts: `grep -rn ALLOCATION` in
+   the machine's `submitscripts/`, `buildsubmitscripts/` and `runscripts/`.
+3. In a `.sh` script, a directive such as `#SBATCH -A @ALLOCATION@`,
+   `#SBATCH --account=@ALLOCATION@` or `#PBS -A @ALLOCATION@` becomes:
+   - `#SBATCH -A @KNOB(allocation)@` (and so on) if your site rejects a job
+     without an account: a submit with none then stops with a message
+     naming `-a` and `cactup knob allocation`;
+   - `#SBATCH -A @KNOB-OR-DROP-LINE(allocation)@` if it does not: with none
+     set, the line is left out instead of going out empty.
+   Give the token a line of its own, not one tied to its neighbors (see
+   above).
+4. In a `.py` script, replace `ALLOCATION` with `knob("allocation", "")`
+   and append the directive only when it is non-empty, or
+   `raise CactupError(...)` when it is empty and your site requires one.
+5. An `-A` in the middle of a command line (`srun -A @ALLOCATION@ …`) can't
+   use a drop-line token. Bind it to a shell variable first,
+   `alloc='@KNOB-OPTIONAL(allocation)@'`, and pass `${alloc:+-A "$alloc"}`.

@@ -207,21 +207,13 @@ impl Simulation {
     /// is warned about, since the simulation's silently wins.
     pub fn knob_snapshot(&self, db: &crate::database::Database) -> indexmap::IndexMap<String, String> {
         let mut snapshot = db.knob_snapshot();
-        let overrides = crate::database::knob_overrides();
         for (name, value) in &self.meta.knobs {
-            if overrides.contains_key(name) {
+            // The command line (`-K`, `-a`) outranks the simulation (§5.1).
+            if db.is_overlaid(name) {
                 continue;
             }
             if let Some(global) = db.knob(name).filter(|g| *g != value) {
-                eprintln!(
-                    "{}",
-                    format!(
-                        "Knob {name} is \"{global}\" globally but \"{value}\" for simulation {}; using the \
-                         simulation's (pass -K {name}=… to choose)",
-                        self.name
-                    )
-                    .yellow()
-                );
+                eprintln!("{}", knob_conflict_notice(&self.name, name, global, value).yellow());
             }
             let rendered = match crate::database::knob_spec(name) {
                 Some(spec) => (spec.render)(value),
@@ -486,6 +478,17 @@ pub fn create(
     Ok(sim)
 }
 
+/// The warning for a stored global knob value simulation `sim`'s own
+/// contradicts: how to choose the other one for this command, which for the
+/// allocation is `-a` as well as `-K`.
+fn knob_conflict_notice(sim: &str, name: &str, global: &str, value: &str) -> String {
+    let choose = match name {
+        "allocation" => "pass -a ACCOUNT or -K allocation=… to choose".to_owned(),
+        _ => format!("pass -K {name}=… to choose"),
+    };
+    format!("Knob {name} is \"{global}\" globally but \"{value}\" for simulation {sim}; using the simulation's ({choose})")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,5 +531,13 @@ mod tests {
         let id = simulation_id("bbh", "mel5", "mel5.cct.lsu.edu");
         assert!(id.starts_with("simulation-bbh-mel5-mel5.cct.lsu.edu-"), "{id}");
         assert!(id.split('-').count() >= 7, "{id}");
+    }
+
+    #[test]
+    fn the_allocation_conflict_notice_names_a() {
+        let notice = knob_conflict_notice("bbh", "allocation", "g", "s");
+        assert!(notice.contains("pass -a ACCOUNT or -K allocation=… to choose"), "{notice}");
+        let notice = knob_conflict_notice("bbh", "kadath-initial-data", "g", "s");
+        assert!(notice.contains("(pass -K kadath-initial-data=… to choose)"), "{notice}");
     }
 }

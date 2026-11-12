@@ -16,7 +16,16 @@
 
 lines = ["#! /bin/bash"]
 lines.append("#SBATCH -t {0}".format(WALLTIME))
-lines.append("#SBATCH --account={0}".format(ALLOCATION))
+# Account required: NCSA Delta rejects a job without an account. The
+# allocation knob, which -a sets for one command; with none, cactup refuses
+# before submitting, naming both.
+allocation = knob("allocation", "")
+if not allocation:
+    raise CactupError(
+        "{0} needs an allocation: pass -a ACCOUNT, or set it once with "
+        "`cactup knob allocation ACCOUNT`".format(MACHINE)
+    )
+lines.append("#SBATCH --account={0}".format(allocation))
 lines.append("#SBATCH --partition={0}".format(QUEUE))
 lines.append("#SBATCH --nodes={0}".format(NODES))
 lines.append("#SBATCH --exclusive --mem=0")

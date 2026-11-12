@@ -307,6 +307,12 @@ fn submit_impl(
     let placement = vars::Placement::submit(machine);
     let mut topo =
         vars::resolve_topology(&args.topology, machine, db, Some(&fit), force_queue, placement)?;
+    // The effective knobs — global, then the simulation's own, then the
+    // command line's (`-K`, and `-a` as `-K allocation=`) — frozen with the
+    // vars so the compute node resolves @KNOB(…)@ without the DB (§5, D11).
+    // @ALLOCATION@ is an alias of the allocation knob in it.
+    let knobs = sim.knob_snapshot(db);
+    topo.allocation = knobs.get("allocation").filter(|a| !a.is_empty()).cloned();
     let sim_home = inst.meta()?.sim_home()?.to_owned();
     let sched = Scheduler::for_machine(machine);
 
@@ -515,27 +521,26 @@ fn submit_impl(
             debug: false,
             scratch_home: &scratch_home,
         })?;
-        // The effective knobs — global, then the simulation's own, then the
-        // `-K` overlay — frozen with the vars so the compute node resolves
-        // @KNOB(…)@ without the DB (§5, D11).
-        vset.set_knobs(sim.knob_snapshot(db));
+        vset.set_knobs(knobs.clone());
         // Before the restart dir exists: a parfile that cannot substitute
-        // (a required knob unset, a typo'd token) fails the submit here,
-        // leaving nothing behind, not the queued job hours from now.
+        // (a required knob unset, a typo'd token) or a script that refuses
+        // (a required allocation unset) fails the submit here, leaving
+        // nothing behind, not the queued job hours from now — nor an empty
+        // restart dir that would take this id.
         check_parfile(sim, &vset)?;
-        fs::create_dir_all(rdir.join(".cactup"))
-            .with_context(|| format!("Failed to create '{}'", rdir.display()))?;
 
         // Submit-phase artifact: same vars, submit-phase ENV_SETUP under the
         // submit universe (§6.1).
         let mut submit_vars = vset.clone();
         submit_vars.set("ENV_SETUP", machine.meta.phase_env(submit_uni_name, Phase::Submit));
         let submit_script = generate_script(machine, ScriptKind::Submit, &sub_script_name, &submit_vars, Phase::Submit, submit_uni_name)?;
-        write_executable(&rdir.join(".cactup").join("submit-script"), &submit_script)?;
-
         // Run-phase artifact, frozen now so the compute node never touches
         // the MDB (§8.3.1).
         let run_script = generate_script(machine, ScriptKind::Run, &run_script_name, &vset, Phase::Run, run_uni_name)?;
+
+        fs::create_dir_all(rdir.join(".cactup"))
+            .with_context(|| format!("Failed to create '{}'", rdir.display()))?;
+        write_executable(&rdir.join(".cactup").join("submit-script"), &submit_script)?;
         write_executable(&rdir.join(".cactup").join("run-script"), &run_script)?;
 
         let mut r = Restart {
@@ -698,6 +703,9 @@ fn run_interactive(
     let placement = vars::Placement::foreground(machine);
     let mut topo =
         vars::resolve_topology(&args.start.topology, machine, db, Some(&fit), force_queue, placement)?;
+    // As in submit: the effective knobs, @ALLOCATION@ their allocation.
+    let knobs = sim.knob_snapshot(db);
+    topo.allocation = knobs.get("allocation").filter(|a| !a.is_empty()).cloned();
     let sim_home = inst.meta()?.sim_home()?.to_owned();
     let sched = Scheduler::for_machine(machine);
 
@@ -773,14 +781,13 @@ fn run_interactive(
         debug: args.debug,
         scratch_home: &scratch_home,
     })?;
-    vset.set_knobs(sim.knob_snapshot(db));
-    // As in submit: a parfile that cannot substitute fails before any
-    // restart directory exists.
+    vset.set_knobs(knobs);
+    // As in submit: a parfile that cannot substitute, or a run script that
+    // refuses, fails before any restart directory exists.
     check_parfile(sim, &vset)?;
+    let run_script = generate_script(machine, ScriptKind::Run, run_script_name, &vset, Phase::Run, run_uni_name)?;
     fs::create_dir_all(rdir.join(".cactup"))
         .with_context(|| format!("Failed to create '{}'", rdir.display()))?;
-
-    let run_script = generate_script(machine, ScriptKind::Run, run_script_name, &vset, Phase::Run, run_uni_name)?;
     write_executable(&rdir.join(".cactup").join("run-script"), &run_script)?;
 
     let mut r = Restart {
@@ -1383,8 +1390,22 @@ mod tests {
             assert!(cfg.join(f).is_file(), "{f} should be snapshotted into the sim");
         }
 
-        // 50 h on a 24 h ceiling → 3 chained segments (§8.8).
+        // A submit script that refuses (a machine requiring an allocation,
+        // none set) also leaves no restart directory behind: no husk to
+        // take id 0, which the good submit below must still get.
+        let scripts = machine.dir.join("submitscripts");
+        fs::rename(scripts.join("default.sh"), scripts.join("default.sh.off")).unwrap();
+        fs::write(scripts.join("default.py"), "print(ALLOCATION or knob(\"allocation\"))\n").unwrap();
         let db = ctx.db.read().unwrap();
+        let err = submit_impl(&inst, &machine, &db, &sim, &start_args("bbh", "50:00:00"), false, Some("testhost"))
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("knob allocation is unset"), "{err:#}");
+        assert!(restart::list_ids(&sim.dir).unwrap().is_empty(), "no restart dir left behind");
+        assert!(!restart::restart_dir(&sim.dir, 0).exists(), "not even an empty one");
+        fs::remove_file(scripts.join("default.py")).unwrap();
+        fs::rename(scripts.join("default.sh.off"), scripts.join("default.sh")).unwrap();
+
+        // 50 h on a 24 h ceiling → 3 chained segments (§8.8).
         submit_impl(&inst, &machine, &db, &sim, &start_args("bbh", "50:00:00"), false, Some("testhost"))
             .unwrap();
 
@@ -2071,5 +2092,330 @@ mod tests {
         let r = Restart::load(&sim.dir, id).unwrap();
         assert_eq!(r.meta.knobs["kadath-initial-data"], "/sim/id.info");
         assert_eq!(ctx.db.read().unwrap().knob("kadath-initial-data"), Some("/global/id.info"), "the global knob is untouched");
+    }
+
+    /// The allocation a restart freezes, as `@KNOB(allocation)@` and as
+    /// `@ALLOCATION@` alike (§5.1): the command line (`-a`, shorthand for
+    /// `-K allocation=`) over the simulation's own knob over the global one.
+    #[test]
+    fn the_allocation_is_the_command_line_then_the_sim_then_the_global_knob() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        let parfile = tmp.path().join("bbh.par");
+        fs::write(&parfile, "A::b = 1\n").unwrap();
+        let mut sim = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
+        ctx.db
+            .update(|db| {
+                db.set_knob("allocation", "global_acct".to_owned());
+                Ok(())
+            })
+            .unwrap();
+        let frozen = |argv: &[&str], sim: &crate::sim::Simulation| {
+            let mut db = ctx.db.read().unwrap();
+            db.apply_overlay(&<crate::args::Args as clap::Parser>::try_parse_from(argv).unwrap().knob_overlay().unwrap());
+            submit_impl(&inst, &machine, &db, sim, &start_args("bbh", "1:00:00"), false, Some("testhost")).unwrap();
+            let id = *restart::list_ids(&sim.dir).unwrap().last().unwrap();
+            let meta = Restart::load(&sim.dir, id).unwrap().meta;
+            let var = meta.vars.get("ALLOCATION").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+            (meta.knobs.get("allocation").cloned().unwrap_or_default(), var, meta.allocation.unwrap_or_default())
+        };
+        let plain = ["cactup", "sim", "submit", "bbh"];
+        let with_a = ["cactup", "sim", "submit", "bbh", "-a", "cli_acct"];
+        let with_k = ["cactup", "-K", "allocation=cli_acct", "sim", "submit", "bbh"];
+        let all = |a: &str| (a.to_owned(), a.to_owned(), a.to_owned());
+
+        assert_eq!(frozen(&plain, &sim), all("global_acct"), "the global knob alone");
+        assert_eq!(frozen(&with_a, &sim), all("cli_acct"), "-a over the global knob");
+        sim.set_knobs([("allocation".to_owned(), "sim_acct".to_owned())].into_iter().collect()).unwrap();
+        let sim = crate::sim::Simulation::open("bbh", &sim.dir).unwrap();
+        assert_eq!(frozen(&plain, &sim), all("sim_acct"), "the simulation's own over the global knob");
+        assert_eq!(frozen(&with_a, &sim), all("cli_acct"), "-a over the simulation's own");
+        assert_eq!(frozen(&with_k, &sim), all("cli_acct"), "-K allocation= the same");
+    }
+
+    /// `cactup import x.sim --submit --allocation acct` on a machine that
+    /// requires an account: import's --allocation joins the knob overlay as
+    /// main installs it (`Args::knob_overlay`, through `Commands::topology`),
+    /// and the `sim submit` import starts renders it into the account line.
+    /// Without it the same submit refuses.
+    #[test]
+    fn imports_allocation_reaches_the_account_line() {
+        use crate::args::{Args, Commands, SimCommand};
+        use cactup_ecosystem_common::sim::{Parfile, ParfileKind, SimFile, SimMeta, ThornlistText};
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        fs::write(
+            machine.dir.join("submitscripts/default.sh"),
+            "#!/bin/sh\n#PBS -A @KNOB(allocation)@\nexec @CACTUP@ sim run @SIMULATION_NAME@ --installation=@ALIAS@ \
+             --sim-dir=@SIMULATION_DIR@ --machine=@MACHINE@ --restart-id=@RESTART_ID@\n",
+        )
+        .unwrap();
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        let parfile = tmp.path().join("bbh.par");
+        fs::write(&parfile, "A::b = 1\n").unwrap();
+        let sim = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
+        let sim_file = SimFile {
+            format: cactup_ecosystem_common::SIM_FORMAT,
+            sim: SimMeta {
+                name: "bbh".into(),
+                summary: None,
+                description: None,
+                authors: vec![],
+                license: None,
+                contact: None,
+                cactarium: None,
+                root: "Cactus".into(),
+            },
+            thornlist: ThornlistText { filename: "bbh.th".into(), text: String::new(), untracked: vec![] },
+            parfile: Parfile { filename: "bbh.par".into(), kind: ParfileKind::Par, vars: vec![], text: String::new() },
+            inputs: vec![],
+            repos: vec![],
+            run: None,
+            provenance: None,
+        };
+        // What main does with the command line, then what import does.
+        let import = |argv: &[&str]| {
+            let args = <Args as clap::Parser>::try_parse_from(argv).unwrap();
+            let mut db = ctx.db.read().unwrap();
+            db.apply_overlay(&args.knob_overlay().unwrap());
+            let Commands::Import(import) = args.command else { panic!("not an import") };
+            let Commands::Sim(SimCommand::Submit(start)) =
+                crate::commands::import::started_command(&sim_file, &import, "bbh").unwrap()
+            else {
+                panic!("not a sim submit")
+            };
+            submit_impl(&inst, &machine, &db, &sim, &start, false, Some("testhost"))
+        };
+
+        let err = import(&["cactup", "import", "bbh.sim", "--submit"]).unwrap_err();
+        assert!(format!("{err:#}").contains("pass -a VALUE or -K allocation=VALUE"), "{err:#}");
+        assert!(restart::list_ids(&sim.dir).unwrap().is_empty(), "the refusal left nothing");
+
+        import(&["cactup", "import", "bbh.sim", "--submit", "--allocation", "acct"]).unwrap();
+        let id = *restart::list_ids(&sim.dir).unwrap().last().unwrap();
+        let script = fs::read_to_string(restart::restart_dir(&sim.dir, id).join(".cactup/submit-script")).unwrap();
+        assert!(script.lines().any(|l| l == "#PBS -A acct"), "{script}");
+    }
+
+    /// The overlay is the one way `-a` reaches a command: a flag it never
+    /// saw is refused rather than silently dropped.
+    #[test]
+    fn an_allocation_flag_the_overlay_never_saw_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        let parfile = tmp.path().join("bbh.par");
+        fs::write(&parfile, "A::b = 1\n").unwrap();
+        let sim = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
+        let mut args = start_args("bbh", "1:00:00");
+        args.topology.allocation = Some("acct".to_owned());
+        let db = ctx.db.read().unwrap();
+        let err = submit_impl(&inst, &machine, &db, &sim, &args, false, Some("testhost")).unwrap_err();
+        assert!(format!("{err:#}").contains("--allocation acct did not reach the allocation knob"), "{err:#}");
+        assert!(restart::list_ids(&sim.dir).unwrap().is_empty());
+    }
+
+    /// The account directive of a scheduler header line (`#SBATCH -A x`,
+    /// `#SBATCH --account=x`, `#PBS -A x`), as its value — `Some("")` when
+    /// the directive is there with nothing after it.
+    fn account_directive(line: &str) -> Option<String> {
+        let line = line.trim();
+        if !line.starts_with("#SBATCH") && !line.starts_with("#PBS") {
+            return None;
+        }
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        tokens.iter().enumerate().find_map(|(i, t)| match *t {
+            "-A" | "--account" => Some(tokens.get(i + 1).copied().unwrap_or("").to_owned()),
+            _ => t.strip_prefix("--account=").map(str::to_owned),
+        })
+    }
+
+    /// A variable set broad enough for every in-repo submit and build-submit
+    /// script, and the runscripts that pass an allocation to `srun`, on
+    /// `queue`, with `db`'s knobs: `@ALLOCATION@` and the snapshot, as the
+    /// submit paths bind them.
+    fn sweep_vars(machine: &Machine, queue: &str, db: &Database) -> VarSet {
+        let mut v = VarSet::new();
+        vars::set_machine_vars(&mut v, machine, queue, None).unwrap();
+        for (var, n) in [
+            ("NODES", 1u64), ("TASKS", 1), ("TASKS_PER_NODE", 1), ("CPUS_PER_TASK", 1),
+            ("GPUS_PER_TASK", 1), ("RESTART_ID", 0), ("RESULTS_ID", 0), ("ATTEMPT_ID", 0), ("MAKEJOBS", 1),
+        ] {
+            v.set(var, n);
+        }
+        v.set("GPU", true);
+        v.set("QUEUE", machine.meta.scheduler_queue_name(queue).unwrap());
+        v.set("ALLOCATION", db.knob("allocation").unwrap_or_default());
+        for var in ["EMAIL", "MAIL", "CHAINED_JOB_ID", "JOB_ID"] {
+            v.set(var, "");
+        }
+        for var in [
+            "STDOUT_FILE", "STDERR_FILE", "CACTUP", "SIMULATION_NAME", "SHORT_SIMULATION_NAME", "SIMULATION_DIR",
+            "SOURCEDIR", "ALIAS", "TEST_NAME", "TEST_DIR", "RUNDIR", "CONFIGURATION", "CONFIG_DIR",
+            "JOB_NAME", "MAIL_TYPE", "USER", "HOSTNAME", "SCRIPTFILE", "SCRATCH_HOME", "EXECUTABLE", "PARFILE",
+            "SIMULATION_ID", "TESTSUITE_RESULTS_DIR", "TESTSUITE_SELECT",
+        ] {
+            v.set(var, format!("<{}>", var.to_lowercase()));
+        }
+        v.set("MACHINE", machine.name.as_str());
+        vars::set_walltime_vars(&mut v, Walltime::parse("1:00:00").unwrap(), Walltime::parse("0:05:00").unwrap());
+        v.set_knobs(db.knob_snapshot());
+        v
+    }
+
+    /// The knobs of a command: none set; `-a acct_x` on the command line,
+    /// through the real overlay; or the stored knob.
+    fn sweep_dbs() -> [(&'static str, Database); 3] {
+        let mut by_flag = Database::new();
+        let argv = ["cactup", "sim", "submit", "s", "-a", "acct_x"];
+        by_flag.apply_overlay(&<crate::args::Args as clap::Parser>::try_parse_from(argv).unwrap().knob_overlay().unwrap());
+        let mut by_knob = Database::new();
+        by_knob.set_knob("allocation", "acct_x".to_owned());
+        [("no allocation", Database::new()), ("-a alone", by_flag), ("the knob alone", by_knob)]
+    }
+
+    /// The queue a script's route serves first, else the machine's default.
+    fn sweep_queue(machine: &Machine, route: &crate::mdb::meta::Route) -> String {
+        route
+            .queues
+            .first()
+            .cloned()
+            .or_else(|| machine.meta.default_queue(None).map(str::to_owned))
+            .or_else(|| machine.meta.queues.keys().next().cloned())
+            .unwrap()
+    }
+
+    fn sweep_mdb() -> crate::mdb::Mdb {
+        crate::mdb::Mdb::with_roots(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"),
+            PathBuf::from("/nonexistent-user-mdb"),
+        )
+    }
+
+    /// The bug a real QB4 test hit: with no allocation, a script wrote
+    /// `#SBATCH -A ` and sbatch read the next directive as the account. Every
+    /// in-repo submit and build-submit script, rendered with no allocation,
+    /// must leave the directive out (a machine where it is optional) or
+    /// refuse naming `-a` (one where it is required). Given one, by `-a`
+    /// alone or by the knob alone — the same knob now, so the two agree
+    /// trivially — every account line it writes carries it.
+    #[test]
+    fn no_mdb_script_writes_an_empty_account_directive() {
+        let mdb = sweep_mdb();
+        let mut directives = 0;
+        for name in mdb.machines().unwrap().into_keys() {
+            let machine = mdb.load(&name).unwrap();
+            for kind in [ScriptKind::Submit, ScriptKind::BuildSubmit] {
+                for (script, route) in &machine.meta.scripts(kind).routes {
+                    let queue = sweep_queue(&machine, route);
+                    let [(_, none), (_, by_flag), (_, by_knob)] = sweep_dbs();
+                    let render = |db: &Database| {
+                        generate_script(&machine, kind, script, &sweep_vars(&machine, &queue, db), Phase::Submit, None)
+                    };
+                    let what = format!("{name} {} script {script}", kind.dir_name());
+                    match render(&none) {
+                        Ok(text) => {
+                            if let Some(line) = text.lines().find(|l| account_directive(l).is_some()) {
+                                panic!("{what}: no allocation, yet it writes `{line}`");
+                            }
+                        }
+                        Err(e) => {
+                            // A .py script's own refusal, or @KNOB(allocation)@'s.
+                            let e = format!("{e:#}");
+                            assert!(
+                                e.contains(&format!("{name} needs an allocation: pass -a ACCOUNT, or set it once with"))
+                                    || e.contains("knob allocation is unset or empty; set it with `cactup knob \
+                                                   allocation VALUE` or pass -a VALUE"),
+                                "{what}: {e}"
+                            );
+                        }
+                    }
+                    let lines = |db: &Database| -> Vec<String> {
+                        let text = render(db).unwrap_or_else(|e| panic!("{what}: {e:#}"));
+                        text.lines().filter(|l| account_directive(l).is_some()).map(str::to_owned).collect()
+                    };
+                    let given = lines(&by_flag);
+                    for line in &given {
+                        let value = account_directive(line).unwrap();
+                        assert!(value.contains("acct_x"), "{what}: account directive `{line}`");
+                    }
+                    // A script that reads the allocation at all (a knob
+                    // token, `knob(…)`, or the legacy alias) must write it.
+                    let template = fs::read_to_string(machine.script_path(kind, script).unwrap().path).unwrap();
+                    if ["(allocation)", "knob(\"allocation\"", "ALLOCATION"].iter().any(|r| template.contains(r)) {
+                        assert!(!given.is_empty(), "{what}: reads the allocation but writes no account line");
+                    }
+                    assert_eq!(lines(&by_knob), given, "{what}: -a alone and the knob alone");
+                    directives += given.len();
+                }
+            }
+        }
+        // The sweep saw the scripts it is about.
+        assert!(directives > 25, "only {directives} account directives rendered");
+    }
+
+    /// A runscript that hands the allocation to `srun -A` (qbc, db1) runs
+    /// inside the job, which already has an account: with none set the `-A`
+    /// must vanish, not leave `srun -A -p …` taking `-p` as the account. The
+    /// `-A` sits mid-line, so a drop-line token cannot do it: each such
+    /// runscript binds `alloc='@KNOB-OPTIONAL(allocation)@'` and passes
+    /// `${alloc:+-A …}`; the shell's own expansion is checked here.
+    #[test]
+    fn runscripts_pass_srun_a_only_with_an_allocation() {
+        let mdb = sweep_mdb();
+        let mut checked = Vec::new();
+        for name in mdb.machines().unwrap().into_keys() {
+            let machine = mdb.load(&name).unwrap();
+            for (script, route) in &machine.meta.scripts(ScriptKind::Run).routes {
+                let file = machine.script_path(ScriptKind::Run, script).unwrap();
+                let template = fs::read_to_string(&file.path).unwrap();
+                if !template.contains("ALLOCATION") && !template.contains("(allocation") {
+                    continue;
+                }
+                let what = format!("{name} runscript {script}");
+                let queue = sweep_queue(&machine, route);
+                for (label, db) in sweep_dbs() {
+                    let flag = if label == "no allocation" { "" } else { "acct_x" };
+                    let v = sweep_vars(&machine, &queue, &db);
+                    let text = generate_script(&machine, ScriptKind::Run, script, &v, Phase::Run, None)
+                        .unwrap_or_else(|e| panic!("{what}: {e:#}"));
+                    // No `-A` token followed by another flag or by nothing.
+                    for line in text.lines().filter(|l| l.contains("srun")) {
+                        let tokens: Vec<&str> = line.split_whitespace().collect();
+                        for (i, t) in tokens.iter().enumerate() {
+                            if *t == "-A" {
+                                let next = tokens.get(i + 1).copied().unwrap_or("");
+                                assert!(!next.is_empty() && !next.starts_with('-') && next != "\\", "{what}: `{line}`");
+                            }
+                        }
+                    }
+                    let alloc = text.lines().find(|l| l.starts_with("alloc=")).unwrap_or_else(|| panic!("{what}: no alloc= line"));
+                    let out = Command::new("bash")
+                        .arg("-c")
+                        .arg(format!("{alloc}\nset -- ${{alloc:+-A \"$alloc\"}}; echo \"$#:$*\""))
+                        .output()
+                        .unwrap();
+                    let expect = if flag.is_empty() { "0:\n".to_owned() } else { format!("2:-A {flag}\n") };
+                    assert_eq!(String::from_utf8_lossy(&out.stdout), expect, "{what} with {label}");
+                    // Each `-A` use goes through the guard, never the bare value.
+                    assert!(!text.contains("-A acct_x") && !text.contains("-A  "), "{what}: an unguarded -A");
+                    let code = text.lines().filter(|l| !l.trim_start().starts_with('#'));
+                    for line in code.filter(|l| l.contains("srun") && l.contains("-A")) {
+                        assert!(line.contains("${alloc:+-A "), "{what}: `{line}`");
+                    }
+                }
+                checked.push(what);
+            }
+        }
+        for want in [
+            "qbc.loni.org runscript default", "qbc.loni.org runscript test",
+            "db1.hpc.lsu.edu runscript sing", "db1.hpc.lsu.edu runscript sing-test",
+        ] {
+            assert!(checked.iter().any(|c| c == want), "{want} not swept: {checked:?}");
+        }
     }
 }

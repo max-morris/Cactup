@@ -2037,8 +2037,16 @@ cactup state).
 For any value that can come from several places (mirrors `simfactory-docs.txt`
 §6.2, adapted):
 
-1. Explicit CLI flag (e.g. `-q/--queue`, `-a/--allocation`) — highest.
-2. `-K name=value` overlay (this command only).
+1. Explicit CLI flag (e.g. `-q/--queue`) — highest.
+2. `-K name=value` overlay (this command only). `-a/--allocation ACCOUNT` is
+   shorthand for `-K allocation=ACCOUNT`, not a flag of its own: it joins the
+   overlay (`Args::knob_overlay`), so `@ALLOCATION@` and `@KNOB(allocation)@`
+   can never disagree. The two spellings are equally explicit, so one command
+   giving both with different values is refused before anything runs, naming
+   both; the same value both ways is fine. `cactup import`'s `--allocation`
+   (long only: its `-a` is `--alias`) joins the overlay the same way, for the
+   `sim submit`/`sim run` it starts. `resolve_topology` refuses an
+   `--allocation` that did not reach the overlay rather than drop it.
 3. Knob.
 4. Machine `meta.toml` value / default.
 5. Built-in default.
@@ -2068,7 +2076,11 @@ values that belong to that simulation rather than to the user — what
 `cactup import` sets for the inputs a `.sim`'s parfile needs (§8.9), such as
 `kadath-initial-data`. A restart of the simulation freezes the global snapshot
 with these laid over it, and the `-K` overlay over both (a knob `-K` names
-keeps its `-K` value): `-K` > the simulation's knobs > the global knobs. Import
+keeps its `-K` value): `-K` (and `-a`) > the simulation's knobs > the global
+knobs. Which knobs the overlay set travels with the snapshot
+(`Database::is_overlaid`), not a process global. `@ALLOCATION@` is the
+allocation knob of this effective map (a simulation's own included), so it
+too follows command line > simulation > global. Import
 never changes a global knob. When a stored global value contradicts the
 simulation's, submit and run warn, naming the `-K` that would choose
 otherwise. `sim show` lists them.
@@ -2093,7 +2105,7 @@ redistributed:
 ## 6. Templating / variable substitution
 
 Per D7, cactup implements **literal `@NAME@` replacement plus two computed
-token families**, `ENV` and `KNOB`, each in three forms:
+token families**, `ENV` and `KNOB`, each in four forms:
 
 | Token | Value |
 |---|---|
@@ -2103,11 +2115,13 @@ token families**, `ENV` and `KNOB`, each in three forms:
 | `@KNOB(name)@` | the knob `name` from the set's knob snapshot (§5.1); unset or empty is a hard error |
 | `@KNOB-OPTIONAL(name)@` | the knob, or the empty string |
 | `@KNOB-OPTIONAL(name, default)@` | the knob, or `default` |
+| `@ENV-OR-DROP-LINE(NAME)@` | `NAME`; unset or empty removes the whole line holding the token |
+| `@KNOB-OR-DROP-LINE(name)@` | the knob; unset or empty removes the whole line holding the token |
 
 `ENV` arguments are `UPPER_SNAKE`, `KNOB` arguments are kebab-case knob
 identifiers (§5); blanks around the argument and default are tolerated; the
-required forms reject a default (it would defeat them); the only suffix is
-`-OPTIONAL`. The **default** is `"double-quoted"`, `'single-quoted'` — quotes
+required and drop-line forms reject a default (it would defeat them); the
+suffixes are `-OPTIONAL` and `-OR-DROP-LINE`. The **default** is `"double-quoted"`, `'single-quoted'` — quotes
 dropped, `\"`/`\'`/`\\` escape the quote or backslash, any other backslash is
 literal — or a **bare** run of ASCII letters and digits; a bare default
 containing anything else (a space, `/`, `_`, `.`) is an error that names the
@@ -2117,7 +2131,39 @@ machine in question (login node for a submit script or optionlist, compute
 node for a run script or parfile). `KNOB` reads the snapshot attached to the
 variable set; a set without one (MDB `[paths]`, ad-hoc sets) rejects every
 `KNOB` token, optional or not, as "not available in this context" rather than
-reading as unset.
+reading as unset. The required `@KNOB(allocation)@` refusal names `-a` as well
+as `-K`, since `-a ACCOUNT` is shorthand for `-K allocation=ACCOUNT` (§8.5).
+
+**Drop-line forms** (MDB generation 5). An `-OR-DROP-LINE` token whose value is
+set and non-empty is replaced exactly as the required form would be; unset or
+empty, the whole source line holding it is removed, newline included — for a
+directive that must not go out with an empty value (`#SBATCH -A
+@KNOB-OR-DROP-LINE(allocation)@`: a bare `#SBATCH -A ` makes sbatch read the
+next directive as the account). Rules:
+- A line with several drop tokens goes if any of them is empty.
+- Every other token on a dropped line is still substituted, and still fails
+  (an unknown `@NAME@`, say); its output goes with the line.
+- A comment is opaque (§6.1), so a drop token in one does nothing.
+- They are allowed only in texts made of lines: `.sh` scripts, the rendered
+  optionlist, `.par` parfiles. They are an error in `Plain` text (a `[paths]`
+  value, a `wrapper-argv` word) and in a single command template (`[scheduler]`
+  commands, `[build].make`, a universe `wrapper`: `Syntax::ShellLine`, shell
+  comments but no lines), where dropping the line would leave no command.
+- They are an error, set or not, on a line that runs on into the next or on
+  the line that continues one, since dropping half of it breaks what is left.
+  What runs on depends on the syntax. In shell: a backslash-newline (outside
+  single quotes; in a heredoc body only when the delimiter is unquoted), a
+  line that ends inside a `'…'` or `"…"` string, a line ending in `|`, `&&`
+  or `||` outside a comment, and a line holding a heredoc opener (its body
+  follows). A heredoc body line is data and may go; a scheduler directive is
+  a comment to the shell, so a trailing backslash on one continues nothing.
+  In an optionlist: a backslash-newline outside a comment. In a parfile: a
+  `"…"` string spanning lines.
+  A mid-line value inside a quoted command (the qbc/db1 runscripts' `srun -A`)
+  is not a line to drop; those keep a shell `${alloc:+-A …}` instead.
+- `.py` scripts take no tokens: `knob(name, "")` and an `if` do the same.
+- `VarSet::check`, which is lenient about an unset `@ENV(…)@`, keeps such a
+  line rather than dropping it.
 
 `@ENV()@` is the mechanism for machine paths only the machine's environment
 knows (TACC/LRZ-style hashed storage roots in `[paths]`, §4.2); because of
@@ -2156,8 +2202,10 @@ environment can judge. `.py` parfiles are not checked.
    address, a `@NAME@` mentioned in prose) is not an error. What a comment
    *is* depends on what will read the substituted text, so every caller
    names the file kind (`template::Syntax`) — the engine does not guess:
-   - **Shell** (`.sh` submit/run/build-submit scripts, `[scheduler]` and
-     `[build].make` command lines, a universe `wrapper` string): a `#` that
+   - **Shell** (`.sh` submit/run/build-submit scripts; and, as
+     `ShellLine`, which differs only in refusing drop-line tokens, the
+     `[scheduler]` and `[build].make` command lines and a universe `wrapper`
+     string): a `#` that
      begins a word — at the start of the text or after whitespace, `;`,
      `&`, `|` or `(` — outside `'…'`/`"…"` quotes and heredoc bodies, to the
      end of the line. A **scheduler directive is not a comment**: a line
@@ -2357,7 +2405,8 @@ flags exactly** — this is the primary divergence from simfactory's names.
 **Topology (canonical — one variable per §8.5 flag):**
 `NODES` (`-n`), `TASKS` (`-T`, total MPI ranks), `TASKS_PER_NODE` (`-t`/tpn),
 `CPUS_PER_TASK` (`-c`/cpus), `GPU` (`-g`; `1`/`0`),
-`GPUS_PER_TASK` (`-G`/gpus-per-task; always `0` when `GPU` is `0`), `ALLOCATION` (`-a`),
+`GPUS_PER_TASK` (`-G`/gpus-per-task; always `0` when `GPU` is `0`), `ALLOCATION` (`-a`; an
+alias of the effective `allocation` knob, §5.1),
 `QUEUE` (`-q`; the scheduler-facing name — the selected queue's `name` override
 when set, else its `[queues.<q>]` key — §4.2), `MAIL` (`-m`), `MAIL_TYPE` (`-M`),
 `JOB_NAME` (`-J` — not `-j`; see below),
@@ -3683,7 +3732,7 @@ proc-distribution math. Flags (those passed through to submit scripts marked *):
 
 | Flag | Meaning | Default |
 |------|---------|---------|
-| `-a/--allocation` * | account | knob |
+| `-a/--allocation` * | account; shorthand for `-K allocation=` (§5.1) | knob (a simulation's own, else the global one) |
 | `-q/--queue` * | scheduler queue | `queue` knob (passed over when the binary may not run there) → the flavor's `runs-on.default-queue` → machine default queue (§4.4). A build job: `build-queue` knob → `[build].queue` → machine default (§7.9) |
 | `-m/--mail` * | notify address | knob |
 | `-M/--mail-type` * | notify type | knob (`all`) |
@@ -5917,8 +5966,16 @@ names: an overlay that keeps them fails to load), adds the provisioning keys
 rostam's `arm-conda` micromamba block and `x86-modules` Perl stub moved into
 `build-provision`), and adds `[scheduler]`'s `job-ids` and
 `unknown-job-pattern` (§10); `ENV_SETUP` now carries the provisioning steps
-too. Overlays set `[cactup] mdb-generation = 3`. `mdb/GENERATIONS.md` carries
-the step-by-step overlay recipe for each.
+too. Overlays set `[cactup] mdb-generation = 3`. *Generation 4* adds
+`[paths].inputs-home`, where `cactup import` keeps a shared simulation's
+inputs (§8.9). *Generation 5* adds the drop-line tokens
+`@KNOB-OR-DROP-LINE(name)@`/`@ENV-OR-DROP-LINE(NAME)@` (§6), allowed only in
+`.sh` scripts, optionlists and parfiles; with `-a` now shorthand for
+`-K allocation=` (§5.1), the in-repo machines read the `allocation` knob and
+say whether they need it: required ones refuse a submit with none
+(`@KNOB(allocation)@`, or a `.py` `CactupError`), optional ones leave the
+account line out (`@KNOB-OR-DROP-LINE(allocation)@`, or a `.py` `if`).
+`mdb/GENERATIONS.md` carries the step-by-step overlay recipe for each.
 
 **Overlays** (`~/.cactup/machines/<name>/meta.toml`) carry
 `[cactup] mdb-generation = N` (written by `machine create`). On load of a

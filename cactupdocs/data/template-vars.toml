@@ -2,7 +2,7 @@
 description = "Installation alias"
 
 [ALLOCATION]
-description = "Account/allocation to charge"
+description = "Account/allocation to charge: the allocation knob, which -a sets for one command (prefer @KNOB(allocation)@ or @KNOB-OR-DROP-LINE(allocation)@)"
 
 [CHAINED_JOB_ID]
 description = "Job id of the previous segment in a chained multi-segment walltime run"

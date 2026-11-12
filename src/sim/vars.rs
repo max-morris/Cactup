@@ -233,6 +233,21 @@ pub fn resolve_topology(
 ) -> Res<Topology> {
     let m = &machine.name;
 
+    // `-a` is shorthand for `-K allocation=` (§5.1): `main` lays it into the
+    // knob overlay every snapshot carries, which is what the allocation is
+    // read from below. A flag the overlay never saw (a path that bypassed
+    // `Args::knob_overlay`) would be silently dropped, so it is refused.
+    let knob_allocation = db.knob("allocation").filter(|a| !a.is_empty());
+    if let Some(flag) = flags.allocation.as_deref().filter(|a| !a.is_empty())
+        && knob_allocation != Some(flag)
+    {
+        bail!(
+            "Internal error: --allocation {flag} did not reach the allocation knob for this command ({}); \
+             pass -K allocation={flag} instead",
+            knob_allocation.unwrap_or("unset")
+        );
+    }
+
     // The config's build universe gates which queues (and scripts) are
     // reachable (§4.4); configs recording none run in the implicit host.
     let cfg_universe = fit.map(|f| f.universe.as_deref().unwrap_or(HOST_UNIVERSE));
@@ -318,7 +333,11 @@ pub fn resolve_topology(
         derived_nodes: layout.derived,
         scheduler_queue: machine.meta.scheduler_queue_name(&queue)?.to_owned(),
         queue,
-        allocation: flags.allocation.clone().or_else(|| db.knob("allocation").map(str::to_owned)),
+        // `-a` reaches here through the knob overlay it is shorthand for
+        // (`Args::knob_overlay`, §5.1), never as a flag of its own, so
+        // @ALLOCATION@ and @KNOB(allocation)@ can never disagree. A
+        // simulation's own knob is laid over this by `sim::start`.
+        allocation: knob_allocation.map(str::to_owned),
         mail: flags.mail.clone().or_else(|| db.knob("mail").map(str::to_owned)),
         mail_type: flags
             .mail_type
@@ -2132,7 +2151,10 @@ mod tests {
                 scratch_home: "",
             })
             .unwrap();
+            // qbd requires an allocation, read from the knob (ALLOCATION is
+            // its legacy alias).
             vars.set("ALLOCATION", "alloc");
+            vars.set_knobs([("allocation".to_owned(), "alloc".to_owned())].into_iter().collect());
             let script = crate::sim::start::generate_script(
                 &machine,
                 ScriptKind::Submit,
@@ -2297,6 +2319,8 @@ mod tests {
                     )
                     .unwrap();
                     set_topology_vars(&mut v, &topo, "job");
+                    // A script's set always carries the knob snapshot.
+                    v.set_knobs(Default::default());
                     for token in body.split('@').skip(1).step_by(2) {
                         // Fill everything this template names that isn't ours,
                         // so the assertion is about GPUS_PER_TASK alone.

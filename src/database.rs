@@ -295,6 +295,10 @@ pub struct Database {
     /// (§4.3). Absent until discovery first succeeds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detected: Option<DetectedMachine>,
+    /// The knobs this snapshot's command line laid over the stored ones
+    /// (`-K`, and `-a` as `-K allocation=`, §5.1); never stored.
+    #[serde(skip)]
+    overlaid: Vec<String>,
 }
 
 /// The discovery cache (§4.3): which machine this `~/.cactup` resolved to,
@@ -334,6 +338,7 @@ impl Database {
             active_installation: None,
             knobs: IndexMap::new(),
             detected: None,
+            overlaid: Vec::new(),
         }
     }
 
@@ -382,9 +387,22 @@ impl Database {
     /// snapshots only — a `Db::update` closure sees the disk state, so an
     /// override is never written back.
     fn apply_knob_overrides(&mut self) {
-        for (name, value) in knob_overrides() {
+        self.apply_overlay(knob_overrides());
+    }
+
+    /// Lay a command-line knob overlay over this snapshot, remembering
+    /// which knobs it names ([`Self::is_overlaid`]).
+    pub fn apply_overlay(&mut self, overlay: &IndexMap<String, String>) {
+        for (name, value) in overlay {
             self.knobs.insert(name.clone(), value.clone());
+            self.overlaid.push(name.clone());
         }
+    }
+
+    /// Whether this command's overlay set knob `name`: the command line
+    /// outranks a simulation's own value of it (§5.1).
+    pub fn is_overlaid(&self, name: &str) -> bool {
+        self.overlaid.iter().any(|n| n == name)
     }
 
     /// The effective knob values as `@KNOB(name)@` sees them (§6.1): every

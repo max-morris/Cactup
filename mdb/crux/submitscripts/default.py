@@ -18,7 +18,16 @@ lines = ["#! /bin/bash"]
 lines.append("#PBS -q \"{0}\"".format(QUEUE))
 lines.append("#PBS -r n")
 lines.append("#PBS -l walltime={0}".format(WALLTIME))
-lines.append("#PBS -A {0}".format(ALLOCATION))
+# Account required: ALCF rejects a job without a project. The allocation knob,
+# which -a sets for one command; with none, cactup refuses before submitting,
+# naming both.
+allocation = knob("allocation", "")
+if not allocation:
+    raise CactupError(
+        "{0} needs an allocation: pass -a ACCOUNT, or set it once with "
+        "`cactup knob allocation ACCOUNT`".format(MACHINE)
+    )
+lines.append("#PBS -A {0}".format(allocation))
 lines.append("#PBS -l select={0}:system=crux".format(NODES))
 lines.append("#PBS -l place=scatter")
 if CHAINED_JOB_ID:
