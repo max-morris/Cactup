@@ -66,8 +66,8 @@ pub struct Step {
 pub static STEPS: &[Step] = &[
     // 1 → 2: never automatic (Max's decision 4): the hand recipe.
     Step { run: refuse_generation_1, optional: false },
-    // 2 → 3: placeholder until the key renames land (plan phase P2).
-    Step { run: not_implemented_yet, optional: true },
+    // 2 → 3: the phase setups renamed after their phase.
+    Step { run: generation_2_to_3, optional: true },
     // 3 → 4: `inputs-home` is not added; without it inputs go to
     // `~/.cactup/inputs`, the generation-4 default.
     Step { run: raise, optional: true },
@@ -107,8 +107,258 @@ fn refuse_generation_1(_: &mut Overlay) -> Result<Vec<String>, Stop> {
     Err(Stop::Unsupported)
 }
 
-fn not_implemented_yet(_: &mut Overlay) -> Result<Vec<String>, Stop> {
-    Err(Stop::Found("updating from generation 2 to 3 is not implemented yet".to_owned()))
+/// The generation-2 phase setups and their generation-3 names.
+const SETUP_RENAMES: [(&str, &str); 3] = [
+    ("env-build-setup", "build-env-setup"),
+    ("env-submit-setup", "submit-env-setup"),
+    ("env-run-setup", "run-env-setup"),
+];
+
+/// 2 → 3: rename the phase setups in `[environment]` and every
+/// `[universes.*]`, in place. No provisioning split: the setups keep
+/// running where they ran, so leaving their lines alone keeps generation 2's
+/// behavior (a provisioning key is optional and never written). Refuses
+/// where the rename is ambiguous (both names in one table), and where a
+/// `.py` build-submit script's `ENV_SETUP` would quietly change: generation
+/// 3 builds it in the submit universe, where generation 2 used the build
+/// universe.
+fn generation_2_to_3(overlay: &mut Overlay) -> Result<Vec<String>, Stop> {
+    let mut suspects = Vec::new();
+    for (label, mut scope) in scopes(&mut overlay.meta.doc) {
+        for (old, new) in SETUP_RENAMES {
+            if scope.contains(old) && scope.contains(new) {
+                return Err(Stop::Found(format!("{label} has both {old} and {new}")));
+            }
+        }
+        scope.rename(&SETUP_RENAMES);
+        for key in ["env-setup", "build-env-setup", "submit-env-setup", "run-env-setup"] {
+            let Some(text) = scope.get_str(key) else { continue };
+            let found = provisioning_hits(&text);
+            if !found.is_empty() {
+                suspects.push(format!("{label} {key} ({})", found.join(", ")));
+            }
+        }
+    }
+    // The ENV_SETUP check needs the typed result; one that does not parse
+    // is reported by the verification after the last step.
+    if let Ok(meta) = toml::from_str::<Meta>(&overlay.meta.doc.to_string()) {
+        check_py_env_setup(overlay, &meta)?;
+    }
+    let mut notes = Vec::new();
+    if !suspects.is_empty() {
+        let shown = suspects.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+        let more = if suspects.len() > 3 { format!(" and {} more", suspects.len() - 3) } else { String::new() };
+        notes.push(format!(
+            "setups that may belong in a provisioning key (generation 3, step 2): {shown}{more}"
+        ));
+    }
+    Ok(notes)
+}
+
+/// What in a setup looks like it makes or fetches something, which
+/// generation 3 moves to a provisioning step: worth a look, never moved.
+fn provisioning_hits(text: &str) -> Vec<&'static str> {
+    static PATTERNS: std::sync::OnceLock<Vec<(&str, regex::Regex)>> = std::sync::OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        [
+            ("mkdir", r"\bmkdir\b"),
+            ("download", r"\b(curl|wget)\b"),
+            ("pip install", r"\bpip3?\s+install\b"),
+            ("conda install", r"\b(conda|mamba|micromamba)\s+(create|install)\b"),
+            ("git clone", r"\bgit\s+clone\b"),
+            ("activate", r"\bactivate\b"),
+        ]
+        .into_iter()
+        .map(|(what, pattern)| (what, regex::Regex::new(pattern).expect("valid pattern")))
+        .collect()
+    });
+    patterns.iter().filter(|(_, re)| re.is_match(text)).map(|(what, _)| *what).collect()
+}
+
+/// A `.py` build-submit script that prints `ENV_SETUP` got the submit
+/// phase's block in the build universe in generation 2, and gets it in the
+/// submit universe from generation 3 on. Refuse when the two differ for any
+/// build universe the route can serve: the batch build would quietly get a
+/// different environment.
+// Mirrors commands/build.rs `submit_impl`: the build universe is the
+// flavor header's `universe`, else `[build].universe`, else a declared host
+// (build::resolve_build_universe; an explicit `--universe` is the user's own
+// choice and not considered), the route is filtered by it (`host` for
+// none), and the submit universe is the route's `universe`, else a declared
+// host (sim::start::resolve_submit_universe).
+fn check_py_env_setup(overlay: &Overlay, meta: &Meta) -> Result<(), Stop> {
+    // The flavors' own build universes first, so a refusal names the one a
+    // plain `build submit` uses.
+    let host = meta.declared_host().map(|_| super::HOST_UNIVERSE.to_owned());
+    let mut candidates: Vec<Option<String>> = Vec::new();
+    let headers = overlay.optionlists.iter().filter_map(|f| optionlist::parse_header(&f.doc.to_string()).ok());
+    for header in headers {
+        candidates.push(header.universe.or_else(|| meta.build.universe.clone()).or_else(|| host.clone()));
+    }
+    candidates.extend([meta.build.universe.clone(), host.clone()]);
+    let mut seen = Vec::new();
+    candidates.retain(|c| !seen.contains(c) && {
+        seen.push(c.clone());
+        true
+    });
+    for (script, route) in &meta.scripts(super::ScriptKind::BuildSubmit).routes {
+        let rel = format!("buildsubmitscripts/{script}.py");
+        let prints = overlay.scripts.contains(&rel)
+            && fs::read_to_string(overlay.dir.join(&rel)).is_ok_and(|text| text.contains("ENV_SETUP"));
+        if !prints {
+            continue;
+        }
+        let submit = route.universe.clone().or_else(|| host.clone());
+        let now = meta.effective_env(submit.as_deref(), super::Phase::Submit);
+        for build in &candidates {
+            if !route.compatible_with(build.as_deref().unwrap_or(super::HOST_UNIVERSE)) {
+                continue;
+            }
+            let before = meta.effective_env(build.as_deref(), super::Phase::Submit);
+            if before != now {
+                let name = |u: &Option<String>| u.as_ref().map_or("none".to_owned(), |u| format!("\"{u}\""));
+                return Err(Stop::Found(format!(
+                    "its build-submit script \"{script}.py\" prints ENV_SETUP, which now comes from the submit \
+                     universe ({}) instead of the build universe ({}): {}",
+                    name(&submit),
+                    name(build),
+                    line_changes(&before, &now)
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What changes between two setup blocks, compactly: the lines dropped and
+/// the lines added, a couple of each.
+fn line_changes(before: &str, now: &str) -> String {
+    let lines = |text: &str| text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect::<Vec<_>>();
+    let (old, new) = (lines(before), lines(now));
+    let list = |only: Vec<&String>| {
+        let shown: Vec<String> = only.iter().take(2).map(|l| format!("`{l}`")).collect();
+        let more = if only.len() > 2 { format!(" and {} more", only.len() - 2) } else { String::new() };
+        format!("{}{more}", shown.join(", "))
+    };
+    let dropped: Vec<&String> = old.iter().filter(|l| !new.contains(l)).collect();
+    let added: Vec<&String> = new.iter().filter(|l| !old.contains(l)).collect();
+    match (dropped.is_empty(), added.is_empty()) {
+        (true, true) => "the same lines in another order".to_owned(),
+        (false, true) => format!("drops {}", list(dropped)),
+        (true, false) => format!("adds {}", list(added)),
+        (false, false) => format!("drops {}, adds {}", list(dropped), list(added)),
+    }
+}
+
+/// A table of setups: `[environment]` or one universe, in whatever form it
+/// was written (a table, an inline table, or dotted keys).
+enum Scope<'a> {
+    Table(&'a mut toml_edit::Table),
+    Inline(&'a mut toml_edit::InlineTable),
+}
+
+impl Scope<'_> {
+    fn of(item: &mut toml_edit::Item) -> Option<Scope<'_>> {
+        match item {
+            toml_edit::Item::Table(table) => Some(Scope::Table(table)),
+            toml_edit::Item::Value(toml_edit::Value::InlineTable(table)) => Some(Scope::Inline(table)),
+            _ => None,
+        }
+    }
+
+    fn contains(&self, key: &str) -> bool {
+        match self {
+            Scope::Table(t) => t.contains_key(key),
+            Scope::Inline(t) => t.contains_key(key),
+        }
+    }
+
+    fn get_str(&self, key: &str) -> Option<String> {
+        match self {
+            Scope::Table(t) => t.get(key).and_then(|i| i.as_str()).map(str::to_owned),
+            Scope::Inline(t) => t.get(key).and_then(|v| v.as_str()).map(str::to_owned),
+        }
+    }
+
+    /// Rename keys in place: same position, same decoration and comments,
+    /// same value. Idempotent (a renamed key is not found again).
+    fn rename(&mut self, renames: &[(&str, &str)]) {
+        let renamed = |key: &toml_edit::Key| {
+            let (_, new) = renames.iter().find(|(old, _)| *old == key.get())?;
+            Some(
+                toml_edit::Key::new(*new)
+                    .with_leaf_decor(key.leaf_decor().clone())
+                    .with_dotted_decor(key.dotted_decor().clone()),
+            )
+        };
+        match self {
+            Scope::Table(t) => {
+                if !t.iter().any(|(k, _)| renames.iter().any(|(old, _)| *old == k)) {
+                    return;
+                }
+                let keys: Vec<String> = t.iter().map(|(k, _)| k.to_owned()).collect();
+                let entries: Vec<(toml_edit::Key, toml_edit::Item)> = keys
+                    .iter()
+                    .map(|k| {
+                        let (key, item) = t.get_key_value(k).expect("listed");
+                        (renamed(key).unwrap_or_else(|| key.clone()), item.clone())
+                    })
+                    .collect();
+                t.clear();
+                for (key, item) in entries {
+                    t.insert_formatted(&key, item);
+                }
+            }
+            Scope::Inline(t) => {
+                if !t.iter().any(|(k, _)| renames.iter().any(|(old, _)| *old == k)) {
+                    return;
+                }
+                let keys: Vec<String> = t.iter().map(|(k, _)| k.to_owned()).collect();
+                let entries: Vec<(toml_edit::Key, toml_edit::Value)> = keys
+                    .iter()
+                    .map(|k| {
+                        let (key, item) = t.get_key_value(k).expect("listed");
+                        let value = item.as_value().expect("an inline table holds values").clone();
+                        (renamed(key).unwrap_or_else(|| key.clone()), value)
+                    })
+                    .collect();
+                t.clear();
+                for (key, value) in entries {
+                    t.insert_formatted(&key, value);
+                }
+            }
+        }
+    }
+}
+
+/// `[environment]` and every `[universes.<name>]`, labeled as a user would
+/// write them.
+fn scopes(doc: &mut DocumentMut) -> Vec<(String, Scope<'_>)> {
+    let mut out = Vec::new();
+    for (key, item) in doc.as_table_mut().iter_mut() {
+        match key.get() {
+            "environment" => out.extend(Scope::of(item).map(|s| ("[environment]".to_owned(), s))),
+            "universes" => match item {
+                toml_edit::Item::Table(table) => {
+                    for (name, item) in table.iter_mut() {
+                        let label = format!("[universes.{}]", name.get());
+                        out.extend(Scope::of(item).map(|s| (label, s)));
+                    }
+                }
+                toml_edit::Item::Value(toml_edit::Value::InlineTable(table)) => {
+                    for (name, value) in table.iter_mut() {
+                        let label = format!("[universes.{}]", name.get());
+                        if let Some(t) = value.as_inline_table_mut() {
+                            out.push((label, Scope::Inline(t)));
+                        }
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -146,7 +396,6 @@ pub struct Overlay {
     /// `optionlists/*.toml`, the files `Machine::flavors` lists.
     pub optionlists: Vec<TomlFile>,
     /// Script files relative to the overlay (`buildsubmitscripts/build.py`).
-    #[allow(dead_code)] // read by the 2→3 checks (plan phase P2)
     pub scripts: Vec<String>,
 }
 
@@ -298,9 +547,6 @@ pub struct OverlayGenerationError {
     /// Where the generation changes are described: a local `GENERATIONS.md`
     /// or its published copy.
     pub guide: String,
-    /// `<CACTUP_HOME>/machine-backups`, where "start over" moves the old
-    /// files.
-    pub backups: PathBuf,
     /// The `machine create` command that starts this machine over, when its
     /// base still exists (`None`: there is nothing to start over from).
     pub recreate: Option<String>,
@@ -346,7 +592,7 @@ impl OverlayGenerationError {
 
 impl std::fmt::Display for OverlayGenerationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self { name, path, found, want, guide, backups, recreate, why } = self;
+        let Self { name, path, found, want, guide, recreate, why } = self;
         match why {
             Why::Newer { kept } => {
                 write!(f, "user-MDB machine \"{name}\" is MDB generation {found}, and this cactup reads {want}: run `cactup update`")?;
@@ -394,17 +640,16 @@ impl std::fmt::Display for OverlayGenerationError {
             path.display()
         )?;
         // Starting over moves the old files aside rather than deleting
-        // them: a refusal before the first step takes no backup.
+        // them: a refusal before the first step takes no backup. A hidden
+        // directory is no machine (`Mdb::machines`).
         let Some(recreate) = recreate else { return Ok(()) };
-        let aside = backups.join(name);
         let dir = path.parent().unwrap_or(path);
+        let aside = dir.with_file_name(format!(".{name}.old"));
         write!(
             f,
-            "\n  Or start over (a fresh copy without your edits; the old files are moved aside): \
-             mkdir -p '{}' && mv '{}' '{}' && {recreate}",
-            aside.display(),
+            "\n  Or start over without your edits, keeping the old files: mv '{}' '{}' && {recreate}",
             dir.display(),
-            aside.join("before-start-over").display()
+            aside.display()
         )
     }
 }
@@ -470,7 +715,6 @@ impl Place<'_> {
             found,
             want,
             guide: self.guide.to_owned(),
-            backups: self.backups.to_owned(),
             recreate: self.recreate(origin),
             why,
         }
@@ -1056,8 +1300,9 @@ pub(crate) mod tests {
         assert!(lines[1].contains(&format!("mdb-generation = {next}")), "{text}");
         assert!(lines[1].contains(&format!("{name}/meta.toml")), "{text}");
         // Starting over keeps the old files: moved aside, never deleted.
-        assert!(lines[2].contains("without your edits") && lines[2].contains("moved aside"), "{text}");
-        assert!(lines[2].contains("&& mv '") && !lines[2].contains("delete"), "{text}");
+        assert!(lines[2].contains("without your edits") && lines[2].contains("keeping the old files"), "{text}");
+        assert!(lines[2].contains(&format!("/.{name}.old'")), "{text}");
+        assert!(lines[2].contains(": mv '") && !lines[2].contains("delete"), "{text}");
         assert!(lines[2].contains(&format!("cactup machine create {name}")), "{text}");
         assert!(!text.contains('§'), "{text}");
     }
@@ -1079,17 +1324,145 @@ pub(crate) mod tests {
         assert!(!home.mdb.user_root.join(".old.migrate.lock").exists());
     }
 
+    /// What generation 2 built for each universe (none, and every declared
+    /// one) and phase, computed from the original `meta.toml` under the old
+    /// names, independently of today's code: `env-setup`, then the phase's
+    /// `env-<phase>-setup`, a universe's keys replacing the machine's one by
+    /// one, joined with a newline where the first does not end in one.
+    fn generation_2_blocks(original: &str) -> Vec<(Option<String>, Phase, String)> {
+        let table: toml::Table = original.parse().unwrap();
+        let get = |t: Option<&toml::Value>, key: &str| t.and_then(|t| t.get(key)).and_then(|v| v.as_str()).map(str::to_owned);
+        let environment = table.get("environment");
+        let universes = table.get("universes").and_then(|u| u.as_table()).cloned().unwrap_or_default();
+        let mut out = Vec::new();
+        for universe in std::iter::once(None).chain(universes.keys().cloned().map(Some)) {
+            let over = universe.as_ref().and_then(|u| universes.get(u));
+            let pick = |key: &str| get(over, key).or_else(|| get(environment, key));
+            for (phase, key) in [(Phase::Build, "env-build-setup"), (Phase::Submit, "env-submit-setup"), (Phase::Run, "env-run-setup")] {
+                let mut block = String::new();
+                for part in [pick("env-setup"), pick(key)].into_iter().flatten() {
+                    if !block.is_empty() && !block.ends_with('\n') {
+                        block.push('\n');
+                    }
+                    block.push_str(&part);
+                }
+                out.push((universe.clone(), phase, block));
+            }
+        }
+        out
+    }
+
+    /// Every setup block of a migrated machine is, string for string, what
+    /// generation 2 built from its original.
+    fn assert_same_environment(label: &str, original: &str, machine: &Machine) {
+        for (universe, phase, block) in generation_2_blocks(original) {
+            assert_eq!(
+                machine.meta.effective_env(universe.as_deref(), phase),
+                block,
+                "{label}: {phase:?} in {universe:?}"
+            );
+        }
+    }
+
+    use crate::mdb::Phase;
+
     #[test]
-    fn a_generation_2_overlay_waits_for_its_step() {
+    fn generation_2_setups_are_renamed_in_place() {
         let home = Home::new();
         let dir = home.overlay("two", 2);
+        let meta = fs::read_to_string(dir.join("meta.toml")).unwrap();
+        let original = meta.replace(
+            "[cactup]",
+            "[environment]\n\
+             env-setup = \"module load base\"\n\
+             # the build needs gcc\n\
+             env-build-setup = \"module load gcc\" # pinned\n\
+             env-run-setup = \"\"\"\nexport A=1\nmkdir -p $HOME/run\n\"\"\"\n\
+             \n\
+             [universes.box]\n\
+             wrapper-argv = [\"env\"]\n\
+             env-submit-setup = \"module load slurm\"\n\
+             \n\
+             [universes]\n\
+             inl = { env-build-setup = \"pip install x\", env-setup = \"export B=2\" }\n\
+             dot.env-run-setup = \"export C=3\"\n\
+             \n\
+             [cactup]",
+        );
+        fs::write(dir.join("meta.toml"), &original).unwrap();
+        let machine = home.mdb.load("two").unwrap();
+        let now = fs::read_to_string(dir.join("meta.toml")).unwrap();
+        // Renamed where they stood, comments and layout kept.
+        assert!(now.contains("# the build needs gcc\nbuild-env-setup = \"module load gcc\" # pinned\n"), "{now}");
+        assert!(now.contains("run-env-setup = \"\"\"\nexport A=1"), "{now}");
+        assert!(now.contains("wrapper-argv = [\"env\"]\nsubmit-env-setup = \"module load slurm\""), "{now}");
+        assert!(now.contains("inl = { build-env-setup = \"pip install x\", env-setup = \"export B=2\" }"), "{now}");
+        assert!(now.contains("dot.run-env-setup = \"export C=3\""), "{now}");
+        assert!(!now.contains("env-build-setup") && !now.contains("env-run-setup") && !now.contains("provision ="), "{now}");
+        assert_same_environment("two", &original, &machine);
+        // One note, naming each suspect setup.
+        let notes = fs::read_to_string(home.backups().join("two/generation-2/NOTES.txt")).unwrap();
+        let note = notes.lines().find(|l| l.contains("provisioning")).unwrap_or_else(|| panic!("{notes}"));
+        assert!(note.contains("[environment] run-env-setup (mkdir)"), "{note}");
+        assert!(note.contains("[universes.inl] build-env-setup (pip install)"), "{note}");
+        assert_eq!(notes.matches("provisioning").count(), 1, "{notes}");
+    }
+
+    #[test]
+    fn both_names_of_one_setup_are_refused() {
+        let home = Home::new();
+        let dir = home.overlay("two", 2);
+        let meta = fs::read_to_string(dir.join("meta.toml")).unwrap();
+        let both = "[universes.u]\nenv-run-setup = \"a\"\nrun-env-setup = \"b\"\n[cactup]";
+        fs::write(dir.join("meta.toml"), meta.replace("[cactup]", both)).unwrap();
         let hash = hash_machine_dir(&dir).unwrap();
         let e = home.mdb.load("two").unwrap_err();
         let text = e.to_string();
-        assert!(text.contains("not implemented yet"), "{text}");
+        assert!(text.contains("[universes.u] has both env-run-setup and run-env-setup"), "{text}");
         assert_older_refusal_shape(&text, "two", 2, 3);
         assert_eq!(hash_machine_dir(&dir).unwrap(), hash);
-        assert!(!home.backups().exists());
+    }
+
+    /// The `.py` build-submit `ENV_SETUP` case: refused only where the block
+    /// would change.
+    #[test]
+    fn a_py_build_submit_whose_environment_would_change_is_refused() {
+        let home = Home::new();
+        let dir = home.overlay("two", 2);
+        let meta = fs::read_to_string(dir.join("meta.toml")).unwrap();
+        fs::create_dir_all(dir.join("buildsubmitscripts")).unwrap();
+        fs::write(dir.join("buildsubmitscripts/build.py"), "print(ENV_SETUP)\n").unwrap();
+        let universes = "[build]\nuniverse = \"img\"\n[universes.img]\nwrapper-argv = [\"env\"]\n\
+                         env-submit-setup = \"module load apptainer\"\n";
+        let write = |route: &str| {
+            let text = meta.replace("[cactup]", &format!("{universes}[buildsubmitscripts]\nbuild = {route}\n[cactup]"));
+            fs::write(dir.join("meta.toml"), text).unwrap();
+        };
+        // The build universe adds a line the submit universe (none) lacks.
+        write("[\"local\"]");
+        let e = home.mdb.load("two").unwrap_err();
+        let text = e.to_string();
+        assert!(text.contains("\"build.py\" prints ENV_SETUP"), "{text}");
+        assert!(text.contains("submit universe (none) instead of the build universe (\"img\")"), "{text}");
+        assert!(text.contains("drops `module load apptainer`"), "{text}");
+        assert_older_refusal_shape(&text, "two", 2, 3);
+        // A route that only serves the host's builds never saw "img".
+        write("{ queues = [\"local\"], build-universes = [\"host\"] }");
+        home.mdb.load("two").unwrap();
+    }
+
+    #[test]
+    fn a_py_build_submit_without_env_setup_or_with_the_same_block_migrates() {
+        let home = Home::new();
+        let dir = home.overlay("two", 2);
+        let meta = fs::read_to_string(dir.join("meta.toml")).unwrap();
+        fs::create_dir_all(dir.join("buildsubmitscripts")).unwrap();
+        // Universes, but the script never prints ENV_SETUP.
+        fs::write(dir.join("buildsubmitscripts/build.py"), "print('#!/bin/sh')\n").unwrap();
+        let extra = "[build]\nuniverse = \"img\"\n[universes.img]\nwrapper-argv = [\"env\"]\nenv-submit-setup = \"x\"\n\
+                     [buildsubmitscripts]\nbuild = [\"local\"]\n[cactup]";
+        fs::write(dir.join("meta.toml"), meta.replace("[cactup]", extra)).unwrap();
+        home.mdb.load("two").unwrap();
     }
 
     #[test]
@@ -1101,7 +1474,7 @@ pub(crate) mod tests {
         fs::write(dir.join("meta.toml"), with_origin("qbd")).unwrap();
         let text = home.mdb.load("old").unwrap_err().to_string();
         assert!(text.ends_with("cactup machine create old --from-existing qbd"), "{text}");
-        let aside = home.backups().join("old/before-start-over");
+        let aside = home.mdb.user_root.join(".old.old");
         assert!(text.contains(&format!("mv '{}' '{}'", dir.display(), aside.display())), "{text}");
 
         // Another overlay as the base counts while it is there.
@@ -1349,8 +1722,9 @@ pub(crate) mod tests {
     }
 
     /// Generations whose step is still a placeholder that refuses with "not
-    /// implemented yet". Plan phase P2 replaces the 2→3 one and empties this.
-    const PLACEHOLDERS: &[u32] = &[2];
+    /// implemented yet" (none now; the slot a future step can use while it
+    /// is being written).
+    const PLACEHOLDERS: &[u32] = &[];
 
     /// The machine directories (holding a meta.toml) directly under `dir`.
     fn machine_dirs(dir: &Path) -> Vec<PathBuf> {
@@ -1440,17 +1814,30 @@ pub(crate) mod tests {
                     continue;
                 }
                 let before: Vec<(PathBuf, Vec<u8>)> = walk(&dir).into_iter().map(|p| (p.clone(), fs::read(&p).unwrap())).collect();
+                let original = fs::read_to_string(dir.join("meta.toml")).unwrap();
                 assert_migrates(&home, &name, n);
-                // Raising the number changes that line and nothing else.
+                if n == 2 {
+                    assert_same_environment(&format!("gen-2/{name}"), &original, &home.mdb.load(&name).unwrap());
+                }
+                // Only the stamp changes, and from generation 2 the setup
+                // names, each in place.
+                let renamed = |old: &str| {
+                    SETUP_RENAMES.iter().fold(old.to_owned(), |line, (from, to)| line.replacen(from, to, 1))
+                };
                 for (path, bytes) in before {
                     let now = fs::read(&path).unwrap();
                     if path.ends_with("meta.toml") {
                         let (old, new) = (String::from_utf8(bytes).unwrap(), String::from_utf8(now).unwrap());
+                        assert_eq!(old.lines().count(), new.lines().count(), "gen-{n}/{name}");
                         let differing: Vec<_> = old.lines().zip(new.lines()).filter(|(a, b)| a != b).collect();
-                        assert!(
-                            differing.len() == 1 && differing[0].1.contains("mdb-generation"),
-                            "gen-{n}/{name}: {differing:?}"
-                        );
+                        let stamps = differing.iter().filter(|(_, b)| b.starts_with("mdb-generation")).count();
+                        assert_eq!(stamps, 1, "gen-{n}/{name}: {differing:?}");
+                        for (a, b) in &differing {
+                            assert!(
+                                b.starts_with("mdb-generation") || (n == 2 && renamed(a) == *b),
+                                "gen-{n}/{name}: {a:?} became {b:?}"
+                            );
+                        }
                     } else {
                         assert_eq!(now, bytes, "gen-{n}/{name}: '{}' changed", path.display());
                     }
@@ -1484,10 +1871,13 @@ pub(crate) mod tests {
         let home = Home::new();
         let dir = install(&home, case, &name);
         let outcome = expect.get("outcome").and_then(|v| v.as_str()).unwrap_or_else(|| panic!("{label}: no outcome"));
-        let result_generation = expect
-            .get("result-generation")
-            .and_then(|v| v.as_integer())
-            .unwrap_or_else(|| panic!("{label}: no result-generation"));
+        // A number, or "current": this binary's generation, which a migrated
+        // case reaches whatever generation is current when it runs.
+        let result_generation = match expect.get("result-generation") {
+            Some(toml::Value::String(s)) if s == "current" => i64::from(MDB_GENERATION),
+            Some(toml::Value::Integer(n)) => *n,
+            other => panic!("{label}: result-generation is {other:?}"),
+        };
         let findings: Vec<&str> = expect
             .get("findings")
             .and_then(|v| v.as_array())
@@ -1500,6 +1890,7 @@ pub(crate) mod tests {
         };
         let start = generation_now(&dir);
         let before = contents(&dir);
+        let original = fs::read_to_string(dir.join("meta.toml")).unwrap();
 
         // A placeholder step refuses whatever the case expects of the real
         // one, before writing anything.
@@ -1512,7 +1903,10 @@ pub(crate) mod tests {
         let after = contents(&dir);
         // What the user reads: the refusal, or the backup's notes.
         let message = match (&result, outcome) {
-            (Ok(_), "migrated") => {
+            (Ok(machine), "migrated") => {
+                if start == 2 {
+                    assert_same_environment(&label, &original, machine);
+                }
                 let backup = home.backups().join(&name).join(format!("generation-{start}"));
                 assert!(backup.join(".complete").is_file(), "{label}: no finished backup");
                 fs::read_to_string(backup.join("NOTES.txt")).unwrap()

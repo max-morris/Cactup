@@ -153,11 +153,13 @@ impl Mdb {
             for entry in entries {
                 let entry = entry?;
                 // A machine directory is one holding a meta.toml; anything
-                // else (e.g. __pycache__) is not a machine.
-                if !entry.path().join("meta.toml").is_file() {
+                // else (e.g. __pycache__) is not a machine, and neither is a
+                // hidden one: that is where a refused overlay's "start over"
+                // keeps the old files (`.<name>.old`).
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') || !entry.path().join("meta.toml").is_file() {
                     continue;
                 }
-                let name = entry.file_name().to_string_lossy().into_owned();
                 out.insert(name, layer); // User is scanned second and wins
             }
         }
@@ -963,6 +965,10 @@ mod tests {
         // `generic` is always present via the embedded built-in fallback, even
         // though neither temp root defines it.
         assert_eq!(machines.keys().cloned().collect::<Vec<_>>(), ["box", "generic", "solo"]);
+        // A hidden directory is set aside, not a machine.
+        fs::create_dir_all(user.path().join(".box.old")).unwrap();
+        fs::copy(user.path().join("box/meta.toml"), user.path().join(".box.old/meta.toml")).unwrap();
+        assert_eq!(mdb.machines().unwrap().len(), 3);
         assert_eq!(machines["box"], Layer::User);
         assert_eq!(machines["generic"], Layer::System);
         assert_eq!(machines["solo"], Layer::System);
