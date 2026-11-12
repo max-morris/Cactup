@@ -44,7 +44,7 @@ fn run_is_live(sched: &Scheduler, r: &Restart) -> Res<bool> {
 /// Whether the active restart `r`'s job, whose run has not recorded its
 /// end (read afresh), is one the scheduler here lists in a state no
 /// pattern reads.
-fn listed_unread(sim: &Simulation, sched: &Scheduler, r: &Restart) -> Res<bool> {
+pub(crate) fn listed_unread(sim: &Simulation, sched: &Scheduler, r: &Restart) -> Res<bool> {
     let fresh = Restart::load(&sim.dir, r.id)?;
     Ok(match fresh.meta.scheduler_job(sched) {
         Some(job) if !fresh.meta.terminated && sched.recorded_elsewhere(job).is_none() => {
@@ -894,15 +894,18 @@ fn live_jobs(sim: &Simulation, sched: &Scheduler) -> Res<Vec<LiveJob>> {
 /// active restart's while it has not recorded its end, else the newest
 /// ended restart's still-listed job, which waiting until it leaves the
 /// queue also clears); any other (a pre-submitted chain's, an ended one
-/// behind a running restart) only `-f` stops.
+/// behind a running restart) only `-f` stops. A job listed in a state no
+/// pattern reads before its run's end is `sim stop -f`'s: a graceful `sim
+/// stop` only writes the trigger and says so.
 fn live_jobs_refusal(name: &str, live: &[LiveJob], stops: Option<u32>) -> String {
     let stoppable = live.iter().find(|l| Some(l.id) == stops);
+    let stop = match stoppable {
+        Some(l) if !l.ended && l.status == JobStatus::Error => format!("cactup sim stop -f {name}"),
+        _ => format!("cactup sim stop {name}"),
+    };
     let advice = match stoppable {
-        Some(_) if live.len() == 1 => format!("`cactup sim stop {name}` first, or use -f to stop it and delete"),
-        Some(l) => format!(
-            "`cactup sim stop {name}` stops {}'s job; use -f to stop them all and delete",
-            restart::dir_name(l.id)
-        ),
+        Some(_) if live.len() == 1 => format!("run `{stop}` first, or use -f to stop it and delete"),
+        Some(l) => format!("`{stop}` stops {}'s job; use -f to stop them all and delete", restart::dir_name(l.id)),
         None => "use -f to stop them and delete".to_owned(),
     };
     let jobs = live
@@ -1820,7 +1823,7 @@ mod tests {
         assert_eq!(live.iter().map(|l| (l.id, l.ended)).collect::<Vec<_>>(), [(0, true)]);
         let refusal = live_jobs_refusal("requeued", &live, Some(0));
         assert!(refusal.contains("job 1003, still listed by the scheduler after the restart ended (queued again)"), "{refusal}");
-        assert!(refusal.ends_with("`cactup sim stop requeued` first, or use -f to stop it and delete"), "{refusal}");
+        assert!(refusal.ends_with("run `cactup sim stop requeued` first, or use -f to stop it and delete"), "{refusal}");
         assert_eq!(shown(false, false, true, Some(Some(JobStatus::Queued))), DisplayState::Requeued);
         // `sim list` asks about it and says the same.
         let name = "requeued".to_owned();
@@ -2078,7 +2081,7 @@ mod tests {
             assert!(refusal.contains("output-0001 = job 1001"), "{zero}: {refusal}");
             match zero {
                 "TO" => assert!(refusal.contains("`cactup sim stop chain` stops output-0001's job"), "{refusal}"),
-                _ => assert!(refusal.ends_with("`cactup sim stop chain` first, or use -f to stop it and delete"), "{refusal}"),
+                _ => assert!(refusal.ends_with("run `cactup sim stop chain` first, or use -f to stop it and delete"), "{refusal}"),
             }
 
             // Forced: restart 1's job, not restart 0's.

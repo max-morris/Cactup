@@ -436,7 +436,8 @@ its run could record it, after a node failure, say) counts as live: `sim
 submit` chains behind it, `sim run` refuses beside it, `sim stop` writes
 `TERMINATE` but does not wait for it (the job is not acting on it now)
 and says that `sim stop --force` asks the scheduler to cancel it, and
-`sim delete` refuses it without `--force` (which cancels it). `sim list`
+`sim delete` refuses it without `--force` (which cancels it); the
+refusals of `sim run` and `sim delete` name `sim stop --force`. `sim list`
 shows it `ERROR`. `sim list` and `sim delete` ask Slurm for all your jobs
 at once, and that list leaves out jobs that have ended, so there a job
 that ended this way reads as gone, while a suspended one is listed. A
