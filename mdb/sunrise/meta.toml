@@ -18,6 +18,9 @@ hostname    = "sol-login.fysik.su.se"
 # @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
 install-home    = "/cfs/home/@USER@/ET-Release-06-24"
 simulation-home = "/cfs/data/@USER@/simulations"
+# Where `cactup import` keeps the downloaded and unpacked inputs of shared
+# simulations: big, so beside the simulations, not in the home quota.
+inputs-home = "/cfs/data/@USER@/inputs"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
 test-home       = "/cfs/data/@USER@/tests"
 

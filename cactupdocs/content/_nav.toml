@@ -40,6 +40,10 @@ title = "User Guide"
   title = "Test Suites"
   file = "users/test-suites.md"
 
+  [[sections.pages]]
+  title = "Sharing Simulations"
+  file = "users/sharing-simulations.md"
+
 [[sections]]
 title = "Cluster Authors"
 
@@ -77,3 +81,7 @@ title = "Reference"
   [[sections.pages]]
   title = "CLI"
   file = "reference/cli.md"
+
+  [[sections.pages]]
+  title = "The .sim Format"
+  file = "reference/sim-format.md"

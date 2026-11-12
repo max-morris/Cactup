@@ -30,6 +30,12 @@ pub fn dispatch(ctx: &Ctx, cmd: SimCommand) -> Res<()> {
         SimCommand::Run(args) => sim::start::run(ctx, args),
         SimCommand::Stop { sim, force } => sim::manage::stop(ctx, &sim, force),
         SimCommand::Clean { sim } => sim::manage::clean(ctx, &sim),
+        SimCommand::Export(args) => sim::export::export(ctx, args),
+        SimCommand::Pack(args) => sim::export::pack(ctx, args),
+        SimCommand::Publish { file, target, version } => super::import::publish(ctx, &file, &target, version.as_deref()),
+        SimCommand::Unpack { file, dir, force } => {
+            sim::export::unpack(&file, dir.as_deref().unwrap_or(std::path::Path::new(".")), force)
+        }
         SimCommand::Delete { sim, force } => sim::manage::delete(ctx, &sim, force),
         SimCommand::List { long, all } => sim::manage::list(ctx, long, all),
         SimCommand::Show { sim, long, output_dir, restart_id } => {

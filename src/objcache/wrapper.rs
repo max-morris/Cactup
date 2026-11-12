@@ -1281,7 +1281,7 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output, 
                 }
             }
             Err(e) => {
-                eprintln!("cactup: lost track of the compiler it was wrapping ({}): {e}", argv[0].to_string_lossy());
+                eprintln!("cactup: failed to wait for the compiler ({}): {e}", argv[0].to_string_lossy());
                 std::process::exit(1);
             }
         }

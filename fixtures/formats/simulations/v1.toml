@@ -1,0 +1,11 @@
+schema = 1
+
+[simulations.bbh]
+dir = "/scratch/sims/et/bbh"
+config = "sim"
+created = "2026-05-01T12:00:00Z"
+
+[simulations.other]
+dir = "/scratch/sims/et/other"
+config = "sim"
+created = "2026-05-02T08:30:00Z"

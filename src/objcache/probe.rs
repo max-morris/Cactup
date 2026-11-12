@@ -96,10 +96,10 @@ fn probe(conf_file: &Path) -> Res<()> {
     let conf = BuildConf::load(conf_file)?;
     let cc_dir = conf_file.parent().context("the configuration file has no parent directory")?;
     if conf_path(cc_dir) != conf_file {
-        bail!("{} is not a build attempt's cache configuration", conf_file.display());
+        bail!("'{}' is not a build attempt's cache configuration", conf_file.display());
     }
     if !conf.cactup.is_file() {
-        bail!("{} is not visible here", conf.cactup.display());
+        bail!("'{}' not found", conf.cactup.display());
     }
     // Where Cactus's object sub-makes run. make compares its own working
     // directory against this, and make's is the physical one: `build` may
@@ -110,7 +110,7 @@ fn probe(conf_file: &Path) -> Res<()> {
     let build_dir = match fs::canonicalize(&build_dir) {
         Ok(physical) => physical,
         Err(_) => fs::canonicalize(&conf.config_dir)
-            .with_context(|| format!("cannot resolve {}", conf.config_dir.display()))?
+            .with_context(|| format!("cannot resolve '{}'", conf.config_dir.display()))?
             .join("build"),
     };
     let selftest = selftest_dir(cc_dir);
@@ -119,11 +119,11 @@ fn probe(conf_file: &Path) -> Res<()> {
     }
 
     let rules_path = conf.config_dir.join("config-data/make.config.rules");
-    let rules = fs::read_to_string(&rules_path).with_context(|| format!("cannot read {}", rules_path.display()))?;
+    let rules = fs::read_to_string(&rules_path).with_context(|| format!("cannot read '{}'", rules_path.display()))?;
     // A recipe redefined in a file the rules include would be one more
     // definition this reader does not see.
     if rules.lines().any(|line| matches!(line.split_whitespace().next(), Some("include" | "-include" | "sinclude"))) {
-        bail!("{} includes other makefiles, which cactup does not follow", rules_path.display());
+        bail!("'{}' includes other makefiles", rules_path.display());
     }
     let wrapped: Vec<Wrapped> = RECIPES
         .iter()
@@ -133,20 +133,20 @@ fn probe(conf_file: &Path) -> Res<()> {
         })
         .collect();
     if wrapped.is_empty() {
-        bail!("{} defines no compile recipe cactup knows how to wrap", rules_path.display());
+        bail!("'{}' defines no compile recipe cactup knows how to wrap", rules_path.display());
     }
 
     // Nothing is written before this point: a probe that declines leaves
     // the configuration as it found it.
     let write = |path: PathBuf, text: String| {
-        fs::write(&path, text).with_context(|| format!("cannot write {}", path.display()))
+        fs::write(&path, text).with_context(|| format!("cannot write '{}'", path.display()))
     };
-    fs::create_dir_all(&build_dir).with_context(|| format!("cannot create {}", build_dir.display()))?;
+    fs::create_dir_all(&build_dir).with_context(|| format!("cannot create '{}'", build_dir.display()))?;
     // Fresh: what a self-test or a build left here before says nothing
     // about this one.
     let _ = fs::remove_dir_all(&selftest);
     let _ = fs::remove_file(super::events_path(cc_dir));
-    fs::create_dir_all(&selftest).with_context(|| format!("cannot create {}", selftest.display()))?;
+    fs::create_dir_all(&selftest).with_context(|| format!("cannot create '{}'", selftest.display()))?;
     write(inject_path(cc_dir), inject_mk(&conf.cactup, conf_file, &inject_path(cc_dir), &build_dir, &wrapped))?;
     write(selftest_wrapped(cc_dir), selftest_wrapped_mk(&wrapped, &selftest_passed(cc_dir, "wrapped")))?;
     write(selftest_untouched(cc_dir), selftest_untouched_mk(&selftest))?;
@@ -171,8 +171,8 @@ fn carried_by_make(path: &Path) -> Res<()> {
     match path.to_str() {
         Some(text) if text.bytes().all(plain) => Ok(()),
         _ => bail!(
-            "the path {} has a character in it that cactup does not pass through make \
-             (letters, digits and / . _ - + @ ~ are fine)",
+            "the path '{}' has a character cactup does not pass through make \
+             (allowed: letters, digits and / . _ - + @ ~)",
             path.display()
         ),
     }

@@ -7,7 +7,7 @@ use crate::args::TestStartArgs;
 use crate::build::{self, ConfigMeta};
 use crate::commands::build as build_cmd;
 use crate::commands::{machine, Ctx};
-use crate::database::{Database, SCHEMA};
+use crate::database::Database;
 use crate::installation::{Installation, TestEntry};
 use crate::lock::LinkLock;
 use crate::mdb::meta::{Route, ScriptTable};
@@ -20,7 +20,7 @@ use crate::sim::start::{
 };
 use crate::sim::vars::{
     apply_tasks_default, default_checkpt_buffer, resolve_topology, set_machine_vars,
-    set_topology_vars, set_walltime_vars, BinaryFit, Topology,
+    set_topology_vars, set_walltime_vars, BinaryFit, Placement, Topology,
 };
 use crate::template::VarSet;
 use crate::testsuite::{
@@ -139,7 +139,7 @@ fn link_arrangements(run_dir: &Path, cactus_root: &Path) -> Res<()> {
         fs::remove_file(&link)?;
     }
     std::os::unix::fs::symlink(cactus_root.join("arrangements"), &link)
-        .with_context(|| format!("Failed to link {}", link.display()))
+        .with_context(|| format!("Failed to link '{}'", link.display()))
 }
 
 /// Route a test script for `queue` (§11.2), with an error that only offers
@@ -165,19 +165,27 @@ fn route_test_script<'t>(
         let what = format!("test {}", scripts.kind.noun());
         if usable.is_empty() {
             anyhow::anyhow!(
-                "no {what} serves queue \"{queue}\", nor any other queue config \"{}\" may run on, \
-                 so this machine cannot run its testsuite",
+                "No {what} serves queue \"{queue}\" or any other queue config \"{}\" may run on",
                 fit.label
             )
         } else {
             anyhow::anyhow!(
-                "no {what} serves queue \"{queue}\"; config \"{}\" can run its testsuite on {}; \
-                 pick one of those with -q",
+                "No {what} serves queue \"{queue}\"; config \"{}\" can be tested on {} (pick one \
+                 with -q)",
                 fit.label,
                 usable.join(", ")
             )
         }
     })
+}
+
+/// One test run's scripts, rendered for result set `results_id` (§11.5).
+struct Rendered {
+    results_id: u32,
+    vset: VarSet,
+    run_script: String,
+    /// The submit-phase variables and submit script; `None` for `test run`.
+    submit: Option<(VarSet, String)>,
 }
 
 fn start_impl(
@@ -199,13 +207,8 @@ fn start_impl(
     // is the compute-node re-entry (handled earlier in `start`).
     if !submit && machine.meta.in_allocation() == Some(false) {
         bail!(
-            "`cactup test run` executes the testsuite here in the foreground, and {}'s \
-             test harness launches each test through a job launcher (e.g. srun) that needs \
-             a live allocation — but none of [{}] is set, so this looks like a login/submit \
-             node and every test would produce no output.\n\
-             Run `cactup test submit` to execute the suite on a compute node, or grab an \
-             interactive allocation first (e.g. `salloc` / `srun --pty`) and re-run \
-             `cactup test run`.",
+            "`cactup test run` needs a job allocation on {}, but none of [{}] is set; use \
+             `cactup test submit`, or run it inside an interactive allocation (e.g. `salloc`)",
             machine.name,
             machine.meta.scheduler.allocation_env.join(", "),
         );
@@ -226,12 +229,9 @@ fn start_impl(
         Some(cfg) => cfg,
         None => {
             if let Some(phrase) = build_cmd::in_flight_build(&config_dir, &cfg_name, Some(machine)) {
-                bail!(
-                    "{phrase} — wait for it, or watch with `cactup build log {cfg_name}` / \
-                     `cactup build show {cfg_name}`"
-                );
+                bail!("{phrase}; wait for it, or watch it with `cactup build log {cfg_name}`");
             }
-            bail!("config \"{cfg_name}\" has never been built (`cactup build {cfg_name}`)");
+            bail!("Config \"{cfg_name}\" has never been built (`cactup build {cfg_name}`)");
         }
     };
     // §7.4: a build is not portable across machines.
@@ -243,12 +243,9 @@ fn start_impl(
     )?;
     if !build::is_complete(&cactus_root, &cfg_name) {
         if let Some(phrase) = build_cmd::in_flight_build(&config_dir, &cfg_name, Some(machine)) {
-            bail!(
-                "{phrase} — wait for it, or watch with `cactup build log {cfg_name}` / \
-                 `cactup build show {cfg_name}`"
-            );
+            bail!("{phrase}; wait for it, or watch it with `cactup build log {cfg_name}`");
         }
-        bail!("config \"{cfg_name}\" is incomplete; rebuild it (`cactup build {cfg_name} -f`)");
+        bail!("Config \"{cfg_name}\" is incomplete; rebuild it (`cactup build {cfg_name} -f`)");
     }
     // §11.5: a test run reads reference data straight from the live source
     // tree, so a tree that moved since the build matters here even more than
@@ -258,7 +255,10 @@ fn start_impl(
     // 2. Topology + queue/GPU guards (§4.4 / D12), exactly as a sim.
     let force_queue = args.force_queue || args.force;
     let fit = BinaryFit::for_config(machine, &cfg)?;
-    let mut topo = resolve_topology(&args.topology, machine, db, Some(&fit), force_queue)?;
+    // A submit hands the suite to the scheduler; a run is here, inside an
+    // allocation or not (§8.5 placement).
+    let placement = if submit { Placement::submit(machine) } else { Placement::foreground(machine) };
+    let mut topo = resolve_topology(&args.topology, machine, db, Some(&fit), force_queue, placement)?;
     let select = if args.tests.is_empty() { "all".to_owned() } else { args.tests.join(" ") };
     // Resolved before anything is created or registered: a selection that
     // names nothing fails here, not as a queued job that runs zero tests.
@@ -286,6 +286,9 @@ fn start_impl(
         None => run_entry.tasks,
     };
     apply_tasks_default(&mut topo, &args.topology, script_tasks, Some(TESTSUITE_DEFAULT_TASKS));
+    if let Some(note) = topo.nodes_note() {
+        println!("{note}");
+    }
     let submit_uni = match sub_entry {
         Some(sub_entry) => resolve_submit_universe(machine, sub_entry.universe.as_deref())?,
         None => None,
@@ -307,8 +310,62 @@ fn start_impl(
     // re-runs reuse the dir and allocate new result sets (§11.5).
     let name = cfg_name.clone();
     let run_dir = test_home.join(&cfg_name).join(&name);
+    let identity = Identity::resolve(db, hostname_override);
+    let scratch_home = machine.meta.path_for(db, "scratch-home")?.unwrap_or_default();
+    let overwrite = args.overwrite || args.force;
+
+    // 5. Scripts at the run root (§11.5): run-script always (the compute node
+    //    executes it), submit-script for `test submit` — with the effective
+    //    knobs, `-K` overlay included, frozen for the compute node (§5, D11).
+    let render = |results_id: u32| -> Res<Rendered> {
+        let mut vset = assemble_test_vars(
+            &name,
+            &run_dir,
+            results_id,
+            &test_home,
+            &cfg,
+            &cactus_root,
+            machine,
+            &topo,
+            &flesh_select,
+            &identity,
+            &inst.alias,
+            run_uni_name,
+            &scratch_home,
+        )?;
+        vset.set_knobs(db.knob_snapshot());
+        let run_script = generate_script(machine, ScriptKind::Run, &run_script_name, &vset, Phase::Run, run_uni_name)?;
+        let submit = match &sub_script_name {
+            Some(sub_script_name) => {
+                // Submit-phase ENV_SETUP under the submit universe (§6.1).
+                let mut submit_vars = vset.clone();
+                submit_vars.set("ENV_SETUP", machine.meta.phase_env(submit_uni_name, Phase::Submit));
+                let script = generate_script(
+                    machine,
+                    ScriptKind::Submit,
+                    sub_script_name,
+                    &submit_vars,
+                    Phase::Submit,
+                    submit_uni_name,
+                )?;
+                Some((submit_vars, script))
+            }
+            None => None,
+        };
+        Ok(Rendered { results_id, vset, run_script, submit })
+    };
+    // Rendered before anything is created, registered or stopped, for the
+    // result set this run would get: a script that refuses (a required
+    // allocation unset) leaves no run dir, registry entry or result set
+    // behind, and stops no old job. Re-rendered below only if, under the
+    // run's lock, the set turns out to be another one.
+    let mut rendered = render(match (overwrite, active_results_id(&run_dir)?) {
+        (true, Some(active)) => active,
+        _ => next_results_id(&run_dir)?,
+    })?;
+
     fs::create_dir_all(run_dir.join(".cactup"))
-        .with_context(|| format!("Failed to create {}", run_dir.display()))?;
+        .with_context(|| format!("Failed to create '{}'", run_dir.display()))?;
     link_arrangements(&run_dir, &cactus_root)?;
 
     // Register it (§11.8) under the per-installation lock.
@@ -324,14 +381,21 @@ fn start_impl(
         }
     }
 
-    let identity = Identity::resolve(db, hostname_override);
     let sched = Scheduler::for_machine(machine);
 
     // A previous run of this config that is still in the queue must be dealt
     // with first (there is no reaper for tests — §11.6).
-    if let Ok(old) = TestRun::open(&run_dir) {
+    // A record a newer cactup wrote stops a re-run here, before anything of
+    // it (results directory, scripts) is touched.
+    let old = TestRun::open(&run_dir);
+    if let Err(e) = &old
+        && e.downcast_ref::<crate::format::Newer>().is_some()
+    {
+        return Err(old.err().expect("matched as an error"));
+    }
+    if let Ok(old) = old {
         if old.lock_live()? {
-            bail!("test run \"{name}\" is currently executing (running.lock is held)");
+            bail!("Test run \"{name}\" is already running");
         }
         // After the old run's end, a job the scheduler still lists in a
         // state its patterns read (leaving the queue, or starting again),
@@ -379,9 +443,9 @@ fn start_impl(
                 && !args.force
             {
                 bail!(
-                    "test run \"{name}\" ended, but the scheduler could not be asked whether its job {} was \
-                     queued again: {failed}\n`cactup test stop {name}` asks the scheduler to stop the job (a job \
-                     it says it does not know is then taken as ended); or pass -f to stop it and run the tests",
+                    "Test run \"{name}\" ended, but the scheduler could not be asked whether its job {} was \
+                     queued again: {failed}\nRun `cactup test stop {name}`, or pass -f to stop it and run the \
+                     tests",
                     job.id
                 );
             }
@@ -389,21 +453,21 @@ fn start_impl(
                 && !args.force
             {
                 bail!(
-                    "test run \"{name}\" ended, but the scheduler still lists its job {} {} (or pass -f to \
-                     stop it)",
+                    "Test run \"{name}\" ended, but the scheduler still lists its job {} {}; or pass -f to \
+                     stop it",
                     job.id,
                     crate::scheduler::listed_after_end(status, &format!("cactup test stop {name}"))
                 );
             }
             if unread && !args.force {
                 bail!(
-                    "test run \"{name}\": {}; `cactup test stop {name}` first, or pass -f to stop it",
+                    "Test run \"{name}\": {}; `cactup test stop {name}` first, or pass -f to stop it",
                     crate::scheduler::unread_state(&format!("its job {}", job.id))
                 );
             }
             if !args.force {
                 bail!(
-                    "test run \"{name}\" still has a live job ({}); \
+                    "Test run \"{name}\" still has a live job ({}); \
                      `cactup test stop {name}` first, or pass -f to stop it",
                     job.id
                 );
@@ -418,8 +482,7 @@ fn start_impl(
                         None => crate::scheduler::StopCase::Listed,
                     })? {
                         println!(
-                            "The scheduler does not know test job {} (its stop command said: {said}): \
-                             taken as ended",
+                            "The scheduler does not know test job {} ({said}); treating it as ended",
                             job.id
                         );
                     }
@@ -433,8 +496,7 @@ fn start_impl(
                         sched.stop_judged(job, crate::scheduler::StopCase::Unread)?
                     {
                         println!(
-                            "The scheduler does not know test job {} (its stop command said: {said}): \
-                             taken as ended",
+                            "The scheduler does not know test job {} ({said}); treating it as ended",
                             job.id
                         );
                     }
@@ -447,12 +509,10 @@ fn start_impl(
     }
 
     // 4. Result set: next results-%04d, or the active one with --overwrite/-f.
-    let overwrite = args.overwrite || args.force;
     let mut run = TestRun {
         name: name.clone(),
         dir: run_dir.clone(),
         meta: TestMeta {
-            schema: SCHEMA,
             name: name.clone(),
             config: cfg_name.clone(),
             config_id: cfg.config_id.clone(),
@@ -485,44 +545,20 @@ fn start_impl(
         (true, Some(active)) => active,
         _ => next_results_id(&run_dir)?,
     };
+    if results_id != rendered.results_id {
+        rendered = render(results_id)?;
+    }
+    let Rendered { vset, run_script, submit: rendered_submit, .. } = rendered;
     fs::create_dir_all(results_dir(&run_dir, results_id))
         .with_context(|| "Failed to create the results directory")?;
     activate_results(&run_dir, results_id)?;
-
-    // Topology variable set (§8.5) + the §11.9 test-only group.
-    let mut vset = assemble_test_vars(
-        &name,
-        &run_dir,
-        results_id,
-        &test_home,
-        &cfg,
-        &cactus_root,
-        machine,
-        &topo,
-        &flesh_select,
-        &identity,
-        &inst.alias,
-        run_uni_name,
-        &machine.meta.path_for(db, "scratch-home")?.unwrap_or_default(),
-    )?;
-    // Effective knobs, `-K` overlay included, frozen for the compute node (§5, D11).
-    vset.set_knobs(db.knob_snapshot());
     run.meta.vars = freeze_vars(&vset);
     run.meta.knobs = freeze_knobs(&vset);
-
-    // 5. Scripts at the run root (§11.5): run-script always (the compute node
-    //    executes it), submit-script for `test submit`.
-    let run_script = generate_script(machine, ScriptKind::Run, &run_script_name, &vset, Phase::Run, run_uni_name)?;
     write_executable(&run_dir.join("run-script"), &run_script)?;
 
-    if let Some(sub_script_name) = &sub_script_name {
-        // Submit-phase ENV_SETUP under the submit universe (§6.1).
-        let mut submit_vars = vset.clone();
-        submit_vars.set("ENV_SETUP", machine.meta.phase_env(submit_uni_name, Phase::Submit));
-        let submit_script =
-            generate_script(machine, ScriptKind::Submit, sub_script_name, &submit_vars, Phase::Submit, submit_uni_name)?;
+    if let Some((submit_vars, submit_script)) = rendered_submit {
         write_executable(&run_dir.join("submit-script"), &submit_script)?;
-        run.store_meta()?;
+        run.store_fresh()?;
 
         let submitted = sched.submit(&submit_vars, submit_uni.as_ref().map(|(n, u)| (n.as_str(), *u)))?;
         run.meta.set_job(&submitted);
@@ -539,7 +575,7 @@ fn start_impl(
         Ok(())
     } else {
         run.meta.job_id = std::process::id().to_string();
-        run.store_meta()?;
+        run.store_fresh()?;
         drop(lock);
         run.log("test-run", &format!("running {} in the foreground (select: {select})", results_name(results_id)));
         println!("Running testsuite of {} into {}", name.bold(), results_name(results_id));
@@ -607,7 +643,7 @@ fn execute_testsuite(run: &mut TestRun, results_id: u32, tee: bool) -> Res<()> {
     let status = status?;
     if !status.success() {
         run.log("test-run", &format!("testsuite run failed ({status})"));
-        bail!("the testsuite run-script exited unsuccessfully ({status})");
+        bail!("The testsuite run-script exited unsuccessfully ({status})");
     }
     match summary {
         Some((passed, failed)) => {
@@ -616,14 +652,14 @@ fn execute_testsuite(run: &mut TestRun, results_id: u32, tee: bool) -> Res<()> {
             if failed > 0 {
                 println!("{}", line.bright_red());
                 // CI-usable: non-zero when any test failed (§11.6).
-                bail!("{failed} test(s) failed (results in {})", results_dir(&run.dir, results_id).display());
+                bail!("{failed} test(s) failed; results in '{}'", results_dir(&run.dir, results_id).display());
             }
             println!("{}", line.bright_green());
         }
         None => {
             run.log("test-run", "completed, but no summary.log was found");
             eprintln!(
-                "{} the harness left no parsable summary in {}",
+                "{} no test summary found in '{}'",
                 "warning:".yellow().bold(),
                 results_dir(&run.dir, results_id).display()
             );
@@ -699,11 +735,11 @@ mod tests {
             format!("{:#}", route_test_script(runs, "big", HOST_UNIVERSE, &machine, &fit, false).unwrap_err())
         };
         let msg = err(&cfg("\"cpu\", \"big\""));
-        assert!(msg.contains("can run its testsuite on cpu; pick one of those with -q"), "{msg}");
+        assert!(msg.contains("can be tested on cpu (pick one with -q)"), "{msg}");
         let msg = err(&cfg(""));
-        assert!(msg.contains("on cpu, gpu;"), "any-queue binary: every test queue qualifies: {msg}");
+        assert!(msg.contains("on cpu, gpu ("), "any-queue binary: every test queue qualifies: {msg}");
         let msg = err(&cfg("\"big\""));
-        assert!(msg.contains("cannot run its testsuite"), "{msg}");
+        assert!(msg.contains("or any other queue config"), "{msg}");
     }
 
     /// A machine with BOTH normal and test-marked scripts (§11.2) and
@@ -912,6 +948,45 @@ mod tests {
         assert_eq!(list_results_ids(&run_dir).unwrap(), vec![0, 1]);
     }
 
+    /// A submit script that refuses (a machine requiring an allocation, none
+    /// set) leaves nothing behind: no run dir or registry entry for a first
+    /// run, and on a re-run no new or re-activated result set, and the
+    /// previous run's record untouched.
+    #[test]
+    fn a_refused_test_submit_leaves_nothing_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let db = Database::new();
+        let run_dir = tmp.path().join("inst/testhome/tests/tests");
+        let scripts = machine.dir.join("submitscripts");
+        let refusing = |on: bool| {
+            if on {
+                fs::rename(scripts.join("test.sh"), scripts.join("test.sh.off")).unwrap();
+                fs::write(scripts.join("test.py"), "print(ALLOCATION or knob(\"allocation\"))\n").unwrap();
+            } else {
+                fs::remove_file(scripts.join("test.py")).unwrap();
+                fs::rename(scripts.join("test.sh.off"), scripts.join("test.sh")).unwrap();
+            }
+        };
+
+        refusing(true);
+        let err = start_impl(&inst, &machine, &db, &test_args(), true, false, Some("h")).unwrap_err();
+        assert!(format!("{err:#}").contains("knob allocation is unset"), "{err:#}");
+        assert!(!run_dir.exists(), "no run dir");
+        assert!(!inst.tests().unwrap().tests.contains_key("tests"), "not registered");
+
+        refusing(false);
+        start_impl(&inst, &machine, &db, &test_args(), true, false, Some("h")).unwrap();
+        assert_eq!(active_results_id(&run_dir).unwrap(), Some(0));
+
+        refusing(true);
+        start_impl(&inst, &machine, &db, &test_args(), true, false, Some("h")).unwrap_err();
+        assert_eq!(list_results_ids(&run_dir).unwrap(), vec![0], "no new result set");
+        assert_eq!(active_results_id(&run_dir).unwrap(), Some(0));
+        assert_eq!(TestRun::open(&run_dir).unwrap().meta.job_id, "JOB-T0", "the last run's record stands");
+    }
+
     #[test]
     fn foreground_run_refuses_outside_allocation() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1008,7 +1083,6 @@ mod tests {
         let cactus_root = inst.cactus_root();
         let config_dir = cactus_root.join("configs/tests");
         let attempt_meta = crate::build::attempt::BuildMeta {
-            schema: crate::database::SCHEMA,
             attempt_id: 0,
             config: "tests".to_owned(),
             optionlist_source: OptionlistSource::Flavor("default".to_owned()),

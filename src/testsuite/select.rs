@@ -47,9 +47,9 @@ pub(crate) fn resolve(cactus_root: &Path, cfg_name: &str, selectors: &[String]) 
     }
     if !problems.is_empty() {
         bail!(
-            "test selection for config \"{cfg_name}\" matches nothing:\n  {}\n\
-             A selector is a test name, a thorn (Thorn or arrangement/Thorn), a Thorn/test \
-             pair, or an arrangement, as listed in configs/{cfg_name}/ThornList.",
+            "Test selection for config \"{cfg_name}\" matches nothing:\n  {}\n\
+             A selector is a test, a thorn (Thorn or arrangement/Thorn), Thorn/test, or an \
+             arrangement in 'configs/{cfg_name}/ThornList'.",
             problems.join("\n  ")
         );
     }
@@ -122,7 +122,7 @@ fn resolve_one(sel: &str, thorns: &[Thorn]) -> Result<Vec<String>, String> {
 fn scan_thorns(cactus_root: &Path, cfg_name: &str) -> Res<Vec<Thorn>> {
     let path = cactus_root.join("configs").join(cfg_name).join("ThornList");
     let text =
-        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+        fs::read_to_string(&path).with_context(|| format!("Failed to read '{}'", path.display()))?;
     let mut seen = BTreeSet::new();
     let mut listed: Vec<(String, String)> = Vec::new();
     for line in text.lines() {

@@ -7,6 +7,8 @@
 //! `.cactup/simulation.toml` (D10).
 
 pub mod cache;
+pub mod export;
+pub mod trim;
 pub mod manage;
 pub mod restart;
 pub mod start;
@@ -15,8 +17,8 @@ pub mod vars;
 use crate::build::{self, ConfigMeta};
 use crate::commands::build as build_cmd;
 use crate::commands::Ctx;
-use crate::database::SCHEMA;
-use crate::installation::{read_toml, write_toml, Installation, SimEntry};
+use crate::format::{self, Format, Toml};
+use crate::installation::{Installation, SimEntry};
 use crate::lock::LinkLock;
 use crate::mdb::Machine;
 use crate::Res;
@@ -27,9 +29,22 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-fn default_schema() -> u32 {
-    SCHEMA
-}
+/// `simulation.toml`'s format: version 1, no migrations. Read by the
+/// compute-node binary of every queued restart for months, so it is
+/// `frozen_read`: a breaking change ships its down-step. `knobs` is an open
+/// string map that `set_knobs` replaces whole; everything else is edited in
+/// place, so a key a newer binary added anywhere else is put back.
+pub static SIMULATION: Format<Toml> = Format {
+    name: "simulation record",
+    key: "schema",
+    current: 1,
+    upgrades: &[],
+    downgrades: &[],
+    down_floor: 1,
+    frozen_read: true,
+    legacy: None,
+    replace_whole: &["knobs"],
+};
 
 /// Parfile basenames that would collide with the `.cactup/` metadata dir or
 /// its entries (§8.2 step 2) — the only naming restriction.
@@ -38,10 +53,9 @@ const RESERVED_NAMES: &[&str] = &[".cactup", "exe", "cfg", "par"];
 /// `<SimName>/.cactup/simulation.toml` (§9.3): the keys simfactory wrote at
 /// create, plus cactup's `alias`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
 #[serde(rename_all = "kebab-case")]
 pub struct SimulationMeta {
-    #[serde(default = "default_schema")]
-    pub schema: u32,
     pub machine: String,
     /// `simulation-<name>-<machine>-<hostname>-<user>-<timestamp>-<pid>` (§9.1).
     pub simulation_id: String,
@@ -64,27 +78,11 @@ pub struct SimulationMeta {
     pub parfile: String,
     /// Installation alias (needed by the compute-node re-invocation, §8.3).
     pub alias: String,
-}
-
-impl Default for SimulationMeta {
-    // Only exists so `read_toml` can be reused; a missing simulation.toml is
-    // handled before this could ever be observed.
-    fn default() -> Self {
-        SimulationMeta {
-            schema: SCHEMA,
-            machine: String::new(),
-            simulation_id: String::new(),
-            sourcedir: PathBuf::new(),
-            configuration: String::new(),
-            config_id: String::new(),
-            build_id: String::new(),
-            executable: PathBuf::new(),
-            optionlist: String::new(),
-            thornlist: String::new(),
-            parfile: String::new(),
-            alias: String::new(),
-        }
-    }
+    /// The simulation's own knob values (§5.1): what `cactup import` set for
+    /// the inputs a `.sim`'s parfile needs (§8.9). They outrank the global
+    /// knobs and are outranked by `-K`.
+    #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
+    pub knobs: indexmap::IndexMap<String, String>,
 }
 
 /// A located simulation: name, directory, and its simulation-level metadata.
@@ -143,13 +141,11 @@ impl Simulation {
     pub fn open(name: &str, dir: &Path) -> Res<Simulation> {
         let path = dir.join(".cactup").join("simulation.toml");
         if !path.is_file() {
-            bail!(
-                "{} is not a cactup simulation ({} does not exist)",
-                dir.display(),
-                path.display()
-            );
+            bail!("'{}' is not a cactup simulation", dir.display());
         }
-        let meta: SimulationMeta = read_toml(&path)?;
+        let Some(meta) = format::read(&path, &SIMULATION)? else {
+            bail!("'{}' is not a cactup simulation", dir.display());
+        };
         Ok(Simulation { name: name.to_owned(), dir: dir.to_owned(), meta })
     }
 
@@ -159,15 +155,15 @@ impl Simulation {
         let registry = inst.simulations()?;
         let entry = registry.simulations.get(name).ok_or_else(|| {
             anyhow!(
-                "no simulation named \"{name}\" in installation \"{}\" (see `cactup sim list`)",
+                "No simulation named \"{name}\" in installation \"{}\" (see `cactup sim list`)",
                 inst.alias
             )
         })?;
         if !entry.dir.is_dir() {
             // §8.1
             bail!(
-                "simulation \"{name}\" is registered at {} but that directory is missing;\n\
-                 run `cactup sim delete {name}` to drop the stale registry entry",
+                "Simulation \"{name}\" is registered at '{}', which is missing; \
+                 run `cactup sim delete {name}` to unregister it",
                 entry.dir.display()
             );
         }
@@ -178,6 +174,11 @@ impl Simulation {
     /// submit and a compute-node handoff) racing the same simulation.
     pub fn lock(&self) -> Res<LinkLock> {
         LinkLock::acquire(&self.cactup_dir().join("sim.lock"))
+    }
+
+    /// The same lock if it is free now: `None` while another holds it.
+    pub fn try_lock(&self) -> Res<Option<LinkLock>> {
+        LinkLock::try_acquire(&self.cactup_dir().join("sim.lock"))
     }
 
     /// The same lock, but waiting for a live holder: the compute-node handoff
@@ -191,8 +192,48 @@ impl Simulation {
         )
     }
 
+    /// The knob values a restart of this simulation freezes (§5.1): the
+    /// global knobs, then the simulation's own over them, then `-K` over
+    /// both (`db`'s snapshot already carries `-K`, so a knob it names keeps
+    /// that value). A stored global value the simulation's own contradicts
+    /// is warned about, since the simulation's silently wins.
+    pub fn knob_snapshot(&self, db: &crate::database::Database) -> indexmap::IndexMap<String, String> {
+        let mut snapshot = db.knob_snapshot();
+        for (name, value) in &self.meta.knobs {
+            // The command line (`-K`, `-a`) outranks the simulation (§5.1).
+            if db.is_overlaid(name) {
+                continue;
+            }
+            if let Some(global) = db.knob(name).filter(|g| *g != value) {
+                eprintln!("{}", knob_conflict_notice(&self.name, name, global, value).yellow());
+            }
+            let rendered = match crate::database::knob_spec(name) {
+                Some(spec) => (spec.render)(value),
+                None => value.clone(),
+            };
+            snapshot.insert(name.clone(), rendered);
+        }
+        snapshot
+    }
+
+    /// Set the simulation's own knob values (see [`Self::knob_snapshot`]).
+    pub fn set_knobs(&mut self, knobs: indexmap::IndexMap<String, String>) -> Res<()> {
+        self.meta.knobs = knobs;
+        self.store_meta()
+    }
+
     fn store_meta(&self) -> Res<()> {
-        write_toml(&self.cactup_dir().join("simulation.toml"), &self.meta)
+        format::write(&self.cactup_dir().join("simulation.toml"), &self.meta, &SIMULATION)
+    }
+
+    /// The config record frozen at create (§8.2 step 6): what the
+    /// simulation's binary was built from — per-repo source states, flags,
+    /// flavor — even after the config has been rebuilt or deleted.
+    /// `Ok(None)` for a simulation created before cactup froze it.
+    // `sim export` (the Cactarium work) is its first caller outside the tests.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn frozen_config(&self) -> Res<Option<ConfigMeta>> {
+        ConfigMeta::load_path(&self.cactup_dir().join("cfg").join(build::CONFIG_RECORD))
     }
 }
 
@@ -211,29 +252,22 @@ fn validate_parfile(parfile: &Path) -> Res<(String, String)> {
     let basename = parfile
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| anyhow!("parfile path {} has no valid file name", parfile.display()))?
+        .ok_or_else(|| anyhow!("Parfile path '{}' has no valid file name", parfile.display()))?
         .to_owned();
     if !basename.ends_with(".par") && !basename.ends_with(".py") {
         // §6.2
-        bail!(
-            "parfile {} must end in .par (literal @NAME@ substitution) or .py (computed)",
-            parfile.display()
-        );
+        bail!("Parfile '{}' must end in .par or .py", parfile.display());
     }
     let stem = parfile_stem(&basename).to_owned();
     if stem.is_empty() {
-        bail!("parfile {} has an empty basename", parfile.display());
+        bail!("Parfile '{}' has an empty basename", parfile.display());
     }
     if RESERVED_NAMES.contains(&stem.as_str()) {
         // §8.2
-        bail!(
-            "parfile basename \"{stem}\" is reserved (one of: {}) — it would collide with \
-             cactup's metadata entries",
-            RESERVED_NAMES.join(", ")
-        );
+        bail!("Parfile basename \"{stem}\" is reserved (one of: {})", RESERVED_NAMES.join(", "));
     }
     if !parfile.is_file() {
-        bail!("parfile {} does not exist", parfile.display());
+        bail!("Parfile '{}' does not exist", parfile.display());
     }
     Ok((basename, stem))
 }
@@ -286,12 +320,9 @@ pub fn create(
         Some(cfg) => cfg,
         None => {
             if let Some(phrase) = build_cmd::in_flight_build(&config_dir, &config, Some(machine)) {
-                bail!(
-                    "{phrase} — wait for it to finish (`cactup build log {config}` / \
-                     `cactup build show {config}`)"
-                );
+                bail!("{phrase}; wait for it to finish (see `cactup build show {config}`)");
             }
-            bail!("config \"{config}\" has never been built (see `cactup config list`)");
+            bail!("Config \"{config}\" has never been built (see `cactup config list`)");
         }
     };
     // §7.4: a build is not portable across machines.
@@ -299,13 +330,10 @@ pub fn create(
     let exe_src = build::executable_path(&cactus_root, &config);
     if !exe_src.is_file() {
         if let Some(phrase) = build_cmd::in_flight_build(&config_dir, &config, Some(machine)) {
-            bail!(
-                "{phrase} — wait for it to finish (`cactup build log {config}` / \
-                 `cactup build show {config}`)"
-            );
+            bail!("{phrase}; wait for it to finish (see `cactup build show {config}`)");
         }
         bail!(
-            "config \"{config}\" has no executable at {} — build it first (`cactup build {config}`)",
+            "Config \"{config}\" has no executable at '{}'; run `cactup build {config}`",
             exe_src.display()
         );
     }
@@ -317,11 +345,7 @@ pub fn create(
     // freezing a half-written binary into a simulation is real corruption,
     // not just confusing advice, so only an explicit `-f` may proceed.
     if !force && let Some(phrase) = build_cmd::in_flight_build(&config_dir, &config, Some(machine)) {
-        bail!(
-            "{phrase} — hard-linking its executable while a build may still be replacing it \
-             risks freezing a corrupted copy into this simulation; wait for it to finish, or \
-             pass -f to proceed anyway"
-        );
+        bail!("{phrase}; wait for it to finish, or pass -f to proceed anyway (it may freeze a half-written executable)");
     }
 
     // 2. Parfile name validation (collision guard, §8.2).
@@ -330,7 +354,7 @@ pub fn create(
     // 3. The simulation directory — fixed now, forever (§8.1).
     let dir = match sim_dir {
         Some(p) => std::path::absolute(p)
-            .with_context(|| format!("Failed to absolutize --sim-dir {}", p.display()))?,
+            .with_context(|| format!("Failed to resolve --sim-dir '{}'", p.display()))?,
         None => sim_home.join(&config).join(name),
     };
 
@@ -343,22 +367,26 @@ pub fn create(
     if let Some(old_dir) = &preexisting {
         if !force {
             bail!(
-                "simulation \"{name}\" already exists at {} (use -f to replace it)",
+                "Simulation \"{name}\" already exists at '{}' (use -f to replace it)",
                 old_dir.display()
             );
         }
         if old_dir.is_dir() {
             fs::remove_dir_all(old_dir)
-                .with_context(|| format!("Failed to remove old simulation at {}", old_dir.display()))?;
+                .with_context(|| format!("Failed to remove old simulation at '{}'", old_dir.display()))?;
         }
         registry.simulations.shift_remove(name);
+        // Recorded now, under the same lock: the new entry of this name is
+        // then written over a registry without the old one, so none of the
+        // old entry's keys are put back onto it.
+        locked.set_simulations(&registry)?;
     }
     if dir.exists() {
         if force {
             fs::remove_dir_all(&dir)
-                .with_context(|| format!("Failed to remove old directory {}", dir.display()))?;
+                .with_context(|| format!("Failed to remove old directory '{}'", dir.display()))?;
         } else {
-            bail!("directory {} already exists (use -f to replace it)", dir.display());
+            bail!("Directory '{}' already exists (use -f to replace it)", dir.display());
         }
     }
 
@@ -366,20 +394,20 @@ pub fn create(
     let cactup_dir = dir.join(".cactup");
     fs::create_dir_all(cactup_dir.join("cfg"))
         .and_then(|()| fs::create_dir_all(cactup_dir.join("par")))
-        .with_context(|| format!("Failed to create {}", cactup_dir.display()))?;
+        .with_context(|| format!("Failed to create '{}'", cactup_dir.display()))?;
 
     // 6. Master copies: the parfile, and the config's optionlist and thornlist
     //    snapshots. Each pair is ordered fed-to-Cactus copy first, source
     //    second; the name recorded in the metadata is the first that exists.
     fs::copy(parfile, cactup_dir.join("par").join(&par_basename))
-        .with_context(|| format!("Failed to copy {} into the simulation", parfile.display()))?;
+        .with_context(|| format!("Failed to copy '{}' into the simulation", parfile.display()))?;
     let copy_cfg = |files: &[&str]| -> Res<String> {
         let mut primary = String::new();
         for cfg_file in files {
             let src = cactus_root.join("configs").join(&config).join(cfg_file);
             if src.is_file() {
                 fs::copy(&src, cactup_dir.join("cfg").join(cfg_file))
-                    .with_context(|| format!("Failed to copy {}", src.display()))?;
+                    .with_context(|| format!("Failed to copy '{}'", src.display()))?;
                 if primary.is_empty() {
                     primary = (*cfg_file).to_owned();
                 }
@@ -393,6 +421,17 @@ pub fn create(
     // snapshot rides along to record what it was derived from. Both may be
     // absent for a config built by an older cactup, hence no hard requirement.
     let thornlist = copy_cfg(&[build::THORNLIST_PROCESSED, build::THORNLIST_SNAPSHOT])?;
+    // The config record as of the build this simulation freezes: its
+    // `sources` map is the commit set the binary was compiled from, next to
+    // the flags and flavor — all of which the config's next build overwrites,
+    // so without this copy a simulation loses its exact provenance the moment
+    // its config is rebuilt (what `sim export` reads, §8.2 step 6).
+    // Serialized from the record loaded above rather than copied from disk:
+    // that is the record whose build-id this simulation names, and a
+    // concurrent `cactup build` rewriting the file cannot hand us a torn copy.
+    // Written once, as a record made anew (keys of a file already there are
+    // not kept) at the config record's version.
+    format::replace(&cactup_dir.join("cfg").join(build::CONFIG_RECORD), &cfg, &build::CONFIG)?;
 
     // 5. Freeze the binary: populate CACHE/exe/<build-id> and hard-link it in
     //    (port of CopyFileWithCaching, §8.1), GC-ing orphans opportunistically.
@@ -402,7 +441,6 @@ pub fn create(
 
     let hostname = crate::mdb::discover::resolve_hostname(ctx.globals.hostname.as_deref());
     let meta = SimulationMeta {
-        schema: SCHEMA,
         machine: machine.name.clone(),
         simulation_id: simulation_id(name, &machine.name, &hostname),
         sourcedir: cactus_root.clone(),
@@ -414,6 +452,7 @@ pub fn create(
         thornlist,
         parfile: par_basename,
         alias: inst.alias.clone(),
+        knobs: Default::default(),
     };
     let sim = Simulation { name: name.to_owned(), dir: dir.clone(), meta };
     sim.store_meta()?;
@@ -428,7 +467,7 @@ pub fn create(
 
     sim.log("create", &format!("created simulation (config {config}, build-id {})", sim.meta.build_id));
     println!(
-        "Created simulation {} at {} (config {})",
+        "Created simulation {} at '{}' (config {})",
         name.bold(),
         dir.display(),
         config.bold()
@@ -436,9 +475,74 @@ pub fn create(
     Ok(sim)
 }
 
+/// The warning for a stored global knob value simulation `sim`'s own
+/// contradicts: how to choose the other one for this command, which for the
+/// allocation is `-a` as well as `-K`.
+fn knob_conflict_notice(sim: &str, name: &str, global: &str, value: &str) -> String {
+    let choose = match name {
+        "allocation" => "pass -a ACCOUNT or -K allocation=… to choose".to_owned(),
+        _ => format!("pass -K {name}=… to choose"),
+    };
+    format!("Knob {name} is \"{global}\" globally but \"{value}\" for simulation {sim}; using the simulation's ({choose})")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every field set, every collection non-empty, and no `..`: a new field
+    /// fails to compile here, and the shape pin then says what to do.
+    fn exhaustive_sample() -> SimulationMeta {
+        SimulationMeta {
+            machine: "workstation".to_owned(),
+            simulation_id: "simulation-bbh-workstation-host-user-20260501-120000-4242".to_owned(),
+            sourcedir: "/scratch/cacti/et/Cactus".into(),
+            configuration: "sim".to_owned(),
+            config_id: "cfg-0123".to_owned(),
+            build_id: "build-0001".to_owned(),
+            executable: "/scratch/sims/et/bbh/.cactup/exe".into(),
+            optionlist: "cactup-optionlist.cfg".to_owned(),
+            thornlist: "thornlist.th".to_owned(),
+            parfile: "bbh.par".to_owned(),
+            alias: "et".to_owned(),
+            knobs: [("queue".to_owned(), "workq".to_owned())].into_iter().collect(),
+        }
+    }
+
+    #[test]
+    fn simulation_format_generic_tests() {
+        use crate::format::testing::*;
+        let fixtures = fixture_dir("simulation");
+        descriptor_is_consistent(&SIMULATION);
+        assert!(SIMULATION.frozen_read);
+        shape_is_pinned(&SIMULATION, &fixtures, &exhaustive_sample());
+        every_fixture_loads::<SimulationMeta, _>(&SIMULATION, &fixtures);
+        newer_is_refused::<SimulationMeta, _>(&SIMULATION, "simulation.toml", "machine = 7\n", &exhaustive_sample());
+        unknown_keys_survive(
+            &SIMULATION,
+            "simulation.toml",
+            &exhaustive_sample(),
+            &[],
+            |m: &mut SimulationMeta| m.knobs.clear(),
+            &["knobs"],
+        );
+    }
+
+    /// A simulation made before the `schema` key existed still opens.
+    #[test]
+    fn a_simulation_without_a_schema_key_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let cactup = dir.path().join(".cactup");
+        fs::create_dir_all(&cactup).unwrap();
+        fs::copy(crate::format::testing::fixture_dir("simulation").join("v1-noschema.toml"), cactup.join("simulation.toml"))
+            .unwrap();
+        let sim = Simulation::open("bbh", dir.path()).unwrap();
+        assert_eq!(sim.meta.alias, "et");
+        assert!(sim.meta.thornlist.is_empty() && sim.meta.knobs.is_empty());
+        let empty = tempfile::tempdir().unwrap();
+        let err = format!("{:#}", Simulation::open("x", empty.path()).unwrap_err());
+        assert!(err.contains("is not a cactup simulation"), "{err}");
+    }
 
     #[test]
     fn parfile_stem_strips_one_extension() {
@@ -478,5 +582,13 @@ mod tests {
         let id = simulation_id("bbh", "mel5", "mel5.cct.lsu.edu");
         assert!(id.starts_with("simulation-bbh-mel5-mel5.cct.lsu.edu-"), "{id}");
         assert!(id.split('-').count() >= 7, "{id}");
+    }
+
+    #[test]
+    fn the_allocation_conflict_notice_names_a() {
+        let notice = knob_conflict_notice("bbh", "allocation", "g", "s");
+        assert!(notice.contains("pass -a ACCOUNT or -K allocation=… to choose"), "{notice}");
+        let notice = knob_conflict_notice("bbh", "kadath-initial-data", "g", "s");
+        assert!(notice.contains("(pass -K kadath-initial-data=… to choose)"), "{notice}");
     }
 }

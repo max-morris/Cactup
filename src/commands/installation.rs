@@ -45,7 +45,7 @@ fn push_group(
 ) {
     for (repo, info) in repos.iter().take(repos_shown) {
         let repo_line = match &info.detail {
-            Some(detail) => format!("                  {repo} — {}", truncate_detail(detail)),
+            Some(detail) => format!("                  {repo}: {}", truncate_detail(detail)),
             None => format!("                  {repo}"),
         };
         lines.push((tone, repo_line));
@@ -67,9 +67,9 @@ fn push_group(
 
 /// The `show` conformance block: the lines describing thorns whose on-disk
 /// contents do not match the installation's recorded thornlist. Empty when
-/// the tree fully conforms. Colourless strings on purpose (so they stay
+/// the tree fully conforms. Colorless strings on purpose (so they stay
 /// testable) paired with a per-line [`Tone`]; `show_installation` applies the
-/// colour.
+/// color.
 ///
 /// A failed repo is an error the user did not ask for and did not get — it is
 /// reported first, in [`Tone::Alarm`], ahead of a merely-skipped one (a
@@ -94,16 +94,16 @@ pub(crate) fn conformance_lines(entry: &CactusInstallation) -> Vec<(Tone, String
         if failed_count > 0 { ("INCOMPLETE", Tone::Alarm) } else { ("PARTIAL", Tone::Warn) };
     let header = match (failed_count > 0, skipped_count > 0) {
         (true, true) => format!(
-            "  conformance:  {word} — {failed_count} repo(s) FAILED to fetch and \
+            "  conformance:  {word}: {failed_count} repo(s) FAILED to fetch and \
              {skipped_count} repo(s) were skipped; {thorn_count} thorn(s) on disk do not match \
              the thornlist above."
         ),
         (true, false) => format!(
-            "  conformance:  {word} — {failed_count} repo(s) FAILED to fetch; {thorn_count} \
+            "  conformance:  {word}: {failed_count} repo(s) FAILED to fetch; {thorn_count} \
              thorn(s) on disk do not match the thornlist above."
         ),
         (false, true) => format!(
-            "  conformance:  {word} — {skipped_count} repo(s) were skipped, so {thorn_count} \
+            "  conformance:  {word}: {skipped_count} repo(s) were skipped, so {thorn_count} \
              thorn(s) on disk do not match the thornlist above."
         ),
         (false, false) => unreachable!(
@@ -143,8 +143,8 @@ pub(crate) fn conformance_lines(entry: &CactusInstallation) -> Vec<(Tone, String
     if !skipped.is_empty() {
         lines.push((
             Tone::Plain,
-            "                Fetch over the skipped ones with `cactup inst refetch -f` \
-             (modified files are backed up first); `cactup inst delta` shows what differs."
+            "                Fetch over the skipped ones with `cactup inst refetch -f`; \
+             modified files are backed up first. `cactup inst delta` shows what differs."
                 .to_owned(),
         ));
     }
@@ -166,21 +166,25 @@ pub fn dispatch(ctx: &Ctx, cmd: InstallationCommand) -> Res<()> {
 pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     let database = ctx.db.read()?;
 
-    // No alias → the contextually-relevant installation: the active one.
-    let alias = match alias {
+    // No alias → the contextually-relevant installation: `-I`, else the
+    // active one (the same choice `Installation::resolve` makes).
+    let alias = match alias.or_else(|| ctx.globals.installation.clone()) {
         Some(alias) => alias,
         None => database.active_installation.clone().ok_or_else(|| {
             anyhow!(
-                "no active installation; run `cactup install`, or `cactup use <alias>` \
-                 to activate an existing one (see `cactup list`)"
+                "No active installation; run `cactup install` or `cactup use <alias>`"
             )
         })?,
     };
 
     let Some(entry) = database.installations.get(&alias) else {
-        bail!("no installation named \"{alias}\" (see `cactup list`)");
+        bail!("No installation named \"{alias}\" (see `cactup list`)");
     };
     let active = database.active_installation.as_deref() == Some(&alias);
+    let inst = Installation::new(entry.alias.clone(), &entry.path);
+    let meta = inst.meta().ok();
+    // Asked before anything is printed, so its progress never splits the output.
+    let yanked = yanked_since(&database, entry, meta.as_ref().map_or(&[][..], |m| &m.added[..]))?;
 
     print!("{}", entry.alias.bold());
     if active {
@@ -189,6 +193,10 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     println!();
     match (&entry.release, &entry.thornlist) {
         (Some(release), _) => println!("  release:      {release}"),
+        (None, _) if let Some(simfile) = &entry.simfile => {
+            println!("  release:      (installed from the .sim file {simfile})")
+        }
+        (None, _) if let Some(stack) = &entry.stack => println!("  release:      stack {stack}"),
         // A custom installation is identified by the thornlist it was built
         // from — that is the only thing distinguishing it from any other.
         (None, Some(thornlist)) => {
@@ -200,13 +208,22 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     // tree below (§2.1 current-release / current-thornlist). Shown only
     // when it actually differs.
     match (&entry.current_release, &entry.current_thornlist) {
-        (Some(current), _) if Some(current) != entry.release.as_ref() => {
+        (Some(current), _) if Some(current) != entry.release.as_ref() && Some(current) != entry.stack.as_ref() => {
             println!("  now on:       {current} (refetched)")
         }
         (None, Some(current)) if Some(current) != entry.thornlist.as_ref() => {
             println!("  now on:       thornlist {current} (refetched)")
         }
         _ => {}
+    }
+    // §8.10: where to take problems with the stack the tree is on.
+    if let Some(contact) = &entry.stack_contact {
+        println!("  problems?     {contact}");
+    }
+    if let Some(slug) = current_stack(entry)
+        && let Some(why) = yanked.get(slug)
+    {
+        println!("{}", format!("  yanked:       {slug} is yanked on the Cactarium{}", reason(why)).yellow());
     }
     for (tone, line) in conformance_lines(entry) {
         match tone {
@@ -217,8 +234,7 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     }
     println!("  path:         {}", entry.path);
 
-    let inst = Installation::new(entry.alias.clone(), &entry.path);
-    if let Ok(meta) = inst.meta() {
+    if let Some(meta) = meta {
         match &meta.active_config {
             Some(config) => println!("  active-config: {config}"),
             None => println!("  active-config: {}", "(null-config)".yellow()),
@@ -229,6 +245,24 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
         if let Some(test_home) = &meta.test_home {
             println!("  test-home:    {}", test_home.display());
         }
+        // §8.11: what `cactup add` put on the base, and where to take
+        // problems with it.
+        for (i, package) in meta.added.iter().enumerate() {
+            let label = if i == 0 { "added:" } else { "" };
+            let thorns: Vec<&str> = package.thorns.iter().map(|t| t.checkout.as_str()).collect();
+            let replaces = if package.replaces.is_empty() {
+                String::new()
+            } else {
+                format!(", in place of {}", package.replaces.join(", "))
+            };
+            let follows = if crate::commands::add::is_tip(&package.version) { ", follows its default branch" } else { "" };
+            let what = crate::commands::add::describe(&package.package, &package.version);
+            println!("  {label:<13} {what} ({}){replaces}{follows}", thorns.join(", "));
+            println!("  {:<13}   problems? {}", "", package.contact.as_deref().unwrap_or(&package.url));
+            if let Some(why) = yanked.get(&format!("{}@{}", package.package, package.version)) {
+                println!("{}", format!("  {:<13}   yanked on the Cactarium{}", "", reason(why)).yellow());
+            }
+        }
     }
     if let Ok(sims) = inst.simulations() {
         println!("  simulations:  {} (see `cactup sim list`)", sims.simulations.len());
@@ -238,6 +272,90 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     }
 
     Ok(())
+}
+
+/// The stack release the tree is on, `owner/stack@version`: where a refetch
+/// took it, else what was installed. `None` for anything else, and for a
+/// branch tip (`@head`/`@master`), which has no release to yank.
+fn current_stack(entry: &CactusInstallation) -> Option<&str> {
+    // A refetch records where it took the tree: a stack (`owner/name@…`), a
+    // manifest release, or a thornlist; only before any is the install-time
+    // stack still the one it is on.
+    let slug = match (&entry.current_release, &entry.current_thornlist) {
+        (Some(current), _) => Some(current.as_str()).filter(|c| c.contains('/'))?,
+        (None, Some(_)) => return None,
+        (None, None) => entry.stack.as_deref()?,
+    };
+    let version = slug.rsplit_once('@')?.1;
+    (version != "head" && version != "master").then_some(slug)
+}
+
+/// `: <reason>`, or nothing for a yank that gave none.
+fn reason(why: &str) -> String {
+    if why.is_empty() { String::new() } else { format!(": {why}") }
+}
+
+/// What the Cactarium says is yanked now: the installation's stack
+/// release and each added package version, by `owner/name@version`. Only
+/// asked when there is something to ask about; asked in parallel, with
+/// progress. An entry that cannot be asked is left out, with one note, since
+/// `inst show` must still show what it knows offline.
+fn yanked_since(
+    db: &crate::database::Database,
+    entry: &CactusInstallation,
+    added: &[crate::installation::AddedPackage],
+) -> Res<std::collections::BTreeMap<String, String>> {
+    use crate::cactarium::EntryKind;
+    let mut asks: Vec<(EntryKind, String)> = Vec::new();
+    if let Some(slug) = current_stack(entry) {
+        asks.push((EntryKind::Stack, slug.to_owned()));
+    }
+    // A branch tip or a bare commit has no version to yank.
+    for package in added
+        .iter()
+        .filter(|p| !crate::commands::add::is_tip(&p.version) && !crate::commands::add::is_commit(&p.version))
+    {
+        asks.push((EntryKind::Package, format!("{}@{}", package.package, package.version)));
+    }
+    if asks.is_empty() {
+        return Ok(Default::default());
+    }
+    // Asked in passing: a registry that cannot be reached costs seconds, not
+    // the default half minute.
+    let client = crate::cactarium::Client::new(db).with_timeout(std::time::Duration::from_secs(5));
+    // One line per entry while it is asked; none stays behind (what is
+    // yanked is said in the output itself).
+    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+    let layout = crate::progress::Layout::for_names(asks.iter().map(|(_, slug)| slug.as_str()));
+    let answers = crate::par::parallel_map(&asks, |(kind, slug)| {
+        let line = crate::progress::Line::over(progress.add_child(slug.clone()), slug, layout.clone());
+        line.phase("asking the Cactarium whether it is yanked");
+        let answer = (|| {
+            let (entry, version) = slug.rsplit_once('@').ok_or_else(|| anyhow!("{slug} names no version"))?;
+            let (owner, name) = entry.split_once('/').ok_or_else(|| anyhow!("{entry} is not owner/name"))?;
+            client.yanked_since(*kind, owner, name, version)
+        })();
+        drop(line);
+        (slug.clone(), answer)
+    });
+    if let Some(renderer) = renderer {
+        renderer.shutdown_and_wait();
+    }
+    let mut yanked = std::collections::BTreeMap::new();
+    let mut failed = None;
+    for (slug, answer) in answers? {
+        match answer {
+            Ok(Some(why)) => {
+                yanked.insert(slug, why);
+            }
+            Ok(None) => {}
+            Err(e) => failed = failed.or(Some(format!("{e:#}"))),
+        }
+    }
+    if let Some(e) = failed {
+        println!("{}", format!("Could not ask the Cactarium whether anything was yanked: {e}").dimmed());
+    }
+    Ok(yanked)
 }
 
 #[cfg(test)]
@@ -252,8 +370,11 @@ mod tests {
             release: Some("ET_2026_05".into()),
             path: "/inst".into(),
             thornlist: None,
+            simfile: None,
+            stack: None,
             current_release: None,
             current_thornlist: None,
+            stack_contact: None,
             unfetched_repos,
         }
     }
@@ -403,8 +524,39 @@ mod tests {
         let repo_line = &lines[2].1;
         assert!(repo_line.contains('…'), "{repo_line}");
         assert!(!repo_line.contains(&long), "{repo_line}");
-        let detail_part = repo_line.split(" — ").nth(1).unwrap();
+        let detail_part = repo_line.split(": ").nth(1).unwrap();
         // 97 chars of the original detail plus the ellipsis.
         assert_eq!(detail_part.chars().count(), 98, "{detail_part}");
+    }
+
+    /// `-I` picks what `show` shows when no alias is given: with an active
+    /// installation present, `-I nope` must fail on "nope" rather than quietly
+    /// show the active one.
+    #[test]
+    fn show_without_alias_honors_the_installation_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::database::Db::in_dir(dir.path());
+        db.update(|d| {
+            d.installations.insert("et".to_owned(), entry(IndexMap::new()));
+            d.active_installation = Some("et".to_owned());
+            Ok(())
+        })
+        .unwrap();
+        let ctx = Ctx {
+            globals: crate::args::GlobalOpts {
+                verbose: false,
+                trace: false,
+                manifest_url: String::new(),
+                mdb_path: None,
+                machine: None,
+                installation: Some("nope".to_owned()),
+                hostname: None,
+                knob: Vec::new(),
+                risky_allow_untrusted_artifacts: false,
+            },
+            db,
+        };
+        let err = show_installation(&ctx, None).unwrap_err().to_string();
+        assert!(err.contains("\"nope\""), "{err}");
     }
 }

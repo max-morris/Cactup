@@ -25,12 +25,20 @@ colored = "3.1.1"
 fastrand = "2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_derive = "1.0.228"
-serde_json = "1.0.150"
+# preserve_order (through indexmap, already a dependency): database.json keeps
+# its key order across writes (src/format.rs). Crate-wide, so the JSON handed
+# to .py scripts also keeps insertion order now; nothing reads meaning into it.
+serde_json = { version = "1.0.150", features = ["preserve_order"] }
 signal-hook = "0.4"
 toml = { version = "1.1.2", features = ["preserve_order"] }
 indexmap = { version = "2.14.0", features = ["serde"] }
 include_dir = "0.7.4"
 regex = "1.13.0"
+# The Cactup ecosystem's shared formats (.sim files, the CRL thornlist parser,
+# stacks, slugs and track versions), shared with the Cactarium registry. Pure
+# Rust with no system libraries (MUSL-safe, D13). Pinned by rev and bumped on
+# purpose, never by branch, so every build is reproducible.
+cactup-ecosystem-common = { git = "https://github.com/max-morris/cactup-ecosystem-common", rev = "ede90f956bc7368c17cd973e71d1a8725e8c1021" }
 gethostname = "1.1.0"
 tempfile = "3.27.0"
 chrono = { version = "0.4.45", features = ["serde"] }
@@ -52,8 +60,17 @@ rustix = { version = "1.1", features = ["param", "process"] }
 # Compresses the build cache's unit records (src/objcache/store.rs). Already
 # in the tree (gix's zlib), pure Rust: nothing for the static binary to load.
 zlib-rs = "0.6"
+# Archive inputs of a .sim (src/inputs.rs): .tar, .tar.gz/.tgz, .tar.xz and
+# .zip (deflate only), every decoder pure Rust (gzip and deflate through the
+# zlib-rs above), so the static binary loads nothing (D13).
+tar = { version = "0.4", default-features = false }
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz"] }
+zip = { version = "9.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [dev-dependencies]
+# Tests build the .tar.xz archives src/inputs.rs unpacks.
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz", "encoder"] }
 gix = { version = "0.85.0", features = ["tree-editor"] }
 
 [[bin]]

@@ -1,0 +1,11 @@
+{
+  "cactup-version": "0.1.0",
+  "installations": {
+    "ET_2026_05": {
+      "alias": "ET_2026_05",
+      "release": "ET_2026_05",
+      "path": "/home/user/.cactup/cacti/ET_2026_05"
+    }
+  },
+  "active-installation": "ET_2026_05"
+}

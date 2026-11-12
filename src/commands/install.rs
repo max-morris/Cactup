@@ -17,21 +17,38 @@ use std::path::{Path, PathBuf};
 enum InstallSource<'repo> {
     Release(manifest::Release<'repo>),
     Custom { path: PathBuf, content: String },
+    /// A `.sim` file (§8.9): `content` is its thornlist with every pinned
+    /// repo pinned by `!REPO_COMMIT`, so the ordinary fetch checks each out
+    /// at exactly its commit and a refetch never moves it.
+    SimFile { path: PathBuf, sim: Box<cactup_ecosystem_common::sim::SimFile>, content: String },
+    /// A Cactarium stack release (§8.10): `content` is its thornlist with
+    /// every repo the release pins pinned by `!REPO_COMMIT`; `slug` is the
+    /// exact release (`owner/stack@version`, or the unpinned `@head`/`@master`).
+    Stack { slug: String, content: String, contact: Option<String> },
 }
 
 pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     let InstallArgs {
         release,
         thornlist,
+        simfile,
         alias,
         silent,
         install_prefix,
         no_symlink,
         symlink_prefix,
         symlink_name,
+        inputs_settled,
     } = args;
 
-    let custom = thornlist.is_some();
+    // `owner/stack[@…]` names a Cactarium stack, never a manifest release
+    // (those have no `/`).
+    let stack_source = match release.as_deref() {
+        Some(req) if req.contains('/') => Some(stack_install_source(ctx, req)?),
+        _ => None,
+    };
+    let custom = thornlist.is_some() || simfile.is_some() || stack_source.is_some();
+    let sim_source = simfile.as_deref().map(sim_install_source).transpose()?.or(stack_source);
 
     let home_dir = std::env::home_dir().ok_or(anyhow!("Failed to determine home directory"))?;
     let cactup_root = &crate::CACTUP_ROOT;
@@ -42,7 +59,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         Some(path) => {
             let expanded = shell::expand_path(&p2s(path.clone())?);
             let content = fs::read_to_string(&expanded)
-                .with_context(|| format!("Failed to read thornlist {expanded}"))?;
+                .with_context(|| format!("Failed to read thornlist '{expanded}'"))?;
             // Carry the *expanded*, absolute path onward: it is what the alias
             // default, the success message, and the recorded provenance all
             // want, and a `~`-relative or cwd-relative path would be
@@ -78,9 +95,10 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
 
     let symlink_prefix_default = home_dir.as_path();
 
-    let source = match custom_thornlist {
-        Some((path, content)) => InstallSource::Custom { path, content },
-        None => {
+    let source = match (custom_thornlist, sim_source) {
+        (_, Some(source)) => source,
+        (Some((path, content)), None) => InstallSource::Custom { path, content },
+        (None, None) => {
             let repo = repo.as_ref().unwrap();
             let releases = releases.as_ref().unwrap();
             // The default is always the newest *release*: master is newer, but
@@ -102,7 +120,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
                         // where an interactive user decides — the flag help
                         // and `cactup releases` are the only other places
                         // that say so.
-                        "Which release do you want to install? (\"master\" installs the manifest's master tip)",
+                        "Which release do you want to install (or \"master\")?",
                         release_default.as_deref().unwrap_or(manifest::MASTER),
                     )?;
                     match manifest::resolve_release(repo, releases, &release_sel)? {
@@ -128,22 +146,38 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
             release.read_file("einsteintoolkit.th")
                    .with_context(|| format!("Failed to read einsteintoolkit.th from {}", release.describe()))?
         }
-        InstallSource::Custom { content, .. } => content.clone().into_bytes(),
+        InstallSource::Custom { content, .. }
+        | InstallSource::SimFile { content, .. }
+        | InstallSource::Stack { content, .. } => content.clone().into_bytes(),
     };
     let thorn_list_text =
-        String::from_utf8(thorn_list.clone()).with_context(|| "the source thornlist is not UTF-8")?;
+        String::from_utf8(thorn_list.clone()).with_context(|| "The source thornlist is not UTF-8")?;
     let list = crate::thornlist::parse(&thorn_list_text)
         .with_context(|| "Failed to parse the source thornlist")?;
     for w in list.warnings() {
-        println!("{}", format!("thornlist warning: {w}").yellow());
+        println!("{}", format!("Thornlist warning: {w}").yellow());
     }
     let root = list.root().to_owned();
     validate_root_dir(&root)?;
+    if let InstallSource::SimFile { sim, path, .. } = &source
+        && sim.sim.root != root
+    {
+        bail!(
+            "'{}' says its source tree is {}, but its thornlist's !DEFINE ROOT is {root}",
+            path.display(),
+            sim.sim.root
+        );
+    }
 
-    let (alias_default, alias_default_source) = match &source {
-        InstallSource::Release(release) => (release.name.clone(), "the release name"),
+    let alias_default = match &source {
+        InstallSource::Release(release) => release.name.clone(),
         InstallSource::Custom { path, .. } => {
-            (path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), "the thornlist file name")
+            path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+        }
+        InstallSource::SimFile { sim, .. } => sim.sim.name.clone(),
+        // `owner/stack@1.2.0` → `stack-1.2.0`, a valid alias.
+        InstallSource::Stack { slug, .. } => {
+            slug.rsplit('/').next().unwrap_or(slug).replace('@', "-").replace(':', "-")
         }
     };
 
@@ -158,16 +192,16 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         }
         Some(alias) => alias,
         None if silent && !valid_alias(&alias_default) => {
-            println!("{}", format!("{} (derived from {}) is not a valid alias: use only letters, digits, '-', '_', and '.'. Please choose one by passing {}.", alias_default.bold(), alias_default_source, "--alias".bold()).bright_red());
+            println!("{}", format!("The default alias {} is not valid: use only letters, digits, '-', '_', and '.'. Pass {} to choose one.", alias_default.bold(), "--alias".bold()).bright_red());
             return Ok(());
         }
         None if silent && database.installations.contains_key(&alias_default) => {
-            println!("{}", format!("An installation with the alias {} (derived from {}) already exists. Please choose a different alias by passing {}.", alias_default.bold(), alias_default_source, "--alias".bold()).bright_red());
+            println!("{}", format!("An installation with the default alias {} already exists. Pass {} to choose another.", alias_default.bold(), "--alias".bold()).bright_red());
             return Ok(());
         }
         None if silent => alias_default.clone(),
         None => loop {
-            let alias_sel = prompt_with_default("What should the installation's alias be? This unique name will be used to identify the installation in the future.", &alias_default)?;
+            let alias_sel = prompt_with_default("What should the installation's alias be?", &alias_default)?;
             if database.installations.contains_key(&alias_sel) {
                 println!("{}", format!("An installation with the alias {} already exists. Please choose another.", alias_sel.bold()).bright_red());
             } else if !valid_alias(&alias_sel) {
@@ -281,18 +315,18 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
 
     let install_dir = Path::new(&install_prefix);
     fs::create_dir_all(install_dir)
-       .with_context(|| format!("Failed to create installation directory {}", install_dir.display()))?;
+       .with_context(|| format!("Failed to create installation directory '{}'", install_dir.display()))?;
 
     // Resolve to an absolute path. A symlink stores its target verbatim, so a
     // relative `install_prefix` would otherwise yield a target interpreted
     // relative to the *link's* directory, producing a dangling/wrong symlink.
     let install_dir = fs::canonicalize(install_dir)
-       .with_context(|| format!("Failed to resolve installation directory {}", install_dir.display()))?;
+       .with_context(|| format!("Failed to resolve installation directory '{}'", install_dir.display()))?;
 
     // The pristine as-fetched copy (§3.2): the baseline `installation
     // refetch`'s hand-edit guard compares against.
     fs::write(install_dir.join(crate::installation::SOURCE_THORNLIST), &thorn_list).with_context(|| {
-        format!("Failed to write {} to {}", crate::installation::SOURCE_THORNLIST, install_dir.display())
+        format!("Failed to write {} to '{}'", crate::installation::SOURCE_THORNLIST, install_dir.display())
     })?;
 
     // --- Native component fetch (§3.2; GetComponents is gone) ---
@@ -313,15 +347,14 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     if !plan.skipped.is_empty() {
         let repos_dir = crate::installation::cactus_root_of(&install_dir, &root).join("repos");
         let mut message = format!(
-            "{} repo(s) in {} have local changes or an incomplete checkout, so this install \
-             would not fetch them:",
+            "{} repo(s) in '{}' have local changes or an incomplete checkout:",
             plan.skipped.len(),
             repos_dir.display()
         );
         for s in &plan.skipped {
             message.push_str(&format!("\n  {}: {}", s.repo, s.reason.describe()));
         }
-        message.push_str("\nDelete them (or the whole installation directory) and install again.");
+        message.push_str("\nDelete them or the installation directory, then install again.");
         bail!(message);
     }
 
@@ -332,7 +365,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         // Running the same install again picks up where this one stopped; a
         // repo cut short mid-checkout is then named, for deleting first.
         bail!(
-            "interrupted; the installation at {} is incomplete and was not registered \
+            "Interrupted; the installation at '{}' is incomplete and was not registered \
              (run the same install again to finish it)",
             install_dir.display()
         );
@@ -341,7 +374,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         for f in &report.failures {
             println!("{}", format!("  {}: {}", f.what, f.error).bright_red());
         }
-        return Err(anyhow!("component fetch failed for {} item(s)", report.failures.len()));
+        return Err(anyhow!("Component fetch failed for {} item(s)", report.failures.len()));
     }
     crate::fetch::FetchState::record(&install_dir, &report.records())?;
 
@@ -350,14 +383,14 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     // is ours); build.rs::resolve_thornlist depends on it being here.
     let live_dir = crate::installation::cactus_root_of(&install_dir, &root).join("thornlists");
     fs::create_dir_all(&live_dir)
-        .with_context(|| format!("Failed to create {}", live_dir.display()))?;
+        .with_context(|| format!("Failed to create '{}'", live_dir.display()))?;
     fs::write(live_dir.join(crate::installation::LIVE_THORNLIST), &thorn_list).with_context(|| {
-        format!("Failed to write {}", live_dir.join(crate::installation::LIVE_THORNLIST).display())
+        format!("Failed to write '{}'", live_dir.join(crate::installation::LIVE_THORNLIST).display())
     })?;
 
     if do_symlink {
         fs::create_dir_all(Path::new(&symlink_prefix))
-           .with_context(|| format!("Failed to create symlink prefix {}", symlink_prefix))?;
+           .with_context(|| format!("Failed to create symlink prefix '{}'", symlink_prefix))?;
         let link_path = Path::new(&symlink_prefix).join(&symlink_name);
         let target = crate::installation::cactus_root_of(&install_dir, &root);
 
@@ -366,14 +399,14 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
             Ok(meta) if meta.file_type().is_symlink() => {
                 #[cfg(unix)]
                 fs::remove_file(&link_path)
-                   .with_context(|| format!("Failed to remove existing symlink {}", link_path.display()))?;
+                   .with_context(|| format!("Failed to remove existing symlink '{}'", link_path.display()))?;
                 #[cfg(windows)]
                 fs::remove_dir(&link_path) // dir symlinks on Windows are removed with remove_dir
-                   .with_context(|| format!("Failed to remove existing symlink {}", link_path.display()))?;
+                   .with_context(|| format!("Failed to remove existing symlink '{}'", link_path.display()))?;
             }
             Ok(_) => {
                 return Err(anyhow!(
-                    "Refusing to overwrite existing path {} (not a symlink)",
+                    "Refusing to overwrite '{}': it is not a symlink",
                     link_path.display()
                 ));
             }
@@ -382,10 +415,10 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
 
         #[cfg(unix)]
         std::os::unix::fs::symlink(&target, &link_path)
-                          .with_context(|| format!("Failed to symlink {} -> {}", link_path.display(), target.display()))?;
+                          .with_context(|| format!("Failed to symlink '{}' -> '{}'", link_path.display(), target.display()))?;
         #[cfg(windows)]
         std::os::windows::fs::symlink_dir(&target, &link_path)
-                             .with_context(|| format!("Failed to symlink {} -> {}", link_path.display(), target.display()))?;
+                             .with_context(|| format!("Failed to symlink '{}' -> '{}'", link_path.display(), target.display()))?;
     }
 
     // Fix sim-home/test-home into installation.toml now, from the machine's
@@ -395,20 +428,28 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
 
     let release_name = match &source {
         InstallSource::Release(release) => Some(release.name.clone()),
-        InstallSource::Custom { .. } => None,
+        InstallSource::Custom { .. } | InstallSource::SimFile { .. } | InstallSource::Stack { .. } => None,
     };
     // A custom installation has no release name to show, so record the
     // thornlist it came from and let `show`/`list` name that instead.
     let source_thornlist = match &source {
-        InstallSource::Release(_) => None,
+        InstallSource::Release(_) | InstallSource::SimFile { .. } | InstallSource::Stack { .. } => None,
         InstallSource::Custom { path, .. } => Some(path.display().to_string()),
+    };
+    let (source_stack, stack_contact) = match &source {
+        InstallSource::Stack { slug, contact, .. } => (Some(slug.clone()), contact.clone()),
+        _ => (None, None),
+    };
+    let source_simfile = match &source {
+        InstallSource::SimFile { path, .. } => Some(path.display().to_string()),
+        _ => None,
     };
 
     let became_active = ctx.db.update(|database| {
         if database.installations.contains_key(&alias) {
             bail!(
-                "an installation named {alias} appeared while this install ran; \
-                 the new installation at {} was NOT registered",
+                "An installation named {alias} appeared while this install ran; \
+                 the new installation at '{}' was NOT registered",
                 install_dir.display()
             );
         }
@@ -417,6 +458,9 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
             release: release_name.clone(),
             path: install_dir.to_string_lossy().to_string(),
             thornlist: source_thornlist.clone(),
+            simfile: source_simfile.clone(),
+            stack: source_stack.clone(),
+            stack_contact: stack_contact.clone(),
             current_release: None,
             current_thornlist: None,
             unfetched_repos: Default::default(),
@@ -432,18 +476,30 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     let installed_root = crate::installation::cactus_root_of(&install_dir, &root);
     match &source {
         InstallSource::Release(release) => {
-            println!("{}", format!("Success! Installed release {} into {}", release.describe(), installed_root.display()).bold().bright_green());
+            println!("{}", format!("Success! Installed release {} into '{}'", release.describe(), installed_root.display()).bold().bright_green());
         }
         InstallSource::Custom { path, .. } => {
-            println!("{}", format!("Success! Installed custom thornlist {} into {}", path.display(), installed_root.display()).bold().bright_green());
+            println!("{}", format!("Success! Installed custom thornlist '{}' into '{}'", path.display(), installed_root.display()).bold().bright_green());
+        }
+        InstallSource::Stack { slug, .. } => {
+            println!("{}", format!("Success! Installed stack {slug} into '{}'", installed_root.display()).bold().bright_green());
+        }
+        InstallSource::SimFile { path, sim, .. } => {
+            println!("{}", format!("Success! Installed the sources of '{}' into '{}'", path.display(), installed_root.display()).bold().bright_green());
+            if !inputs_settled {
+                for input in &sim.inputs {
+                    let what = input.description.as_deref().map(|d| format!(": {d}")).unwrap_or_default();
+                    println!("Its parfile needs knob {}{what}", input.knob.bold());
+                }
+            }
         }
     }
     if do_symlink {
-        println!("{}", format!("Created a symlink at {}/{}", symlink_prefix, symlink_name).bold().bright_green());
+        println!("{}", format!("Created a symlink at '{}/{}'", symlink_prefix, symlink_name).bold().bright_green());
     }
 
     if !became_active {
-        println!("Another installation is already active. To switch to this installation, run `{}`", format!("cactup use {}", alias).bold());
+        println!("Another installation is active; run `{}` to switch to this one.", format!("cactup use {}", alias).bold());
     }
 
     Ok(())
@@ -454,7 +510,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
 /// has only seen tags has no way to know it is accepted.
 fn invalid_release(selector: &str) -> String {
     format!(
-        "{} is not a valid release. Pass a release from `cactup releases`, or {} for the tip of the manifest's master branch.",
+        "{} is not a valid release; pass one from `cactup releases`, or {}.",
         selector.bold(),
         manifest::MASTER.bold()
     ).bright_red().to_string()
@@ -477,9 +533,69 @@ fn valid_alias(alias: &str) -> bool {
         && alias.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+/// Resolve `req` (`owner/stack[@range|version|head|master]`) on the
+/// Cactarium (§8.10) to one release, fetched with its pins and pinned into
+/// its thornlist. A range is resolved once, here: the installation records
+/// the exact release, and moving to another is an explicit refetch.
+fn stack_install_source(ctx: &Ctx, req: &str) -> Res<InstallSource<'static>> {
+    let crate::cactarium::StackRelease { slug, text: content, unpinned, contact } =
+        crate::cactarium::stack_release_text(&ctx.db.read()?, req, ctx.globals.risky_allow_untrusted_artifacts)?;
+    if unpinned {
+        println!(
+            "{}",
+            format!("{slug} is not a release: its repos follow their branches, so the installation is not reproducible")
+                .yellow()
+        );
+    }
+    Ok(InstallSource::Stack { slug, content, contact })
+}
+
+/// Read a `.sim` file for `install --simfile` (§8.9): its thornlist pinned by
+/// `!REPO_COMMIT` to every commit it records and by `!CHECKSUM_SHA256` to
+/// every download hash, and a word on what it does not pin — repos it leaves
+/// on their branch, sources that were dirty when it was exported (their
+/// edits are not in the file), a hash that names no single file.
+fn sim_install_source(path: &Path) -> Res<InstallSource<'static>> {
+    use cactup_ecosystem_common::sim::SimFile;
+    let expanded = PathBuf::from(shell::expand_path(&p2s(path.to_owned())?));
+    let text = fs::read_to_string(&expanded).with_context(|| format!("Failed to read '{}'", expanded.display()))?;
+    let sim = SimFile::from_toml(&text).map_err(|e| anyhow!("'{}': {e}", expanded.display()))?;
+    let pin_failed = || format!("Failed to pin the thornlist in '{}'", expanded.display());
+    let (pins, unchecked) = crate::thornlist::recorded_pins(&sim.thornlist.text, &sim.repos).with_context(pin_failed)?;
+    let content = crate::thornlist::pin_text(&sim.thornlist.text, &pins).with_context(pin_failed)?;
+    let names = |pred: &dyn Fn(&cactup_ecosystem_common::sim::RepoPin) -> bool| -> Vec<&str> {
+        sim.repos.iter().filter(|r| pred(r)).map(|r| r.name.as_str()).collect()
+    };
+    let unpinned = names(&|r| r.commit.is_none() && r.sha256.is_none());
+    if !unpinned.is_empty() {
+        println!("{}", format!("Not pinned, so they follow their branch: {}", unpinned.join(", ")).yellow());
+    }
+    let dirty = names(&|r| r.dirty);
+    if !dirty.is_empty() {
+        println!(
+            "{}",
+            format!("Had uncommitted changes when exported, which the file does not carry: {}", dirty.join(", "))
+                .yellow()
+        );
+    }
+    if !unchecked.is_empty() {
+        println!(
+            "{}",
+            format!(
+                "Downloaded without checking their recorded hash, which names no single file: {}",
+                unchecked.join(", ")
+            )
+            .yellow()
+        );
+    }
+    let resolved = fs::canonicalize(&expanded).unwrap_or(expanded);
+    Ok(InstallSource::SimFile { path: resolved, sim: Box::new(sim), content })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{default_symlink_name, valid_alias};
+    use super::{default_symlink_name, sim_install_source, valid_alias, InstallSource};
+    use std::fs;
 
     #[test]
     fn alias_validation() {
@@ -503,5 +619,69 @@ mod tests {
         // `validate_root_dir` rejects "." before this is ever called in
         // practice, but the fallback is a safety net worth pinning anyway.
         assert_eq!(default_symlink_name(".", "et-dev"), "et-dev");
+    }
+
+
+    /// `install --simfile` (§8.9): the `.sim`'s thornlist, pinned to its
+    /// recorded commits, is what the fetch reads, so each repo lands at its
+    /// pin — not the branch tip it has moved on to since.
+    #[test]
+    fn a_simfile_installs_each_repo_at_its_pinned_commit() {
+        use cactup_ecosystem_common::sim::{Parfile, ParfileKind, RepoPin, SimFile, SimMeta, ThornlistText};
+        let tmp = tempfile::tempdir().unwrap();
+        let upstream = tmp.path().join("upstream/carpetx");
+        crate::fetch::git::testrepo::init(&upstream);
+        let pinned = crate::fetch::git::testrepo::commit_tree(&upstream, &[("Makefile", "v1\n", false)]);
+        crate::fetch::git::testrepo::commit_tree(&upstream, &[("Makefile", "v2\n", false)]);
+        let (branch, _) = crate::fetch::git::head_of(&upstream).unwrap();
+        let url = upstream.to_string_lossy().into_owned();
+        let sim = SimFile {
+            format: cactup_ecosystem_common::SIM_FORMAT,
+            sim: SimMeta {
+                name: "bhns".into(),
+                summary: None,
+                description: None,
+                authors: vec![],
+                license: None,
+                contact: None,
+                cactarium: None,
+                root: "Cactus".into(),
+            },
+            thornlist: ThornlistText {
+                filename: "bhns.th".into(),
+                text: format!(
+                    "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!TARGET = $ROOT\n!TYPE = git\n!URL = {url}\n\
+                     !REPO_BRANCH = {branch}\n!NAME = carpetx\n!CHECKOUT = Makefile\n"
+                ),
+                untracked: vec![],
+            },
+            parfile: Parfile { filename: "bhns.par".into(), kind: ParfileKind::Par, vars: vec![], text: "x\n".into() },
+            inputs: vec![],
+            repos: vec![RepoPin {
+                name: "carpetx".into(),
+                url: url.clone(),
+                git_ref: Some(branch.clone()),
+                commit: Some(pinned.to_string()),
+                sha256: None,
+                cactarium: None,
+                dirty: false,
+            }],
+            run: None,
+            provenance: None,
+        };
+        let file = tmp.path().join("bhns.sim");
+        fs::write(&file, sim.to_toml().unwrap()).unwrap();
+
+        let InstallSource::SimFile { content, .. } = sim_install_source(&file).unwrap() else { panic!("a .sim source") };
+        let list = crate::thornlist::parse(&content).unwrap();
+        assert_eq!(list.components()[0].commit.as_deref(), Some(pinned.to_string().as_str()));
+        let root = tmp.path().join("install");
+        let mut progress = prodash::tree::Root::new().add_child("test plan");
+        let plan = crate::fetch::plan(&list, &root, &mut progress).unwrap();
+        let report = crate::fetch::execute(&plan, &root).unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        let repo = root.join("Cactus/repos/carpetx");
+        assert_eq!(crate::fetch::git::head_of(&repo).unwrap().1, pinned);
+        assert_eq!(fs::read_to_string(repo.join("Makefile")).unwrap(), "v1\n");
     }
 }

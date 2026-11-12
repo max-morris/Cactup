@@ -31,6 +31,9 @@ hostname    = "graham.computecanada.ca"
 [paths]
 install-home    = "/home/@USER@"
 simulation-home = "/scratch/@USER@/simulations"
+# Where `cactup import` keeps the downloaded and unpacked inputs of shared
+# simulations: big, so beside the simulations, not in the home quota.
+inputs-home = "/scratch/@USER@/inputs"
 test-home       = "/scratch/@USER@/tests"
 
 [hardware]

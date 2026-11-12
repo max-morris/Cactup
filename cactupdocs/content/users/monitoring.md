@@ -308,7 +308,7 @@ scheduler does not know the job, or lists it as over, or the build has
 finished). An unfinished build whose status query fails is shown
 `UNKNOWN`, `build stop` refuses with the scheduler's output, and `build
 prune` keeps it. One whose job the scheduler lists in a state cactup does
-not read (suspended, as Slurm's `S`, or ended before the build could
+not recognize (suspended, as Slurm's `S`, or ended before the build could
 record its result) counts as live: `build stop` cancels it and records
 the result, a new build of that config refuses (`-f` cancels it first),
 `build prune` keeps it, and `build list` shows it `ERROR` (`build list`

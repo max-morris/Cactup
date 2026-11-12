@@ -60,11 +60,10 @@ fn listed_unread(sim: &Simulation, sched: &Scheduler, r: &Restart) -> Res<bool> 
 fn left_unread(sim: &Simulation, r: &Restart, name: &str) {
     let dir = restart::dir_name(r.id);
     println!(
-        "{}, so it is not acting on the trigger now. Leaving {dir} active — `cactup sim stop -f {name}` asks \
-         the scheduler to stop it.",
+        "{}. Leaving {dir} active; run `cactup sim stop -f {name}` to stop it.",
         sentence(crate::scheduler::unread_state(&format!("job {}", r.meta.job_id)))
     );
-    sim.log("stop", &format!("{dir} left active: its job is listed in a state cactup does not read"));
+    sim.log("stop", &format!("{dir} left active: its job is listed in a state cactup does not recognize"));
 }
 
 /// For `sim stop -f` of a job a batch scheduler answers for, that has not
@@ -79,7 +78,7 @@ fn batch_status(sched: &Scheduler, job: JobRef<'_>) -> Res<Option<JobStatus>> {
     match sched.get_status(job) {
         Ok(JobStatus::Error) => Ok(Some(JobStatus::Error)),
         Ok(JobStatus::Unknown) if sched.tells_failed_queries() => Ok(Some(JobStatus::Unknown)),
-        _ if gix::interrupt::is_triggered() => bail!("interrupted"),
+        _ if gix::interrupt::is_triggered() => bail!("Interrupted"),
         _ => Ok(None),
     }
 }
@@ -121,7 +120,7 @@ fn await_run_exit(sim: &Simulation, sched: &Scheduler, r: &Restart) -> Res<bool>
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         if gix::interrupt::is_triggered() {
-            break Err(anyhow::anyhow!("interrupted while waiting for the job to stop"));
+            break Err(anyhow::anyhow!("Interrupted while waiting for the job to stop"));
         }
     };
 
@@ -162,11 +161,8 @@ fn stop_sim(sim: &Simulation, sched: &Scheduler, name: &str, force: bool) -> Res
 
     if terminate.is_file() && !force {
         fs::write(&terminate, b"1\n")
-            .with_context(|| format!("Failed to write {}", terminate.display()))?;
-        println!(
-            "Requested graceful termination of {} (wrote 1 into TERMINATE)",
-            restart::dir_name(active)
-        );
+            .with_context(|| format!("Failed to write '{}'", terminate.display()))?;
+        println!("Requested graceful termination of {}", restart::dir_name(active));
         sim.log("stop", &format!("graceful termination of {} requested", restart::dir_name(active)));
 
         // A job listed in a state no pattern reads (suspended, or over
@@ -194,9 +190,8 @@ fn stop_sim(sim: &Simulation, sched: &Scheduler, name: &str, force: bool) -> Res
                 format!("job {} is still in the queue", r.meta.job_id)
             };
             println!(
-                "{what} after {GRACEFUL_WAIT_SECS}s: Cactus acts on the trigger at its next \
-                 termination check, often after a checkpoint. Leaving {} active — re-run \
-                 `cactup sim stop -f {name}` to kill it now.",
+                "{what} after {GRACEFUL_WAIT_SECS}s; Cactus stops at its next termination check. \
+                 Leaving {} active; run `cactup sim stop -f {name}` to kill it now.",
                 restart::dir_name(active)
             );
             sim.log(
@@ -212,15 +207,15 @@ fn stop_sim(sim: &Simulation, sched: &Scheduler, name: &str, force: bool) -> Res
             // job, and only its lock says whether it runs.
             if crate::lock::LinkLock::is_held_live(&r.running_lock_path())? {
                 println!(
-                    "{} runs in the foreground (pid {}), which the scheduler knows nothing of: \
-                     interrupt it where it runs (Ctrl-C). Nothing recorded.",
+                    "{} runs in the foreground (pid {}); interrupt it with Ctrl-C in its terminal. \
+                     Nothing recorded.",
                     restart::dir_name(active),
                     r.meta.job_id
                 );
                 return Ok(());
             }
             println!(
-                "{} ran in the foreground, and nothing of its run holds its lock: taken as ended",
+                "{} ran in the foreground and no run holds its lock; treating it as ended",
                 restart::dir_name(active)
             );
         } else if let Some(job) = r.meta.scheduler_job(sched)
@@ -235,23 +230,21 @@ fn stop_sim(sim: &Simulation, sched: &Scheduler, name: &str, force: bool) -> Res
                     let what = crate::scheduler::unread_state(&format!("job {}", r.meta.job_id));
                     match sched.stop_judged(job, StopCase::Unread)? {
                         EndedStop::Sent => println!(
-                            "{}; asked the scheduler to stop it (if it had not ended already)",
+                            "{}; asked the scheduler to stop it",
                             sentence(what)
                         ),
                         EndedStop::NotKnown(said) if crate::lock::LinkLock::is_held_live(&r.running_lock_path())? => {
                             println!(
-                                "{}, and the scheduler says it does not know it ({said}), but the restart's \
-                                 running.lock is held: nothing recorded. Once the run lets go of it (a lock left \
-                                 by a run that ended expires within {} minutes), run `cactup sim stop -f {name}` \
-                                 again.",
+                                "{}, and the scheduler does not know it ({said}), but the restart's running.lock \
+                                 is held; nothing recorded. Run `cactup sim stop -f {name}` again once the lock is \
+                                 released (a stale lock expires within {} minutes).",
                                 sentence(what),
                                 crate::lock::LOCK_STALE_SECS / 60
                             );
                             return Ok(());
                         }
                         EndedStop::NotKnown(said) => println!(
-                            "{}, and the scheduler says it does not know it ({said}); nothing of the run holds \
-                             its lock, so cactup takes it as ended",
+                            "{}, and the scheduler does not know it ({said}); treating it as ended",
                             sentence(what)
                         ),
                     }
@@ -268,15 +261,15 @@ fn stop_sim(sim: &Simulation, sched: &Scheduler, name: &str, force: bool) -> Res
                 // Another host's pid (§10): its lock says whether it runs.
                 Stopped::Elsewhere(host) if crate::lock::LinkLock::is_held_live(&r.running_lock_path())? => {
                     println!(
-                        "Job {} runs on host {host}, where it was submitted, and this host cannot stop it: \
-                         stop it there (`cactup sim stop -f {name}` on {host}). Nothing recorded.",
+                        "Job {} runs on host {host}; stop it there with `cactup sim stop -f {name}`. \
+                         Nothing recorded.",
                         r.meta.job_id
                     );
                     return Ok(());
                 }
                 Stopped::Elsewhere(host) => println!(
-                    "Job {} was submitted on host {host}, and nothing of its run holds the restart's \
-                     lock: taken as ended",
+                    "Job {} was submitted on host {host} and no run holds the restart's lock; \
+                     treating it as ended",
                     r.meta.job_id
                 ),
             }
@@ -284,9 +277,16 @@ fn stop_sim(sim: &Simulation, sched: &Scheduler, name: &str, force: bool) -> Res
         sim.log("stop", &format!("stopped job {} ({})", r.meta.job_id, restart::dir_name(active)));
     }
 
-    // finish: mark terminated + deactivate (§8.6).
-    r.meta.terminated = true;
-    r.meta.finished = Some(chrono::Utc::now());
+    // finish: mark terminated + deactivate (§8.6). Read afresh first: the run
+    // records its own end meanwhile (without waiting for this lock), and the
+    // copy read before the wait would undo it.
+    if let Ok(fresh) = Restart::load(&sim.dir, active) {
+        r = fresh;
+    }
+    if !r.meta.terminated {
+        r.meta.terminated = true;
+        r.meta.finished = Some(chrono::Utc::now());
+    }
     r.store()?;
     restart::deactivate(&sim.dir)?;
     note_chained_after(sim, sched, active)
@@ -335,8 +335,8 @@ fn stop_ended(sim: &Simulation, sched: &Scheduler, name: &str) -> Res<()> {
             }
             EndedStop::NotKnown(said) => {
                 println!(
-                    "The scheduler does not know job {job_id}, of {dir}, which has ended (its stop \
-                     command said: {said}): taken as ended"
+                    "The scheduler does not know job {job_id} of ended restart {dir} (stop command \
+                     said: {said}); treating it as ended"
                 );
                 record_job_stopped(sim, r.id)?;
                 Ok(false)
@@ -350,20 +350,20 @@ fn stop_ended(sim: &Simulation, sched: &Scheduler, name: &str) -> Res<()> {
             crate::scheduler::listed_state_words(*status)
         ), StopCase::Listed)?,
         Some(AfterEnd::Unanswered(failed)) => stop_it(&format!(
-            "Could not ask the scheduler about job {}, of {dir}, which has ended; asked it to stop the \
-             job in case it was queued again",
+            "Could not query job {} of ended restart {dir}; asked the scheduler to stop it in case \
+             it was queued again",
             job_id.bold()
         ), StopCase::Unanswered(failed))?,
         Some(AfterEnd::Over(JobStatus::Unknown)) => {
-            println!("The scheduler does not know job {job_id} ({dir} has ended); nothing to stop");
+            println!("The scheduler does not know job {job_id} of {dir}; nothing to stop");
             false
         }
         Some(AfterEnd::Over(_)) => {
-            println!("The scheduler lists job {job_id} as over ({dir} has ended); nothing to stop");
+            println!("Job {job_id} of {dir} has ended; nothing to stop");
             false
         }
         None if active == Some(r.id) => {
-            println!("{dir} has recorded its end; nothing to stop");
+            println!("{dir} has ended; nothing to stop");
             false
         }
         None => {
@@ -506,7 +506,7 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
     // A stale registry entry (dir vanished) is pruned rather than fataled.
     let registry = inst.simulations()?;
     let Some(entry) = registry.simulations.get(name) else {
-        bail!("no simulation named \"{name}\" (see `cactup sim list`)");
+        bail!("No simulation named \"{name}\" (see `cactup sim list`)");
     };
     if !entry.dir.is_dir() {
         let locked = inst.locked()?;
@@ -514,7 +514,7 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
         reg.simulations.shift_remove(name);
         locked.set_simulations(&reg)?;
         println!(
-            "Simulation {} directory {} was already gone; pruned the stale registry entry",
+            "Simulation {} directory '{}' is missing; removed its registry entry",
             name.bold(),
             entry.dir.display()
         );
@@ -535,7 +535,7 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
     // works, not the advice below.
     if let Some(old) = live.iter().find(|l| l.unverified) {
         bail!(
-            "restart {} of simulation \"{name}\": {}; then delete the simulation",
+            "Restart {} of simulation \"{name}\": {}; then delete the simulation",
             restart::dir_name(old.id),
             UnverifiedPid::of(&old.job.id)
         );
@@ -544,7 +544,7 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
     // refuse it too.
     if let Some(shared) = live.iter().find(|l| l.shared_group) {
         bail!(
-            "restart {} of simulation \"{name}\": {}; then delete the simulation",
+            "Restart {} of simulation \"{name}\": {}; then delete the simulation",
             restart::dir_name(shared.id),
             crate::scheduler::SharedGroup(shared.job.id.clone())
         );
@@ -573,19 +573,17 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
                     let r = Restart::load(&sim.dir, l.id)?;
                     if crate::lock::LinkLock::is_held_live(&r.running_lock_path())? {
                         bail!(
-                            "{}, says it does not know it ({said}), and restart {}'s running.lock is held: \
-                             delete the simulation once the run has let go of the lock (a lock left by a run \
-                             that ended expires within {} minutes)",
-                            crate::scheduler::unread_state(&format!("job {}", l.job.id)),
+                            "{}, and the scheduler does not know it ({said}), but restart {}'s running.lock is \
+                             held. Run `cactup sim delete -f {name}` again once the lock is released (a stale \
+                             lock expires within {} minutes)",
+                            sentence(crate::scheduler::unread_state(&format!("job {}", l.job.id))),
                             restart::dir_name(l.id),
                             crate::lock::LOCK_STALE_SECS / 60
                         );
                     }
                     println!(
-                        "{}, and the scheduler says it does not know it ({said}); nothing of restart {}'s run \
-                         holds its lock, so cactup takes it as ended",
-                        sentence(crate::scheduler::unread_state(&format!("job {}", l.job.id))),
-                        restart::dir_name(l.id)
+                        "{}, and the scheduler does not know it ({said}); treating it as ended",
+                        sentence(crate::scheduler::unread_state(&format!("job {}", l.job.id)))
                     );
                 }
                 continue;
@@ -604,11 +602,11 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
         // -f implies --purge (§8.7 ASSUMPTION): permanent removal, links no
         // longer count for cache GC.
         fs::remove_dir_all(&sim.dir)
-            .with_context(|| format!("Failed to remove {}", sim.dir.display()))?;
+            .with_context(|| format!("Failed to remove '{}'", sim.dir.display()))?;
         println!("Deleted simulation {} permanently", name.bold());
     } else {
         let dst = cache::move_to_trash(&sim_home, &sim.dir, &sim.meta.simulation_id)?;
-        println!("Moved simulation {} to {}", name.bold(), dst.display());
+        println!("Moved simulation {} to '{}'", name.bold(), dst.display());
     }
 
     let locked = inst.locked()?;
@@ -695,9 +693,9 @@ pub(crate) fn ended_newest(sim: &Simulation, sched: &Scheduler) -> Res<Option<(R
 pub(crate) fn unanswered_refusal(sim: &Simulation, r: &Restart, failed: &str, what: &str) -> anyhow::Error {
     let name = &sim.name;
     anyhow::anyhow!(
-        "restart {} of simulation \"{name}\" ended, but the scheduler could not be asked whether its job \
-         {} was queued again: {failed}\n`cactup sim stop {name}` asks the scheduler to stop the job (a job it \
-         says it does not know is then taken as ended); or pass -f to stop it and {what}",
+        "Restart {} of simulation \"{name}\" ended, but the scheduler could not be asked whether its job \
+         {} was queued again: {failed}\nRun `cactup sim stop {name}` to stop the job, or pass -f to stop it \
+         and {what}",
         restart::dir_name(r.id),
         r.meta.job_id
     )
@@ -724,14 +722,14 @@ pub(crate) fn stop_unanswered(sim: &Simulation, sched: &Scheduler, r: &Restart, 
     match stopped {
         EndedStop::Sent => {
             println!(
-                "Could not ask the scheduler about job {job_id}, of {dir}, which has ended; asked it to \
-                 stop the job in case it was queued again"
+                "Could not query job {job_id} of ended restart {dir}; asked the scheduler to stop it \
+                 in case it was queued again"
             );
             sim.log("stop", &format!("asked the scheduler to stop job {job_id} ({dir}), after its end"));
         }
         EndedStop::NotKnown(said) => println!(
-            "The scheduler does not know job {job_id}, of {dir}, which has ended (its stop command said: \
-             {said}): taken as ended"
+            "The scheduler does not know job {job_id} of ended restart {dir} ({said}); \
+             treating it as ended"
         ),
     }
     Ok(())
@@ -790,7 +788,7 @@ fn chained_after(sim: &Simulation, sched: &Scheduler, id: u32) -> Res<Vec<String
             None => "the scheduler's own stop command".to_owned(),
         };
         lines.push(format!(
-            "Restart {dir} (job {}) is chained behind job {after} and runs after it; to stop it: {how}",
+            "Restart {dir} (job {}) is chained behind job {after}; to stop it: {how}",
             r.meta.job_id
         ));
     }
@@ -839,9 +837,8 @@ fn live_jobs(sim: &Simulation, sched: &Scheduler) -> Res<Vec<LiveJob>> {
         let Some(job) = r.meta.scheduler_job(sched) else {
             if r.meta.foreground && held()? {
                 bail!(
-                    "restart {} of simulation \"{}\" runs in the foreground (pid {}), which the \
-                     scheduler knows nothing of: interrupt it where it runs (Ctrl-C), then delete \
-                     the simulation (a lock left by a run that ended expires within {} minutes)",
+                    "Restart {} of simulation \"{}\" runs in the foreground (pid {}); interrupt it \
+                     (Ctrl-C), then delete the simulation (a stale lock expires within {} minutes)",
                     restart::dir_name(id),
                     sim.name,
                     r.meta.job_id,
@@ -856,9 +853,8 @@ fn live_jobs(sim: &Simulation, sched: &Scheduler) -> Res<Vec<LiveJob>> {
         if let Some(host) = sched.recorded_elsewhere(job) {
             if held()? {
                 bail!(
-                    "restart {} of simulation \"{}\" runs on host {host}, where its job {} was \
-                     submitted, and this host can neither ask about it nor stop it: stop it there \
-                     (`cactup sim stop -f {}` on {host}), then delete the simulation",
+                    "Restart {} of simulation \"{}\" runs on host {host} (job {}); stop it there \
+                     with `cactup sim stop -f {}`, then delete the simulation",
                     restart::dir_name(id),
                     sim.name,
                     r.meta.job_id,
@@ -919,7 +915,7 @@ fn live_jobs_refusal(name: &str, live: &[LiveJob], stops: Option<u32>) -> String
                 crate::scheduler::listed_state_words(l.status)
             ),
             false if l.status == JobStatus::Error => format!(
-                "{} = job {}, listed in a state cactup does not read (suspended, exiting, or ended)",
+                "{} = job {}, listed in a state cactup does not recognize",
                 restart::dir_name(l.id),
                 l.job.id
             ),
@@ -1269,6 +1265,10 @@ fn show_one(inst: &Installation, sched: &Scheduler, name: &str, long: bool) -> R
     println!("  machine:       {}", sim.meta.machine);
     println!("  parfile:       {}", sim.meta.parfile);
     println!("  simulation-id: {}", sim.meta.simulation_id);
+    // Its own knob values (§5.1), which outrank the global ones.
+    for (knob, value) in &sim.meta.knobs {
+        println!("  knob:          {knob} = {value}");
+    }
     if long {
         // Build provenance snapshotted into `.cactup/cfg/` at create time
         // (§8.2): what this sim's frozen binary was compiled from, which
@@ -1302,7 +1302,7 @@ fn show_one(inst: &Installation, sched: &Scheduler, name: &str, long: bool) -> R
                 let status = query.flatten();
                 let state = shown(active == Some(id), r.meta.chained_job_id.is_some(), r.meta.terminated, query);
                 let mut line = format!(
-                    "    {}{marker}: {} — job {}, queue {}, wall {}",
+                    "    {}{marker}: {}, job {}, queue {}, wall {}",
                     restart::dir_name(id),
                     state_str(state),
                     r.meta.job_id,
@@ -1313,7 +1313,7 @@ fn show_one(inst: &Installation, sched: &Scheduler, name: &str, long: bool) -> R
                     // What the scheduler's answer said (a state its running
                     // pattern reads; its own word for it is not kept), and
                     // what it may mean.
-                    line.push_str(", listed running after the restart ended: leaving the queue, or starting again");
+                    line.push_str(", listed as running after the restart ended");
                 }
                 if long {
                     if let Some(chained) = &r.meta.chained_job_id {
@@ -1350,12 +1350,12 @@ fn print_output_dir(inst: &Installation, name: &str, restart_id: Option<u32>) ->
             Some(id) => id,
             None => *restart::list_ids(&sim.dir)?
                 .last()
-                .ok_or_else(|| anyhow::anyhow!("simulation \"{name}\" has no restarts yet"))?,
+                .ok_or_else(|| anyhow::anyhow!("Simulation \"{name}\" has no restarts yet"))?,
         },
     };
     let dir = restart::restart_dir(&sim.dir, id);
     if !dir.is_dir() {
-        bail!("restart {} does not exist", restart::dir_name(id));
+        bail!("Restart {} does not exist", restart::dir_name(id));
     }
     println!("{}", dir.display());
     Ok(())
@@ -1370,7 +1370,7 @@ pub fn log_cmd(ctx: &Ctx, name: &str, mode: crate::tail::FollowMode) -> Res<()> 
     let id = restart::active_id(&sim.dir)?
         .or(restart::list_ids(&sim.dir)?.last().copied());
     let Some(id) = id else {
-        bail!("simulation \"{name}\" has no restarts yet (nothing to show)");
+        bail!("Simulation \"{name}\" has no restarts yet");
     };
     let rdir = restart::restart_dir(&sim.dir, id);
 
@@ -1469,7 +1469,8 @@ mod tests {
     ) -> SimEntry {
         let dir = root.join(name);
         let meta = SimulationMeta { parfile: "bbh.par".to_owned(), ..Default::default() };
-        crate::installation::write_toml(&dir.join(".cactup").join("simulation.toml"), &meta).unwrap();
+        let record = dir.join(".cactup").join("simulation.toml");
+        crate::format::write(&record, &meta, &crate::sim::SIMULATION).unwrap();
 
         let rdir = restart::restart_dir(&dir, 0);
         fs::create_dir_all(rdir.join(".cactup")).unwrap();
@@ -1684,7 +1685,7 @@ mod tests {
         let live = live_jobs(&sim, &suspended).unwrap();
         assert_eq!(live.iter().map(|l| (l.id, l.status)).collect::<Vec<_>>(), [(0, JobStatus::Error)]);
         let refused = live_jobs_refusal("requeued", &live, Some(0));
-        assert!(refused.contains("job 4242, listed in a state cactup does not read"), "{refused}");
+        assert!(refused.contains("job 4242, listed in a state cactup does not recognize"), "{refused}");
         assert_eq!(sim_state_now(&sim, &suspended).0, DisplayState::Error);
 
         // Ended, and the scheduler still lists the job in a state its
@@ -1876,7 +1877,7 @@ mod tests {
         assert!(r.meta.foreground && r.meta.scheduler_job(&batch).is_none());
         let held = crate::lock::LinkLock::acquire(&r.running_lock_path()).unwrap();
         let err = live_jobs(&sim, &batch).unwrap_err().to_string();
-        assert!(err.contains("runs in the foreground") && err.contains("interrupt it where it runs"), "{err}");
+        assert!(err.contains("runs in the foreground") && err.contains("interrupt it (Ctrl-C)"), "{err}");
         assert!(run_is_live(&batch, &r).unwrap(), "its lock says it runs");
         assert_eq!(sim_state_now(&sim, &batch).0, DisplayState::Active);
         drop(held);
@@ -2245,7 +2246,7 @@ mod tests {
             match named {
                 true => assert_eq!(
                     lines,
-                    ["Restart output-0001 (job 1004) is chained behind job 1003 and runs after it; to stop it: `scancel 1004`"],
+                    ["Restart output-0001 (job 1004) is chained behind job 1003; to stop it: `scancel 1004`"],
                     "{state}"
                 ),
                 false => assert!(lines.is_empty(), "{state}: {lines:?}"),
@@ -2320,7 +2321,7 @@ mod tests {
             for force in [false, true] {
                 let err = stop_sim(&sim, &sched, name, force).unwrap_err().to_string();
                 assert!(err.contains("Socket timed out"), "{name} -f={force}: {err}");
-                assert!(err.contains(if name == "listed" { "the stop command for job 1003 failed" } else { "failed too: " }), "{err}");
+                assert!(err.contains(if name == "listed" { "The stop command for job 1003 failed" } else { "failed too: " }), "{err}");
             }
             // (`sim run -f` stops only a job the scheduler could not be asked
             // about; beside a listed one it refuses, `-f` too.)

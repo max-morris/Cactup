@@ -56,7 +56,9 @@ static CLIENT: LazyLock<reqwest::blocking::Client> = LazyLock::new(|| {
 /// Download one http/https component into `<install_root>/<target>/`,
 /// overwriting whatever is already there (refetch semantics: downloads are
 /// always refreshed, matching GetComponents' `update` method never skipping
-/// a re-fetch). Returns the final file path. Never extracts an archive —
+/// a re-fetch) — except a `!CHECKSUM_SHA256` download already there with that
+/// content, which is kept; a checksummed download that does not match is an
+/// error and leaves the old file in place. Never extracts an archive —
 /// neither does `handle_wget`. Streams the body in 64 KiB chunks rather than
 /// buffering it whole, reporting bytes (with a percentage and throughput,
 /// when the server sends `Content-Length`) via `progress`.
@@ -64,14 +66,11 @@ pub fn download_component(
     install_root: &Path,
     component: &Component,
     progress: &mut impl prodash::Progress,
-) -> crate::Res<PathBuf> {
+) -> crate::Res<Downloaded> {
     if component.ty == ComponentType::Ftp {
         let dest_dir = install_root.join(&component.target);
         bail!(
-            "component '{}' uses !TYPE = ftp, which cactup cannot fetch natively \
-             (reqwest, cactup's HTTP client, speaks only http/https — GetComponents \
-             itself only handled ftp by shelling out to wget, see the module docs). \
-             Fetch it manually into '{}' or install the component another way.",
+            "Component '{}' uses !TYPE = ftp, which cactup cannot fetch; fetch it manually into '{}'",
             component.checkout,
             dest_dir.display(),
         );
@@ -88,28 +87,63 @@ pub fn download_component(
     let url = component
         .url
         .as_deref()
-        .ok_or_else(|| anyhow!("component '{}' has no !URL", component.checkout))?;
+        .ok_or_else(|| anyhow!("Component '{}' has no !URL", component.checkout))?;
     let fetch_url = effective_url(url, &component.checkout);
     let filename = derive_filename(component.name.as_deref(), &component.checkout);
 
     let dest_dir = install_root.join(&component.target);
     std::fs::create_dir_all(&dest_dir)
-        .with_context(|| format!("Failed to create {}", dest_dir.display()))?;
+        .with_context(|| format!("Failed to create '{}'", dest_dir.display()))?;
     let dest_path = dest_dir.join(&filename);
     let tmp_path = dest_dir.join(format!("{filename}.part"));
 
-    // Write to a same-directory temp file, then rename into place, so a
-    // reader never observes a partially-written destination file.
+    // A checksummed download already there with that very content is left
+    // alone, like a git repo already at its pin: nothing to fetch.
+    if let Some(expected) = &component.checksum
+        && dest_path.is_file()
+        && crate::update::sha256_hex(&dest_path).is_ok_and(|actual| actual == *expected)
     {
+        return Ok(Downloaded { path: dest_path, fetched: false, sha256: expected.clone() });
+    }
+
+    // Write to a same-directory temp file, then rename into place, so a
+    // reader never observes a partially-written destination file. A
+    // transient failure starts the download over: `File::create` truncates
+    // whatever the failed attempt wrote.
+    super::retry::with_backoff(progress, |progress| {
         let mut tmp_file = std::fs::File::create(&tmp_path)
-            .with_context(|| format!("Failed to create {}", tmp_path.display()))?;
-        download_to(client(), &fetch_url, &mut tmp_file, progress)?;
+            .with_context(|| format!("Failed to create '{}'", tmp_path.display()))?;
+        download_to(client(), &fetch_url, &mut tmp_file, progress).map(drop)
+    })?;
+    // `!CHECKSUM_SHA256`: a download that is not what the list pins never
+    // replaces the file. Not retried: a different file is not a transient
+    // failure. Hashed either way: the fetch record keeps every download's
+    // hash, which is what a build freezes and `sim export` pins.
+    let actual = crate::update::sha256_hex_counting(&tmp_path, progress)?;
+    if let Some(expected) = &component.checksum {
+        if actual != *expected {
+            let _ = std::fs::remove_file(&tmp_path);
+            bail!(
+                "{fetch_url} is not the file the thornlist pins: its SHA-256 is {actual}, not {expected}. The file \
+                 on the server has changed since the list was pinned"
+            );
+        }
     }
     std::fs::rename(&tmp_path, &dest_path).with_context(|| {
-        format!("Failed to move {} into place at {}", tmp_path.display(), dest_path.display())
+        format!("Failed to move '{}' to '{}'", tmp_path.display(), dest_path.display())
     })?;
 
-    Ok(dest_path)
+    Ok(Downloaded { path: dest_path, fetched: true, sha256: actual })
+}
+
+/// Where a download landed, and whether it was fetched (`false`: a
+/// checksummed file already there with the pinned content was kept).
+#[derive(Debug)]
+pub struct Downloaded {
+    pub path: PathBuf,
+    pub fetched: bool,
+    /// The file's SHA-256, lowercase hex.
+    pub sha256: String,
 }
 
 /// The shared download client ([`CLIENT`]): cactup's `User-Agent` and
@@ -132,11 +166,30 @@ pub(crate) fn download_to(
     dest: &mut std::fs::File,
     progress: &mut impl prodash::Progress,
 ) -> crate::Res<u64> {
+    download_to_limited(client, url, dest, progress, None)
+}
+
+/// [`download_to`], stopping with an error once more than `limit` bytes
+/// arrive (or the server announces more): a download whose size was agreed
+/// to never grows past it.
+pub(crate) fn download_to_limited(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    dest: &mut std::fs::File,
+    progress: &mut impl prodash::Progress,
+    limit: Option<u64>,
+) -> crate::Res<u64> {
+    let too_big = |limit: u64| anyhow!("{url} is bigger than {}; pass -y to download it anyway", crate::progress::bytes(limit as usize));
     let mut response = client
         .get(url)
         .send()
         .and_then(|r| r.error_for_status())
         .with_context(|| format!("Failed to download {url}"))?;
+    if let (Some(limit), Some(announced)) = (limit, response.content_length())
+        && announced > limit
+    {
+        return Err(too_big(limit));
+    }
     progress.init(
         response.content_length().map(|l| l as usize),
         Some(prodash::unit::dynamic_and_mode(
@@ -149,7 +202,7 @@ pub(crate) fn download_to(
     let mut total = 0u64;
     loop {
         if gix::interrupt::is_triggered() {
-            bail!("interrupted");
+            bail!("Interrupted");
         }
         let n = std::io::Read::read(&mut response, &mut buf)
             .with_context(|| format!("Failed to read the response body of {url}"))?;
@@ -159,6 +212,11 @@ pub(crate) fn download_to(
         std::io::Write::write_all(dest, &buf[..n])
             .with_context(|| format!("Failed to save the download of {url}"))?;
         total += n as u64;
+        if let Some(limit) = limit
+            && total > limit
+        {
+            return Err(too_big(limit));
+        }
         progress.inc_by(n);
     }
     Ok(total)
@@ -180,7 +238,7 @@ fn effective_url(url: &str, checkout: &str) -> String {
 /// what gets appended last in [`effective_url`]. Falls back to `index.html`
 /// (wget's own fallback for a URL with no usable trailing segment) when that
 /// segment is empty or `.` — i.e. `checkout` is empty or `.`.
-fn derive_filename(name: Option<&str>, checkout: &str) -> String {
+pub(crate) fn derive_filename(name: Option<&str>, checkout: &str) -> String {
     if let Some(n) = name {
         return n.to_owned();
     }
@@ -224,7 +282,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut c = http_component("file.txt", None);
         c.url = Some(base);
-        let path = download_component(dir.path(), &c, &mut test_progress()).unwrap();
+        let path = download_component(dir.path(), &c, &mut test_progress()).unwrap().path;
         assert_eq!(std::fs::read(&path).unwrap(), b"payload");
 
         let head = server.join().expect("server thread");
@@ -234,6 +292,70 @@ mod tests {
             .find(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
             .map(|(_, value)| value.trim().to_owned());
         assert_eq!(sent.as_deref(), Some(USER_AGENT), "request head was:\n{head}");
+    }
+
+    #[test]
+    fn a_download_that_fails_transiently_is_retried() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        let (base, server) = test_server::serve_with(2, move |_| match calls.fetch_add(1, Ordering::Relaxed) {
+            0 => ("503 Service Unavailable", String::new(), b"try later".to_vec()),
+            _ => ("200 OK", String::new(), b"payload".to_vec()),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = http_component("file.txt", None);
+        c.url = Some(base);
+        let path = download_component(dir.path(), &c, &mut test_progress()).unwrap().path;
+        assert_eq!(std::fs::read(&path).unwrap(), b"payload");
+        assert_eq!(server.join().expect("server thread").len(), 2);
+    }
+
+    #[test]
+    fn a_download_that_fails_for_good_is_asked_once() {
+        let (base, server) = test_server::serve(Vec::new(), 1);
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = http_component("file.txt", None);
+        c.url = Some(base);
+        let err = download_component(dir.path(), &c, &mut test_progress()).unwrap_err();
+        assert!(format!("{err:#}").contains("404"), "{err:#}");
+        assert!(!format!("{err:#}").contains("gave up"), "a 404 is not retried: {err:#}");
+        assert_eq!(server.join().expect("server thread").len(), 1);
+    }
+
+    /// `!CHECKSUM_SHA256`: a matching download lands; one that does not is
+    /// refused (asked once, not retried) and leaves the old file; a file
+    /// already there with the pinned content is kept without a request.
+    #[test]
+    fn a_checksummed_download_is_checked() {
+        let other = "0".repeat(64);
+        let dir = tempfile::tempdir().unwrap();
+        let sample = dir.path().join("sample");
+        std::fs::write(&sample, b"payload").unwrap();
+        let payload_hash = crate::update::sha256_hex(&sample).unwrap();
+
+        let mut c = http_component("file.txt", None);
+        c.checksum = Some(payload_hash.clone());
+        let (base, server) = serve_once(b"payload");
+        c.url = Some(base.clone());
+        let got = download_component(dir.path(), &c, &mut test_progress()).unwrap();
+        assert!(got.fetched);
+        assert_eq!(std::fs::read(&got.path).unwrap(), b"payload");
+        server.join().expect("server thread");
+
+        // Already there with that content: kept, and no request goes out (no server is listening).
+        c.url = Some(base);
+        let kept = download_component(dir.path(), &c, &mut test_progress()).unwrap();
+        assert!(!kept.fetched);
+
+        // A different pin: the download is refused and the file stays as it was.
+        let (base, server) = test_server::serve(vec![("*", b"payload".to_vec())], 1);
+        c.url = Some(base);
+        c.checksum = Some(other);
+        let err = format!("{:#}", download_component(dir.path(), &c, &mut test_progress()).unwrap_err());
+        assert!(err.contains("not the file the thornlist pins") && err.contains(&payload_hash), "{err}");
+        assert_eq!(server.join().expect("server thread").len(), 1, "a mismatch is not retried");
+        assert_eq!(std::fs::read(&got.path).unwrap(), b"payload");
+        assert!(!dir.path().join("Cactus/arrangements/Thorns/file.txt.part").exists());
     }
 
     fn http_component(checkout: &str, name: Option<&str>) -> Component {
@@ -248,6 +370,9 @@ mod tests {
             anon_pass: None,
             repo_path: None,
             branch: None,
+            commit: None,
+            checksum: None,
+            fetch_only: false,
             repo: "dist".to_owned(),
         }
     }
@@ -340,7 +465,7 @@ pub(crate) mod test_server {
     /// Serve `requests` requests, answering each with what `reply` returns
     /// for its path: a status, extra header lines (each ending in CRLF) and
     /// a body.
-    fn serve_with(
+    pub(crate) fn serve_with(
         requests: usize,
         reply: impl Fn(&str) -> (&'static str, String, Vec<u8>) + Send + 'static,
     ) -> (String, std::thread::JoinHandle<Vec<String>>) {
