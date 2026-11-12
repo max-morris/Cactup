@@ -101,12 +101,10 @@ the crate's `generation::check` before the typed parse (missing is an error);
   numbered fixture and re-pin; otherwise bump.
 - **Interchange formats** have deployed readers we cannot update. `.sim`
   writes the oldest generation that holds its content
-  (`SimFile::required_format`) and reads `1..=SIM_FORMAT`; manifests are an
-  exact match at the current pin (the same while `MANIFEST_FORMAT` is 1) and
-  `1..=N` forever once the pin moves past max-morris/cactup-ecosystem-common#1
-  (tags are immutable); the stack release's `format` is checked before the
-  typed parse against `cactarium.rs`'s `STACK_FORMAT` copy until then, the
-  crate's after; the API is gated by `api-generation`. A `.sim` whose `format`
+  (`SimFile::required_format`) and reads `1..=SIM_FORMAT`; manifests are
+  read `1..=MANIFEST_FORMAT` forever (tags are immutable); the stack
+  release's `format` is checked against the crate's `STACK_FORMAT` before the
+  typed parse; the API is gated by `api-generation`. A `.sim` whose `format`
   is older than its content needs is refused as invalid. **`latest.json` is never versioned and never broken**: old
   binaries update themselves from it. Add keys only; a change that cannot be
   additive is published at a new path beside it (the path is the version).

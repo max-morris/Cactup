@@ -532,8 +532,8 @@ of a server or update site.
 | `cactup-config.toml` | S at build finish; L on build, the up-to-date refresh and the thornlist retarget | (a) S at `execute` start | Sticky and put-back. The 1 → 2 bump predates down-steps and is grandfathered (`down_floor` 2): §7.4's accepted narrow window. | Chain `[1 → 2]`. |
 | `<sim>/.cactup/cfg/cactup-config.toml` | `sim create`, once, by `replace` | login readers (`sim export`) | Written once, at the oldest version that holds it. | The config chain. |
 | `.sim` | `cactup export` | (c) every cactup import, the server | Written at the oldest generation that holds the content (`SimFile::required_format`), so a file needing nothing new stays readable by older cactups. | Reads generations 1 to `SIM_FORMAT`; a newer one is refused with an upgrade message, and a file claiming a generation older than its content needs is refused as invalid. |
-| `cactarium.toml`, `cactarium-stack.toml` | authors | the server | An exact match at the current pin (the same thing while `MANIFEST_FORMAT` is 1); once the pin moves past the shared crate's change, read 1..=N forever: tags are immutable. | n/a |
-| Stack release (API JSON, `FrozenStack`) | the server | (c) all clients | Gated by the `api-generation` header, and cactup checks the release's `format` against `STACK_FORMAT` (its own copy in `cactarium.rs` until the pin moves, the crate's after) before the typed parse, so a newer one says to upgrade rather than failing on an unknown key. The server should keep answering older-generation clients in their generation beside the new one until a deliberate cutoff (a rule for the Cactarium repository). | n/a |
+| `cactarium.toml`, `cactarium-stack.toml` | authors | the server | Read 1..=`MANIFEST_FORMAT` forever: tags are immutable. | n/a |
+| Stack release (API JSON, `FrozenStack`) | the server | (c) all clients | Gated by the `api-generation` header, and cactup checks the release's `format` against the shared crate's `STACK_FORMAT` before the typed parse, so a newer one says to upgrade rather than failing on an unknown key. The server should keep answering older-generation clients in their generation beside the new one until a deliberate cutoff (a rule for the Cactarium repository). | n/a |
 | `latest.json` | CI (`ci/assemble-site.sh`) | (c) every deployed binary and the installer | **Never versioned and never broken**: a refusal would leave old binaries unable to update themselves. It carries no version key; **the path is the version**. Keys may only be added (it is read leniently), and a change that cannot be additive is published at a new path beside the old one. | n/a |
 
 **The hard case.** A newer L rewriting `restart.toml` at a bumped version
@@ -567,7 +567,7 @@ written older).
 | `configs/<c>/cactup-config.toml` (and the sim's frozen copy) | `build::CONFIG` (chain `[1 → 2]`, `down_floor` 2) | `schema` | 2 | yes |
 | `.sim` | shared crate, `SimFile` (`SIM_FORMAT`) | `format` | 3 | n/a |
 | `cactarium.toml`, `cactarium-stack.toml` | shared crate (`MANIFEST_FORMAT`) | `format` | 1 | n/a |
-| Stack release JSON | `cactarium::STACK_FORMAT` (the crate's copy once the pin moves) | `format` | 1 | n/a |
+| Stack release JSON | shared crate (`STACK_FORMAT`) | `format` | 1 | n/a |
 | `latest.json` | none: the path is the version | n/a | n/a | n/a |
 
 `replace_whole` per descriptor: `DATABASE` (`detected`,

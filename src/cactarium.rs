@@ -18,6 +18,7 @@ use cactup_ecosystem_common::api::{
     CONTACT_HEADER, SHA256_HEADER, UNPINNED_HEADER, UNTRUSTED_HEADER,
 };
 use cactup_ecosystem_common::stack::FrozenStack;
+use cactup_ecosystem_common::STACK_FORMAT;
 use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
 
@@ -379,11 +380,6 @@ fn json<T: DeserializeOwned>(response: reqwest::blocking::Response) -> Res<T> {
     let text = response.text().with_context(|| format!("Failed to read the answer from {url}"))?;
     serde_json::from_str(&text).with_context(|| format!("The Cactarium's answer from {url} is not what cactup expects"))
 }
-
-/// The newest stack-release `format` this cactup reads. The shared crate's
-/// `STACK_FORMAT` says the same; this copy stands in until the crate pin
-/// moves to a revision that has it, and then goes (use the crate's).
-const STACK_FORMAT: u32 = 1;
 
 /// A stack release's JSON, its `format` checked before the typed parse
 /// (`FrozenStack` refuses keys it does not know, so a release from a newer
