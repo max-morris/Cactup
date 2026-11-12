@@ -528,17 +528,22 @@ fn reject_generation_1_header(source: &str) -> Res<()> {
 /// flavors (§4.4) without demanding every listed file parses in
 /// full.
 pub fn load_header(path: &Path) -> Res<OptionlistHeader> {
+    let source = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read optionlist '{}'", path.display()))?;
+    parse_header(&source).with_context(|| format!("Invalid optionlist '{}'", path.display()))
+}
+
+/// `load_header`'s string-level half (an overlay migration checks the text
+/// it is about to write).
+pub fn parse_header(source: &str) -> Res<OptionlistHeader> {
     #[derive(Deserialize)]
     struct HeaderOnly {
         #[serde(default)]
         cactup: OptionlistHeader,
     }
-    let source = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read optionlist '{}'", path.display()))?;
-    reject_generation_1_header(&source).with_context(|| format!("Invalid optionlist '{}'", path.display()))?;
-    let raw: HeaderOnly = toml::from_str(&source)
-        .with_context(|| format!("Invalid optionlist '{}'", path.display()))?;
-    raw.cactup.runs_on.validate().with_context(|| format!("Invalid optionlist '{}'", path.display()))?;
+    reject_generation_1_header(source)?;
+    let raw: HeaderOnly = toml::from_str(source)?;
+    raw.cactup.runs_on.validate()?;
     Ok(raw.cactup)
 }
 
