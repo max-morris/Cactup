@@ -220,6 +220,15 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
         return Ok(());
     }
 
+    // A library placement the new list drops (the new base carries the
+    // library itself, say) loses its link before anything is fetched: the
+    // new list's sections would otherwise be resolved through it. Only the
+    // links cactup made go; anything else there refuses the refetch.
+    let before = fs::read_to_string(&live_read).unwrap_or_default();
+    for link in fetch::library::unplace_dropped(&inst.root, &before, &composed)? {
+        println!("Took away the old library link at {link}.");
+    }
+
     // Back the dirty repos actually being forced up outside the installation
     // (uninstall deletes the installation), then fetch them like clean repos.
     if !forced_repo_names.is_empty() {

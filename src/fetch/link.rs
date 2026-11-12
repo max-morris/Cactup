@@ -130,6 +130,18 @@ fn plan_link(pass: &LinkPass, component: &Component) -> crate::Res<LinkPlan> {
     } else {
         Path::new(&component.target).join(&checkout_dir)
     });
+    // Resolved physically, a target may leave the installation: a `..`
+    // after a symlink climbs from wherever the link points. Nothing is made
+    // or linked outside the installation, whatever the list says.
+    if !target_dir.starts_with(&pass.physical_root) {
+        bail!(
+            "The !TARGET of '{}' ({}) resolves to '{}', outside the installation '{}'; not linking there",
+            component.checkout,
+            component.target,
+            target_dir.display(),
+            pass.physical_root.display()
+        );
+    }
 
     // The three cases, lines 1568-1615 (see the module doc for the ln -nsf
     // divergence in how each result is applied).
@@ -771,5 +783,30 @@ mod tests {
         let c = git_component(".", "Whole");
         let err = link_component(&f.install_root, "Cactus", &c).unwrap_err();
         assert!(format!("{err:#}").contains("!NAME"));
+    }
+
+    /// A `!TARGET` that, resolved physically (through a symlink, then `..`),
+    /// leaves the installation is refused, and nothing is made out there:
+    /// neither the target directory nor the link.
+    #[test]
+    fn a_target_resolving_outside_the_installation_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("inst");
+        make_repo(&install_root, "A");
+        make_repo(&install_root, "B");
+        // Inside the installation, a link to the directory holding it.
+        std::os::unix::fs::symlink(dir.path(), install_root.join("Cactus/repos/A/up")).unwrap();
+        let mut c = git_component("Thorn", "B");
+        c.target = "Cactus/repos/A/up/escape".to_owned();
+        let err = link_component(&install_root, "Cactus", &c).unwrap_err();
+        assert!(format!("{err:#}").contains("outside the installation"), "{err:#}");
+        assert!(!dir.path().join("escape").exists(), "nothing made outside");
+        // `..` past a link, as the Einstein Toolkit's FUKA section spells it.
+        c.target = "Cactus/repos/A/up/inst/Cactus/repos/A/up/../../escape2".to_owned();
+        assert!(link_component(&install_root, "Cactus", &c).is_err());
+        assert!(std::fs::read_dir(dir.path()).unwrap().count() == 1, "only the installation there");
+        // Inside, through the same link: fine.
+        c.target = "Cactus/repos/A/up/inst/Cactus/arrangements".to_owned();
+        assert_eq!(link_component(&install_root, "Cactus", &c).unwrap(), LinkOutcome::Created);
     }
 }

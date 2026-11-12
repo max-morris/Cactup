@@ -100,19 +100,22 @@ fn library_sections(root: &str, base: &thornlist::Thornlist, added: &[AddedPacka
     use std::collections::BTreeMap;
     let mut sections: Vec<Component> = Vec::new();
     // Each clone's source, so a name used twice must mean one source: the
-    // base's repos, the packages' clones, then the libraries'.
+    // base's repos, the packages' clones, then the libraries'. Names (and
+    // paths) are compared without case: on a case-insensitive filesystem
+    // `Fuka` and `fuka` are one directory.
+    let fold = |s: &str| s.to_ascii_lowercase();
     let mut sources: BTreeMap<String, (String, Option<String>, String)> = BTreeMap::new();
     let normalized = |u: &str| crate::fetch::git::normalize_url(u);
     for c in base.components() {
         if let Some(url) = &c.url {
             let source = (normalized(url), c.commit.clone(), "the installation's thornlist".to_owned());
-            sources.entry(c.repo.clone()).or_insert(source);
+            sources.entry(fold(&c.repo)).or_insert(source);
         }
     }
     for a in added {
         for clone in package_repos(a) {
             let commit = (!is_tip(&a.version)).then(|| a.commit.clone());
-            sources.entry(clone).or_insert((normalized(&a.url), commit, a.package.clone()));
+            sources.entry(fold(&clone)).or_insert((normalized(&a.url), commit, a.package.clone()));
         }
     }
     let mut at: BTreeMap<String, (String, &AddedLibrary)> = BTreeMap::new();
@@ -120,7 +123,7 @@ fn library_sections(root: &str, base: &thornlist::Thornlist, added: &[AddedPacka
     // puts it (a new base, say a stack release that now carries it), and so
     // does what goes inside it.
     let in_base: BTreeSet<String> = base.components().iter().filter_map(|c| c.url.as_deref()).map(normalized).collect();
-    let mut left: BTreeSet<&str> = BTreeSet::new();
+    let mut left: BTreeSet<String> = BTreeSet::new();
     for a in added {
         for l in &a.libraries {
             crate::fetch::library::check_into(&l.into)
@@ -131,8 +134,8 @@ fn library_sections(root: &str, base: &thornlist::Thornlist, added: &[AddedPacka
                 bail!("{}'s library {} goes inside \"{}\", which is no clone's name", a.package, l.package, l.inside);
             }
             let name = l.clone_name();
-            if in_base.contains(&normalized(&l.url)) || left.contains(l.inside.as_str()) {
-                left.insert(name);
+            if in_base.contains(&normalized(&l.url)) || left.contains(&fold(&l.inside)) {
+                left.insert(fold(name));
                 continue;
             }
             let (dir, _) = l.into.rsplit_once('/').unwrap_or(("", name));
@@ -141,7 +144,7 @@ fn library_sections(root: &str, base: &thornlist::Thornlist, added: &[AddedPacka
                 dir => format!("{root}/repos/{}/{dir}", l.inside),
             };
             let path = format!("{}/{}", l.inside, l.into);
-            if let Some((other, them)) = at.get(&path) {
+            if let Some((other, them)) = at.get(&fold(&path)) {
                 if them.url == l.url && them.commit == l.commit {
                     continue;
                 }
@@ -153,7 +156,8 @@ fn library_sections(root: &str, base: &thornlist::Thornlist, added: &[AddedPacka
                 );
             }
             if let Some((other, them)) = at.values().find(|(_, them)| {
-                them.inside == l.inside && them.into.rsplit_once('/').map_or("", |(d, _)| d) == dir
+                them.inside.eq_ignore_ascii_case(&l.inside)
+                    && them.into.rsplit_once('/').map_or("", |(d, _)| d).eq_ignore_ascii_case(dir)
             }) {
                 bail!(
                     "{}'s library {} and {}'s library {} both go in {}/{dir}; cactup places one library per \
@@ -162,7 +166,7 @@ fn library_sections(root: &str, base: &thornlist::Thornlist, added: &[AddedPacka
                 );
             }
             let source = (normalized(&l.url), Some(l.commit.clone()), l.package.clone());
-            match sources.get(name) {
+            match sources.get(&fold(name)) {
                 Some((url, commit, who)) if (url, commit) != (&source.0, &source.1) => bail!(
                     "{}'s library {} would be cloned as repos/{name}, a name {who} already uses for another source; \
                      one clone holds one source",
@@ -170,10 +174,10 @@ fn library_sections(root: &str, base: &thornlist::Thornlist, added: &[AddedPacka
                     l.package
                 ),
                 _ => {
-                    sources.insert(name.to_owned(), source);
+                    sources.insert(fold(name), source);
                 }
             }
-            at.insert(path, (a.package.clone(), l));
+            at.insert(fold(&path), (a.package.clone(), l));
             sections.push(Component {
                 ty: ComponentType::Git,
                 target,
@@ -307,7 +311,11 @@ pub(crate) fn describe(package: &str, version: &str) -> String {
 /// plain component too.
 fn check_registry_names(slug: &str, arrangement: &str, thorn: &str, repo_path: &str) -> Res<()> {
     let plain = |s: &str| {
-        !s.is_empty() && s != "." && s != ".." && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        !s.is_empty()
+            && s != "."
+            && s != ".."
+            && !s.starts_with('-')
+            && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
     };
     if !plain(arrangement) || !plain(thorn) {
         bail!("The Cactarium names a thorn of {slug} \"{arrangement}/{thorn}\", which is not a plain Arrangement/Thorn");
@@ -352,6 +360,52 @@ fn check_registry_source(slug: &str, url: &str, commit: &str, label: Option<&str
 /// Every clone a package is fetched into.
 fn package_repos(a: &AddedPackage) -> BTreeSet<String> {
     a.thorns.iter().map(|t| clone_of(&a.repo, t)).collect()
+}
+
+/// Narrow `plan` to `repos`: their git work and links, and only the library
+/// placements of or into them (never every placement of the list); no
+/// downloads, externals or skips. Nothing else in the installation moves.
+fn narrow(plan: &mut crate::fetch::Plan, repos: &BTreeSet<&str>) {
+    plan.git.retain(|g| repos.contains(g.repo.as_str()));
+    plan.links.retain(|c| repos.contains(c.repo.as_str()));
+    plan.libraries.retain(|p| repos.contains(p.repo.as_str()) || repos.contains(p.dependent.as_str()));
+    plan.downloads.clear();
+    plan.external.clear();
+    plan.skipped.clear();
+}
+
+/// A library's clone goes at `repos/<name>`, a name the registry chooses
+/// (the last part of `into`). One already on disk must be a clone cactup
+/// fetched from that same repository (its fetch record says so), never a
+/// directory of the user's that a forced refetch would then retarget.
+fn check_library_dirs(install_root: &std::path::Path, root: &str, added: &[AddedPackage]) -> Res<()> {
+    let state = crate::fetch::FetchState::read(install_root)?;
+    let repos = install_root.join(root).join("repos");
+    for a in added {
+        for l in &a.libraries {
+            let name = l.clone_name();
+            let dir = repos.join(name);
+            if std::fs::symlink_metadata(&dir).is_err() {
+                continue;
+            }
+            let url = crate::fetch::git::normalize_url(&l.url);
+            let ours = state
+                .as_ref()
+                .and_then(|s| s.repos.get(name))
+                .is_some_and(|r| crate::fetch::git::normalize_url(&r.url) == url);
+            if !ours {
+                bail!(
+                    "{}'s library {} would be cloned at '{}', which is already there and is not a clone cactup \
+                     fetched from {}; move it aside, then add again",
+                    a.package,
+                    l.package,
+                    dir.display(),
+                    l.url
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Every clone a package is fetched into, its libraries' included.
@@ -581,7 +635,12 @@ fn resolve_all(
         }
         // The package's own clone is named from its URL: a plain component too.
         let clone = repo_name(&url);
-        if clone.is_empty() || clone == "." || clone == ".." || !clone.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)) {
+        if clone.is_empty()
+            || clone == "."
+            || clone == ".."
+            || clone.starts_with('-')
+            || !clone.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        {
             bail!("The Cactarium gives {} the repository {url}, whose name cactup will not use as a directory", resolved.slug);
         }
         if let Some(t) = thorns.iter().find(|t| t.repo_path.trim().is_empty()) {
@@ -776,7 +835,8 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<
     let live = std::fs::read_to_string(inst.live_thornlist_to_read()).unwrap_or_default();
     // The live list must be what cactup composed, or the add would silently
     // discard edits made to it by hand.
-    let edits = super::refetch::component_divergence(&live, &compose(&pristine, &meta.added)?);
+    let before = compose(&pristine, &meta.added)?;
+    let edits = super::refetch::component_divergence(&live, &before);
     if !edits.is_empty() && !force {
         bail!(
             "'{}' has hand edits, which adding would overwrite:\n  {}\nMove them into a thornlist of your own, or pass -f",
@@ -860,6 +920,7 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<
     let repos: BTreeSet<String> = added.iter().flat_map(all_repos).collect();
     let repos: BTreeSet<&str> = repos.iter().map(String::as_str).collect();
     let list = thornlist::parse(&composed)?;
+    check_library_dirs(&inst.root, list.root(), &added)?;
     let (progress, renderer) = crate::manifest::setup_prodash();
     let mut classify = progress.add_child("classify repos");
     let mut plan = crate::fetch::plan(&list, &inst.root, &mut classify)?;
@@ -868,12 +929,11 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<
     if let Some(skipped) = plan.skipped.iter().find(|s| repos.contains(s.repo.as_str())) {
         bail!("Repo {} in the installation has {}; it was left alone", skipped.repo, skipped.reason.describe());
     }
-    plan.git.retain(|g| repos.contains(g.repo.as_str()));
-    plan.links.retain(|c| repos.contains(c.repo.as_str()));
-    plan.libraries.retain(|p| repos.contains(p.repo.as_str()));
-    plan.downloads.clear();
-    plan.external.clear();
-    plan.skipped.clear();
+    narrow(&mut plan, &repos);
+    // A placement the add drops (its `into` changed, or the base took the
+    // library over) loses its link first: a stale link would have the new
+    // list's sections resolved through it.
+    let gone = crate::fetch::library::unplace_dropped(&inst.root, &before, &composed)?;
     let report = crate::fetch::execute(&plan, &inst.root)?;
     if !report.failures.is_empty() {
         // What did fetch is recorded all the same, so a later prune knows
@@ -917,6 +977,9 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<
     for note in &notes {
         println!("{note}");
     }
+    for link in &gone {
+        println!("Took away the old library link at {link}.");
+    }
     println!("Build a config to compile them, e.g. `{}`.", "cactup build <config>".bold());
     Ok(())
 }
@@ -946,7 +1009,8 @@ pub fn remove(ctx: &Ctx, package: &str, force: bool) -> Res<()> {
         .context("This installation has no pristine thornlist")?;
     let live_path = inst.live_thornlist();
     let live = std::fs::read_to_string(inst.live_thornlist_to_read()).unwrap_or_default();
-    let edits = super::refetch::component_divergence(&live, &compose(&pristine, &meta.added)?);
+    let before = compose(&pristine, &meta.added)?;
+    let edits = super::refetch::component_divergence(&live, &before);
     if !edits.is_empty() && !force {
         bail!(
             "'{}' has hand edits, which removing would overwrite:\n  {}\nPass -f to discard them",
@@ -956,6 +1020,9 @@ pub fn remove(ctx: &Ctx, package: &str, force: bool) -> Res<()> {
     }
     let removed = meta.added.remove(i);
     let composed = compose(&pristine, &meta.added)?;
+    // Its libraries' links go with it (only the links cactup made; anything
+    // else at those paths is refused and left).
+    let gone = crate::fetch::library::unplace_dropped(&inst.root, &before, &composed)?;
 
     // The replaced base repos go back to what the base pins.
     let touched: BTreeSet<&str> = removed.replaces.iter().map(String::as_str).collect();
@@ -969,11 +1036,7 @@ pub fn remove(ctx: &Ctx, package: &str, force: bool) -> Res<()> {
         if let Some(skipped) = plan.skipped.iter().find(|s| touched.contains(s.repo.as_str())) {
             bail!("Repo {} has {}; it was left alone, and {entry} is still added", skipped.repo, skipped.reason.describe());
         }
-        plan.git.retain(|g| touched.contains(g.repo.as_str()));
-        plan.links.retain(|c| touched.contains(c.repo.as_str()));
-        plan.downloads.clear();
-        plan.external.clear();
-        plan.skipped.clear();
+        narrow(&mut plan, &touched);
         let report = crate::fetch::execute(&plan, &inst.root)?;
         if !report.failures.is_empty() {
             let why: Vec<String> = report.failures.iter().map(|f| format!("{}: {}", f.what, f.error)).collect();
@@ -986,6 +1049,9 @@ pub fn remove(ctx: &Ctx, package: &str, force: bool) -> Res<()> {
     drop(locked);
 
     println!("Removed {} from the thornlist.", removed.package.bold());
+    for link in &gone {
+        println!("Took away its library link at {link}.");
+    }
     if touched.is_empty() {
         let repos: Vec<String> = all_repos(&removed).into_iter().collect();
         println!("Its repo {} stays on disk; `cactup inst refetch --prune` removes it.", repos.join(", "));
@@ -1577,5 +1643,73 @@ mod tests {
         assert_eq!(std::fs::read_to_string(cmake).unwrap(), "fuka\n");
         let thorn = root.join("Cactus/arrangements/Fuka/KadathThorn/src/build.sh");
         assert_eq!(std::fs::read_to_string(thorn).unwrap(), "cd fuka\n");
+    }
+
+    /// Review finding 7: clone names are compared without case, as a
+    /// case-insensitive filesystem would see them.
+    #[test]
+    fn library_clone_names_collide_without_case() {
+        let e = |libraries: Vec<AddedLibrary>| format!("{:#}", compose(BASE, &[kadath(libraries)]).unwrap_err());
+        assert!(e(vec![fuka("KadathThorn", "src/CarpetX")]).contains("would be cloned as repos/CarpetX"));
+        let upper = AddedLibrary { package: "et/other".into(), url: "https://x/other".into(), ..fuka("KadathThorn", "src/FUKA") };
+        assert!(e(vec![fuka("KadathThorn", "src/fuka"), upper]).contains("both put a library at"));
+    }
+
+    /// Review finding 8: narrowing a plan to some repos keeps only the
+    /// placements of or into them, never every placement of the list.
+    #[test]
+    fn a_narrowed_plan_keeps_only_its_own_placements() {
+        let placement = |repo: &str, dependent: &str| crate::fetch::library::Placement {
+            repo: repo.into(),
+            url: format!("https://x/{repo}"),
+            dependent: dependent.into(),
+            dependent_url: format!("https://x/{dependent}"),
+            dependent_commit: None,
+            into: format!("src/{repo}"),
+        };
+        let mut plan = crate::fetch::Plan {
+            git: Vec::new(),
+            skipped: Vec::new(),
+            downloads: Vec::new(),
+            external: Vec::new(),
+            links: Vec::new(),
+            libraries: vec![placement("fuka", "KadathThorn"), placement("eigen", "Other"), placement("blas", "carpetx")],
+            root: "Cactus".into(),
+        };
+        narrow(&mut plan, &["carpetx", "fuka"].into_iter().collect());
+        let kept: Vec<&str> = plan.libraries.iter().map(|p| p.repo.as_str()).collect();
+        assert_eq!(kept, ["fuka", "blas"]);
+        narrow(&mut plan, &BTreeSet::new());
+        assert!(plan.libraries.is_empty());
+    }
+
+    /// Review finding 9: a library's clone name already on disk must be a
+    /// clone cactup fetched from that repository, by its fetch record.
+    #[test]
+    fn a_library_clone_name_taken_on_disk_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repos = tmp.path().join("Cactus/repos");
+        let package = kadath(vec![fuka("KadathThorn", "src/fuka")]);
+        check_library_dirs(tmp.path(), "Cactus", std::slice::from_ref(&package)).unwrap();
+        std::fs::create_dir_all(repos.join("fuka")).unwrap();
+        let err = format!("{:#}", check_library_dirs(tmp.path(), "Cactus", std::slice::from_ref(&package)).unwrap_err());
+        assert!(err.contains("not a clone cactup fetched"), "{err}");
+        let record = |url: &str| crate::fetch::FetchRecords {
+            repos: vec![("fuka".into(), crate::fetch::RepoRecord { url: url.into(), branch: None, head: "b".repeat(40), commit: None })],
+            downloads: Vec::new(),
+        };
+        crate::fetch::FetchState::record(tmp.path(), &record("https://elsewhere/fuka")).unwrap();
+        assert!(check_library_dirs(tmp.path(), "Cactus", std::slice::from_ref(&package)).is_err(), "another repository's");
+        crate::fetch::FetchState::record(tmp.path(), &record("https://bitbucket.org/fukaws/fuka.git")).unwrap();
+        check_library_dirs(tmp.path(), "Cactus", std::slice::from_ref(&package)).unwrap();
+    }
+
+    /// Review finding 9: a registry name that would start a clone's name
+    /// with `-` is refused.
+    #[test]
+    fn registry_names_never_start_with_a_dash() {
+        assert!(check_registry_names("et/x", "Arr", "Thorn", "../-$2").is_err());
+        assert!(check_registry_names("et/x", "-Arr", "Thorn", "$2").is_err());
+        check_registry_names("et/x", "Arr", "Thorn", "../$1-$2").unwrap();
     }
 }

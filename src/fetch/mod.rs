@@ -1052,6 +1052,17 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
                     .url
                     .clone()
                     .with_context(|| format!("git component {} has no !URL", c.checkout))?;
+                // Two names that differ only in case are one directory on a
+                // case-insensitive filesystem: one clone, claimed twice.
+                if let Some(other) =
+                    git_groups.keys().find(|k| **k != c.repo && k.eq_ignore_ascii_case(&c.repo))
+                {
+                    bail!(
+                        "Thornlist names repos {other} and {}, which differ only in case: on a case-insensitive \
+                         filesystem they are one directory",
+                        c.repo
+                    );
+                }
                 match git_groups.get_mut(&c.repo) {
                     None => {
                         git_groups.insert(

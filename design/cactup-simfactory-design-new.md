@@ -4549,19 +4549,36 @@ Einstein Toolkit's own list makes for FUKA (its `!TARGET` reaches into
 tree. The fetch planner recognizes such a section (a `.` checkout whose
 target is inside `repos/<clone>`) as a placement and makes it in the link
 phase, after the worker pool has joined, a library inside another library
-after it. Placing checks, immediately before writing: `into` is a plain
-relative path (no `..`, no root, no `.git`); the dependent is really checked
-out (a directory, not a link; its `origin` and pin), and so is the library's
-clone; no symlink or non-directory on the way; nothing the dependent tracks
-at the path; nothing at the path but the link itself. It never overwrites,
-moves or deletes anything, and adds `/<into>` to the dependent's
-`.git/info/exclude` so the link is not an untracked file there. A library
-whose repository the base already checks out stays where the base puts it
-(a stack's or sim's own list places its libraries). Two libraries at one
-path, or in one directory of a clone (two `.` checkouts at one `!TARGET` read
-as one path), and a library clone name another source uses, are refused
-when composing. `cactup add owner/library` on its own is refused with what a
-library is, and so is a flesh package.
+after it. Placing checks, before its first write: `into` is a plain
+relative path (no `..`, no root, no `.git`, no part starting with `-`); the
+dependent is really checked out (a directory, not a link; its `origin` and
+pin), and so is the library's clone; no symlink or non-directory on the way;
+nothing the dependent tracks at the path or under it, and no proper prefix of
+it tracked as anything but a directory (a submodule's gitlink, a file), in
+its index (which must exist) or HEAD's tree; `.git` a plain directory (not a
+link, not a `gitdir:` file); nothing at the path but the link itself. The way
+is walked by descriptor (`openat` with `O_NOFOLLOW`), and the missing folders
+and the link are made relative to those descriptors (`mkdirat`,
+`symlinkat`), so the write lands where the checks looked. It then appends
+`/<into>` to the dependent's `.git/info/exclude` (`O_APPEND|O_NOFOLLOW`,
+never rewritten), so the link is not an untracked file there; if that fails,
+the link and the folders it made are taken back. It never overwrites, moves
+or deletes anything else. When a list stops placing a library (the package
+is removed, its `into` changes, or the base takes the library over), `add`,
+`remove` and `refetch` take its link away before fetching, but only a
+symlink whose text is exactly the one placing writes; anything else there
+refuses the command. Independently, the link pass refuses any `!TARGET`
+that resolves physically outside the installation. A library whose
+repository the base already checks out stays where the base puts it (a
+stack's or sim's own list places its libraries). Refused when composing,
+names compared without case (a case-insensitive filesystem): two libraries
+at one path, or in one directory of a clone (two `.` checkouts at one
+`!TARGET` read as one path), and a library clone name another source uses.
+`add` also refuses a library clone name already on disk that is not a clone
+cactup fetched from that repository (by its fetch record), and the planner
+refuses two repos whose names differ only in case. `cactup add
+owner/library` on its own is refused with what a library is, and so is a
+flesh package.
 
 **Collisions.** A package whose repository the base already has (same derived
 name or same normalized URL), or that checks out a thorn the base already

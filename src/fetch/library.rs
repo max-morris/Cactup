@@ -25,19 +25,28 @@
 //! commit, a forced refetch, a prune) can delete or rewrite the library, and
 //! the library's own fetch never touches the dependent.
 //!
-//! The one write inside the dependent, the link, is made by [`place`], after
-//! every clone of the fetch has finished (see `fetch::execute`), in the order
-//! [`order`] gives, and only when the checks there pass: a plain relative
-//! `into`; a dependent that is really checked out, at its source; no symlink
-//! or non-directory on the way; nothing tracked at the path; and nothing at
-//! all at the path except the link cactup made. It never overwrites, moves or
-//! deletes anything.
+//! The one write inside the dependent, the link (with a line appended to its
+//! `.git/info/exclude`), is made by [`place`], after every clone of the fetch
+//! has finished (see `fetch::execute`), in the order [`order`] gives, and only
+//! when the checks there pass: a plain relative `into`; a dependent that is
+//! really checked out, at its source; no symlink or non-directory on the way;
+//! nothing tracked at the path or around it; and nothing at all at the path
+//! except the link cactup made. The way is held by file descriptor, so the
+//! write lands where the checks looked. It never overwrites, moves or deletes
+//! anything but its own link: when a list stops placing a library,
+//! [`unplace_dropped`] takes that link away, and only if it is exactly the
+//! link [`place`] makes.
 
 use super::link::LinkOutcome;
-use crate::thornlist::Component;
+use crate::thornlist::{Component, Thornlist};
 use crate::Res;
 use anyhow::{anyhow, bail, Context};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
+use std::io::{Read, Write};
+use std::os::fd::{AsFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 /// One library placed inside another clone: `repos/<dependent>/<into>` is a
@@ -68,7 +77,8 @@ impl Placement {
 
 /// Whether `into` (where a library goes, relative to its dependent's repo
 /// root) is a plain path inside the repo: relative, made only of ordinary
-/// names (no empty, `.` or `..` part, no root), none of them `.git`, and of
+/// names (no empty, `.` or `..` part, no root, none starting with `-`, which
+/// a tool would read as an option), none of them `.git`, and of
 /// characters a thornlist `!TARGET` and `!NAME` carry verbatim. The registry
 /// checks this too; cactup does not take its word for it, since the path is
 /// written to disk.
@@ -77,6 +87,7 @@ pub fn check_into(into: &str) -> Res<()> {
         !s.is_empty()
             && s != "."
             && s != ".."
+            && !s.starts_with('-')
             && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
     };
     if into.is_empty() {
@@ -134,9 +145,12 @@ pub fn placement_of(root: &str, c: &Component) -> Option<(String, String)> {
 /// Refused: a cycle (a library inside itself, or inside one that is inside
 /// it), and two placements at one path.
 pub fn order(placements: Vec<Placement>) -> Res<Vec<Placement>> {
+    // Names compared without case: on a case-insensitive filesystem
+    // `src/FUKA` and `src/fuka` are one path, and `Fuka` and `fuka` one clone.
+    let fold = |s: &str| s.to_ascii_lowercase();
     let mut at: BTreeMap<(String, String), &Placement> = BTreeMap::new();
     for p in &placements {
-        if let Some(other) = at.insert((p.dependent.clone(), p.into.clone()), p) {
+        if let Some(other) = at.insert((fold(&p.dependent), fold(&p.into)), p) {
             bail!(
                 "Two libraries go to {}: {} and {}; one path holds one checkout",
                 p.label(),
@@ -149,18 +163,17 @@ pub fn order(placements: Vec<Placement>) -> Res<Vec<Placement>> {
     // ready: one is ready once every placement of its dependent's clone is
     // made (a clone that is no library, i.e. a package, is ready from the
     // start).
-    let libraries: BTreeSet<&str> = placements.iter().map(|p| p.repo.as_str()).collect();
+    let libraries: BTreeSet<String> = placements.iter().map(|p| fold(&p.repo)).collect();
     let mut done: Vec<bool> = vec![false; placements.len()];
-    let mut placed_repos: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut placed_repos: BTreeMap<String, usize> = BTreeMap::new();
     let mut out = Vec::with_capacity(placements.len());
-    let count = |repo: &str| placements.iter().filter(|p| p.repo == repo).count();
+    let count = |repo: &str| placements.iter().filter(|p| fold(&p.repo) == repo).count();
     while out.len() < placements.len() {
         let ready = (0..placements.len()).find(|&i| {
-            let p = &placements[i];
+            let dependent = fold(&placements[i].dependent);
             !done[i]
-                && (!libraries.contains(p.dependent.as_str())
-                    || placed_repos.get(p.dependent.as_str()).copied().unwrap_or(0)
-                        == count(&p.dependent))
+                && (!libraries.contains(&dependent)
+                    || placed_repos.get(&dependent).copied().unwrap_or(0) == count(&dependent))
         });
         let Some(i) = ready else {
             let stuck: Vec<String> = (0..placements.len())
@@ -170,7 +183,7 @@ pub fn order(placements: Vec<Placement>) -> Res<Vec<Placement>> {
             bail!("Libraries placed inside each other in a cycle: {}", stuck.join(", "));
         };
         done[i] = true;
-        *placed_repos.entry(placements[i].repo.as_str()).or_default() += 1;
+        *placed_repos.entry(fold(&placements[i].repo)).or_default() += 1;
         out.push(i);
     }
     let mut slots: Vec<Option<Placement>> = placements.into_iter().map(Some).collect();
@@ -227,58 +240,125 @@ fn check_clone(dir: &Path, what: &str, url: &str, commit: Option<&str>) -> Res<g
     Ok(repo)
 }
 
-/// Whether the dependent's repo tracks anything at `into` or under it.
-fn tracked_at(repo: &gix::Repository, into: &str) -> Res<Option<String>> {
-    let index = repo.index_or_empty().context("Failed to read the dependent's index")?;
+/// What the dependent tracks that a library at `into` would cover or sit
+/// inside: `into` itself or anything under it, or a proper prefix of it that
+/// is no plain directory (a file, a link, a submodule's gitlink), in its
+/// index or in HEAD's tree. A dependent with no index is refused: what it
+/// tracks cannot be told.
+fn tracked_at(repo: &gix::Repository, dependent: &str, into: &str) -> Res<Option<String>> {
+    let index_path = repo.index_path();
+    let index = repo.index().map_err(|e| {
+        anyhow!(e).context(format!(
+            "{dependent} has no readable index at '{}', so what it tracks at {into} cannot be told",
+            index_path.display()
+        ))
+    })?;
+    let parts: Vec<&str> = into.split('/').collect();
+    let prefixes: Vec<String> = (1..parts.len()).map(|i| parts[..i].join("/")).collect();
     let under = format!("{into}/");
-    Ok(index
+    if let Some(p) = index
         .entries()
         .iter()
         .map(|e| e.path(&index).to_string())
-        .find(|p| p == into || p.starts_with(&under)))
-}
-
-/// What is at `path`, without following a symlink there.
-enum Found {
-    Nothing,
-    Dir,
-    Link(PathBuf),
-    Other(&'static str),
-}
-
-fn found(path: &Path) -> Res<Found> {
-    match std::fs::symlink_metadata(path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Found::Nothing),
-        Err(e) => Err(anyhow!(e).context(format!("Failed to read '{}'", path.display()))),
-        Ok(m) if m.file_type().is_symlink() => Ok(Found::Link(std::fs::read_link(path)?)),
-        Ok(m) if m.is_dir() => Ok(Found::Dir),
-        Ok(m) if m.is_file() => Ok(Found::Other("file")),
-        Ok(_) => Ok(Found::Other("special file")),
+        .find(|p| *p == into || p.starts_with(&under) || prefixes.contains(p))
+    {
+        return Ok(Some(p));
     }
-}
-
-/// Walk `into` below `dependent` one part at a time, without following
-/// symlinks: every part before the last that exists must be a plain
-/// directory. Returns how many of those parts exist (the rest are missing).
-fn walk(dependent: &Path, into: &str) -> Res<usize> {
-    let parts: Vec<&str> = into.split('/').collect();
-    let mut dir = dependent.to_path_buf();
-    for (i, part) in parts[..parts.len() - 1].iter().enumerate() {
-        dir.push(part);
-        match found(&dir)? {
-            Found::Dir => {}
-            Found::Nothing => return Ok(i),
-            Found::Link(to) => bail!(
-                "'{}' is a symlink (to '{}'); cactup places a library only through plain directories",
-                dir.display(),
-                to.display()
-            ),
-            Found::Other(kind) => {
-                bail!("'{}' is a {kind}, not a directory, so nothing can go inside it", dir.display())
-            }
+    // HEAD, for what the index no longer lists (a path deleted on disk and
+    // from the index, but still committed). An unborn HEAD tracks nothing.
+    let Ok(commit) = repo.head_commit() else { return Ok(None) };
+    let tree = commit.tree().context("Failed to read the dependent's HEAD tree")?;
+    if tree
+        .lookup_entry_by_path(into)
+        .context("Failed to read the dependent's HEAD tree")?
+        .is_some()
+    {
+        return Ok(Some(into.to_owned()));
+    }
+    for prefix in &prefixes {
+        let entry = tree
+            .lookup_entry_by_path(prefix)
+            .context("Failed to read the dependent's HEAD tree")?;
+        if entry.is_some_and(|e| !e.mode().is_tree()) {
+            return Ok(Some(prefix.clone()));
         }
     }
-    Ok(parts.len() - 1)
+    Ok(None)
+}
+
+/// What a directory entry is, without following a symlink: `None` when
+/// there is nothing.
+fn kind_at(dir: &OwnedFd, name: &str, shown: &Path) -> Res<Option<FileType>> {
+    match rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(st) => Ok(Some(FileType::from_raw_mode(st.st_mode))),
+        Err(rustix::io::Errno::NOENT) => Ok(None),
+        Err(e) => Err(anyhow!(e).context(format!("Failed to read '{}'", shown.display()))),
+    }
+}
+
+/// Open the directory `name` in `dir`, never through a symlink (`O_NOFOLLOW`):
+/// whatever is held after this is that very directory, whatever later
+/// happens to its path.
+fn open_dir_at(dir: impl AsFd, name: &str) -> rustix::io::Result<OwnedFd> {
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    rustix::fs::openat(dir, name, flags, Mode::empty())
+}
+
+/// What `kind` is, for a message.
+fn kind_name(kind: FileType) -> &'static str {
+    match kind {
+        FileType::RegularFile => "file",
+        FileType::Directory => "directory",
+        FileType::Symlink => "symlink",
+        _ => "special file",
+    }
+}
+
+/// The directories on the way to a placement, held open: the dependent,
+/// then each part of `into` before the last that exists (`existing` of
+/// them); the rest are missing.
+struct Way {
+    dirs: Vec<OwnedFd>,
+    existing: usize,
+}
+
+/// Walk `parts` (all of `into` but its last part) from the dependent's
+/// directory `dependent`, one part at a time and never through a symlink:
+/// each part that exists must be a plain directory, and is opened by
+/// `O_NOFOLLOW` from the one before, so nothing the walk holds can be
+/// swapped for a link.
+fn walk(dependent: OwnedFd, shown: &Path, parts: &[&str]) -> Res<Way> {
+    let mut dirs = vec![dependent];
+    let mut path = shown.to_path_buf();
+    for (i, part) in parts.iter().enumerate() {
+        path.push(part);
+        let here = dirs.last().expect("the dependent at least");
+        match kind_at(here, part, &path)? {
+            None => return Ok(Way { dirs, existing: i }),
+            Some(FileType::Directory) => {}
+            Some(FileType::Symlink) => {
+                let to = rustix::fs::readlinkat(here, *part, Vec::new())
+                    .map(|t| t.to_string_lossy().into_owned());
+                bail!(
+                    "'{}' is a symlink (to '{}'); cactup places a library only through plain directories",
+                    path.display(),
+                    to.unwrap_or_default()
+                );
+            }
+            Some(kind) => {
+                bail!(
+                    "'{}' is a {}, not a directory, so nothing can go inside it",
+                    path.display(),
+                    kind_name(kind)
+                )
+            }
+        }
+        let next = open_dir_at(here, part).map_err(|e| {
+            anyhow!(e).context(format!("'{}' changed while it was being read", path.display()))
+        })?;
+        dirs.push(next);
+    }
+    Ok(Way { existing: parts.len(), dirs })
 }
 
 /// The link's text: from the directory it sits in (`depth` levels below
@@ -292,35 +372,108 @@ fn link_text(depth: usize, repo: &str) -> PathBuf {
     p
 }
 
-/// Make sure the dependent's git ignores `/<into>`, via its
-/// `.git/info/exclude` (never a tracked file such as `.gitignore`), so the
-/// link does not show as an untracked file of the dependent in `git status`
-/// or `cactup inst delta`.
-fn exclude(repo: &gix::Repository, into: &str) -> Res<()> {
-    let info = repo.git_dir().join("info");
-    let file = info.join("exclude");
-    let line = format!("/{into}");
-    if let Found::Link(_) | Found::Other(_) = found(&info)? {
-        bail!("'{}' is not a plain directory; not writing the exclude for {line} there", info.display());
+/// Whether the link `name` in `dir` reads exactly `text`.
+fn link_reads(dir: &OwnedFd, name: &str, text: &Path) -> bool {
+    rustix::fs::readlinkat(dir, name, Vec::new())
+        .is_ok_and(|t| Path::new(OsStr::from_bytes(t.as_bytes())) == text)
+}
+
+/// The dependent's `.git/info/exclude`, checked before anything is written:
+/// `.git` a real directory (not a symlink, nor a `gitdir:` file pointing
+/// elsewhere), `info` a real directory or missing, `exclude` a plain file or
+/// missing. Holds `.git` and, when it exists, `info`.
+struct Exclude {
+    git: OwnedFd,
+    info: Option<OwnedFd>,
+    shown: PathBuf,
+}
+
+const EXCLUDE_COMMENT: &str = "# A library cactup placed (a link to its own clone)";
+
+impl Exclude {
+    fn check(dependent: &OwnedFd, shown: &Path) -> Res<Exclude> {
+        let git_path = shown.join(".git");
+        match kind_at(dependent, ".git", &git_path)? {
+            Some(FileType::Directory) => {}
+            Some(kind) => bail!(
+                "'{}' is a {}, not the repository's own directory; cactup writes the library's exclude only into a \
+                 plain .git directory",
+                git_path.display(),
+                kind_name(kind)
+            ),
+            None => bail!("'{}' is missing", git_path.display()),
+        }
+        let git = open_dir_at(dependent, ".git").map_err(|e| {
+            anyhow!(e).context(format!("'{}' changed while it was being read", git_path.display()))
+        })?;
+        let info_path = git_path.join("info");
+        let info = match kind_at(&git, "info", &info_path)? {
+            None => None,
+            Some(FileType::Directory) => Some(open_dir_at(&git, "info").map_err(|e| {
+                anyhow!(e).context(format!("'{}' changed while it was being read", info_path.display()))
+            })?),
+            Some(kind) => bail!(
+                "'{}' is a {}, not a directory; not writing an exclude there",
+                info_path.display(),
+                kind_name(kind)
+            ),
+        };
+        let shown = info_path.join("exclude");
+        if let Some(info) = &info {
+            match kind_at(info, "exclude", &shown)? {
+                None | Some(FileType::RegularFile) => {}
+                Some(kind) => bail!(
+                    "'{}' is a {}, not a plain file; not writing to it",
+                    shown.display(),
+                    kind_name(kind)
+                ),
+            }
+        }
+        Ok(Exclude { git, info, shown })
     }
-    let text = match found(&file)? {
-        Found::Nothing => String::new(),
-        Found::Other("file") => std::fs::read_to_string(&file)
-            .with_context(|| format!("Failed to read '{}'", file.display()))?,
-        _ => bail!("'{}' is not a plain file; not writing the exclude for {line} there", file.display()),
-    };
-    if text.lines().any(|l| l.trim_end() == line) {
-        return Ok(());
+
+    /// Append `/<into>` unless it is there: opened with `O_APPEND` and
+    /// `O_NOFOLLOW` (created if missing), so the file is never truncated or
+    /// rewritten, and never written through a link.
+    fn add(&mut self, into: &str) -> Res<()> {
+        let line = format!("/{into}");
+        if self.info.is_none() {
+            rustix::fs::mkdirat(&self.git, "info", Mode::from_raw_mode(0o755)).map_err(|e| {
+                anyhow!(e)
+                    .context(format!("Failed to create '{}'", self.shown.with_file_name("").display()))
+            })?;
+            self.info = Some(open_dir_at(&self.git, "info")?);
+        }
+        let info = self.info.as_ref().expect("made above");
+        let mut text = String::new();
+        match rustix::fs::openat(
+            info,
+            "exclude",
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => {
+                std::fs::File::from(fd)
+                    .read_to_string(&mut text)
+                    .with_context(|| format!("Failed to read '{}'", self.shown.display()))?;
+            }
+            Err(rustix::io::Errno::NOENT) => {}
+            Err(e) => {
+                return Err(anyhow!(e).context(format!("Failed to read '{}'", self.shown.display())));
+            }
+        }
+        if text.lines().any(|l| l.trim_end() == line) {
+            return Ok(());
+        }
+        let flags =
+            OFlags::WRONLY | OFlags::APPEND | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let fd = rustix::fs::openat(info, "exclude", flags, Mode::from_raw_mode(0o644))
+            .map_err(|e| anyhow!(e).context(format!("Failed to open '{}'", self.shown.display())))?;
+        let lead = if text.is_empty() || text.ends_with('\n') { "" } else { "\n" };
+        std::fs::File::from(fd)
+            .write_all(format!("{lead}{EXCLUDE_COMMENT}\n{line}\n").as_bytes())
+            .with_context(|| format!("Failed to append to '{}'", self.shown.display()))
     }
-    std::fs::create_dir_all(&info).with_context(|| format!("Failed to create '{}'", info.display()))?;
-    let mut out = text;
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str("# A library cactup placed (a link to its own clone)\n");
-    out.push_str(&line);
-    out.push('\n');
-    std::fs::write(&file, out).with_context(|| format!("Failed to write '{}'", file.display()))
 }
 
 /// Proof that a fetch's clones are over: `fetch::execute` makes one only once
@@ -336,6 +489,17 @@ impl ClonesDone {
     }
 }
 
+/// `repos/` canonicalized and held open, with its path for messages.
+fn open_repos(install_root: &Path, root: &str) -> Res<(PathBuf, OwnedFd)> {
+    let repos = install_root.join(root).join("repos");
+    let repos = std::fs::canonicalize(&repos)
+        .with_context(|| format!("No repos directory at '{}'", repos.display()))?;
+    let fd =
+        rustix::fs::open(&repos, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty())
+            .map_err(|e| anyhow!(e).context(format!("Failed to open '{}'", repos.display())))?;
+    Ok((repos, fd))
+}
+
 /// Place one library: `repos/<dependent>/<into>` becomes a relative link to
 /// `repos/<repo>`. Run after every clone of the fetch has finished (hence
 /// [`ClonesDone`]). `failed` names what failed to fetch in this run, and
@@ -345,10 +509,18 @@ impl ClonesDone {
 /// Refused, with the path named, and nothing written: an `into` that is not a
 /// plain relative path; a dependent that is not checked out, or not at its
 /// source (`origin` and pin); a library clone likewise; any symlink or
-/// non-directory on the way; a path the dependent tracks files at; and
-/// anything already at the path other than the link this would make. The
-/// path is checked again, part by part, immediately before the link is made,
-/// and the link is created without replacing anything.
+/// non-directory on the way; a path the dependent tracks (in its index or
+/// HEAD), or one inside something it tracks that is no directory (a
+/// submodule); a `.git` that is no plain directory; and anything already at
+/// the path other than the link this would make.
+///
+/// Every check comes before the first write. The way is walked by file
+/// descriptor, each directory opened `O_NOFOLLOW` from the one before, and
+/// the missing folders and the link are made relative to those descriptors
+/// (`mkdirat`, `symlinkat`, which never replaces), so nothing swapped in on
+/// the way between the check and the write is followed. If appending the
+/// exclude fails, what this call made (the link, and the folders on the way)
+/// is taken away again.
 pub fn place(
     _clones_done: &ClonesDone,
     install_root: &Path,
@@ -357,10 +529,23 @@ pub fn place(
     failed: &BTreeSet<String>,
     unplaced: &BTreeSet<String>,
 ) -> Res<LinkOutcome> {
+    place_between(install_root, root, p, failed, unplaced, &|| {})
+}
+
+/// [`place`], calling `between` after every check and before the first
+/// write: the window a race would use, for a test to use it.
+fn place_between(
+    install_root: &Path,
+    root: &str,
+    p: &Placement,
+    failed: &BTreeSet<String>,
+    unplaced: &BTreeSet<String>,
+    between: &dyn Fn(),
+) -> Res<LinkOutcome> {
     check_into(&p.into)?;
     let parts: Vec<&str> = p.into.split('/').collect();
-    let name = *parts.last().expect("check_into: not empty");
-    if name != p.repo {
+    let (name, on_the_way) = parts.split_last().expect("check_into: not empty");
+    if *name != p.repo {
         bail!(
             "The library {} would be linked as '{name}', not under its own name (a bug in the plan)",
             p.repo
@@ -379,9 +564,7 @@ pub fn place(
         );
     }
 
-    let repos = install_root.join(root).join("repos");
-    let repos = std::fs::canonicalize(&repos)
-        .with_context(|| format!("No repos directory at '{}'", repos.display()))?;
+    let (repos, repos_fd) = open_repos(install_root, root)?;
     let dependent_dir = repos.join(&p.dependent);
     let dependent = check_clone(
         &dependent_dir,
@@ -394,83 +577,186 @@ pub fn place(
     )?;
     let library_dir = repos.join(&p.repo);
     check_clone(&library_dir, &p.repo, &p.url, None).context("Not placed")?;
-    if let Some(path) = tracked_at(&dependent, &p.into)? {
+    if let Some(path) = tracked_at(&dependent, &p.dependent, &p.into).context("Not placed")? {
         bail!(
-            "Not placed: {} tracks '{path}', so '{}' is the dependent's own; cactup will not put a library over it",
+            "Not placed: {} tracks '{path}', so '{}' is the dependent's own; cactup will not put a library over it \
+             or inside it",
             p.dependent,
             dependent_dir.join(&p.into).display()
         );
     }
+    let dependent_fd = open_dir_at(&repos_fd, &p.dependent).map_err(|e| {
+        anyhow!(e).context(format!(
+            "Not placed: '{}' changed while it was being read",
+            dependent_dir.display()
+        ))
+    })?;
+    let mut exclude = Exclude::check(&dependent_fd, &dependent_dir).context("Not placed")?;
+    let way = walk(dependent_fd, &dependent_dir, on_the_way).context("Not placed")?;
 
     let target = dependent_dir.join(&p.into);
     let want = repos.join(&p.repo);
-    let existing = walk(&dependent_dir, &p.into)?;
-    let parent_depth = parts.len(); // the dependent itself plus every part before the last
-    if existing == parts.len() - 1 {
-        match found(&target)? {
-            Found::Nothing => {}
-            Found::Link(to) => {
-                let resolved = cactup_ecosystem_common::crl::lexical_canonicalize(
-                    &target.parent().expect("inside the dependent").join(&to).to_string_lossy(),
-                );
-                if Path::new(&resolved) == want {
-                    exclude(&dependent, &p.into)?;
-                    return Ok(LinkOutcome::Unchanged);
-                }
+    let text = link_text(parts.len(), &p.repo);
+    if way.existing == on_the_way.len() {
+        let parent = way.dirs.last().expect("the dependent at least");
+        match kind_at(parent, name, &target)? {
+            None => {}
+            Some(FileType::Symlink) if link_reads(parent, name, &text) => {
+                exclude.add(&p.into).context("Not placed")?;
+                return Ok(LinkOutcome::Unchanged);
+            }
+            Some(FileType::Symlink) => {
+                let to = rustix::fs::readlinkat(parent, *name, Vec::new())
+                    .map(|t| t.to_string_lossy().into_owned());
                 bail!(
                     "Not placed: '{}' is already a link, to '{}', which cactup did not make for {}; move it aside",
                     target.display(),
-                    to.display(),
+                    to.unwrap_or_default(),
                     p.repo
                 );
             }
-            Found::Dir => bail!(
+            Some(FileType::Directory) => bail!(
                 "Not placed: '{}' is already a directory; cactup never overwrites one (a library is a link to its \
                  own clone, '{}'); move it aside",
                 target.display(),
                 want.display()
             ),
-            Found::Other(kind) => {
-                bail!(
-                    "Not placed: '{}' is already a {kind}; cactup never overwrites one; move it aside",
-                    target.display()
-                )
+            Some(kind) => bail!(
+                "Not placed: '{}' is already a {}; cactup never overwrites one; move it aside",
+                target.display(),
+                kind_name(kind)
+            ),
+        }
+    }
+
+    between();
+
+    // The writes, relative to the directories held: the missing folders
+    // (mkdirat fails on anything there), then the link (symlinkat never
+    // replaces), then the exclude. Any failure takes back what this call made.
+    let Way { mut dirs, existing } = way;
+    let mut made: Vec<usize> = Vec::new();
+    let result = (|| -> Res<()> {
+        for (i, part) in on_the_way.iter().enumerate().skip(existing) {
+            let here = dirs.last().expect("the dependent at least");
+            let shown = dependent_dir.join(on_the_way[..=i].join("/"));
+            rustix::fs::mkdirat(here, *part, Mode::from_raw_mode(0o755))
+                .map_err(|e| anyhow!(e).context(format!("Failed to create '{}'", shown.display())))?;
+            made.push(i);
+            let next = open_dir_at(here, part).map_err(|e| {
+                anyhow!(e).context(format!("'{}' changed while it was being made", shown.display()))
+            })?;
+            dirs.push(next);
+        }
+        let parent = dirs.last().expect("the dependent at least");
+        rustix::fs::symlinkat(&text, parent, *name).map_err(|e| {
+            anyhow!(e).context(format!("Failed to link '{}' to {}", target.display(), want.display()))
+        })?;
+        if let Err(e) = exclude.add(&p.into) {
+            if link_reads(parent, name, &text) {
+                let _ = rustix::fs::unlinkat(parent, *name, AtFlags::empty());
             }
+            return Err(e);
         }
-    }
-
-    // The folders on the way that are missing, one at a time: each must be
-    // new (create_dir fails on anything already there).
-    let mut dir = dependent_dir.clone();
-    for (i, part) in parts[..parts.len() - 1].iter().enumerate() {
-        dir.push(part);
-        if i >= existing {
-            std::fs::create_dir(&dir)
-                .with_context(|| format!("Failed to create '{}'", dir.display()))?;
+        Ok(())
+    })();
+    if let Err(e) = result {
+        // The folders this call made, deepest first, each from the one it
+        // is in; rmdir takes only an empty one.
+        for &i in made.iter().rev() {
+            let _ = rustix::fs::unlinkat(&dirs[i], on_the_way[i], AtFlags::REMOVEDIR);
         }
+        return Err(e.context("Not placed; nothing was left behind"));
     }
-
-    // Immediately before writing: the whole way again, by lstat, and the
-    // parent, resolved, still inside the dependent, itself inside repos/.
-    if walk(&dependent_dir, &p.into)? != parts.len() - 1 {
-        bail!("Not placed: the way to '{}' changed while it was being made", target.display());
-    }
-    let parent = target.parent().expect("inside the dependent");
-    let real_parent = std::fs::canonicalize(parent)?;
-    let real_dependent = std::fs::canonicalize(&dependent_dir)?;
-    if !real_parent.starts_with(&real_dependent) || real_dependent.parent() != Some(repos.as_path()) {
-        bail!(
-            "Not placed: '{}' resolves to '{}', outside {}'s checkout",
-            parent.display(),
-            real_parent.display(),
-            p.dependent
-        );
-    }
-    // symlink(2) never replaces: anything that appeared at the path since is an error.
-    std::os::unix::fs::symlink(link_text(parent_depth, &p.repo), &target)
-        .with_context(|| format!("Failed to link '{}' to {}", target.display(), want.display()))?;
-    exclude(&dependent, &p.into)?;
     Ok(LinkOutcome::Created)
+}
+
+/// Take a placement's link away: `repos/<dependent>/<into>`, only when it is
+/// the symlink [`place`] would make there (its text exactly the relative
+/// path to `repos/<repo>`), walked by descriptor and never through a link.
+/// Nothing there (or no dependent at all) is nothing to do; anything else at
+/// the path is refused and left as it is. Returns whether a link went.
+pub fn unplace(install_root: &Path, root: &str, dependent: &str, into: &str, repo: &str) -> Res<bool> {
+    check_into(into)?;
+    check_into(dependent)?;
+    let parts: Vec<&str> = into.split('/').collect();
+    let (name, on_the_way) = parts.split_last().expect("check_into: not empty");
+    let (repos, repos_fd) = open_repos(install_root, root)?;
+    let dependent_dir = repos.join(dependent);
+    let dependent_fd = match kind_at(&repos_fd, dependent, &dependent_dir)? {
+        None => return Ok(false),
+        Some(FileType::Directory) => open_dir_at(&repos_fd, dependent).map_err(|e| {
+            anyhow!(e).context(format!("'{}' changed while it was being read", dependent_dir.display()))
+        })?,
+        Some(kind) => bail!(
+            "'{}' is a {}, not {dependent}'s checkout; not looking for {repo}'s old link in it",
+            dependent_dir.display(),
+            kind_name(kind)
+        ),
+    };
+    let way = walk(dependent_fd, &dependent_dir, on_the_way)?;
+    if way.existing < on_the_way.len() {
+        return Ok(false);
+    }
+    let parent = way.dirs.last().expect("the dependent at least");
+    let target = dependent_dir.join(into);
+    let text = link_text(parts.len(), repo);
+    match kind_at(parent, name, &target)? {
+        None => Ok(false),
+        Some(FileType::Symlink) if link_reads(parent, name, &text) => {
+            rustix::fs::unlinkat(parent, *name, AtFlags::empty())
+                .map_err(|e| anyhow!(e).context(format!("Failed to remove '{}'", target.display())))?;
+            Ok(true)
+        }
+        Some(kind) => bail!(
+            "'{}', where {repo} was linked in, is now a {} cactup did not make; it was left as it is. Move it aside, \
+             then run this again",
+            target.display(),
+            kind_name(kind)
+        ),
+    }
+}
+
+/// The placements `before` makes that `after` does not (the package was
+/// removed, its library's `into` changed, or the base took the library
+/// over), as `(dependent, into, repo)`, compared without case.
+pub fn dropped(before: &Thornlist, after: &Thornlist) -> Vec<(String, String, String)> {
+    let key = |d: &str, i: &str| (d.to_ascii_lowercase(), i.to_ascii_lowercase());
+    let kept: BTreeSet<(String, String)> = after
+        .components()
+        .iter()
+        .filter_map(|c| placement_of(after.root(), c))
+        .map(|(d, i)| key(&d, &i))
+        .collect();
+    let mut out: Vec<(String, String, String)> = Vec::new();
+    for c in before.components() {
+        if let Some((d, i)) = placement_of(before.root(), c)
+            && !kept.contains(&key(&d, &i))
+            && !out.iter().any(|(od, oi, _)| key(od, oi) == key(&d, &i))
+        {
+            out.push((d, i, c.repo.clone()));
+        }
+    }
+    out
+}
+
+/// Take away the links of the placements `before_text` makes and
+/// `after_text` does not ([`dropped`], [`unplace`]), before `after_text` is
+/// fetched: a stale link left in a dependent would have the next list's
+/// sections resolved through it. A `before_text` that does not parse places
+/// nothing. Returns the links taken away, as `dependent/into`.
+pub fn unplace_dropped(install_root: &Path, before_text: &str, after_text: &str) -> Res<Vec<String>> {
+    let Ok(before) = crate::thornlist::parse(before_text) else { return Ok(Vec::new()) };
+    let after = crate::thornlist::parse(after_text)?;
+    let mut gone = Vec::new();
+    for (dependent, into, repo) in dropped(&before, &after) {
+        if unplace(install_root, before.root(), &dependent, &into, &repo)
+            .with_context(|| format!("{repo} is no longer placed at {dependent}/{into}"))?
+        {
+            gone.push(format!("{dependent}/{into}"));
+        }
+    }
+    Ok(gone)
 }
 
 #[cfg(test)]
@@ -936,5 +1222,525 @@ mod tests {
             "bundled\n",
             "the dependent's file is untouched"
         );
+    }
+
+    // From the review of the first version: each of these reproduced a
+    // problem (or checked one was not there), and stays as a regression test.
+
+    /// Commit nested entries `(path, content, is_link)` on HEAD, objects
+    /// only (no worktree): an upstream for the fetch.
+    fn commit_entries(dir: &Path, files: &[(&str, &str, bool)]) -> gix::ObjectId {
+        #[derive(Default)]
+        struct D<'a> {
+            subdirs: BTreeMap<&'a str, D<'a>>,
+            files: Vec<(&'a str, &'a str, bool)>,
+        }
+        fn write(repo: &gix::Repository, d: &D) -> gix::ObjectId {
+            use gix::objs::tree::{Entry, EntryKind};
+            let mut tree = gix::objs::Tree::empty();
+            for (name, sub) in &d.subdirs {
+                let oid = write(repo, sub);
+                tree.entries
+                    .push(Entry { mode: EntryKind::Tree.into(), filename: (*name).into(), oid });
+            }
+            for (name, content, link) in &d.files {
+                let oid = repo.write_blob(content.as_bytes()).unwrap().detach();
+                let kind = if *link { EntryKind::Link } else { EntryKind::Blob };
+                tree.entries.push(Entry { mode: kind.into(), filename: (*name).into(), oid });
+            }
+            tree.entries.sort();
+            repo.write_object(&tree).unwrap().detach()
+        }
+        let repo = gix::open(dir).expect("open repo");
+        let mut root = D::default();
+        for (path, content, link) in files {
+            let mut node = &mut root;
+            let mut parts = path.split('/').peekable();
+            while let Some(part) = parts.next() {
+                if parts.peek().is_some() {
+                    node = node.subdirs.entry(part).or_default();
+                } else {
+                    node.files.push((part, content, *link));
+                }
+            }
+        }
+        let tree = write(&repo, &root);
+        let parents: Vec<gix::ObjectId> = repo
+            .head()
+            .ok()
+            .and_then(|mut h| h.peel_to_commit().ok())
+            .map(|c| vec![c.id])
+            .unwrap_or_default();
+        repo.commit("HEAD", "c", tree, parents).unwrap().detach()
+    }
+
+    /// Everything under `dir` but `.git`: directories, files with their
+    /// content, links with their text.
+    fn snapshot(dir: &Path) -> Vec<String> {
+        fn go(base: &Path, d: &Path, out: &mut Vec<String>) {
+            let Ok(entries) = std::fs::read_dir(d) else { return };
+            for e in entries {
+                let p = e.unwrap().path();
+                let m = std::fs::symlink_metadata(&p).unwrap();
+                let rel = p.strip_prefix(base).unwrap().display().to_string();
+                if rel.starts_with(".git") {
+                    continue;
+                }
+                if m.file_type().is_symlink() {
+                    out.push(format!("{rel} -> {}", std::fs::read_link(&p).unwrap().display()));
+                } else if m.is_dir() {
+                    out.push(format!("{rel}/"));
+                    go(base, &p, out);
+                } else {
+                    out.push(format!("{rel} = {}", std::fs::read_to_string(&p).unwrap_or_default()));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        go(dir, dir, &mut out);
+        out.sort();
+        out
+    }
+
+    /// The Einstein Toolkit's own FUKA section, at `f`, and KadathThorn at `k`:
+    /// FUKA's items linked through
+    /// `$ARR/Fuka/KadathThorn/src/fuka/../../../../repos/KadathThorn/src/fuka`.
+    fn et_list(s: &Setup, k: &gix::ObjectId, f: &gix::ObjectId) -> String {
+        format!(
+            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!DEFINE ARR = $ROOT/arrangements\n\n\
+             !TARGET = $ARR/Fuka/KadathThorn/src/fuka/../../../../repos/KadathThorn/src/fuka\n!TYPE = git\n!URL = {}\n\
+             !REPO_COMMIT = {f}\n!CHECKOUT = Cmake src\n\n\
+             !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = {}\n!REPO_PATH = ../$2\n!REPO_COMMIT = {k}\n\
+             !CHECKOUT =\nFuka/KadathThorn\n",
+            s.fuka.display(),
+            s.kadath.display()
+        )
+    }
+
+    /// Finding 1, defense in depth: a placed library's link left behind, then
+    /// a list carrying FUKA the Einstein Toolkit's way. Resolved through the
+    /// stale link, that `!TARGET` climbs out of the installation; the link
+    /// pass refuses rather than writing there.
+    #[test]
+    fn review_et_style_base_after_a_placed_library() {
+        let s = Setup::new();
+        let k = commit_entries(&s.kadath, &[("src/build.sh", "1\n", false)]);
+        let f = commit_entries(
+            &s.fuka,
+            &[("Cmake/CMakeLists.txt", "fuka\n", false), ("src/a.cpp", "a\n", false)],
+        );
+        assert!(s.fetch(&s.list(&k, &f, "")).failures.is_empty());
+        let report = s.fetch(&et_list(&s, &k, &f));
+        assert!(
+            !s.tmp.path().join("repos").exists(),
+            "wrote outside the installation: {:?}",
+            snapshot(s.tmp.path())
+        );
+        let refused: Vec<&str> = report.failures.iter().map(|f| f.error.as_str()).collect();
+        assert!(refused.iter().any(|e| e.contains("outside the installation")), "{refused:?}");
+    }
+
+    /// Finding 1: a placement the next list drops (the base took the library
+    /// over, the package went, or `into` changed) loses its link first, and
+    /// then the Einstein Toolkit's own FUKA section links into a real
+    /// directory there. Only cactup's own link goes: anything else at the
+    /// path refuses, and stays.
+    #[test]
+    fn a_dropped_placement_takes_its_own_link_away_and_nothing_else() {
+        let s = Setup::new();
+        let k = commit_entries(&s.kadath, &[("src/build.sh", "1\n", false)]);
+        let f = commit_entries(
+            &s.fuka,
+            &[("Cmake/CMakeLists.txt", "fuka\n", false), ("src/a.cpp", "a\n", false)],
+        );
+        let placed = s.list(&k, &f, "");
+        assert!(s.fetch(&placed).failures.is_empty());
+        let et = et_list(&s, &k, &f);
+        let link = s.repos().join("KadathThorn/src/fuka");
+
+        // Not this list's: nothing to drop.
+        assert!(unplace_dropped(&s.install(), &placed, &placed).unwrap().is_empty());
+        assert_eq!(unplace_dropped(&s.install(), &placed, &et).unwrap(), ["KadathThorn/src/fuka"]);
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        let report = s.fetch(&et);
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert!(std::fs::symlink_metadata(&link).unwrap().is_dir(), "the ET's own real directory now");
+        assert_eq!(std::fs::read_to_string(link.join("Cmake/CMakeLists.txt")).unwrap(), "fuka\n");
+        // Gone already: nothing to do.
+        assert!(
+            unplace_dropped(&s.install(), &placed, &et).is_err(),
+            "a real directory there is refused"
+        );
+        assert!(link.join("Cmake").exists(), "and left as it is");
+
+        // `into` changed: the old link goes, the new one is made.
+        let s = Setup::new();
+        let k = commit_entries(&s.kadath, &[("src/build.sh", "1\n", false)]);
+        let f = commit_entries(&s.fuka, &[("src/a.cpp", "a\n", false)]);
+        let old = s.list(&k, &f, "");
+        assert!(s.fetch(&old).failures.is_empty());
+        let new = old.replace("$ROOT/repos/KadathThorn/src\n", "$ROOT/repos/KadathThorn/ext\n");
+        assert_eq!(unplace_dropped(&s.install(), &old, &new).unwrap(), ["KadathThorn/src/fuka"]);
+        assert!(s.fetch(&new).failures.is_empty());
+        assert!(s.repos().join("KadathThorn/ext/fuka/src/a.cpp").is_file());
+        assert!(std::fs::symlink_metadata(s.repos().join("KadathThorn/src/fuka")).is_err());
+
+        // A link cactup did not make, at the dropped path: refused, kept.
+        let elsewhere = s.tmp.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let theirs = s.repos().join("KadathThorn/ext/fuka");
+        std::fs::remove_file(&theirs).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &theirs).unwrap();
+        let err = format!("{:#}", unplace_dropped(&s.install(), &new, &old).unwrap_err());
+        assert!(err.contains("cactup did not make") && err.contains("ext/fuka"), "{err}");
+        assert_eq!(std::fs::read_link(&theirs).unwrap(), elsewhere);
+    }
+
+    /// Finding 2: the dependent tracks `src` as a submodule (a gitlink); a
+    /// library at `src/fuka` would sit inside the submodule's tree.
+    #[test]
+    fn review_into_inside_a_tracked_gitlink() {
+        let s = Setup::new();
+        let f = commit_entries(&s.fuka, &[("Cmake/CMakeLists.txt", "fuka\n", false)]);
+        let repo = gix::open(&s.kadath).unwrap();
+        let blob = repo.write_blob(b"x\n").unwrap().detach();
+        let mut tree = gix::objs::Tree::empty();
+        use gix::objs::tree::{Entry, EntryKind};
+        tree.entries.push(Entry {
+            mode: EntryKind::Blob.into(),
+            filename: "build.sh".into(),
+            oid: blob,
+        });
+        tree.entries
+            .push(Entry { mode: EntryKind::Commit.into(), filename: "src".into(), oid: f });
+        tree.entries.sort();
+        let t = repo.write_object(&tree).unwrap().detach();
+        let k = repo.commit("HEAD", "c", t, Vec::<gix::ObjectId>::new()).unwrap().detach();
+        let report = s.fetch(&s.list(&k, &f, ""));
+        let failure = report
+            .failures
+            .iter()
+            .find(|x| x.what == "KadathThorn/src/fuka")
+            .expect("refused");
+        assert!(failure.error.contains("tracks 'src'"), "{}", failure.error);
+        assert!(
+            std::fs::symlink_metadata(s.repos().join("KadathThorn/src/fuka")).is_err(),
+            "placed inside a tracked submodule path"
+        );
+    }
+
+    /// Finding 3: with no index, what the dependent tracks cannot be told:
+    /// refused (here HEAD tracks `src/fuka/README`, deleted on disk).
+    #[test]
+    fn review_tracked_check_uses_index_only() {
+        let s = Setup::new();
+        let k = commit_entries(
+            &s.kadath,
+            &[("src/build.sh", "1\n", false), ("src/fuka/README", "bundled\n", false)],
+        );
+        let f = commit_entries(&s.fuka, &[("Cmake/CMakeLists.txt", "fuka\n", false)]);
+        let list = s.list(&k, &f, "");
+        let _ = s.fetch(&list);
+        let kadath = s.repos().join("KadathThorn");
+        std::fs::remove_dir_all(kadath.join("src/fuka")).unwrap();
+        std::fs::remove_file(kadath.join(".git/index")).unwrap();
+        let p = s.placement(&list);
+        let r = s.place(&p);
+        assert!(r.is_err(), "placed over a path HEAD tracks");
+        assert!(format!("{:#}", r.unwrap_err()).contains("no readable index"));
+        assert!(std::fs::symlink_metadata(kadath.join("src/fuka")).is_err());
+    }
+
+    /// Finding 3: an index that no longer lists the path, while HEAD still
+    /// tracks it: HEAD's tree is checked too.
+    #[test]
+    fn a_path_only_head_tracks_is_refused() {
+        let s = Setup::new();
+        let k = commit_entries(
+            &s.kadath,
+            &[("src/build.sh", "1\n", false), ("src/fuka/README", "bundled\n", false)],
+        );
+        let f = commit_entries(&s.fuka, &[("Cmake/CMakeLists.txt", "fuka\n", false)]);
+        let list = s.list(&k, &f, "");
+        let _ = s.fetch(&list);
+        let kadath = s.repos().join("KadathThorn");
+        std::fs::remove_dir_all(kadath.join("src/fuka")).unwrap();
+        // An index of just `src/build.sh`.
+        let repo = gix::open(&kadath).unwrap();
+        let blob = repo.write_blob(b"1\n").unwrap().detach();
+        let mut src = gix::objs::Tree::empty();
+        src.entries.push(gix::objs::tree::Entry {
+            mode: gix::objs::tree::EntryKind::Blob.into(),
+            filename: "build.sh".into(),
+            oid: blob,
+        });
+        let src = repo.write_object(&src).unwrap().detach();
+        let mut top = gix::objs::Tree::empty();
+        top.entries.push(gix::objs::tree::Entry {
+            mode: gix::objs::tree::EntryKind::Tree.into(),
+            filename: "src".into(),
+            oid: src,
+        });
+        let top = repo.write_object(&top).unwrap().detach();
+        let mut index = repo.index_from_tree(&top).unwrap();
+        index.write(Default::default()).unwrap();
+        let p = s.placement(&list);
+        let err = format!("{:#}", s.place(&p).unwrap_err());
+        assert!(err.contains("tracks 'src/fuka'"), "{err}");
+        assert!(std::fs::symlink_metadata(kadath.join("src/fuka")).is_err());
+    }
+
+    /// Finding 4: appending the exclude fails (its directory is read-only):
+    /// the link, and the folder made on the way to it, are taken back.
+    #[test]
+    fn a_failed_exclude_leaves_nothing_behind() {
+        use std::os::unix::fs::PermissionsExt;
+        let s = Setup::new();
+        let k = commit_entries(&s.kadath, &[("src/build.sh", "1\n", false)]);
+        let f = commit_entries(&s.fuka, &[("src/a.cpp", "a\n", false)]);
+        let list = s.list(&k, &f, "");
+        assert!(s.fetch(&list).failures.is_empty());
+        let kadath = s.repos().join("KadathThorn");
+        std::fs::remove_file(kadath.join("src/fuka")).unwrap();
+        let info = kadath.join(".git/info");
+        std::fs::remove_file(info.join("exclude")).unwrap();
+        std::fs::set_permissions(&info, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::write(info.join("probe"), "").is_ok() {
+            // Running as root: permissions do not bind, nothing to show.
+            std::fs::set_permissions(&info, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let p = Placement { into: "ext/fuka".into(), ..s.placement(&list) };
+        let err = format!("{:#}", s.place(&p).unwrap_err());
+        std::fs::set_permissions(&info, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(err.contains("nothing was left behind"), "{err}");
+        assert!(std::fs::symlink_metadata(kadath.join("ext")).is_err(), "{:?}", snapshot(&kadath));
+    }
+
+    /// Finding 5: a `.git` that is no plain directory (a `gitdir:` file, as
+    /// a worktree or submodule has, or a symlink) is never written through:
+    /// refused before anything is made.
+    #[test]
+    fn a_git_that_is_no_plain_directory_is_refused() {
+        let s = Setup::new();
+        let k = commit_entries(&s.kadath, &[("src/build.sh", "1\n", false)]);
+        let f = commit_entries(&s.fuka, &[("src/a.cpp", "a\n", false)]);
+        let list = s.list(&k, &f, "");
+        assert!(s.fetch(&list).failures.is_empty());
+        let p = s.placement(&list);
+        let kadath = s.repos().join("KadathThorn");
+        std::fs::remove_file(kadath.join("src/fuka")).unwrap();
+        let real = s.tmp.path().join("real-git");
+        std::fs::rename(kadath.join(".git"), &real).unwrap();
+        let exclude_before = std::fs::read_to_string(real.join("info/exclude")).unwrap();
+
+        std::fs::write(kadath.join(".git"), format!("gitdir: {}\n", real.display())).unwrap();
+        let err = format!("{:#}", s.place(&p).unwrap_err());
+        assert!(err.contains("not the repository's own directory"), "{err}");
+        assert!(std::fs::symlink_metadata(kadath.join("src/fuka")).is_err());
+
+        std::fs::remove_file(kadath.join(".git")).unwrap();
+        std::os::unix::fs::symlink(&real, kadath.join(".git")).unwrap();
+        let err = format!("{:#}", s.place(&p).unwrap_err());
+        assert!(err.contains("symlink"), "{err}");
+        assert!(std::fs::symlink_metadata(kadath.join("src/fuka")).is_err());
+        assert_eq!(std::fs::read_to_string(real.join("info/exclude")).unwrap(), exclude_before);
+    }
+
+    /// Finding 5: `.git/info/exclude` a symlink: refused, and the file it
+    /// points at is untouched.
+    #[test]
+    fn review_exclude_through_symlink() {
+        let s = Setup::new();
+        let k = commit_entries(&s.kadath, &[("src/build.sh", "1\n", false)]);
+        let f = commit_entries(&s.fuka, &[("Cmake/CMakeLists.txt", "fuka\n", false)]);
+        let list = s.list(&k, &f, "");
+        assert!(s.fetch(&list).failures.is_empty());
+        let p = s.placement(&list);
+        let kadath = s.repos().join("KadathThorn");
+        std::fs::remove_file(kadath.join("src/fuka")).unwrap();
+        let victim = s.tmp.path().join("victim");
+        std::fs::write(&victim, "precious\n").unwrap();
+        std::fs::remove_file(kadath.join(".git/info/exclude")).unwrap();
+        std::os::unix::fs::symlink(&victim, kadath.join(".git/info/exclude")).unwrap();
+        assert!(s.place(&p).is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious\n");
+        assert!(std::fs::symlink_metadata(kadath.join("src/fuka")).is_err(), "nothing written");
+    }
+
+    /// Finding 5: the exclude is appended to, never rewritten: what was in
+    /// it stays byte for byte, a last line without a newline included.
+    #[test]
+    fn the_exclude_is_appended_to() {
+        let s = Setup::new();
+        let k = commit_entries(&s.kadath, &[("src/build.sh", "1\n", false)]);
+        let f = commit_entries(&s.fuka, &[("src/a.cpp", "a\n", false)]);
+        let list = s.list(&k, &f, "");
+        assert!(s.fetch(&list).failures.is_empty());
+        let p = s.placement(&list);
+        let kadath = s.repos().join("KadathThorn");
+        std::fs::remove_file(kadath.join("src/fuka")).unwrap();
+        std::fs::write(kadath.join(".git/info/exclude"), "*.o\nbuild").unwrap();
+        assert_eq!(s.place(&p).unwrap(), LinkOutcome::Created);
+        let text = std::fs::read_to_string(kadath.join(".git/info/exclude")).unwrap();
+        assert_eq!(text, format!("*.o\nbuild\n{EXCLUDE_COMMENT}\n/src/fuka\n"));
+    }
+
+    /// Finding 6: the way swapped for a symlink to outside the checkout after
+    /// every check and before the write. The write goes by the descriptors
+    /// already held, so the link lands in the directory that was checked
+    /// (now renamed), and nothing outside is touched.
+    #[test]
+    fn a_way_swapped_after_the_checks_is_not_followed() {
+        let s = Setup::new();
+        let k = commit_entries(&s.kadath, &[("src/build.sh", "1\n", false)]);
+        let f = commit_entries(&s.fuka, &[("src/a.cpp", "a\n", false)]);
+        let list = s.list(&k, &f, "");
+        assert!(s.fetch(&list).failures.is_empty());
+        let p = s.placement(&list);
+        let kadath = s.repos().join("KadathThorn");
+        std::fs::remove_file(kadath.join("src/fuka")).unwrap();
+        let outside = s.tmp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let swap = || {
+            std::fs::rename(kadath.join("src"), kadath.join("src.checked")).unwrap();
+            std::os::unix::fs::symlink(&outside, kadath.join("src")).unwrap();
+        };
+        let outcome =
+            place_between(&s.install(), "Cactus", &p, &BTreeSet::new(), &BTreeSet::new(), &swap)
+                .unwrap();
+        assert_eq!(outcome, LinkOutcome::Created);
+        assert!(snapshot(&outside).is_empty(), "nothing outside: {:?}", snapshot(&outside));
+        assert_eq!(
+            std::fs::read_link(kadath.join("src.checked/fuka")).unwrap(),
+            Path::new("../../fuka")
+        );
+    }
+
+    /// Finding 7: on a case-insensitive filesystem `src/FUKA` and `src/fuka`
+    /// are one path, and `FUKA` and `fuka` one clone.
+    #[test]
+    fn names_differing_only_in_case_collide() {
+        let err = order(vec![
+            placement("fuka", "KadathThorn", "src/fuka"),
+            placement("FUKA", "KadathThorn", "src/FUKA"),
+        ])
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("Two libraries go to"), "{err:#}");
+        let list = crate::thornlist::parse(
+            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\
+             !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://x/fuka\n!CHECKOUT = A/B\n\n\
+             !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://y/FUKA\n!CHECKOUT = C/D\n",
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("plan");
+        let err = super::super::plan(&list, tmp.path(), &mut progress).unwrap_err();
+        assert!(format!("{err:#}").contains("differ only in case"), "{err:#}");
+    }
+
+    /// Finding 9: no part of `into`, so no clone name, may start with `-`.
+    #[test]
+    fn a_name_starting_with_a_dash_is_refused() {
+        for bad in ["-rf", "src/-fuka", "-/x"] {
+            assert!(check_into(bad).is_err(), "{bad}");
+        }
+        check_into("src/fu-ka").unwrap();
+    }
+
+    /// The dependent moves to a commit tracking files under the link's path:
+    /// its checkout never writes through the link into the library's clone.
+    #[test]
+    fn review_dependent_upgrade_tracking_under_the_link() {
+        let s = Setup::new();
+        let k1 = commit_entries(&s.kadath, &[("src/build.sh", "1\n", false)]);
+        let f = commit_entries(&s.fuka, &[("Cmake/CMakeLists.txt", "fuka\n", false)]);
+        assert!(s.fetch(&s.list(&k1, &f, "")).failures.is_empty());
+        let before = snapshot(&s.repos().join("fuka"));
+        let k2 = commit_entries(
+            &s.kadath,
+            &[
+                ("src/build.sh", "2\n", false),
+                ("src/fuka/evil.txt", "EVIL\n", false),
+                ("src/fuka/Cmake/CMakeLists.txt", "CLOBBERED\n", false),
+            ],
+        );
+        let list = crate::thornlist::parse(&s.list(&k2, &f, "")).unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("plan");
+        let plan = super::super::plan(&list, &s.install(), &mut progress).unwrap();
+        let _ = super::super::execute(&plan, &s.install()).unwrap();
+        assert_eq!(
+            before,
+            snapshot(&s.repos().join("fuka")),
+            "library clone changed by the dependent's checkout"
+        );
+    }
+
+    /// The dependent's new commit tracks `src/fuka` as a file.
+    #[test]
+    fn review_dependent_upgrade_tracking_the_link_path_as_file() {
+        let s = Setup::new();
+        let k1 = commit_entries(&s.kadath, &[("src/build.sh", "1\n", false)]);
+        let f = commit_entries(&s.fuka, &[("Cmake/CMakeLists.txt", "fuka\n", false)]);
+        assert!(s.fetch(&s.list(&k1, &f, "")).failures.is_empty());
+        let before = snapshot(&s.repos().join("fuka"));
+        let k2 = commit_entries(
+            &s.kadath,
+            &[("src/build.sh", "2\n", false), ("src/fuka", "a file\n", false)],
+        );
+        let list = crate::thornlist::parse(&s.list(&k2, &f, "")).unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("plan");
+        let plan = super::super::plan(&list, &s.install(), &mut progress).unwrap();
+        let _ = super::super::execute(&plan, &s.install()).unwrap();
+        assert_eq!(before, snapshot(&s.repos().join("fuka")));
+    }
+
+    /// The dependent's new commit makes `src` a tracked symlink to outside:
+    /// nothing lands there.
+    #[test]
+    fn review_dependent_upgrade_src_becomes_symlink_outside() {
+        let s = Setup::new();
+        let outside = s.tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("precious"), "keep\n").unwrap();
+        let k1 = commit_entries(&s.kadath, &[("src/build.sh", "1\n", false)]);
+        let f = commit_entries(&s.fuka, &[("Cmake/CMakeLists.txt", "fuka\n", false)]);
+        assert!(s.fetch(&s.list(&k1, &f, "")).failures.is_empty());
+        let k2 = commit_entries(&s.kadath, &[("src", &outside.display().to_string(), true)]);
+        let list = crate::thornlist::parse(&s.list(&k2, &f, "")).unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("plan");
+        let plan = super::super::plan(&list, &s.install(), &mut progress).unwrap();
+        let _ = super::super::execute(&plan, &s.install()).unwrap();
+        assert_eq!(snapshot(&outside), ["precious = keep\n"]);
+    }
+
+    /// A symlink planted at `repos/<dependent>`: refused, nothing written
+    /// where it points.
+    #[test]
+    fn review_symlinked_clones_in_repos() {
+        let s = Setup::new();
+        let k = commit_entries(&s.kadath, &[("src/build.sh", "1\n", false)]);
+        let f = commit_entries(&s.fuka, &[("Cmake/CMakeLists.txt", "fuka\n", false)]);
+        let list = s.list(&k, &f, "");
+        assert!(s.fetch(&list).failures.is_empty());
+        let p = s.placement(&list);
+        let kadath = s.repos().join("KadathThorn");
+        std::fs::remove_file(kadath.join("src/fuka")).unwrap();
+        let real = s.tmp.path().join("realkadath");
+        std::fs::rename(&kadath, &real).unwrap();
+        std::os::unix::fs::symlink(&real, &kadath).unwrap();
+        assert!(s.place(&p).is_err());
+        assert!(std::fs::symlink_metadata(real.join("src/fuka")).is_err());
+    }
+
+    /// A whole-repo section's clone is its `!NAME`.
+    #[test]
+    fn review_repo_of_a_named_whole_repo_section() {
+        let list = crate::thornlist::parse(
+            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\
+             !TARGET = $ROOT/repos/KadathThorn/src\n!TYPE = git\n!URL = https://x/fuka.git\n!NAME = libfuka\n!CHECKOUT = .\n",
+        )
+        .unwrap();
+        assert_eq!(list.components()[0].repo, "libfuka");
     }
 }
