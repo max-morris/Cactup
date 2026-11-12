@@ -76,6 +76,19 @@ pub static STEPS: &[Step] = &[
     Step { run: raise, optional: true },
 ];
 
+/// Why the transaction did not finish: a step (or a file the steps need)
+/// stopped it, or a condition the user clears and then simply retries.
+enum Failure {
+    Stop(Stop),
+    Transient(String),
+}
+
+impl From<Stop> for Failure {
+    fn from(stop: Stop) -> Failure {
+        Failure::Stop(stop)
+    }
+}
+
 /// Why a step stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stop {
@@ -138,9 +151,11 @@ pub struct Overlay {
 }
 
 impl Overlay {
-    fn read(name: &str, dir: &Path, meta_text: String) -> Result<Overlay, Stop> {
+    /// The overlay at `dir`, or why not: a file that is not TOML stops the
+    /// migration; one that cannot be read is a condition to clear first.
+    fn read(name: &str, dir: &Path, meta_text: String) -> Result<Overlay, Failure> {
         let unreadable = |path: &Path, e: std::io::Error| {
-            Stop::Found(format!("'{}' could not be read ({e})", path.display()))
+            Failure::Transient(format!("'{}' could not be read ({e})", path.display()))
         };
         let meta = TomlFile::parse("meta.toml".to_owned(), meta_text)?;
         let mut optionlists = Vec::new();
@@ -283,8 +298,12 @@ pub struct OverlayGenerationError {
     /// Where the generation changes are described: a local `GENERATIONS.md`
     /// or its published copy.
     pub guide: String,
-    /// The `--from-existing` base the overlay was created from, if any.
-    pub origin: Option<String>,
+    /// `<CACTUP_HOME>/machine-backups`, where "start over" moves the old
+    /// files.
+    pub backups: PathBuf,
+    /// The `machine create` command that starts this machine over, when its
+    /// base still exists (`None`: there is nothing to start over from).
+    pub recreate: Option<String>,
     pub why: Why,
 }
 
@@ -299,6 +318,10 @@ pub enum Why {
     /// when earlier steps were written this time (so `found` is where they
     /// got to).
     Stopped { finding: String, from: Option<u32> },
+    /// Older, and updating could not proceed just now (the lock, a read or
+    /// a write failed): nothing to fix by hand, retry once `reason` is
+    /// cleared. Whatever was written is finished by the next load.
+    Transient { reason: String },
 }
 
 impl OverlayGenerationError {
@@ -310,6 +333,9 @@ impl OverlayGenerationError {
             Why::Unsupported | Why::Stopped { from: None, .. } => format!(
                 "MDB generation {found}, could not be updated automatically; see `cactup machine show {name}`"
             ),
+            Why::Transient { .. } => {
+                format!("MDB generation {found}, could not be updated just now; see `cactup machine show {name}`")
+            }
             Why::Stopped { from: Some(from), .. } => format!(
                 "MDB generation {found} (updated from {from}), could not be updated further; \
                  see `cactup machine show {name}`"
@@ -320,7 +346,7 @@ impl OverlayGenerationError {
 
 impl std::fmt::Display for OverlayGenerationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self { name, path, found, want, guide, origin, why } = self;
+        let Self { name, path, found, want, guide, backups, recreate, why } = self;
         match why {
             Why::Newer { kept } => {
                 write!(f, "user-MDB machine \"{name}\" is MDB generation {found}, and this cactup reads {want}: run `cactup update`")?;
@@ -349,6 +375,15 @@ impl std::fmt::Display for OverlayGenerationError {
                 "user-MDB machine \"{name}\" was updated from MDB generation {from} to {found}, and this \
                  cactup reads {want}. It could not be updated further: {finding}."
             )?,
+            Why::Transient { reason } => {
+                return write!(
+                    f,
+                    "user-MDB machine \"{name}\" is MDB generation {found}, and this cactup reads {want}. \
+                     It could not be updated just now: {reason}.\n  \
+                     Nothing needs editing by hand: once that is cleared, run the command again and cactup \
+                     finishes the update."
+                );
+            }
         }
         // Generation 0 is no generation; the first recipe is generation 2's.
         let next = (*found).max(1) + 1;
@@ -358,10 +393,18 @@ impl std::fmt::Display for OverlayGenerationError {
             guide_section(guide, next),
             path.display()
         )?;
-        let base = origin.as_ref().map(|base| format!(" --from-existing {base}")).unwrap_or_default();
+        // Starting over moves the old files aside rather than deleting
+        // them: a refusal before the first step takes no backup.
+        let Some(recreate) = recreate else { return Ok(()) };
+        let aside = backups.join(name);
+        let dir = path.parent().unwrap_or(path);
         write!(
             f,
-            "\n  Or start over (loses your edits): cactup machine delete {name} && cactup machine create {name}{base}"
+            "\n  Or start over (a fresh copy without your edits; the old files are moved aside): \
+             mkdir -p '{}' && mv '{}' '{}' && {recreate}",
+            aside.display(),
+            dir.display(),
+            aside.join("before-start-over").display()
         )
     }
 }
@@ -414,6 +457,8 @@ pub struct Place<'a> {
     pub dir: &'a Path,
     /// `<CACTUP_HOME>/machine-backups`.
     pub backups: &'a Path,
+    /// The system MDB, where a `--from-existing` base may live.
+    pub system_root: &'a Path,
     pub guide: &'a str,
 }
 
@@ -425,9 +470,25 @@ impl Place<'_> {
             found,
             want,
             guide: self.guide.to_owned(),
-            origin,
+            backups: self.backups.to_owned(),
+            recreate: self.recreate(origin),
             why,
         }
+    }
+
+    /// The command that re-creates this machine from the base it records,
+    /// once it has been moved aside: `None` when that base would not resolve
+    /// any more (retired from the system MDB, or another overlay since
+    /// deleted). An overlay without an origin came from `generic`, which
+    /// always exists.
+    fn recreate(&self, origin: Option<String>) -> Option<String> {
+        let name = self.name;
+        let Some(base) = origin else { return Some(format!("cactup machine create {name}")) };
+        let user_root = self.dir.parent().unwrap_or(self.dir);
+        let exists = base == "generic"
+            || self.system_root.join(&base).join("meta.toml").is_file()
+            || (base != name && user_root.join(&base).join("meta.toml").is_file());
+        exists.then(|| format!("cactup machine create {name} --from-existing {base}"))
     }
 
     /// The refusal of an overlay newer than this binary.
@@ -460,22 +521,40 @@ fn bring_forward_with(place: &Place, found: u32, steps: &[Step], want: u32) -> R
     // 1. One migrator per overlay, across processes and hosts. The lock
     // lives beside the overlay, never inside it (`machines()` lists only
     // directories with a meta.toml).
-    let lock_path = place.dir.with_file_name(format!(".{}.migrate.lock", place.name));
-    let _lock = match LinkLock::try_acquire(&lock_path)? {
-        Some(lock) => lock,
-        None => {
-            eprintln!("Waiting for another cactup updating user-MDB machine \"{}\"…", place.name);
-            match LinkLock::acquire_wait(&lock_path, LOCK_WAIT) {
-                Ok(lock) => lock,
-                Err(e) if gix::interrupt::is_triggered() => return Err(e),
-                Err(e) => return Err(stopped(found, None, format!("{e:#}")).into()),
-            }
+    // Anything that stops it short of a step's verdict (the lock, a read, a
+    // write) is transient: say what, and that a retry finishes the job.
+    let unlocked_origin = fs::read_to_string(&meta_path).ok().and_then(|text| origin_from(&text));
+    let transient = |found: u32, origin: Option<String>, e: anyhow::Error| -> anyhow::Error {
+        if gix::interrupt::is_triggered() {
+            return e;
         }
+        place.refusal(found, want, origin, Why::Transient { reason: format!("{e:#}") }).into()
+    };
+    // An overlay whose first step refuses needs no lock and gets nothing
+    // written: refuse it from an unlocked read, so a lock that cannot be
+    // taken never hides the real verdict.
+    if let Ok(text) = fs::read_to_string(&meta_path)
+        && let Recorded::At(n) = recorded(&text)
+        && n < want
+    {
+        plan(place, n, text, unlocked_origin.clone(), steps, want)?;
+    }
+    let lock_path = place.dir.with_file_name(format!(".{}.migrate.lock", place.name));
+    let acquired = LinkLock::try_acquire(&lock_path);
+    let _lock = match acquired {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            eprintln!("Waiting for another cactup updating user-MDB machine \"{}\"…", place.name);
+            LinkLock::acquire_wait(&lock_path, lock_wait())
+                .map_err(|e| transient(found, unlocked_origin.clone(), e))?
+        }
+        Err(e) => return Err(transient(found, unlocked_origin, e)),
     };
 
     // 2. Re-read under the lock: another process may have finished first.
     let text = fs::read_to_string(&meta_path)
-        .with_context(|| format!("Failed to read '{}'", meta_path.display()))?;
+        .with_context(|| format!("Failed to read '{}'", meta_path.display()))
+        .map_err(|e| transient(found, unlocked_origin, e))?;
     let origin = origin_from(&text);
     let found = match recorded(&text) {
         Recorded::At(n) if n > want => return Err(place.newer(n, origin).into()),
@@ -485,34 +564,7 @@ fn bring_forward_with(place: &Place, found: u32, steps: &[Step], want: u32) -> R
 
     // 3. Every step, in memory. Nothing has been written yet, and nothing
     // is until the result is known to be worth writing.
-    let mut overlay = match Overlay::read(place.name, place.dir, text) {
-        Ok(overlay) => overlay,
-        Err(stop) => return Err(refuse(place, found, want, origin, stop, None).into()),
-    };
-    let mut reached = found;
-    let mut notes = Vec::new();
-    let mut stop = None;
-    for generation in found.max(1)..want {
-        let Some(step) = steps.get(generation as usize - 1) else {
-            stop = Some(Stop::Found(format!("this cactup has no update from generation {generation}")));
-            break;
-        };
-        match (step.run)(&mut overlay) {
-            Ok(mut more) => {
-                notes.append(&mut more);
-                reached = generation + 1;
-            }
-            Err(why) => {
-                stop = Some(why);
-                break;
-            }
-        }
-    }
-    if reached == found {
-        // The first step stopped: nothing to write, not even a backup.
-        let stop = stop.expect("a step ran or stopped");
-        return Err(refuse(place, found, want, origin, stop, None).into());
-    }
+    let Planned { mut overlay, reached, notes, stop } = plan(place, found, text, origin.clone(), steps, want)?;
     // 4. Only a complete chain can be checked against today's schema; a
     // partial one stops at an older generation, which the user finishes by
     // hand from the recipe the refusal names.
@@ -525,20 +577,23 @@ fn bring_forward_with(place: &Place, found: u32, steps: &[Step], want: u32) -> R
     overlay.stamp(reached)?;
 
     // 5. Back up, then commit, `meta.toml` last.
-    let backup = match back_up(place, found) {
-        Ok(backup) => backup,
-        Err(e) if gix::interrupt::is_triggered() => return Err(e),
-        Err(e) => return Err(stopped(found, origin, format!("{e:#}")).into()),
-    };
+    let backup = back_up(place, found).map_err(|e| transient(found, origin.clone(), e))?;
     if gix::interrupt::is_triggered() {
         bail!("Interrupted");
     }
+    let committing = backup.join(COMMITTING);
+    write_atomic(&committing, "").map_err(|e| transient(found, origin.clone(), e))?;
     commit(&overlay).map_err(|e| {
-        let finding = format!("writing the updated files failed ({e:#}); the old ones are in '{}'", backup.display());
-        stopped(found, origin.clone(), finding)
+        let e = e.context(format!("the old files are in '{}'", backup.display()));
+        transient(found, origin.clone(), e)
     })?;
-    finish_backup(&backup, place.name, found, reached, &notes, stop.as_ref())
-        .map_err(|e| stopped(reached, origin.clone(), format!("{e:#}")))?;
+    // Committed: the overlay is at `reached` whatever happens to the notes.
+    if let Err(e) = finish_backup(&backup, place.name, found, reached, &notes, stop.as_ref()) {
+        eprintln!(
+            "{}",
+            format!("Warning: could not finish the record of the update in '{}': {e:#}", backup.display()).yellow()
+        );
+    }
 
     // 6. Say so, once.
     let optional: Vec<String> = (found + 1..=reached)
@@ -567,12 +622,67 @@ fn bring_forward_with(place: &Place, found: u32, steps: &[Step], want: u32) -> R
     }
 }
 
+/// The steps' result, in memory: the edited overlay, the generation it
+/// reached, the notes, and what stopped it short of this generation.
+struct Planned {
+    overlay: Overlay,
+    reached: u32,
+    notes: Vec<String>,
+    stop: Option<Stop>,
+}
+
+/// Run the steps from `found` over the overlay whose `meta.toml` reads
+/// `text`. A refusal when there is nothing to write: the first step
+/// stopped, or the files could not be read.
+fn plan(place: &Place, found: u32, text: String, origin: Option<String>, steps: &[Step], want: u32) -> Res<Planned> {
+    let mut overlay = match Overlay::read(place.name, place.dir, text) {
+        Ok(overlay) => overlay,
+        Err(Failure::Stop(stop)) => return Err(refuse(place, found, want, origin, stop, None).into()),
+        Err(Failure::Transient(reason)) => {
+            return Err(place.refusal(found, want, origin, Why::Transient { reason }).into());
+        }
+    };
+    let mut reached = found;
+    let mut notes = Vec::new();
+    let mut stop = None;
+    for generation in found.max(1)..want {
+        let Some(step) = steps.get(generation as usize - 1) else {
+            stop = Some(Stop::Found(format!("this cactup has no update from generation {generation}")));
+            break;
+        };
+        match (step.run)(&mut overlay) {
+            Ok(mut more) => {
+                notes.append(&mut more);
+                reached = generation + 1;
+            }
+            Err(why) => {
+                stop = Some(why);
+                break;
+            }
+        }
+    }
+    if reached == found {
+        // The first step stopped: nothing to write, not even a backup.
+        let stop = stop.expect("a step ran or stopped");
+        return Err(refuse(place, found, want, origin, stop, None).into());
+    }
+    Ok(Planned { overlay, reached, notes, stop })
+}
+
 fn refuse(place: &Place, found: u32, want: u32, origin: Option<String>, stop: Stop, from: Option<u32>) -> OverlayGenerationError {
     let why = match stop {
         Stop::Unsupported => Why::Unsupported,
         Stop::Found(finding) => Why::Stopped { finding, from },
     };
     place.refusal(found, want, origin, why)
+}
+
+fn lock_wait() -> Duration {
+    #[cfg(test)]
+    if let Some(wait) = tests::LOCK_WAIT_HERE.with(|w| w.get()) {
+        return wait;
+    }
+    LOCK_WAIT
 }
 
 fn on_compute_node() -> bool {
@@ -583,12 +693,20 @@ fn on_compute_node() -> bool {
     COMPUTE_NODE.load(Ordering::Relaxed)
 }
 
+/// In a backup, written just before the commit starts: the overlay may
+/// hold edited files from here on, so this copy is the only one from
+/// before them.
+const COMMITTING: &str = ".committing";
+
 /// The backup directory for a migration from `found`: a fresh full copy at
 /// `generation-<found>` (or `.2`, `.3`, … past ones a finished migration
-/// kept), or the copy an interrupted run of this same migration left,
-/// which holds the files from before it touched any. A copy is published
-/// by renaming a finished one into place, so a directory under its final
-/// name is always whole; `.complete` marks a migration that finished.
+/// kept), or the copy a run of this same migration left when it was
+/// interrupted mid-commit (`.committing`, no `.complete`), which holds the
+/// files from before it touched any. A copy is published by renaming a
+/// finished one into place, so a directory under its final name is always
+/// whole. One with neither marker never reached the commit, so the overlay
+/// may have changed since (the user edited it, or deleted and re-created
+/// the machine): it is replaced by a fresh copy.
 fn back_up(place: &Place, found: u32) -> Res<PathBuf> {
     let parent = place.backups.join(place.name);
     fs::create_dir_all(&parent).with_context(|| format!("Failed to create '{}'", parent.display()))?;
@@ -598,7 +716,10 @@ fn back_up(place: &Place, found: u32) -> Res<PathBuf> {
             if dir.join(".complete").exists() {
                 continue;
             }
-            return Ok(dir);
+            if dir.join(COMMITTING).exists() {
+                return Ok(dir);
+            }
+            fs::remove_dir_all(&dir).with_context(|| format!("Failed to replace the stale copy '{}'", dir.display()))?;
         }
         let temp = tempfile::Builder::new()
             .prefix(".copy-")
@@ -677,6 +798,10 @@ fn finish_backup(dir: &Path, name: &str, found: u32, reached: u32, notes: &[Stri
         }
         Some(Stop::Found(finding)) => text.push_str(&format!("\nStopped at generation {reached}: {finding}.\n")),
     }
+    #[cfg(test)]
+    if tests::FAIL_FINISH.with(|f| f.get()) {
+        bail!("injected fault in the record");
+    }
     write_atomic(&dir.join("NOTES.txt"), &text)?;
     write_atomic(&dir.join(".complete"), "")
 }
@@ -749,6 +874,10 @@ pub(crate) mod tests {
         /// Behave as a compute-node run, on this thread only (the global
         /// flag would leak into tests running beside it).
         pub(super) static COMPUTE_NODE_HERE: Cell<bool> = const { Cell::new(false) };
+        /// Wait this long for the lock instead of `LOCK_WAIT`.
+        pub(super) static LOCK_WAIT_HERE: Cell<Option<Duration>> = const { Cell::new(None) };
+        /// Fail writing NOTES.txt/.complete, after the commit.
+        pub(super) static FAIL_FINISH: Cell<bool> = const { Cell::new(false) };
     }
 
     #[test]
@@ -788,7 +917,7 @@ pub(crate) mod tests {
         }
 
         fn place<'a>(&'a self, name: &'a str, dir: &'a Path, backups: &'a Path) -> Place<'a> {
-            Place { name, dir, backups, guide: "/mdb/GENERATIONS.md" }
+            Place { name, dir, backups, system_root: &self.mdb.system_root, guide: "/mdb/GENERATIONS.md" }
         }
 
         /// A loadable overlay `name` at `generation`, with comments.
@@ -926,8 +1055,10 @@ pub(crate) mod tests {
         assert!(lines[1].contains(&format!("\"Generation {next}\"")), "{text}");
         assert!(lines[1].contains(&format!("mdb-generation = {next}")), "{text}");
         assert!(lines[1].contains(&format!("{name}/meta.toml")), "{text}");
-        assert!(lines[2].contains("loses your edits"), "{text}");
-        assert!(lines[2].contains(&format!("cactup machine delete {name}")), "{text}");
+        // Starting over keeps the old files: moved aside, never deleted.
+        assert!(lines[2].contains("without your edits") && lines[2].contains("moved aside"), "{text}");
+        assert!(lines[2].contains("&& mv '") && !lines[2].contains("delete"), "{text}");
+        assert!(lines[2].contains(&format!("cactup machine create {name}")), "{text}");
         assert!(!text.contains('§'), "{text}");
     }
 
@@ -962,13 +1093,110 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn start_over_names_the_base_an_overlay_came_from() {
+    fn start_over_names_the_base_an_overlay_came_from_while_it_exists() {
         let home = Home::new();
         let dir = home.overlay("old", 1);
         let meta = fs::read_to_string(dir.join("meta.toml")).unwrap();
-        fs::write(dir.join("meta.toml"), format!("{meta}origin = {{ from = \"qbd\", hash = \"0\" }}\n")).unwrap();
+        let with_origin = |base: &str| format!("{meta}origin = {{ from = \"{base}\", hash = \"0\" }}\n");
+        fs::write(dir.join("meta.toml"), with_origin("qbd")).unwrap();
         let text = home.mdb.load("old").unwrap_err().to_string();
         assert!(text.ends_with("cactup machine create old --from-existing qbd"), "{text}");
+        let aside = home.backups().join("old/before-start-over");
+        assert!(text.contains(&format!("mv '{}' '{}'", dir.display(), aside.display())), "{text}");
+
+        // Another overlay as the base counts while it is there.
+        home.overlay("mine", MDB_GENERATION);
+        fs::write(dir.join("meta.toml"), with_origin("mine")).unwrap();
+        let text = home.mdb.load("old").unwrap_err().to_string();
+        assert!(text.ends_with("--from-existing mine"), "{text}");
+
+        // A base that is gone (retired, or the overlay itself) offers no
+        // fresh start: following it would only lose the machine.
+        for base in ["retired-machine", "old"] {
+            fs::write(dir.join("meta.toml"), with_origin(base)).unwrap();
+            let text = home.mdb.load("old").unwrap_err().to_string();
+            assert_eq!(text.lines().count(), 2, "{base}: {text}");
+            assert!(!text.contains("start over"), "{base}: {text}");
+        }
+    }
+
+    /// The shape of a transient failure: what happened and to retry, with
+    /// no hand fix and no fresh start (a hand edit now would be a second
+    /// writer).
+    fn assert_transient_shape(e: &anyhow::Error, name: &str, mentions: &str) {
+        let refusal = overlay_error(e);
+        assert!(matches!(refusal.why, Why::Transient { .. }), "{e}");
+        let text = e.to_string();
+        assert_eq!(text.lines().count(), 2, "{text}");
+        assert!(text.contains(&format!("\"{name}\"")) && text.contains("just now") && text.contains(mentions), "{text}");
+        assert!(text.contains("run the command again"), "{text}");
+        assert!(!text.contains("To fix by hand") && !text.contains("start over"), "{text}");
+        assert!(refusal.brief().contains("could not be updated just now"), "{}", refusal.brief());
+    }
+
+    #[test]
+    fn a_lock_held_too_long_is_transient() {
+        let home = Home::new();
+        let dir = home.overlay("box", MDB_GENERATION - 1);
+        let hash = hash_machine_dir(&dir).unwrap();
+        let lock_path = home.mdb.user_root.join(".box.migrate.lock");
+        let _held = LinkLock::acquire(&lock_path).unwrap();
+        LOCK_WAIT_HERE.with(|w| w.set(Some(Duration::from_millis(200))));
+        let result = home.mdb.load("box");
+        LOCK_WAIT_HERE.with(|w| w.set(None));
+        assert_transient_shape(&result.unwrap_err(), "box", ".box.migrate.lock");
+        assert_eq!(hash_machine_dir(&dir).unwrap(), hash);
+    }
+
+    #[test]
+    fn a_lock_that_cannot_be_taken_is_transient() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = Home::new();
+        let dir = home.overlay("box", MDB_GENERATION - 1);
+        home.overlay("old", 1);
+        let hash = hash_machine_dir(&dir).unwrap();
+        // A read-only user layer (a full quota fails the same way).
+        fs::set_permissions(&home.mdb.user_root, fs::Permissions::from_mode(0o555)).unwrap();
+        if fs::write(home.mdb.user_root.join(".probe"), "").is_ok() {
+            eprintln!("skipping: permissions do not bind here (root?)");
+            return;
+        }
+        let result = home.mdb.load("box");
+        // A refusal that needs no lock is still the real verdict.
+        let old = home.mdb.load("old");
+        fs::set_permissions(&home.mdb.user_root, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_transient_shape(&result.unwrap_err(), "box", "Permission denied");
+        assert_eq!(overlay_error(&old.unwrap_err()).why, Why::Unsupported);
+        assert_eq!(hash_machine_dir(&dir).unwrap(), hash);
+    }
+
+    #[test]
+    fn a_failed_record_after_the_commit_is_only_a_warning() {
+        let home = Home::new();
+        let dir = home.overlay("box", MDB_GENERATION - 1);
+        FAIL_FINISH.with(|f| f.set(true));
+        let result = home.mdb.load("box");
+        FAIL_FINISH.with(|f| f.set(false));
+        result.unwrap();
+        assert_eq!(recorded(&fs::read_to_string(dir.join("meta.toml")).unwrap()), Recorded::At(MDB_GENERATION));
+        home.mdb.load("box").unwrap();
+    }
+
+    #[test]
+    fn a_copy_from_a_run_that_never_committed_is_replaced() {
+        let home = Home::new();
+        let dir = home.overlay("box", MDB_GENERATION - 1);
+        // Left by a run stopped between its backup and its commit, from
+        // files the user has edited since.
+        let stale = home.backups().join("box").join(format!("generation-{}", MDB_GENERATION - 1));
+        fs::create_dir_all(&stale).unwrap();
+        fs::write(stale.join("meta.toml"), "# an older edit\n").unwrap();
+        fs::write(stale.join("leftover"), "x").unwrap();
+        let before = fs::read_to_string(dir.join("meta.toml")).unwrap();
+        home.mdb.load("box").unwrap();
+        assert_eq!(fs::read_to_string(stale.join("meta.toml")).unwrap(), before);
+        assert!(!stale.join("leftover").exists());
+        assert!(stale.join(".complete").is_file());
     }
 
     #[test]
@@ -1021,6 +1249,7 @@ pub(crate) mod tests {
         assert_eq!(recorded(&fs::read_to_string(dir.join("meta.toml")).unwrap()), Recorded::At(want - 1));
         let backup = backups.join("box").join(format!("generation-{}", want - 1));
         assert!(!backup.join(".complete").exists());
+        assert!(backup.join(COMMITTING).exists());
 
         bring_forward_with(&place, want - 1, &steps, want).unwrap();
         assert_eq!(recorded(&fs::read_to_string(dir.join("meta.toml")).unwrap()), Recorded::At(want));

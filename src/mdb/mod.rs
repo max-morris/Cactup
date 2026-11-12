@@ -232,11 +232,11 @@ impl Mdb {
         let text = std::fs::read_to_string(&meta_path)
             .with_context(|| format!("Failed to read '{}'", meta_path.display()))?;
         let (guide, backups) = (self.generations_guide(), self.backup_root());
-        let place = migrate::Place { name, dir, backups: &backups, guide: &guide };
+        let place = migrate::Place { name, dir, backups: &backups, system_root: &self.system_root, guide: &guide };
         match migrate::recorded(&text) {
             migrate::Recorded::Unreadable => Ok(()),
             migrate::Recorded::Missing => {
-                warn_unmarked(name, &meta_path, &text);
+                warn_unmarked(name, &meta_path, &text, &guide);
                 Ok(())
             }
             migrate::Recorded::At(found) if found == want => Ok(()),
@@ -357,18 +357,27 @@ fn check_root_generation(root: &Path) -> Res<()> {
 /// generation. It is assumed current and never rewritten: guessing where it
 /// starts would be exactly the silent change migration must not make. When
 /// its keys give an older generation away, the warning says which.
-fn warn_unmarked(name: &str, meta_path: &Path, text: &str) {
+fn warn_unmarked(name: &str, meta_path: &Path, text: &str, guide: &str) {
     static WARNED: std::sync::Mutex<std::collections::BTreeSet<String>> =
         std::sync::Mutex::new(std::collections::BTreeSet::new());
     let first = WARNED.lock().map(|mut warned| warned.insert(name.to_owned())).unwrap_or(false);
     if first {
-        eprintln!("{}", unmarked_warning(name, meta_path, text).yellow());
+        eprintln!("{}", unmarked_warning(name, meta_path, text, guide).yellow());
     }
 }
 
-fn unmarked_warning(name: &str, meta_path: &Path, text: &str) -> String {
+fn unmarked_warning(name: &str, meta_path: &Path, text: &str, guide: &str) -> String {
     let want = crate::build_info::MDB_GENERATION;
     match migrate::looks_like(text) {
+        // Generation 1 is never brought forward automatically: the hand
+        // recipe, then the stamp it leads to.
+        Some(1) => format!(
+            "Warning: user-MDB machine \"{name}\" in '{}' records no MDB generation, but looks like \
+             generation 1, which cactup does not update automatically; follow {} by hand, then add \
+             `mdb-generation = 2` under [cactup] and cactup will bring it the rest of the way.",
+            meta_path.display(),
+            migrate::guide_section(guide, 2)
+        ),
         Some(older) => format!(
             "Warning: user-MDB machine \"{name}\" in '{}' records no MDB generation, but looks like \
              generation {older}; add `mdb-generation = {older}` under [cactup] and cactup will bring it forward.",
@@ -1146,10 +1155,15 @@ mod tests {
     #[test]
     fn an_unmarked_overlay_that_looks_older_says_so() {
         let path = Path::new("/u/machines/m/meta.toml");
-        let plain = unmarked_warning("m", path, "[machine]\n");
+        let plain = unmarked_warning("m", path, "[machine]\n", "/g.md");
         assert!(plain.contains(&format!("assuming generation {}", crate::build_info::MDB_GENERATION)), "{plain}");
-        let older = unmarked_warning("m", path, "[environment]\nenv-build-setup = \"x\"\n");
+        let older = unmarked_warning("m", path, "[environment]\nenv-build-setup = \"x\"\n", "/g.md");
         assert!(older.contains("looks like generation 2") && older.contains("mdb-generation = 2"), "{older}");
+        // Generation 1 is never brought forward: the hint leads to the hand
+        // recipe, not to a promise.
+        let first = unmarked_warning("m", path, "[variants.submitscript]\n", "/g.md");
+        assert!(first.contains("does not update automatically"), "{first}");
+        assert!(first.contains("\"Generation 2\" in '/g.md'") && first.contains("mdb-generation = 2"), "{first}");
     }
 
     #[test]
