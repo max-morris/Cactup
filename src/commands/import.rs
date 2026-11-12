@@ -173,10 +173,18 @@ fn matching_installation(ctx: &Ctx, sim: &SimFile) -> Res<Option<String>> {
         })
         .collect();
     candidates.sort_by_key(|entry| db.active_installation.as_deref() != Some(entry.alias.as_str()));
+    // A candidate that cannot be compared (an installation.toml a newer
+    // cactup wrote, a live thornlist that does not parse) is no match, like
+    // one whose fetch record cannot be read above: the user never named it,
+    // so it must not stop the import, which installs a fresh copy instead.
+    // An interrupt still stops it.
     for entry in candidates {
         let inst = Installation::new(entry.alias.clone(), &entry.path);
-        if differences(&inst, sim)?.is_empty() {
-            return Ok(Some(entry.alias.clone()));
+        match differences(&inst, sim) {
+            Ok(differences) if differences.is_empty() => return Ok(Some(entry.alias.clone())),
+            Ok(_) => {}
+            Err(e) if gix::interrupt::is_triggered() => return Err(e),
+            Err(_) => {}
         }
     }
     Ok(None)
@@ -644,6 +652,45 @@ mod tests {
         assert!(at_v2.len() == 1 && at_v2[0].starts_with("carpetx is at "), "{at_v2:?}");
         let missing = differences(&inst, &sim("README", v1)).unwrap();
         assert_eq!(missing, ["README is not in its thornlist"]);
+
+        // Auto-match skips an installation it cannot compare, here one whose
+        // installation.toml a newer cactup wrote, even the active one with a
+        // fetch record that agrees on every pin: the user never named it, so
+        // it must not stop the import.
+        crate::fetch::FetchState::record(&root, &report.records()).unwrap();
+        let newer = tmp.path().join("newer");
+        std::fs::create_dir_all(newer.join(".cactup")).unwrap();
+        std::fs::copy(root.join(".cactup/fetch-state.toml"), newer.join(".cactup/fetch-state.toml")).unwrap();
+        let schema = crate::installation::INSTALLATION.current + 1;
+        std::fs::write(newer.join(".cactup/installation.toml"), format!("schema = {schema}\n")).unwrap();
+        let entry = |alias: &str, path: &std::path::Path| crate::database::CactusInstallation {
+            alias: alias.into(),
+            release: None,
+            path: path.display().to_string(),
+            thornlist: None,
+            simfile: None,
+            stack: None,
+            current_release: None,
+            current_thornlist: None,
+            stack_contact: None,
+            unfetched_repos: IndexMap::new(),
+        };
+        let ctx = ctx(&tmp.path().join("db"));
+        ctx.db
+            .update(|d| {
+                d.installations.insert("newer".to_owned(), entry("newer", &newer));
+                d.active_installation = Some("newer".to_owned());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(matching_installation(&ctx, &sim("Makefile", v1)).unwrap(), None);
+        ctx.db
+            .update(|d| {
+                d.installations.insert("t".to_owned(), entry("t", &root));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(matching_installation(&ctx, &sim("Makefile", v1)).unwrap().as_deref(), Some("t"));
         std::fs::write(root.join("Cactus/repos/carpetx/Makefile"), "edited\n").unwrap();
         assert_eq!(differences(&inst, &sim("Makefile", v1)).unwrap(), ["carpetx has uncommitted changes there"]);
     }
