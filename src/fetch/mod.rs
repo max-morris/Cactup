@@ -243,6 +243,10 @@ pub struct RepoResult {
     pub commit: Option<gix::ObjectId>,
     /// Whether the action moved HEAD (false = already up to date).
     pub changed: bool,
+    /// The branch a pin took HEAD off, if it was on one: a change to the
+    /// checkout even when the commit is the same, so it is said (and counted
+    /// in the summary) though the sources did not move.
+    pub detached: Option<String>,
     /// Carried through from the plan: why this repo needed forcing, if it did.
     pub forced: Option<String>,
     /// `Some(url)` when this fetch re-pointed the repo's `origin` at the
@@ -336,19 +340,23 @@ impl ExecReport {
 /// to date" would bury the handful that moved. The caller's summary reports
 /// how many were already current; the scrollback is for what happened.
 /// `branch` is the one the repo went to: the item's, or the default branch
-/// `execute` asked the remote for.
+/// `execute` asked the remote for. `detached` is the branch a pin took HEAD
+/// off: a pin always detaches, and leaving a branch HEAD was on is a change
+/// to the user's checkout, said in yellow even when the commit is the same.
 fn announce_repo(
     line: &crate::progress::Line,
     item: &GitRepoPlan,
     branch: Option<&str>,
     head: gix::ObjectId,
     changed: bool,
+    detached: Option<&str>,
 ) {
     let head = head.to_string();
     let short = &head[..12.min(head.len())];
-    let what = match (&item.action, branch) {
+    let mut what = match (&item.action, branch) {
         (GitAction::Clone, _) if item.commit.is_some() => format!("cloned, pinned at {short}"),
         (GitAction::Pin, _) if changed => format!("pinned at {short}"),
+        (GitAction::Pin, _) if detached.is_some() => format!("detached at the pin {short}"),
         (GitAction::Clone, Some(branch)) => format!("cloned {branch} at {short}"),
         (GitAction::Clone, None) => format!("cloned at {short}"),
         (_, Some(branch)) if changed => format!("{branch} now at {short}"),
@@ -360,9 +368,13 @@ fn announce_repo(
         }
         _ => return,
     };
+    if let Some(off) = detached {
+        what.push_str(&format!(", off {off}"));
+    }
     match (&item.forced, &item.retarget) {
         (Some(reason), _) => line.warned(format!("{what}; overwrote {reason}")),
         (None, Some(url)) => line.warned(format!("{what}; origin re-pointed at {url}")),
+        (None, None) if detached.is_some() => line.warned(what),
         (None, None) => line.succeeded(what),
     }
 }
@@ -481,7 +493,7 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                         }
                         let before = match item.action {
                             GitAction::Clone => None,
-                            _ => git::head_of(&item.dir).ok().map(|(_, id)| id),
+                            _ => git::head_of(&item.dir).ok(),
                         };
                         // An existing repo with neither a branch nor a pin
                         // (forced off a detached HEAD, or detached by a
@@ -574,8 +586,16 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                         let mut report = report.lock().expect("fetch report poisoned");
                         match outcome {
                             Ok(head) => {
-                                let changed = before != Some(head);
-                                announce_repo(&line, item, branch.as_deref(), head, changed);
+                                let changed = before.as_ref().map(|(_, id)| *id) != Some(head);
+                                // A pin leaves HEAD detached, wherever it was.
+                                let detached = match (&item.action, &before) {
+                                    (GitAction::Pin, Some((was, _))) if was != git::DETACHED => {
+                                        Some(was.clone())
+                                    }
+                                    _ => None,
+                                };
+                                let off = detached.as_deref();
+                                announce_repo(&line, item, branch.as_deref(), head, changed, off);
                                 report.repos.push(RepoResult {
                                     repo: item.repo.clone(),
                                     url: item.url.clone(),
@@ -585,6 +605,7 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                                     head: head.to_string(),
                                     commit: item.commit,
                                     changed,
+                                    detached,
                                     forced: item.forced.clone(),
                                     retargeted: item.retarget.clone(),
                                 });
@@ -2051,6 +2072,7 @@ pub(crate) mod tests {
         let (plan, report) = refetch_once(&list_naming(&upstream, Some("rel"), Some(release)), &root);
         assert!(matches!(plan.git[0].action, GitAction::Pin));
         assert!(!report.repos[0].changed, "the pin moved nothing");
+        assert_eq!(report.repos[0].detached.as_deref(), Some("rel"), "but HEAD left rel");
         assert_eq!(git::head_of(&dir).unwrap(), (git::DETACHED.to_owned(), release));
 
         let (plan, _) = refetch_once(&list_without_a_branch(&upstream), &root);
@@ -2520,6 +2542,37 @@ pub(crate) mod tests {
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert_eq!(git::head_of(&dir).unwrap(), (default, tip));
         assert!(gix::open(&dir).unwrap().find_reference("refs/heads/topic").is_ok());
+    }
+
+    /// A pin always detaches HEAD; off a branch, it says so, even when HEAD
+    /// was already at the commit (here, the user's `git checkout` of the
+    /// default branch, which happens to be at the pin): the repo's result
+    /// names the branch it left, and the summary counts it.
+    #[test]
+    fn a_pin_that_detaches_a_branch_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (upstream, release, default, tip) = upstream_with_a_release_branch(tmp.path());
+        let root = tmp.path().join("install");
+        let dir = root.join("Cactus/repos/R");
+        refetch_once(&list_without_a_branch(&upstream), &root);
+
+        // At the pin already: nothing moves but HEAD, off the branch.
+        let (plan, report) = refetch_once(&list_naming(&upstream, None, Some(tip)), &root);
+        assert!(matches!(plan.git[0].action, GitAction::Pin));
+        assert!(!report.repos[0].changed);
+        assert_eq!(report.repos[0].detached.as_deref(), Some(default.as_str()));
+        assert_eq!(git::head_of(&dir).unwrap(), (git::DETACHED.to_owned(), tip));
+
+        // Already detached: a new pin leaves no branch.
+        let (_, report) = refetch_once(&list_naming(&upstream, None, Some(release)), &root);
+        assert!(report.repos[0].changed);
+        assert_eq!(report.repos[0].detached, None);
+
+        // Back on the branch, pinned elsewhere: moved, and off the branch.
+        refetch_once(&list_without_a_branch(&upstream), &root);
+        let (_, report) = refetch_once(&list_naming(&upstream, None, Some(release)), &root);
+        assert!(report.repos[0].changed);
+        assert_eq!(report.repos[0].detached.as_deref(), Some(default.as_str()));
     }
 
     /// End-to-end: `plan()` classifies a repo whose `origin` has drifted from

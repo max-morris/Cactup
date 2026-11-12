@@ -289,12 +289,16 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             report.downloads.len()
         );
     }
+    // `changed` is what moved the sources (and so what the configs hear
+    // about, below); a pin that only took HEAD off a branch changed the
+    // checkout, not the sources, and counts as updated here alone.
     let changed = report.repos.iter().filter(|r| r.changed).count();
-    let up_to_date = report.repos.len() - changed;
+    let updated = report.repos.iter().filter(|r| r.changed || r.detached.is_some()).count();
+    let up_to_date = report.repos.len() - updated;
     println!(
         "Fetched {} repo(s): {} updated, {} already up to date; {} download(s).",
         report.repos.len(),
-        changed,
+        updated,
         up_to_date,
         report.downloads.len()
     );
@@ -313,7 +317,11 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     }
     if ctx.globals.verbose {
         for r in &report.repos {
-            let mark = if r.changed { "updated" } else { "up to date" };
+            let mark = match (&r.detached, r.changed) {
+                (Some(branch), _) => format!("detached off {branch}"),
+                (None, true) => "updated".to_owned(),
+                (None, false) => "up to date".to_owned(),
+            };
             let forced = r.forced.as_deref().map(|f| format!(" (forced: {f})")).unwrap_or_default();
             println!("  {} @ {}: {mark}{forced}", r.repo, r.branch.as_deref().unwrap_or("<default>"));
         }
