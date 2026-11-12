@@ -3672,9 +3672,15 @@ default, `Cactus`. `Installation::cactus_root()` resolves
 `<installation home>/<root-dir>` from this one recorded value, and every
 path that needs the source tree — build, sim, test, config, refetch,
 delta — goes through it rather than assuming a literal `Cactus`. An
-`installation.toml` that cannot be read (above all one a newer cactup wrote,
-§2.5) is an error there, never the default: the user gets the upgrade
-message, not a missing tree under a guessed root.
+`installation.toml` that cannot be read is an error there, never the
+default: the user gets the read error, not a missing tree under a guessed
+root. One a newer cactup wrote (§2.5) is refused up front, by every command
+that resolves the installation, with the upgrade message. Any other
+unreadable file (a typo in a hand edit) fails only the commands that need
+the tree or the record, where they read it: `sim stop`/`list`/`show`/`log`,
+`test list`/`show`/`log`/`stop` and the like never read `installation.toml`
+and keep working, and the thornlist-name migration (§3.2) is skipped until
+the file can be read.
 
 **Per-simulation directory & the registry.** A simulation's directory defaults to
 `<sim-home>/<config>/<SimName>` (grouping simulations by the config that produced

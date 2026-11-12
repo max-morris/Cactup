@@ -571,21 +571,13 @@ mod tests {
         assert!(err.contains("\"nope\""), "{err}");
     }
 
-    /// An installation.toml a newer cactup wrote is refused with the upgrade
-    /// message on every path, not read around: with a custom `!DEFINE ROOT`
-    /// in it, guessing `Cactus` would send the user hunting for a tree that
-    /// was never there, and `show` would print no homes and no packages.
-    #[test]
-    fn a_newer_installation_toml_asks_for_an_upgrade() {
+    /// An active installation "et" whose installation.toml holds `toml`:
+    /// the scratch directory, the installation home, and a `Ctx` over them.
+    fn with_installation_toml(toml: &str) -> (tempfile::TempDir, std::path::PathBuf, Ctx) {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("inst");
         std::fs::create_dir_all(home.join(".cactup")).unwrap();
-        let current = crate::installation::INSTALLATION.current;
-        std::fs::write(
-            home.join(".cactup/installation.toml"),
-            format!("schema = {}\nroot-dir = \"CactusMin\"\n", current + 1),
-        )
-        .unwrap();
+        std::fs::write(home.join(".cactup/installation.toml"), toml).unwrap();
         let db = crate::database::Db::in_dir(dir.path());
         db.update(|d| {
             let mut et = entry(IndexMap::new());
@@ -609,6 +601,18 @@ mod tests {
             },
             db,
         };
+        (dir, home, ctx)
+    }
+
+    /// An installation.toml a newer cactup wrote is refused with the upgrade
+    /// message on every path, not read around: with a custom `!DEFINE ROOT`
+    /// in it, guessing `Cactus` would send the user hunting for a tree that
+    /// was never there, and `show` would print no homes and no packages.
+    #[test]
+    fn a_newer_installation_toml_asks_for_an_upgrade() {
+        let current = crate::installation::INSTALLATION.current;
+        let (_dir, home, ctx) =
+            with_installation_toml(&format!("schema = {}\nroot-dir = \"CactusMin\"\n", current + 1));
         let newer = |err: anyhow::Error| {
             assert!(err.downcast_ref::<crate::format::Newer>().is_some(), "{err:#}");
             assert!(format!("{err:#}").contains("upgrade cactup"), "{err:#}");
@@ -623,5 +627,31 @@ mod tests {
         newer(Installation::resolve(&ctx).err().unwrap());
         newer(show_installation(&ctx, None).unwrap_err());
         newer(show_installation(&ctx, Some("et".to_owned())).unwrap_err());
+    }
+
+    /// Any other unreadable installation.toml (a typo in a hand edit) fails
+    /// only what needs the tree: the installation still resolves, so `sim
+    /// stop`, `sim list`, `test log` and the like keep working; the tree
+    /// accessors report the parse error instead of guessing `Cactus`; and
+    /// `show` prints the registry's view.
+    #[test]
+    fn a_corrupt_installation_toml_fails_only_what_needs_the_tree() {
+        let (_dir, home, ctx) = with_installation_toml("schema = 1\nroot-dir = \"CactusMin\n");
+        std::fs::write(home.join("einsteintoolkit.th"), "A/B\n").unwrap();
+
+        let inst = Installation::resolve(&ctx).unwrap();
+        assert_eq!(inst.alias, "et");
+        // What `sim list`/`sim stop`/`test list` read.
+        assert!(inst.simulations().unwrap().simulations.is_empty());
+        assert!(inst.tests().unwrap().tests.is_empty());
+        // The thornlist-name migration was skipped, not run under a guess.
+        assert!(home.join("einsteintoolkit.th").exists());
+
+        let err = inst.cactus_root().unwrap_err();
+        assert!(err.downcast_ref::<crate::format::Newer>().is_none(), "{err:#}");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("installation.toml") && !msg.contains("upgrade cactup"), "{msg}");
+        show_installation(&ctx, None).unwrap();
+        show_installation(&ctx, Some("et".to_owned())).unwrap();
     }
 }

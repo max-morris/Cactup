@@ -390,13 +390,22 @@ impl Installation {
             .get(&alias)
             .ok_or_else(|| anyhow!("No installation named \"{alias}\" (see `cactup list`)"))?;
         let inst = Installation::new(alias, &entry.path);
-        // An installation.toml this binary cannot read (one a newer cactup
-        // wrote, above all) fails every command here, with its own message,
-        // before anything guesses at the source tree.
-        inst.cactus_root()?;
-        // Upgrade a pre-rename installation on first use, whatever the command
-        // is: every path that reads a thornlist then sees one set of names.
-        inst.upgrade_thornlist_names();
+        match inst.cactus_root() {
+            // Upgrade a pre-rename installation on first use, whatever the
+            // command is: every path that reads a thornlist then sees one set
+            // of names.
+            Ok(_) => inst.upgrade_thornlist_names(),
+            // An installation.toml a newer cactup wrote fails every command
+            // here, with the upgrade message: nothing this binary does to that
+            // installation can be trusted to keep what it does not know.
+            Err(e) if e.downcast_ref::<format::Newer>().is_some() => return Err(e),
+            // Any other unreadable file (a typo in a hand edit) fails only the
+            // commands that need the tree, where they ask for it: `sim stop`
+            // of a running job, `sim list`, `test log` and the like never read
+            // installation.toml and must keep working. Nothing guesses at the
+            // root meanwhile; the migration is skipped until it can be read.
+            Err(_) => {}
+        }
         Ok(inst)
     }
 
@@ -480,7 +489,14 @@ impl Installation {
     /// actually ran, since reads fall back to the pre-rename names on their
     /// own. The notice goes to stderr — it is out-of-band with respect to
     /// whatever that command is printing.
+    ///
+    /// An installation.toml that cannot be read skips the migration silently:
+    /// the command's own read of it reports the error, once (`cactup use`
+    /// reads it right after).
     pub fn upgrade_thornlist_names(&self) {
+        if self.cactus_root().is_err() {
+            return;
+        }
         match self.migrate_thornlist_names() {
             Ok(true) => {
                 // The migration resolved the root, so this cannot fail now.
