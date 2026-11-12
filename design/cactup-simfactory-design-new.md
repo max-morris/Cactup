@@ -555,7 +555,7 @@ written older).
 | File | Descriptor | Key | Current | `frozen_read` |
 |---|---|---|---|---|
 | `~/.cactup/database.json` | `database::DATABASE` (JSON; `legacy`: bare `detected-machine`) | `schema` | 1 | no |
-| `<inst>/.cactup/installation.toml` | `installation::INSTALLATION` | `schema` | 1 | no |
+| `<inst>/.cactup/installation.toml` | `installation::INSTALLATION` (chain `[1 → 2]`, a no-op; down-step `[2 → 1]` unless some `[[added]]` has `libraries`, which an older writer would drop; once written as 2 a file stays 2. Binaries released before the bump read a schema-2 file's `root-dir` as `Cactus` on some paths, so with a custom `!DEFINE ROOT` they may report a missing tree instead of "upgrade") | `schema` | 2 | no |
 | `simulations.toml` | `installation::SIM_REGISTRY` | `schema` | 1 | no |
 | `tests.toml` | `installation::TEST_REGISTRY` | `schema` | 1 | no |
 | `<inst>/.cactup/fetch-state.toml` | `fetch::FETCH_STATE` | `schema` | 1 | no |
@@ -3674,7 +3674,16 @@ key (an installation from before root tracking landed) means the historical
 default, `Cactus`. `Installation::cactus_root()` resolves
 `<installation home>/<root-dir>` from this one recorded value, and every
 path that needs the source tree — build, sim, test, config, refetch,
-delta — goes through it rather than assuming a literal `Cactus`.
+delta — goes through it rather than assuming a literal `Cactus`. An
+`installation.toml` that cannot be read is an error there, never the
+default: the user gets the read error, not a missing tree under a guessed
+root. One a newer cactup wrote (§2.5) is refused up front, by every command
+that resolves the installation, with the upgrade message. Any other
+unreadable file (a typo in a hand edit) fails only the commands that need
+the tree or the record, where they read it: `sim stop`/`list`/`show`/`log`,
+`test list`/`show`/`log`/`stop` and the like never read `installation.toml`
+and keep working, and the thornlist-name migration (§3.2) is skipped until
+the file can be read.
 
 **Per-simulation directory & the registry.** A simulation's directory defaults to
 `<sim-home>/<config>/<SimName>` (grouping simulations by the config that produced
@@ -4840,6 +4849,88 @@ its ThornList and skips `!` lines, §7.5). So:
 is recomposed without it, and only the base repos it replaced are fetched again
 — back to the base's pins. The package's own repo stays on disk, unlisted, for
 `inst refetch --prune` to remove.
+
+**Libraries.** A package can build against a library package (`[package]
+library = true` in the registry: no thorns, e.g. et/fuka, which KadathThorn
+builds from source), declaring where its checkout goes relative to the
+package's own repo root (`into = "src/fuka"`; `ClaimInfo.into` in the API).
+`add` resolves every such dependency of the version it adds (its range or
+commit, as any spec; a commit no version names gets the same trust check),
+checks the target really is a library, and follows the library's own
+`into`-dependencies down the chain (a cycle is refused). Each is recorded
+under the package (`[[added.libraries]]`: package, version, tag, commit, URL,
+the clone it goes `inside`, and `into`; `installation.toml` is written as
+schema 2 once some package has libraries, since an older writer would drop
+them, and stays schema 2 thereafter (versions are sticky); one that never had
+libraries stays schema 1: §2.5) and composed as one whole-repo
+section, pinned, with `!CHECKOUT = .` on the `!` line (never a thorn):
+
+```
+!TARGET      = Cactus/repos/KadathThorn/src
+!TYPE        = git
+!URL         = https://bitbucket.org/fukaws/fuka
+!REPO_BRANCH = <tag>
+!REPO_COMMIT = <commit>
+!NAME        = fuka
+!CHECKOUT    = .
+```
+
+So the library is cloned as any repo, at `repos/<last part of into>`
+(fetched, pinned, recorded, refetched and pruned like every other), and
+`repos/KadathThorn/src/fuka` is one relative link to it: the arrangement the
+Einstein Toolkit's own list makes for FUKA (its `!TARGET` reaches into
+`repos/KadathThorn/src/fuka`), with nothing cloned inside another working
+tree. The fetch planner recognizes such a section (a `.` checkout whose
+target is inside `repos/<clone>`) as a placement and makes it in the link
+phase, after the worker pool has joined, a library inside another library
+after it. Placing checks, before its first write: `into` is a plain
+relative path (no `..`, no root, no `.git`, no part starting with `-`); the
+dependent is really checked out (a directory, not a link; its `origin` and
+pin), and so is the library's clone; no symlink or non-directory on the way;
+nothing the dependent tracks at the path or under it, and no proper prefix of
+it tracked as anything but a directory (a submodule's gitlink, a file), in
+its index (which must exist) or HEAD's tree; `.git` a plain directory (not a
+link, not a `gitdir:` file); nothing at the path but the link itself. The way
+is walked by descriptor (`openat` with `O_NOFOLLOW`), and the missing folders
+and the link are made relative to those descriptors (`mkdirat`,
+`symlinkat`), so the write lands where the checks looked. It then appends
+`/<into>` to the dependent's `.git/info/exclude` (`O_APPEND|O_NOFOLLOW`,
+never rewritten), so the link is not an untracked file there; if that fails,
+the link and the folders it made are taken back. It never overwrites, moves
+or deletes anything else. When a list stops placing a library (the package
+is removed, its `into` changes, or the base takes the library over), `add`,
+`remove` and `refetch` take that placement away after every refusal, just
+before fetching: the link, only if it is a symlink whose text is exactly the
+one placing writes, and the exclude's comment and path pair (handled as
+bytes, rewritten through a temporary in `.git/info` unique to the process
+(a dead process's is unlinked first, never followed) and one rename; every
+other line kept). A failure
+to rewrite the exclude after the link went is a note, never an error that
+hides the link's removal. Whatever else is at the path (the dependent's own tracked files, a
+folder on the way that became a link) is left, with a note; removing
+nothing is always safe. Until a command commits (writes the list that
+drops them; it commits as soon as the list is written, before pruning or
+the metadata), any way out (an error, a late `?`, an interrupt, a list not
+adopted) undoes it: the placements this run created (by its fetch report,
+never a link it found there) go, and what it dropped comes back; what cannot be put back is printed with how, moving
+aside whatever sits at the path first. Prune counts files at any path still excluded by such a pair as
+untracked, so an orphan holding the user's work there is kept, or backed up
+under -f. Independently, the link pass refuses any `!TARGET` that resolves
+physically outside the installation, its Cactus root, `repos/` and
+`arrangements/` (each of which may be a symlink out, to scratch space, when
+the user made it: a link whose chain passes through `repos/`, a hop's own
+directory included, is a repo's content and is not trusted), and it never makes a link at the Cactus root,
+its `arrangements/` or its `repos/` themselves (compared without case). A library whose
+repository the base already checks out stays where the base puts it (a
+stack's or sim's own list places its libraries). Refused when composing,
+names compared without case (a case-insensitive filesystem): two libraries
+at one path, or in one directory of a clone (two `.` checkouts at one
+`!TARGET` read as one path), and a library clone name another source uses.
+`add` also refuses a library clone name already on disk that is not a clone
+cactup fetched from that repository (by its fetch record), and the planner
+refuses two repos whose names differ only in case. `cactup add
+owner/library` on its own is refused with what a library is, and so is a
+flesh package.
 
 **Collisions.** A package whose repository the base already has (same derived
 name or same normalized URL), or that checks out a thorn the base already

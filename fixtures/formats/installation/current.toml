@@ -1,4 +1,4 @@
-schema = 1
+schema = 2
 active-config = "sim"
 sim-home = "/scratch/sims/et"
 test-home = "/scratch/tests/et"
@@ -17,3 +17,12 @@ contact = "https://github.com/owner/pkg/issues"
 [[added.thorns]]
 checkout = "Arr/Thorn"
 repo-path = "Arr/Thorn"
+
+[[added.libraries]]
+package = "owner/lib"
+version = "0.4.1"
+tag = "v0.4.1"
+commit = "89abcdef0123456789abcdef0123456789abcdef"
+url = "https://github.com/owner/lib"
+inside = "pkg"
+into = "src/lib"

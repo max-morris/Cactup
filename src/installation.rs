@@ -23,21 +23,59 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// `installation.toml`'s format: version 1, no migrations. Only login
-/// binaries write it (D11), so it is not `frozen_read`. Every field is a
-/// scalar or an array (`added`, which put-back never enters), so nothing is
-/// replaced whole.
+/// `installation.toml`'s format. Only login binaries write it (D11), so it is
+/// not `frozen_read`. Every field is a scalar or an array (`added`, which
+/// put-back never enters), so nothing is replaced whole.
+///
+/// Version 2 added `[[added.libraries]]`. Inside an array element, an older
+/// writer would drop it, and losing it is not harmless: which links to
+/// remove is decided by comparing the placements recorded before and after
+/// a command (`unplace_dropped`, `dropped`), and `PutBack` undoes only what
+/// the run recorded, so a library link a v1 rewrite forgot (and its
+/// `.git/info/exclude` entry) would never be cleaned up, and prune's
+/// hidden-files check would keep flagging its path. So the bump: a file is
+/// written as v2 once some package has libraries, and it stays v2 thereafter
+/// even if they are removed (versions are sticky); an older binary refuses
+/// it rather than corrupts it. A file that never had libraries stays v1 (the
+/// down-step), so an older binary keeps reading those installations.
+// Spec §2.5 matrix; the v1 shape is fixtures/formats/installation/v1.toml.
 pub static INSTALLATION: Format<Toml> = Format {
     name: "installation record",
     key: "schema",
-    current: 1,
-    upgrades: &[],
-    downgrades: &[],
+    current: 2,
+    upgrades: &[installation_up_1],
+    downgrades: &[installation_down_2],
     down_floor: 1,
     frozen_read: false,
     legacy: None,
     replace_whole: &[],
 };
+
+/// v1 → v2: nothing to change (v1 has no libraries).
+fn installation_up_1(_doc: &mut Toml) -> Res<()> {
+    Ok(())
+}
+
+/// v2 → v1: unchanged, unless some added package has libraries, which v1
+/// cannot hold.
+fn installation_down_2(doc: &mut Toml) -> Result<(), format::CannotExpress> {
+    let uses_libraries = doc
+        .get("added")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_table)
+        .any(|package| match package.get("libraries") {
+            None => false,
+            Some(toml::Value::Array(libraries)) => !libraries.is_empty(),
+            // Not an array: nothing v1 can hold either.
+            Some(_) => true,
+        });
+    if uses_libraries {
+        return Err(format::CannotExpress);
+    }
+    Ok(())
+}
 
 /// `simulations.toml`'s format. Entries are added and removed, never
 /// rewritten in place: `sim create` inserts a new name, `sim delete` removes
@@ -122,6 +160,41 @@ pub struct AddedPackage {
     /// (its declared contact, else its repo).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact: Option<String>,
+    /// The libraries the package builds against (dependencies on a package
+    /// with `library = true`, which has no thorns), each checked out where
+    /// the dependency's `into` says: inside the package's clone, or, for a
+    /// library's own library, inside that library's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub libraries: Vec<AddedLibrary>,
+}
+
+/// One library an added package builds against, frozen at the commit the
+/// registry served for the version its dependency resolved to. Its clone is
+/// `repos/<the last part of into>`, linked in at `repos/<inside>/<into>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AddedLibrary {
+    /// `owner/name`.
+    pub package: String,
+    /// The exact version, or a full commit id for a dependency on a commit.
+    pub version: String,
+    /// The tag the version was cut from: a label beside the pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    pub commit: String,
+    pub url: String,
+    /// The clone it goes inside: the package's own, or another library's.
+    pub inside: String,
+    /// Where, relative to that clone's root: the dependency's `into`.
+    pub into: String,
+}
+
+impl AddedLibrary {
+    /// The library's own clone (and the name it is linked in under): the
+    /// last part of `into`.
+    pub fn clone_name(&self) -> &str {
+        self.into.rsplit('/').next().unwrap_or(&self.into)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -317,25 +390,44 @@ impl Installation {
             .get(&alias)
             .ok_or_else(|| anyhow!("No installation named \"{alias}\" (see `cactup list`)"))?;
         let inst = Installation::new(alias, &entry.path);
-        // Upgrade a pre-rename installation on first use, whatever the command
-        // is: every path that reads a thornlist then sees one set of names.
-        inst.upgrade_thornlist_names();
+        match inst.cactus_root() {
+            // Upgrade a pre-rename installation on first use, whatever the
+            // command is: every path that reads a thornlist then sees one set
+            // of names.
+            Ok(_) => inst.upgrade_thornlist_names(),
+            // An installation.toml a newer cactup wrote fails every command
+            // here, with the upgrade message: nothing this binary does to that
+            // installation can be trusted to keep what it does not know.
+            Err(e) if e.downcast_ref::<format::Newer>().is_some() => return Err(e),
+            // Any other unreadable file (a typo in a hand edit) fails only the
+            // commands that need the tree, where they ask for it: `sim stop`
+            // of a running job, `sim list`, `test log` and the like never read
+            // installation.toml and must keep working. Nothing guesses at the
+            // root meanwhile; the migration is skipped until it can be read.
+            Err(_) => {}
+        }
         Ok(inst)
     }
 
     /// The recorded `!DEFINE ROOT` directory name, read from
     /// installation.toml once per `Installation` (a missing file or field
-    /// means `Cactus`).
-    fn root_dir_name(&self) -> &str {
-        self.root_dir.get_or_init(|| {
-            self.meta().ok().and_then(|m| m.root_dir).unwrap_or_else(|| DEFAULT_ROOT_DIR.to_owned())
-        })
+    /// means `Cactus`). An unreadable file is an error, not `Cactus`: above
+    /// all one a newer cactup wrote, whose upgrade message must reach the
+    /// user instead of a "no Cactus tree" under a guessed root. Only a
+    /// success is cached.
+    fn root_dir_name(&self) -> Res<&str> {
+        if let Some(root_dir) = self.root_dir.get() {
+            return Ok(root_dir);
+        }
+        let root_dir = self.meta()?.root_dir.unwrap_or_else(|| DEFAULT_ROOT_DIR.to_owned());
+        Ok(self.root_dir.get_or_init(|| root_dir))
     }
 
     /// The Cactus source root of this installation: the installation home
     /// joined with the `!DEFINE ROOT` recorded at install time (§8.1).
-    pub fn cactus_root(&self) -> PathBuf {
-        cactus_root_of(&self.root, self.root_dir_name())
+    /// Fails when installation.toml cannot be read (see `root_dir_name`).
+    pub fn cactus_root(&self) -> Res<PathBuf> {
+        Ok(cactus_root_of(&self.root, self.root_dir_name()?))
     }
 
     /// The installation's live thornlist ([`LIVE_THORNLIST`]) — the canonical
@@ -343,19 +435,19 @@ impl Installation {
     /// was installed, so for a custom installation this file holds the custom
     /// list's content; `config show` says as much rather than leaving the name
     /// to imply it.
-    pub fn live_thornlist(&self) -> PathBuf {
-        self.cactus_root().join("thornlists").join(LIVE_THORNLIST)
+    pub fn live_thornlist(&self) -> Res<PathBuf> {
+        Ok(self.cactus_root()?.join("thornlists").join(LIVE_THORNLIST))
     }
 
     /// The live thornlist under its pre-rename name ([`LEGACY_THORNLIST`]).
-    pub fn legacy_live_thornlist(&self) -> PathBuf {
-        self.cactus_root().join("thornlists").join(LEGACY_THORNLIST)
+    pub fn legacy_live_thornlist(&self) -> Res<PathBuf> {
+        Ok(self.cactus_root()?.join("thornlists").join(LEGACY_THORNLIST))
     }
 
     /// The live thornlist to *read*: the current name, falling back to the
     /// pre-rename one on an installation the migration has not reached.
-    pub fn live_thornlist_to_read(&self) -> PathBuf {
-        prefer_existing(self.live_thornlist(), self.legacy_live_thornlist())
+    pub fn live_thornlist_to_read(&self) -> Res<PathBuf> {
+        Ok(prefer_existing(self.live_thornlist()?, self.legacy_live_thornlist()?))
     }
 
     /// The installation's pristine as-fetched thornlist ([`SOURCE_THORNLIST`])
@@ -382,14 +474,14 @@ impl Installation {
     /// `--thornlist`. The pre-rename name counts too: a config recorded before
     /// the rename was still built from the live list, and must not start
     /// reading as `--thornlist`.
-    pub fn is_live_thornlist(&self, recorded: &str) -> bool {
+    pub fn is_live_thornlist(&self, recorded: &str) -> Res<bool> {
         let same = |candidate: PathBuf| {
             if recorded == candidate.display().to_string() {
                 return true;
             }
             std::fs::canonicalize(&candidate).is_ok_and(|c| recorded == c.display().to_string())
         };
-        same(self.live_thornlist()) || same(self.legacy_live_thornlist())
+        Ok(same(self.live_thornlist()?) || same(self.legacy_live_thornlist()?))
     }
 
     /// [`Installation::migrate_thornlist_names`], reported and best-effort: a
@@ -397,17 +489,28 @@ impl Installation {
     /// actually ran, since reads fall back to the pre-rename names on their
     /// own. The notice goes to stderr — it is out-of-band with respect to
     /// whatever that command is printing.
+    ///
+    /// An installation.toml that cannot be read skips the migration silently:
+    /// the command's own read of it reports the error, once (`cactup use`
+    /// reads it right after).
     pub fn upgrade_thornlist_names(&self) {
+        if self.cactus_root().is_err() {
+            return;
+        }
         match self.migrate_thornlist_names() {
-            Ok(true) => eprintln!(
-                "{}",
-                format!(
-                    "Renamed this installation's thornlists: pristine copy '{}', live copy '{}'.",
-                    self.source_thornlist().display(),
-                    self.live_thornlist().display()
+            Ok(true) => {
+                // The migration resolved the root, so this cannot fail now.
+                let live = self.live_thornlist().unwrap_or_default();
+                eprintln!(
+                    "{}",
+                    format!(
+                        "Renamed this installation's thornlists: pristine copy '{}', live copy '{}'.",
+                        self.source_thornlist().display(),
+                        live.display()
+                    )
+                    .dimmed()
                 )
-                .dimmed()
-            ),
+            }
             Ok(false) => {}
             Err(e) => eprintln!(
                 "{}",
@@ -434,7 +537,7 @@ impl Installation {
         let mut moved = false;
         for (legacy, current) in [
             (self.legacy_source_thornlist(), self.source_thornlist()),
-            (self.legacy_live_thornlist(), self.live_thornlist()),
+            (self.legacy_live_thornlist()?, self.live_thornlist()?),
         ] {
             if !legacy.exists() || current.exists() {
                 continue;
@@ -448,9 +551,9 @@ impl Installation {
             return Ok(false);
         }
         crate::build::retarget_recorded_thornlist(
-            &self.cactus_root(),
-            &self.legacy_live_thornlist(),
-            &self.live_thornlist(),
+            &self.cactus_root()?,
+            &self.legacy_live_thornlist()?,
+            &self.live_thornlist()?,
         )?;
         Ok(true)
     }
@@ -601,17 +704,17 @@ mod tests {
     /// The pre-rename layout: both copies named `einsteintoolkit.th`, and a
     /// config recording the live one as the file it was built from.
     fn legacy_layout(inst: &Installation) {
-        std::fs::create_dir_all(inst.cactus_root().join("thornlists")).unwrap();
+        std::fs::create_dir_all(inst.cactus_root().unwrap().join("thornlists")).unwrap();
         std::fs::write(inst.legacy_source_thornlist(), "A/B\n").unwrap();
-        std::fs::write(inst.legacy_live_thornlist(), "A/B\nC/D\n").unwrap();
-        let cfg = inst.cactus_root().join("configs/sim");
+        std::fs::write(inst.legacy_live_thornlist().unwrap(), "A/B\nC/D\n").unwrap();
+        let cfg = inst.cactus_root().unwrap().join("configs/sim");
         std::fs::create_dir_all(&cfg).unwrap();
         std::fs::write(
             cfg.join("cactup-config.toml"),
             format!(
                 "name = \"sim\"\nflavor = \"default\"\nthornlist = \"{}\"\nmachine = \"fake\"\n\
                  config-id = \"c1\"\nbuild-id = \"b1\"\n",
-                inst.legacy_live_thornlist().display()
+                inst.legacy_live_thornlist().unwrap().display()
             ),
         )
         .unwrap();
@@ -625,9 +728,10 @@ mod tests {
         let (_dir, inst) = inst();
         legacy_layout(&inst);
 
-        assert_eq!(inst.live_thornlist_to_read(), inst.legacy_live_thornlist());
+        assert_eq!(inst.live_thornlist_to_read().unwrap(), inst.legacy_live_thornlist().unwrap());
         assert_eq!(inst.source_thornlist_to_read(), inst.legacy_source_thornlist());
-        assert!(inst.is_live_thornlist(&inst.legacy_live_thornlist().display().to_string()));
+        let legacy = inst.legacy_live_thornlist().unwrap();
+        assert!(inst.is_live_thornlist(&legacy.display().to_string()).unwrap());
 
     }
 
@@ -636,7 +740,7 @@ mod tests {
     #[test]
     fn missing_thornlists_resolve_to_the_current_name() {
         let (_dir, empty) = inst();
-        assert_eq!(empty.live_thornlist_to_read(), empty.live_thornlist());
+        assert_eq!(empty.live_thornlist_to_read().unwrap(), empty.live_thornlist().unwrap());
         assert_eq!(empty.source_thornlist_to_read(), empty.source_thornlist());
     }
 
@@ -647,15 +751,15 @@ mod tests {
 
         assert!(inst.migrate_thornlist_names().unwrap());
         assert_eq!(std::fs::read_to_string(inst.source_thornlist()).unwrap(), "A/B\n");
-        assert_eq!(std::fs::read_to_string(inst.live_thornlist()).unwrap(), "A/B\nC/D\n");
+        assert_eq!(std::fs::read_to_string(inst.live_thornlist().unwrap()).unwrap(), "A/B\nC/D\n");
         assert!(!inst.legacy_source_thornlist().exists());
-        assert!(!inst.legacy_live_thornlist().exists());
+        assert!(!inst.legacy_live_thornlist().unwrap().exists());
 
         // Retargeted, so a rebuild still resolves the live list (and still
         // picks up edits to it) instead of dropping to the config's snapshot.
-        let meta = crate::build::ConfigMeta::load(&inst.cactus_root(), "sim").unwrap().unwrap();
-        assert_eq!(meta.thornlist, inst.live_thornlist().display().to_string());
-        assert!(inst.is_live_thornlist(&meta.thornlist));
+        let meta = crate::build::ConfigMeta::load(&inst.cactus_root().unwrap(), "sim").unwrap().unwrap();
+        assert_eq!(meta.thornlist, inst.live_thornlist().unwrap().display().to_string());
+        assert!(inst.is_live_thornlist(&meta.thornlist).unwrap());
 
         // Idempotent: the second run has nothing to move.
         assert!(!inst.migrate_thornlist_names().unwrap());
@@ -667,11 +771,11 @@ mod tests {
     fn migration_never_clobbers_a_current_copy() {
         let (_dir, inst) = inst();
         legacy_layout(&inst);
-        std::fs::write(inst.live_thornlist(), "live\n").unwrap();
+        std::fs::write(inst.live_thornlist().unwrap(), "live\n").unwrap();
 
         assert!(inst.migrate_thornlist_names().unwrap());
-        assert_eq!(std::fs::read_to_string(inst.live_thornlist()).unwrap(), "live\n");
-        assert_eq!(inst.live_thornlist_to_read(), inst.live_thornlist());
+        assert_eq!(std::fs::read_to_string(inst.live_thornlist().unwrap()).unwrap(), "live\n");
+        assert_eq!(inst.live_thornlist_to_read().unwrap(), inst.live_thornlist().unwrap());
         // The pristine copy had no current-name file, so it still moved.
         assert!(inst.source_thornlist().exists());
     }
@@ -685,16 +789,16 @@ mod tests {
         let elsewhere = dir.path().join("custom").join(LEGACY_THORNLIST);
         std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
         std::fs::write(&elsewhere, "X/Y\n").unwrap();
-        let cfg = inst.cactus_root().join("configs/sim/cactup-config.toml");
-        let text = std::fs::read_to_string(&cfg)
-            .unwrap()
-            .replace(&inst.legacy_live_thornlist().display().to_string(), &elsewhere.display().to_string());
+        let cfg = inst.cactus_root().unwrap().join("configs/sim/cactup-config.toml");
+        let legacy = inst.legacy_live_thornlist().unwrap().display().to_string();
+        let custom = elsewhere.display().to_string();
+        let text = std::fs::read_to_string(&cfg).unwrap().replace(&legacy, &custom);
         std::fs::write(&cfg, text).unwrap();
 
         assert!(inst.migrate_thornlist_names().unwrap());
-        let meta = crate::build::ConfigMeta::load(&inst.cactus_root(), "sim").unwrap().unwrap();
+        let meta = crate::build::ConfigMeta::load(&inst.cactus_root().unwrap(), "sim").unwrap().unwrap();
         assert_eq!(meta.thornlist, elsewhere.display().to_string());
-        assert!(!inst.is_live_thornlist(&meta.thornlist));
+        assert!(!inst.is_live_thornlist(&meta.thornlist).unwrap());
     }
 
     #[test]
@@ -748,28 +852,28 @@ mod tests {
     #[test]
     fn is_live_thornlist_tolerates_both_recorded_forms() {
         let (_dir, inst) = inst();
-        let live = inst.live_thornlist();
+        let live = inst.live_thornlist().unwrap();
 
         // The default-rule form: a plain display() string, file need not exist.
-        assert!(inst.is_live_thornlist(&live.display().to_string()));
+        assert!(inst.is_live_thornlist(&live.display().to_string()).unwrap());
         // Never a match: an explicit custom path, or an empty recorded string
         // (which the old unwrap_or_default() form could spuriously match when
         // canonicalize failed).
-        assert!(!inst.is_live_thornlist("/somewhere/else/my-forks.th"));
-        assert!(!inst.is_live_thornlist(""));
+        assert!(!inst.is_live_thornlist("/somewhere/else/my-forks.th").unwrap());
+        assert!(!inst.is_live_thornlist("").unwrap());
 
         // The --thornlist form: the same file, but recorded canonicalized.
         std::fs::create_dir_all(live.parent().unwrap()).unwrap();
         std::fs::write(&live, "!CRL_VERSION = 1.0\n").unwrap();
         let canonical = std::fs::canonicalize(&live).unwrap();
-        assert!(inst.is_live_thornlist(&canonical.display().to_string()));
+        assert!(inst.is_live_thornlist(&canonical.display().to_string()).unwrap());
     }
 
     #[test]
     fn schema_guard_refuses_newer_files() {
         let (_dir, inst) = inst();
         std::fs::create_dir_all(inst.cactup_dir()).unwrap();
-        std::fs::write(inst.meta_path(), "schema = 2\n").unwrap();
+        std::fs::write(inst.meta_path(), "schema = 3\n").unwrap();
         let err = format!("{:#}", inst.meta().unwrap_err());
         assert!(err.contains("upgrade"), "{err}");
     }
@@ -795,6 +899,15 @@ mod tests {
                 }],
                 replaces: vec!["OldRepo".to_owned()],
                 contact: Some("https://github.com/owner/pkg/issues".to_owned()),
+                libraries: vec![AddedLibrary {
+                    package: "owner/lib".to_owned(),
+                    version: "0.4.1".to_owned(),
+                    tag: Some("v0.4.1".to_owned()),
+                    commit: "89abcdef0123456789abcdef0123456789abcdef".to_owned(),
+                    url: "https://github.com/owner/lib".to_owned(),
+                    inside: "pkg".to_owned(),
+                    into: "src/lib".to_owned(),
+                }],
             }],
         }
     }
@@ -878,6 +991,84 @@ mod tests {
         );
     }
 
+    /// Only libraries need version 2: an installation without them is written
+    /// as v1, one with them as v2, and a v1 file that gains a library moves
+    /// up. Once at v2 a file stays there (sticky), even without libraries.
+    #[test]
+    fn only_libraries_make_an_installation_record_v2() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installation.toml");
+        let schema = || {
+            let doc: Toml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            doc["schema"].as_integer().unwrap()
+        };
+        let mut plain = exhaustive_meta();
+        plain.added[0].libraries.clear();
+
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        assert_eq!(schema(), 1);
+        let back: InstallationMeta = format::read(&path, &INSTALLATION).unwrap().unwrap();
+        assert_eq!(back.added, plain.added);
+
+        format::write(&path, &exhaustive_meta(), &INSTALLATION).unwrap();
+        assert_eq!(schema(), 2);
+        let back: InstallationMeta = format::read(&path, &INSTALLATION).unwrap().unwrap();
+        assert_eq!(back.added, exhaustive_meta().added);
+
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        assert_eq!(schema(), 2);
+
+        // A new file without libraries, and one with no packages at all.
+        std::fs::remove_file(&path).unwrap();
+        format::write(&path, &InstallationMeta::default(), &INSTALLATION).unwrap();
+        assert_eq!(schema(), 1);
+    }
+
+    /// What a binary from before version 2 makes of the files this one
+    /// writes: it reads one without libraries, and refuses one with them
+    /// (asking for an upgrade) instead of dropping them on its next write.
+    #[test]
+    fn an_older_binary_refuses_only_installations_with_libraries() {
+        // `INSTALLATION` as it shipped at version 1.
+        static V1: Format<Toml> = Format {
+            name: "installation record",
+            key: "schema",
+            current: 1,
+            upgrades: &[],
+            downgrades: &[],
+            down_floor: 1,
+            frozen_read: false,
+            legacy: None,
+            replace_whole: &[],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installation.toml");
+        let mut plain = exhaustive_meta();
+        plain.added[0].libraries.clear();
+
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        let old: InstallationMeta = format::read(&path, &V1).unwrap().unwrap();
+        assert_eq!(old.added, plain.added);
+        // Exactly the shape version 1 shipped with, not merely one it reads.
+        let parse = |path: &Path| -> Toml {
+            toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        };
+        let v1 = crate::format::testing::fixture_dir("installation").join("v1.toml");
+        assert_eq!(parse(&path), parse(&v1));
+
+        format::write(&path, &exhaustive_meta(), &INSTALLATION).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let err = format::read::<InstallationMeta, _>(&path, &V1).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+        let err = format::write(&path, &plain, &V1).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "the libraries survive");
+
+        let fixture = crate::format::testing::fixture_dir("installation").join("v2.toml");
+        let err = format::read::<InstallationMeta, _>(&fixture, &V1).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+    }
+
     #[test]
     fn ensure_meta_resolves_homes_once() {
         let (_dir, inst) = inst();
@@ -912,20 +1103,20 @@ mod tests {
         let (_dir, inst) = inst();
         std::fs::create_dir_all(inst.cactup_dir()).unwrap();
         std::fs::write(inst.meta_path(), "root-dir = \"Something\"\n").unwrap();
-        assert_eq!(inst.cactus_root(), inst.root.join("Something"));
+        assert_eq!(inst.cactus_root().unwrap(), inst.root.join("Something"));
     }
 
     #[test]
     fn cactus_root_defaults_to_cactus_when_unrecorded() {
         // No installation.toml at all.
         let (_dir, no_meta) = inst();
-        assert_eq!(no_meta.cactus_root(), no_meta.root.join(DEFAULT_ROOT_DIR));
+        assert_eq!(no_meta.cactus_root().unwrap(), no_meta.root.join(DEFAULT_ROOT_DIR));
 
         // installation.toml exists but omits root-dir.
         let (_dir2, no_root_field) = inst();
         std::fs::create_dir_all(no_root_field.cactup_dir()).unwrap();
         std::fs::write(no_root_field.meta_path(), "schema = 1\n").unwrap();
-        assert_eq!(no_root_field.cactus_root(), no_root_field.root.join(DEFAULT_ROOT_DIR));
+        assert_eq!(no_root_field.cactus_root().unwrap(), no_root_field.root.join(DEFAULT_ROOT_DIR));
     }
 
     #[test]
@@ -1006,16 +1197,17 @@ mod tests {
         std::fs::write(inst.meta_path(), "root-dir = \"MyTree\"\n").unwrap();
 
         let root = inst.root.join("MyTree");
-        assert_eq!(inst.cactus_root(), root);
-        assert_eq!(inst.live_thornlist(), root.join("thornlists").join(LIVE_THORNLIST));
-        assert_eq!(inst.legacy_live_thornlist(), root.join("thornlists").join(LEGACY_THORNLIST));
-        assert_eq!(inst.live_thornlist_to_read(), inst.live_thornlist());
+        assert_eq!(inst.cactus_root().unwrap(), root);
+        assert_eq!(inst.live_thornlist().unwrap(), root.join("thornlists").join(LIVE_THORNLIST));
+        let legacy = root.join("thornlists").join(LEGACY_THORNLIST);
+        assert_eq!(inst.legacy_live_thornlist().unwrap(), legacy);
+        assert_eq!(inst.live_thornlist_to_read().unwrap(), inst.live_thornlist().unwrap());
 
         // The pristine as-fetched copy lives at the installation home, NOT
         // inside the source tree — an easy asymmetry to break by accident.
         assert_eq!(inst.source_thornlist(), inst.root.join(SOURCE_THORNLIST));
 
-        assert!(inst.is_live_thornlist(&inst.live_thornlist().display().to_string()));
+        assert!(inst.is_live_thornlist(&inst.live_thornlist().unwrap().display().to_string()).unwrap());
     }
 
     /// `cactup use`'s backfill call passes `root_dir: None`; it must never
@@ -1041,7 +1233,7 @@ mod tests {
         let generic = mdb.load("generic").unwrap();
         let meta = inst.ensure_meta(&generic, &Database::new(), None).unwrap();
         assert!(meta.root_dir.is_none());
-        assert_eq!(inst.cactus_root(), inst.root.join(DEFAULT_ROOT_DIR));
+        assert_eq!(inst.cactus_root().unwrap(), inst.root.join(DEFAULT_ROOT_DIR));
     }
 
     /// [`Installation::migrate_thornlist_names`] must move the legacy files
@@ -1055,9 +1247,10 @@ mod tests {
 
         assert!(inst.migrate_thornlist_names().unwrap());
         let root = inst.root.join("MyTree");
-        assert!(inst.live_thornlist().starts_with(&root), "{}", inst.live_thornlist().display());
-        assert_eq!(std::fs::read_to_string(inst.live_thornlist()).unwrap(), "A/B\nC/D\n");
-        assert!(!inst.legacy_live_thornlist().exists());
+        let live = inst.live_thornlist().unwrap();
+        assert!(live.starts_with(&root), "{}", live.display());
+        assert_eq!(std::fs::read_to_string(inst.live_thornlist().unwrap()).unwrap(), "A/B\nC/D\n");
+        assert!(!inst.legacy_live_thornlist().unwrap().exists());
         // Never under the historical default name.
         assert!(!inst.root.join(DEFAULT_ROOT_DIR).exists());
     }
@@ -1073,7 +1266,7 @@ mod tests {
 
         let meta = inst.ensure_meta(&mel5, &Database::new(), Some("Foo")).unwrap();
         assert_eq!(meta.root_dir.as_deref(), Some("Foo"));
-        assert_eq!(inst.cactus_root(), inst.root.join("Foo"));
+        assert_eq!(inst.cactus_root().unwrap(), inst.root.join("Foo"));
 
         // Fixed at install time: a later ensure with a different root dir
         // changes nothing.
