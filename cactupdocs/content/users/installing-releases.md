@@ -192,7 +192,12 @@ branch you checked out yourself is left alone, like any other local state
 whether a branch was yours or the thornlist's, so after an upgrade such a
 repo sitting on a branch other than the default is skipped as a switched
 branch until you say otherwise: `cactup inst refetch --overwrite <repo>`
-moves it to the default branch.
+moves it to the default branch. The same goes, once, for switching to a
+release or thornlist that names a branch the repo already has locally:
+such a repo is skipped as a switched branch, and `--overwrite <repo>` moves
+it. When the repository cannot be asked which branch is its default (the
+server is unreachable, say), a repo on a branch cactup put it on stays
+there, and one on a branch you checked out is skipped, left alone.
 
 ### Switching release or thornlist
 

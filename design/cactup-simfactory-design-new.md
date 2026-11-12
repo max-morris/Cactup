@@ -822,17 +822,26 @@ an older cactup names (those recorded whatever branch such a repo was on,
 so they cannot tell the user's choice from a list's). `refetch` asks every
 time, so a remote that moves its default — or renames the branch the repo
 was on — is followed by the next refetch. A remote that does not answer
-leaves the repo on its current branch, following what its record says it
-followed, with a warning on its line; its fetch, to the same remote,
-reports the failure. `fetch-state.toml` records `follows-default = true`
+leaves a repo on a branch its record vouches for where it is, following
+what the record says it followed, with a warning on its line; its fetch, to
+the same remote, reports the failure. On any other branch the repo is
+skipped (`no answer from its remote on which branch is its default`), the
+branch left alone: an update is not known to be what the list asks, and a
+fast-forward must not land on the user's branch in the remote's stead.
+`fetch-state.toml` records `follows-default = true`
 for a repo fetched this way and `named-branch = true` for one on the branch
 its list named; commands that fetch only part of a list (`add`) or start
 from nothing (`install`) take the record's word for a repo it found on its
-default branch rather than asking every remote. A forced refetch of a repo
-skipped as a branch switch goes to the remote's default. One skipped for
-anything else (local edits or commits, a detached HEAD) stays on its
-current branch, goes to the remote's default from a detached HEAD, and
-fails, saying why, when its HEAD cannot be read.
+default branch rather than asking every remote. A forced refetch of such a
+repo goes to the remote's default (asked again; the repo fails if the remote
+still does not answer) when it was skipped as a branch switch or for an
+unanswered ask, when it sits on a branch its record vouches for (skipped
+for local edits, say, or a re-pointed `origin`: forcing it does what the
+list asks, and leaves no claim behind that would skip it again), from a
+detached HEAD, and from a branch origin does not have (one made locally,
+which an align could never reach). A repo skipped for anything else on the
+user's own branch stays on that branch, and one whose HEAD cannot be read
+fails, saying why.
 
 **Pinned repos: `!REPO_COMMIT`.** A git section may carry
 `!REPO_COMMIT = <full commit id>` (40 hex digits, or 64 for a SHA-256 repo;
@@ -876,9 +885,10 @@ onto its branch when the list drops the pin: the branch the list now
 names, or with none the remote's default (asked then; when the remote does
 not answer, the fetch asks again and fails the repo if it still cannot).
 A pin always leaves HEAD detached, even when the repo already sat at the
-commit on a branch (a ref edit, no tree written), so a branch the user
-checks out after a pin is the user's, whatever branch the pin was taken
-from. A pin with no `!REPO_BRANCH` — what `cactup add owner/name#<sha>` and
+commit on a branch (a ref edit, no tree written; the repo's line says which
+branch it left, in yellow, and the summary counts it as updated), so a
+branch the user checks out after a pin is the user's, whatever branch the
+pin was taken from. A pin with no `!REPO_BRANCH` — what `cactup add owner/name#<sha>` and
 `sim export` write — records no branch at all. Detached anywhere else is the
 user's doing and is skipped (`detached HEAD at …`) unless forced; forcing a
 pinned repo pins it. `installation delta` compares a pinned repo by commit

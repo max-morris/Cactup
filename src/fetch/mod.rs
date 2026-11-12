@@ -817,7 +817,10 @@ pub struct RepoRecord {
     /// from one the user checked out (an older cactup recorded whatever
     /// branch a repo with no `!REPO_BRANCH` was on): such a record is read
     /// as not saying, and the branch as the user's. Additive (spec §2.5):
-    /// an older binary ignores it.
+    /// an older binary ignores it, and a record it rewrites without it costs
+    /// the repo its claim: a later list that moves it off that branch (drops
+    /// `!REPO_BRANCH`, or names another branch the repo has locally) skips
+    /// it once as a branch switch, until `--overwrite` moves it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub named_branch: bool,
     /// The commit HEAD resolved to when cactup last fetched this repo.
