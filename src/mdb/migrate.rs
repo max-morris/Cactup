@@ -762,7 +762,7 @@ pub(crate) mod tests {
     /// A scratch home: `<tmp>/machines` is the user layer, so backups land
     /// in `<tmp>/machine-backups`, inside the scratch directory.
     pub(crate) struct Home {
-        pub tmp: tempfile::TempDir,
+        _tmp: tempfile::TempDir,
         pub mdb: Mdb,
     }
 
@@ -772,7 +772,7 @@ pub(crate) mod tests {
             let system = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb");
             let mdb = Mdb::with_roots(system, tmp.path().join("machines"));
             fs::create_dir_all(&mdb.user_root).unwrap();
-            Home { tmp, mdb }
+            Home { _tmp: tmp, mdb }
         }
 
         pub fn dir(&self, name: &str) -> PathBuf {
@@ -1224,81 +1224,154 @@ pub(crate) mod tests {
                 }
             }
         }
-        for case in machine_dirs(&fixtures().join("edge")).into_iter().chain(edge_cases_with_subdirs()) {
+        for case in machine_dirs(&fixtures().join("edge")) {
             check_edge_case(&case);
         }
     }
 
-    /// Edge cases laid out as `edge/<case>/<machine>/` with the
-    /// `expect.toml` in `edge/<case>/`.
-    fn edge_cases_with_subdirs() -> Vec<PathBuf> {
-        let Ok(entries) = fs::read_dir(fixtures().join("edge")) else { return Vec::new() };
-        let mut cases: Vec<PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| !p.join("meta.toml").exists() && p.join("expect.toml").is_file())
-            .collect();
-        cases.sort();
-        cases
+    /// Every file under `dir` with its bytes.
+    fn contents(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut files: Vec<_> = walk(dir).into_iter().map(|p| (p.clone(), fs::read(&p).unwrap())).collect();
+        files.sort();
+        files
     }
 
+    /// One `edge/<case>/`: the case directory is the overlay, named after
+    /// the case, and its `expect.toml` says what loading it must do
+    /// (fixtures/mdb-overlays/README.md). `findings` are kind strings; each
+    /// is checked below, and an unknown one fails the test.
     fn check_edge_case(case: &Path) {
         let expect_path = case.join("expect.toml");
         let expect: toml::Table = fs::read_to_string(&expect_path)
             .unwrap_or_else(|e| panic!("'{}': {e}", expect_path.display()))
             .parse()
             .unwrap_or_else(|e| panic!("'{}': {e}", expect_path.display()));
-        let source = if case.join("meta.toml").is_file() {
-            case.to_owned()
-        } else {
-            match machine_dirs(case).as_slice() {
-                [only] => only.clone(),
-                other => panic!("'{}' holds {} overlays, not one", case.display(), other.len()),
-            }
-        };
-        let name = source.file_name().unwrap().to_string_lossy().into_owned();
-        let label = case.strip_prefix(fixtures()).unwrap().display().to_string();
+        let name = case.file_name().unwrap().to_string_lossy().into_owned();
+        let label = format!("edge/{name}");
         let home = Home::new();
-        let dir = install(&home, &source, &name);
-        let n = generation_of(&dir);
+        let dir = install(&home, case, &name);
         let outcome = expect.get("outcome").and_then(|v| v.as_str()).unwrap_or_else(|| panic!("{label}: no outcome"));
-        let result_generation = expect.get("result-generation").and_then(|v| v.as_integer());
+        let result_generation = expect
+            .get("result-generation")
+            .and_then(|v| v.as_integer())
+            .unwrap_or_else(|| panic!("{label}: no result-generation"));
         let findings: Vec<&str> = expect
             .get("findings")
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
-        if n == 1 || PLACEHOLDERS.contains(&n) {
-            // Generation 1 always refuses (Max's decision 4); a placeholder
-            // step refuses whatever the case expects of the real one.
-            if n == 1 {
-                assert_eq!(outcome, "refused", "{label}: generation 1 is never migrated");
-            }
-            assert_refused(&home, &name, n);
+        let generation_now = |dir: &Path| match recorded(&fs::read_to_string(dir.join("meta.toml")).unwrap()) {
+            Recorded::At(n) => i64::from(n),
+            Recorded::Missing => 0,
+            Recorded::Unreadable => panic!("{label}: unreadable generation"),
+        };
+        let start = generation_now(&dir);
+        let before = contents(&dir);
+
+        // A placeholder step refuses whatever the case expects of the real
+        // one, before writing anything.
+        if (1..MDB_GENERATION).any(|n| PLACEHOLDERS.contains(&n) && i64::from(n) == start) {
+            assert_refused(&home, &name, start as u32);
             return;
         }
-        match outcome {
-            "migrated" => {
-                assert_migrates(&home, &name, n);
-                if let Some(g) = result_generation {
-                    assert_eq!(i64::from(generation_of(&dir)), g, "{label}");
+        let result = home.mdb.load(&name);
+        assert_eq!(generation_now(&dir), result_generation, "{label}: generation after the load");
+        let after = contents(&dir);
+        // What the user reads: the refusal, or the backup's notes.
+        let message = match (&result, outcome) {
+            (Ok(_), "migrated") => {
+                let backup = home.backups().join(&name).join(format!("generation-{start}"));
+                assert!(backup.join(".complete").is_file(), "{label}: no finished backup");
+                fs::read_to_string(backup.join("NOTES.txt")).unwrap()
+            }
+            (Ok(_), "untouched") => {
+                assert_eq!(after, before, "{label}: an untouched overlay was written");
+                assert!(!home.backups().exists(), "{label}");
+                String::new()
+            }
+            (Err(e), "refused") => {
+                let _ = overlay_error(e);
+                e.to_string()
+            }
+            (Ok(_), other) => panic!("{label}: loaded, but the expected outcome is {other:?}"),
+            (Err(e), other) => panic!("{label}: refused, but the expected outcome is {other:?}: {e:#}"),
+        };
+        let error = result.as_ref().err().map(overlay_error);
+        let changed = |pick: &dyn Fn(&Path) -> bool| -> Vec<PathBuf> {
+            before
+                .iter()
+                .zip(&after)
+                .filter(|((path, old), (_, new))| pick(path) && old != new)
+                .map(|((path, _), _)| path.clone())
+                .collect()
+        };
+        assert_eq!(before.len(), after.len(), "{label}: files appeared or vanished");
+        let comments = |files: &[(PathBuf, Vec<u8>)]| -> Vec<String> {
+            files
+                .iter()
+                .filter(|(path, _)| path.extension().is_some_and(|e| e == "toml"))
+                .flat_map(|(_, bytes)| String::from_utf8_lossy(bytes).lines().map(str::to_owned).collect::<Vec<_>>())
+                .filter_map(|line| line.find('#').map(|at| line[at..].trim().to_owned()))
+                .collect()
+        };
+        for finding in findings {
+            match finding.split_once(':') {
+                _ if finding == "generation-1-not-migrated" => {
+                    assert_eq!(error.map(|e| &e.why), Some(&Why::Unsupported), "{label}");
                 }
-                let notes = fs::read_to_string(home.backups().join(&name).join(format!("generation-{n}/NOTES.txt"))).unwrap();
-                for finding in findings {
-                    assert!(notes.contains(finding), "{label}: no note {finding:?} in\n{notes}");
+                _ if finding == "overlay-newer-than-binary" => {
+                    assert!(matches!(error.map(|e| &e.why), Some(Why::Newer { .. })), "{label}");
+                }
+                _ if finding == "files-untouched" => assert_eq!(after, before, "{label}"),
+                _ if finding == "no-recorded-generation-warning" => {
+                    assert!(home.mdb.load(&name).unwrap().meta.cactup.mdb_generation.is_none(), "{label}");
+                }
+                _ if finding == "generation-number-only" => {
+                    let meta = |p: &Path| p.ends_with("meta.toml") && p.parent() == Some(dir.as_path());
+                    assert!(changed(&|p| !meta(p)).is_empty(), "{label}: {:?}", changed(&|p| !meta(p)));
+                    let (old, new) = (&before.iter().find(|(p, _)| meta(p)).unwrap().1, &after.iter().find(|(p, _)| meta(p)).unwrap().1);
+                    let (old, new) = (String::from_utf8_lossy(old), String::from_utf8_lossy(new));
+                    let differing: Vec<_> = old.lines().zip(new.lines()).filter(|(a, b)| a != b).collect();
+                    assert!(differing.len() == 1 && differing[0].1.contains("mdb-generation"), "{label}: {differing:?}");
+                }
+                _ if finding == "scripts-untouched" => {
+                    let script = |p: &Path| {
+                        let rel = p.strip_prefix(&dir).unwrap();
+                        rel.components().count() > 1 && !rel.starts_with("optionlists")
+                    };
+                    assert!(changed(&script).is_empty(), "{label}: {:?}", changed(&script));
+                }
+                _ if finding == "comments-preserved" => {
+                    let (old, new) = (comments(&before), comments(&after));
+                    for comment in &old {
+                        assert!(new.contains(comment), "{label}: comment {comment:?} lost");
+                    }
+                }
+                // "renamed:<old>-><new>": the old key is gone, the new one there.
+                Some(("renamed", rename)) => {
+                    let (old, new) = rename.split_once("->").unwrap_or_else(|| panic!("{label}: {finding}"));
+                    let meta = fs::read_to_string(dir.join("meta.toml")).unwrap();
+                    let keys: Vec<&str> = meta.lines().filter_map(|l| l.split_once('=')).map(|(k, _)| k.trim()).collect();
+                    assert!(!keys.contains(&old) && keys.contains(&new), "{label}: {finding}\n{meta}");
+                }
+                // The details of a note or refusal ("build-universe:et-sing")
+                // and the key it names ("environment.env-build-setup"): the
+                // words of the message.
+                Some((_, detail)) => assert!(message.contains(detail), "{label}: {finding:?} not in\n{message}"),
+                None if finding.contains('.') => {
+                    let key = finding.rsplit('.').next().unwrap();
+                    assert!(message.contains(key), "{label}: {finding:?} not in\n{message}");
+                }
+                None => {
+                    let word = match finding {
+                        "may-belong-in-provision" => "provision",
+                        "old-and-new-key-both-present" => "both",
+                        "py-env-setup-differs" => "ENV_SETUP",
+                        other => panic!("{label}: unknown finding kind {other:?}; teach check_edge_case it"),
+                    };
+                    assert!(message.contains(word), "{label}: {finding:?} ({word:?}) not in\n{message}");
                 }
             }
-            "refused" => {
-                let e = home.mdb.load(&name).expect_err(&label);
-                let text = e.to_string();
-                if let Some(g) = result_generation {
-                    assert_eq!(i64::from(generation_of(&dir)), g, "{label}");
-                }
-                for finding in findings {
-                    assert!(text.contains(finding), "{label}: {finding:?} not in\n{text}");
-                }
-            }
-            other => panic!("{label}: unknown outcome {other:?}"),
         }
     }
 
