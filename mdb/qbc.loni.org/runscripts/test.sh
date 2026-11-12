@@ -37,7 +37,15 @@ date
 # $nprocs/$exe/$parfile into this command (design §11.6); single quotes keep
 # them out of the shell's hands. The launcher mirrors runscripts/default.sh.
 export CCTK_TESTSUITE_RUN_PROCESSORS=@TASKS@
-export CCTK_TESTSUITE_RUN_COMMAND='srun -u -A @ALLOCATION@ -p checkpt -n $nprocs singularity exec --bind /var/spool --bind /project --bind /ddnA/project --bind /etc/ssh/ssh_known_hosts --bind /ddnA/work --bind /work --bind /scratch /work/sbrandt/images/etworkshop-cpu.simg $exe $parfile'
+# Each test's srun runs inside the job, which already charges an account:
+# pass -A only when an allocation is set. An empty `-A` would take the next
+# flag as the account.
+# The -A sits mid-line (inside a quoted command, for the testsuite), so a
+# @KNOB-OR-DROP-LINE@ token, which removes its whole line, does not fit; the
+# shell drops just the flag. The value is the allocation knob, which -a sets
+# for one command.
+alloc='@KNOB-OPTIONAL(allocation)@'
+export CCTK_TESTSUITE_RUN_COMMAND='srun -u '"${alloc:+-A $alloc }"'-p checkpt -n $nprocs singularity exec --bind /var/spool --bind /project --bind /ddnA/project --bind /etc/ssh/ssh_known_hosts --bind /ddnA/work --bind /work --bind /scratch /work/sbrandt/images/etworkshop-cpu.simg $exe $parfile'
 
 # Redirect testsuite output into test-home (design §11.6): the flesh harness
 # honors TESTS_DIR and writes each test's run dirs plus summary.log under

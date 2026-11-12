@@ -473,7 +473,6 @@ mod tests {
     /// reproduced in `commands::build::tests` instead of exported.
     fn make_in_flight_attempt(config_dir: &Path, cactus_root: &Path, config: &str, job_id: &str) {
         let meta = crate::build::attempt::BuildMeta {
-            schema: crate::database::SCHEMA,
             attempt_id: 0,
             config: config.to_owned(),
             optionlist_source: OptionlistSource::Flavor("default".to_owned()),

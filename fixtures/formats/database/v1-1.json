@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "cactup-version": "0.1.0",
+  "installations": {
+    "et": {
+      "alias": "et",
+      "release": "ET_2026_05",
+      "path": "/home/user/.cactup/cacti/et",
+      "thornlist": "/home/user/lists/mine.th",
+      "current-release": "master",
+      "current-thornlist": "/home/user/.cactup/cacti/et/Cactus/thornlists/mine.th",
+      "unfetched-repos": {
+        "CarpetX": {
+          "reason": "skipped",
+          "thorns": [
+            "CarpetX/Algo",
+            "CarpetX/Loop"
+          ],
+          "detail": "local modifications (Loop/src/loop.cxx)"
+        }
+      }
+    }
+  },
+  "active-installation": "et",
+  "knobs": {
+    "queue": "workq"
+  },
+  "detected": {
+    "name": "workstation",
+    "hostname": "workstation",
+    "session": "4242:1234567"
+  }
+}

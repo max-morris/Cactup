@@ -9,6 +9,7 @@ pub mod attempt;
 use crate::args::{BuildOpts, MakeJobs, TopologyFlags};
 use crate::build::attempt::{BuildAttempt, BuildMeta, BuildOutcomeRecord, Reservation, Timestamps};
 use crate::fetch::SourceHeads;
+use crate::format::{self, Format, Toml};
 use crate::installation::Installation;
 use crate::lock::LinkLock;
 use crate::mdb::meta::Phase;
@@ -59,14 +60,33 @@ fn tolerant_runs_on<'de, D: serde::Deserializer<'de>>(d: D) -> Result<RunsOn, D:
     toml::Value::Table(table).try_into().map_err(serde::de::Error::custom)
 }
 
-/// The config record's own format version. 2 renamed `variant` to `flavor`
-/// and grouped `gpu`/`compatible-queues` as `[runs-on]`; older records are
-/// upgraded on read (`ConfigMeta::from_table`).
-pub const CONFIG_SCHEMA: u32 = 2;
+/// `cactup-config.toml`'s format (§7.4), also the record embedded in each
+/// build attempt's `build.toml` and the copy `sim create` freezes. Version 2
+/// renamed `variant` to `flavor` and grouped `gpu`/`compatible-queues` as
+/// `[runs-on]`; [`config_1_to_2`] upgrades an older record on read, and is
+/// kept indefinitely: a build queued by an older cactup runs that older
+/// binary on the compute node and writes a schema-1 record when it
+/// finishes, whatever version the user has moved on to since.
+///
+/// `frozen_read`: a queued build's frozen binary reads it at `execute`.
+/// The 1 -> 2 bump predates down-steps, so the down-chain starts at 2
+/// (`down_floor`): a newer binary writes 2 over a 1, the narrow window spec
+/// §7.4 accepts. A finished build stores its record anew
+/// ([`ConfigMeta::store_built`]); every other writer edits the one on disk.
+/// The maps listed are open (every key in them is known) and rewritten
+/// whole by a rebuild or a refresh, which listing them says.
+pub static CONFIG: Format<Toml> = Format {
+    name: "config record",
+    key: "schema",
+    current: 2,
+    upgrades: &[config_1_to_2],
+    downgrades: &[],
+    down_floor: 2,
+    frozen_read: true,
+    legacy: None,
+    replace_whole: &["sources", "downloads", "thorn-providers", "thorn-shapes", "thorn-stamps"],
+};
 
-fn default_schema() -> u32 {
-    CONFIG_SCHEMA
-}
 fn default_true() -> bool {
     true
 }
@@ -76,8 +96,6 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ConfigMeta {
-    #[serde(default = "default_schema")]
-    pub schema: u32,
     pub name: String,
     /// Which optionlist this config is built from, and hence rebuilt from
     /// (§7.8). Flattened, so on disk this is the single key it names.
@@ -100,8 +118,8 @@ pub struct ConfigMeta {
     /// Where the binary may run, snapshotted from the flavor's header at build
     /// time (D12). A TOML table, so it follows every scalar key. Read
     /// tolerantly, unlike the closed MDB header the same type parses: a key a
-    /// newer cactup added must reach the `schema` check below ("please
-    /// upgrade") rather than fail the parse first.
+    /// newer cactup added is one this binary does not model, which a write
+    /// puts back, not one that fails the parse.
     #[serde(default, deserialize_with = "tolerant_runs_on")]
     pub runs_on: RunsOn,
     /// Per-repo HEADs (from `fetch-state.toml`) of the repos this config's
@@ -223,62 +241,59 @@ impl ConfigMeta {
     /// A config record read from any path: the config's own, or the copy a
     /// simulation froze at create (§8.2 step 6). `Ok(None)` when there is no
     /// file. Either copy goes through the same upgrade and the same refusal
-    /// of a schema newer than this binary.
+    /// of a schema newer than this binary. Never rewrites the file.
     pub fn load_path(path: &Path) -> Res<Option<ConfigMeta>> {
-        let text = match fs::read_to_string(path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            other => other.with_context(|| format!("Failed to read '{}'", path.display()))?,
-        };
-        let table: toml::Table =
-            toml::from_str(&text).with_context(|| format!("Failed to parse '{}'", path.display()))?;
-        let meta = ConfigMeta::from_table(table)
-            .with_context(|| format!("Failed to parse '{}'", path.display()))?;
-        if meta.schema > CONFIG_SCHEMA {
-            bail!(
-                "'{}' has schema {} (> {CONFIG_SCHEMA}); please upgrade cactup",
-                path.display(),
-                meta.schema
-            );
-        }
-        Ok(Some(meta))
-    }
-
-    /// A config record from its raw TOML table, upgrading an older schema in
-    /// memory first. Every on-disk read goes through here — `load`, and the
-    /// copy embedded in a build attempt's `build.toml` (`deserialize_upgrading`)
-    /// — so a record written by any earlier cactup keeps loading. The file
-    /// itself is left alone; the next `store` writes the current schema.
-    ///
-    /// Deliberately kept indefinitely: a build queued by an older cactup runs
-    /// that older binary on the compute node and writes an old-schema record
-    /// when it finishes, whatever version the user has moved on to since.
-    pub fn from_table(mut table: toml::Table) -> Result<ConfigMeta, toml::de::Error> {
-        upgrade_config_record(&mut table);
-        toml::Value::Table(table).try_into()
+        format::read(path, &CONFIG)
     }
 
     /// `#[serde(deserialize_with)]` for a `ConfigMeta` embedded in another
-    /// record: the same upgrade `from_table` applies.
+    /// record (`build.toml`'s `[config-meta]`), which carries its own
+    /// version key: the same chain as [`Self::load_path`].
     pub fn deserialize_upgrading<'de, D: serde::Deserializer<'de>>(d: D) -> Result<ConfigMeta, D::Error> {
-        let table = toml::Table::deserialize(d)?;
-        ConfigMeta::from_table(table).map_err(serde::de::Error::custom)
+        let table = Toml::deserialize(d)?;
+        format::parse_embedded(table, &CONFIG).map_err(|e| serde::de::Error::custom(format!("{e:#}")))
     }
 
+    /// `#[serde(serialize_with)]` for a `ConfigMeta` embedded in another
+    /// record: the record with its own version key first, at
+    /// `CONFIG.current`, as it always has been.
+    // The embedded copy is not sticky: when CONFIG next bumps, how a build
+    // record written by an older binary keeps its embedded record's version
+    // (and how `build::attempt::BUILD`'s `legacy`, which upgrades it in
+    // memory for put-back, steps it back down) must be designed with it.
+    pub fn serialize_versioned<S: serde::Serializer>(meta: &ConfigMeta, s: S) -> Result<S::Ok, S::Error> {
+        let mut table = Toml::new();
+        table.insert(CONFIG.key.to_owned(), toml::Value::Integer(i64::from(CONFIG.current)));
+        let body = <Toml as format::Document>::from_typed(meta)
+            .map_err(|e| serde::ser::Error::custom(format!("{e:#}")))?;
+        table.extend(body.into_iter().filter(|(key, _)| key != CONFIG.key));
+        table.serialize(s)
+    }
+
+    /// Store an edit of the record on disk (keys this binary does not model
+    /// are kept).
     fn store(&self, cactus_root: &Path) -> Res<()> {
-        let path = Self::path_for(cactus_root, &self.name);
-        fs::write(&path, toml::to_string_pretty(self)?)
-            .with_context(|| format!("Failed to write '{}'", path.display()))
+        format::write(&Self::path_for(cactus_root, &self.name), self, &CONFIG)
+    }
+
+    /// Store an edit that also took `[runs-on]` afresh from the flavor's
+    /// header: a key a newer binary added there described the old header,
+    /// not this one, so it is not kept.
+    fn store_new_runs_on(&self, cactus_root: &Path) -> Res<()> {
+        format::write_replacing(&Self::path_for(cactus_root, &self.name), self, &CONFIG, &["runs-on"])
+    }
+
+    /// Store a finished build's record: made anew, so nothing of the
+    /// previous build's record is kept, whichever binary wrote it.
+    fn store_built(&self, cactus_root: &Path) -> Res<()> {
+        format::replace(&Self::path_for(cactus_root, &self.name), self, &CONFIG)
     }
 }
 
 /// Schema 1 -> 2, in place: `variant = "x"` becomes `flavor = "x"`, and the
 /// flat `gpu`/`compatible-queues` keys move into a `[runs-on]` table as
-/// `gpu`/`queues`. A record already at schema 2 or later is left untouched.
-fn upgrade_config_record(table: &mut toml::Table) {
-    let schema = table.get("schema").and_then(toml::Value::as_integer).unwrap_or(1);
-    if schema >= 2 {
-        return;
-    }
+/// `gpu`/`queues`.
+fn config_1_to_2(table: &mut Toml) -> Res<()> {
     if let Some(flavor) = table.remove("variant") {
         table.insert("flavor".to_owned(), flavor);
     }
@@ -292,7 +307,61 @@ fn upgrade_config_record(table: &mut toml::Table) {
     if !runs_on.is_empty() {
         table.insert("runs-on".to_owned(), toml::Value::Table(runs_on));
     }
-    table.insert("schema".to_owned(), toml::Value::Integer(2));
+    Ok(())
+}
+
+/// Every value of [`OptionlistSource`], in a match with no wildcard: a new
+/// value fails to compile here until it has a place in the samples (the
+/// config record's shape pin holds `[0]`, the build record's `[0]` at its
+/// top level and `[1]` in its embedded config record).
+#[cfg(test)]
+pub(crate) fn every_optionlist_source() -> [OptionlistSource; 2] {
+    // Each value's place in `all`, which must hold every place exactly once
+    // (Rust cannot list an enum's values, so the place is what this relies on).
+    let place = |source: &OptionlistSource| match source {
+        OptionlistSource::Flavor(_) => 0,
+        OptionlistSource::Optionlist(_) => 1,
+    };
+    let all = [
+        OptionlistSource::Flavor("cuda".to_owned()),
+        OptionlistSource::Optionlist("/home/user/my.cfg".to_owned()),
+    ];
+    let mut places: Vec<usize> = all.iter().map(place).collect();
+    places.sort();
+    assert_eq!(places, (0..all.len()).collect::<Vec<_>>(), "every OptionlistSource, once");
+    all
+}
+
+#[cfg(test)]
+impl ConfigMeta {
+    /// Every field set, every collection non-empty, and no `..`: a new field
+    /// fails to compile here, and the shape pins of the config record and
+    /// of the build record that embeds it then say what to do.
+    pub(crate) fn exhaustive_sample(optionlist_source: OptionlistSource) -> ConfigMeta {
+        let map = |k: &str, v: &str| [(k.to_owned(), v.to_owned())].into_iter().collect::<BTreeMap<_, _>>();
+        ConfigMeta {
+            name: "sim".to_owned(),
+            optionlist_source,
+            thornlist: "/home/user/et/thornlists/sim.th".to_owned(),
+            machine: "workstation".to_owned(),
+            universe: Some("et-sif".to_owned()),
+            coerce_run_universe: false,
+            config_id: "config-sim-workstation-20260501-120000".to_owned(),
+            build_id: "build-sim-workstation-20260501-120000".to_owned(),
+            built: Some("2026-05-01T13:00:00Z".parse().unwrap()),
+            flags: BuildFlags { debug: true, optimize: true, unsafe_build: true, profile: true },
+            runs_on: RunsOn {
+                queues: vec!["gpu".to_owned(), "gpu-debug".to_owned()],
+                gpu: true,
+                default_queue: Some("gpu".to_owned()),
+            },
+            sources: Some(map("Cactus", "0123456789abcdef0123456789abcdef01234567")),
+            downloads: map("ExternalLibraries-Data", "sha256-of-the-download"),
+            thorn_providers: Some(map("CarpetX", "repos/cactusamrex/CarpetX")),
+            thorn_shapes: Some(map("CarpetX", "shape-fingerprint")),
+            thorn_stamps: Some(map("CarpetX", "stamp-fingerprint")),
+        }
+    }
 }
 
 /// The two thornlist artifacts kept in a config directory (§7.5). The
@@ -2035,7 +2104,11 @@ fn prepare_with_cache(
             if let Some(live) = fresh_stamps {
                 stored.thorn_stamps = Some(live);
             }
-            stored.store(&cactus_root)?;
+            if header_changed {
+                stored.store_new_runs_on(&cactus_root)?;
+            } else {
+                stored.store(&cactus_root)?;
+            }
         }
         return Ok(Prepared::UpToDate(stored));
     }
@@ -2128,7 +2201,10 @@ fn prepare_with_cache(
     // Several machines' make commands / build universes reference
     // @ALLOCATION@ (e.g. mike's and Deep Bayou's `srun … singularity exec`
     // build wrappers); bind it from the allocation knob the way the sim path
-    // does, empty when unset.
+    // does, empty when unset. The snapshot carries the command's overlay, so
+    // `build -a ACCOUNT` / `build submit -a ACCOUNT` reach it (§5.1), and it
+    // is frozen here, on the login node, for the wrapper `execute` renders
+    // on the compute node from `build.toml` alone (D11).
     let db = crate::database::Db::open().and_then(|db| db.read());
     // Resolve @USER@/@ENV()@ in scratch-home (§4.2), the user's knob over
     // the machine's — the raw template would otherwise leak `@USER@`
@@ -2196,7 +2272,7 @@ fn prepare_with_cache(
         // custom `make` key. A machine that sets its own `make` keeps full
         // control of parallelism.
         let make = vars
-            .substitute(machine.meta.build.make.as_deref().unwrap_or(DEFAULT_MAKE), Syntax::Shell)
+            .substitute(machine.meta.build.make.as_deref().unwrap_or(DEFAULT_MAKE), Syntax::ShellLine)
             .context("Substituting the machine make command")?;
         // Build-phase env for the resolved universe (§6.1): universe env keys
         // override the machine [environment] key-by-key. The provisioning
@@ -2214,7 +2290,6 @@ fn prepare_with_cache(
     // (execute stamps that once the build actually finishes).
     let now = Utc::now();
     let config_meta = ConfigMeta {
-        schema: CONFIG_SCHEMA,
         name: name.to_owned(),
         // Carried forward on every rebuild, which is what makes the choice —
         // flavor or file — sticky (resolution rule 3).
@@ -2232,7 +2307,10 @@ fn prepare_with_cache(
         built: None,
         flags,
         sources: fresh_sources.as_ref().map(|s| s.heads.clone()),
-        downloads: parsed_list.as_ref().map(|l| crate::fetch::download_hashes(&installation.root, l)).unwrap_or_default(),
+        downloads: match parsed_list.as_ref() {
+            Some(list) => crate::fetch::download_hashes(&installation.root, list)?,
+            None => Default::default(),
+        },
         thorn_providers: fresh_providers.clone(),
         thorn_shapes: fresh_shapes.clone(),
         thorn_stamps: fresh_stamps.clone(),
@@ -2245,7 +2323,6 @@ fn prepare_with_cache(
     vars.set("STDOUT_FILE", attempt_dir.join("build.out").display().to_string());
     vars.set("STDERR_FILE", attempt_dir.join("build.err").display().to_string());
     let meta = BuildMeta {
-        schema: crate::database::SCHEMA,
         attempt_id,
         config: name.to_owned(),
         optionlist_source: optionlist_source.clone(),
@@ -2757,7 +2834,7 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
     meta.thorn_providers = fresh_providers;
     meta.thorn_shapes = fresh_shapes;
     meta.thorn_stamps = fresh_stamps;
-    meta.store(&cactus_root)?;
+    meta.store_built(&cactus_root)?;
     fs::copy(attempt.optionlist_path(), config_dir.join("cactup-optionlist.cfg"))
         .with_context(|| "Failed to install cactup-optionlist.cfg")?;
     fs::copy(attempt.optionlist_snapshot_path(), config_dir.join(OPTIONLIST_SNAPSHOT))
@@ -2876,6 +2953,143 @@ mod tests {
 
     const RECORD_TAIL: &str = "thornlist = \"t.th\"\nmachine = \"qbd\"\nconfig-id = \"c\"\nbuild-id = \"b\"\n";
 
+    fn config_sample() -> ConfigMeta {
+        ConfigMeta::exhaustive_sample(every_optionlist_source()[0].clone())
+    }
+
+    #[test]
+    fn config_format_generic_tests() {
+        use crate::format::testing::*;
+        let fixtures = fixture_dir("config");
+        descriptor_is_consistent(&CONFIG);
+        assert!(CONFIG.frozen_read);
+        assert_eq!(CONFIG.down_floor, 2, "the 1 -> 2 bump predates down-steps");
+        shape_is_pinned(&CONFIG, &fixtures, &config_sample());
+        every_fixture_loads::<ConfigMeta, _>(&CONFIG, &fixtures);
+        newer_is_refused::<ConfigMeta, _>(&CONFIG, CONFIG_RECORD, "name = 7\n", &config_sample());
+        unknown_keys_survive(
+            &CONFIG,
+            CONFIG_RECORD,
+            &config_sample(),
+            &["runs-on"],
+            |m: &mut ConfigMeta| m.built = None,
+            &["built"],
+        );
+    }
+
+    /// The schema-1 fixtures (an old cactup's own output, and the same
+    /// without its `schema` key) read as what they recorded: `variant` is
+    /// the flavor, the flat `gpu`/`compatible-queues` its `runs-on`.
+    #[test]
+    fn schema_1_fixtures_read_as_what_they_recorded() {
+        for name in ["v1.toml", "v1-noschema.toml"] {
+            let path = crate::format::testing::fixture_dir("config").join(name);
+            let meta = ConfigMeta::load_path(&path).unwrap().unwrap();
+            assert_eq!(meta.optionlist_source, OptionlistSource::Flavor("cuda".to_owned()), "{name}");
+            assert_eq!(meta.runs_on.queues, ["gpu", "gpu-debug"], "{name}");
+            assert!(meta.runs_on.gpu, "{name}");
+            assert_eq!(meta.runs_on.default_queue, None, "{name}");
+            assert_eq!(meta.sources.unwrap()["Cactus"], "0123456789abcdef0123456789abcdef01234567");
+            assert!(meta.flags.debug && meta.built.is_some(), "{name}");
+        }
+    }
+
+    /// A config written by `cactup-config.toml`'s writers: the record on
+    /// disk at `dir`, with keys a newer cactup added at the top level and
+    /// inside `[runs-on]`.
+    fn record_with_future_keys(dir: &Path) -> PathBuf {
+        let path = ConfigMeta::path_for(dir, "sim");
+        config_sample().store(dir).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        let text = text.replace("[runs-on]\n", "[runs-on]\nfuture-runs-on = 1\n");
+        let text = text.replacen("name = ", "future-top = \"x\"\nname = ", 1);
+        fs::write(&path, &text).unwrap();
+        path
+    }
+
+    /// Each writer of the record keeps what it should of a newer binary's
+    /// additions: an edit keeps them all; a refresh that took `[runs-on]`
+    /// afresh from the header drops only those inside it; a finished
+    /// build's record, made anew, keeps none. The version stays 2.
+    #[test]
+    fn each_config_writer_keeps_what_it_should_of_unknown_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = record_with_future_keys(dir.path());
+        let mut meta = ConfigMeta::load(dir.path(), "sim").unwrap().unwrap();
+        meta.thornlist = "/elsewhere/sim.th".to_owned();
+        meta.store(dir.path()).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("schema = 2\n"), "{text}");
+        assert!(text.contains("future-top") && text.contains("future-runs-on"), "{text}");
+
+        meta.runs_on.queues = vec!["single".to_owned()];
+        meta.store_new_runs_on(dir.path()).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("future-top") && !text.contains("future-runs-on"), "{text}");
+
+        let path = record_with_future_keys(dir.path());
+        let built = ConfigMeta { build_id: "build-2".to_owned(), ..config_sample() };
+        built.store_built(dir.path()).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("schema = 2\n") && !text.contains("future"), "{text}");
+    }
+
+    /// Moving a config from a flavor to an `--optionlist` file (or back)
+    /// never leaves both keys: the old one is known, so put-back leaves it
+    /// out, also when the record on disk is a schema-1 one with `variant`.
+    #[test]
+    fn switching_the_optionlist_source_never_leaves_both_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = ConfigMeta::path_for(dir.path(), "sim");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for start in ["v1.toml", "v2.toml"] {
+            fs::copy(crate::format::testing::fixture_dir("config").join(start), &path).unwrap();
+            let mut meta = ConfigMeta::load(dir.path(), "sim").unwrap().unwrap();
+            meta.optionlist_source = OptionlistSource::Optionlist("/x/my.cfg".to_owned());
+            meta.store(dir.path()).unwrap();
+            let doc: Toml = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            assert!(!doc.contains_key("flavor") && !doc.contains_key("variant"), "{start}: {doc:?}");
+            assert_eq!(doc["optionlist"].as_str(), Some("/x/my.cfg"));
+            assert!(!doc.contains_key("gpu") && !doc.contains_key("compatible-queues"), "{start}");
+
+            meta.optionlist_source = OptionlistSource::Flavor("cpu".to_owned());
+            meta.store(dir.path()).unwrap();
+            let doc: Toml = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            assert!(!doc.contains_key("optionlist"), "{start}: {doc:?}");
+            assert_eq!(doc["flavor"].as_str(), Some("cpu"));
+        }
+    }
+
+    /// The record is replaced by rename, never rewritten in place, so no
+    /// reader meets a torn one: a reader that opened the record before a
+    /// store reads the whole old record to the end, the store leaves a new
+    /// inode behind, and no temp file stays beside it. (A plain `fs::write`
+    /// truncates the file under that reader and writes into it.)
+    #[test]
+    fn the_config_write_is_atomic() {
+        use std::io::Read;
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = ConfigMeta::path_for(dir.path(), "sim");
+        let mut meta = config_sample();
+        meta.thorn_stamps = Some((0..4000).map(|i| (format!("Thorn{i:05}"), "f".repeat(64))).collect());
+        meta.store(dir.path()).unwrap();
+        let old = fs::read_to_string(&path).unwrap();
+        let before = fs::metadata(&path).unwrap().ino();
+        let mut reader = fs::File::open(&path).unwrap();
+
+        meta.build_id = "build-next".to_owned();
+        meta.thorn_stamps = Some(BTreeMap::new());
+        meta.store(dir.path()).unwrap();
+        let mut seen = String::new();
+        reader.read_to_string(&mut seen).unwrap();
+        assert!(seen == old, "a reader that opened the record before the store saw it change");
+        assert_ne!(fs::metadata(&path).unwrap().ino(), before, "stored in place");
+        let names: Vec<_> = fs::read_dir(path.parent().unwrap()).unwrap().collect();
+        assert_eq!(names.len(), 1, "a temp file was left behind");
+        assert_eq!(ConfigMeta::load(dir.path(), "sim").unwrap().unwrap().build_id, "build-next");
+    }
+
     /// A schema-1 record (written before the flavor rename) loads as the
     /// current shape: `variant` is the flavor, and the flat `gpu`/
     /// `compatible-queues` keys are its `runs-on`. The file is not touched
@@ -2888,7 +3102,6 @@ mod tests {
              compatible-queues = [\"single\", \"workq\"]\n{RECORD_TAIL}"
         );
         let (dir, meta) = load_record(&old);
-        assert_eq!(meta.schema, CONFIG_SCHEMA);
         assert_eq!(meta.optionlist_source, OptionlistSource::Flavor("cpu".to_owned()));
         assert_eq!(meta.runs_on, RunsOn { queues: vec!["single".to_owned(), "workq".to_owned()], gpu: true, default_queue: None });
         let path = ConfigMeta::path_for(dir.path(), "sim");
@@ -2911,13 +3124,13 @@ mod tests {
         let (_dir, meta) = load_record(&format!(
             "name = \"sim\"\noptionlist = \"/x/my.cfg\"\ncompatible-queues = [\"gpu\"]\n{RECORD_TAIL}"
         ));
-        assert_eq!(meta.schema, CONFIG_SCHEMA);
         assert_eq!(meta.optionlist_source, OptionlistSource::Optionlist("/x/my.cfg".to_owned()));
         assert_eq!(meta.runs_on, RunsOn { queues: vec!["gpu".to_owned()], gpu: false, default_queue: None });
     }
 
     /// A record a newer cactup wrote may carry `runs-on` keys this one does
-    /// not know; they must not fail the parse ahead of the schema check.
+    /// not know; the version is checked before any typed parse, so the
+    /// verdict is the upgrade message, naming the file.
     #[test]
     fn newer_record_reaches_the_schema_check() {
         let dir = tempfile::tempdir().unwrap();
@@ -2929,7 +3142,7 @@ mod tests {
         )
         .unwrap();
         let err = format!("{:#}", ConfigMeta::load(dir.path(), "sim").unwrap_err());
-        assert!(err.contains("please upgrade cactup"), "{err}");
+        assert!(err.contains("newer cactup") && err.contains("cactup-config.toml"), "{err}");
     }
 
     /// A current record is taken as-is — the upgrade never touches a key it
@@ -2992,7 +3205,6 @@ mod tests {
         // Rule 2 with a recorded path whose old-name file is gone.
         fs::remove_file(&legacy).unwrap();
         let stored = ConfigMeta {
-            schema: CONFIG_SCHEMA,
             name: "sim".to_owned(),
             optionlist_source: OptionlistSource::Flavor("default".to_owned()),
             runs_on: RunsOn::default(),

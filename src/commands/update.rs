@@ -17,7 +17,7 @@ pub fn dispatch(ctx: &Ctx, check: bool, prune: bool) -> Res<()> {
             "This is a development build of cactup; update it with git pull and cargo build"
         );
     };
-    let base = update::update_url(&ctx.db.read()?);
+    let base = update::update_url(&update::readable_db(&ctx.db)?);
     if check {
         return report(&me, &base);
     }

@@ -7,7 +7,7 @@ use crate::args::TestStartArgs;
 use crate::build::{self, ConfigMeta};
 use crate::commands::build as build_cmd;
 use crate::commands::{machine, Ctx};
-use crate::database::{Database, SCHEMA};
+use crate::database::Database;
 use crate::installation::{Installation, TestEntry};
 use crate::lock::LinkLock;
 use crate::mdb::meta::{Route, ScriptTable};
@@ -20,7 +20,7 @@ use crate::sim::start::{
 };
 use crate::sim::vars::{
     apply_tasks_default, default_checkpt_buffer, resolve_topology, set_machine_vars,
-    set_topology_vars, set_walltime_vars, BinaryFit, Topology,
+    set_topology_vars, set_walltime_vars, BinaryFit, Placement, Topology,
 };
 use crate::template::VarSet;
 use crate::testsuite::{
@@ -179,6 +179,15 @@ fn route_test_script<'t>(
     })
 }
 
+/// One test run's scripts, rendered for result set `results_id` (§11.5).
+struct Rendered {
+    results_id: u32,
+    vset: VarSet,
+    run_script: String,
+    /// The submit-phase variables and submit script; `None` for `test run`.
+    submit: Option<(VarSet, String)>,
+}
+
 fn start_impl(
     inst: &Installation,
     machine: &Machine,
@@ -246,7 +255,10 @@ fn start_impl(
     // 2. Topology + queue/GPU guards (§4.4 / D12), exactly as a sim.
     let force_queue = args.force_queue || args.force;
     let fit = BinaryFit::for_config(machine, &cfg)?;
-    let mut topo = resolve_topology(&args.topology, machine, db, Some(&fit), force_queue)?;
+    // A submit hands the suite to the scheduler; a run is here, inside an
+    // allocation or not (§8.5 placement).
+    let placement = if submit { Placement::submit(machine) } else { Placement::foreground(machine) };
+    let mut topo = resolve_topology(&args.topology, machine, db, Some(&fit), force_queue, placement)?;
     let select = if args.tests.is_empty() { "all".to_owned() } else { args.tests.join(" ") };
     // Resolved before anything is created or registered: a selection that
     // names nothing fails here, not as a queued job that runs zero tests.
@@ -274,6 +286,9 @@ fn start_impl(
         None => run_entry.tasks,
     };
     apply_tasks_default(&mut topo, &args.topology, script_tasks, Some(TESTSUITE_DEFAULT_TASKS));
+    if let Some(note) = topo.nodes_note() {
+        println!("{note}");
+    }
     let submit_uni = match sub_entry {
         Some(sub_entry) => resolve_submit_universe(machine, sub_entry.universe.as_deref())?,
         None => None,
@@ -295,6 +310,60 @@ fn start_impl(
     // re-runs reuse the dir and allocate new result sets (§11.5).
     let name = cfg_name.clone();
     let run_dir = test_home.join(&cfg_name).join(&name);
+    let identity = Identity::resolve(db, hostname_override);
+    let scratch_home = machine.meta.path_for(db, "scratch-home")?.unwrap_or_default();
+    let overwrite = args.overwrite || args.force;
+
+    // 5. Scripts at the run root (§11.5): run-script always (the compute node
+    //    executes it), submit-script for `test submit` — with the effective
+    //    knobs, `-K` overlay included, frozen for the compute node (§5, D11).
+    let render = |results_id: u32| -> Res<Rendered> {
+        let mut vset = assemble_test_vars(
+            &name,
+            &run_dir,
+            results_id,
+            &test_home,
+            &cfg,
+            &cactus_root,
+            machine,
+            &topo,
+            &flesh_select,
+            &identity,
+            &inst.alias,
+            run_uni_name,
+            &scratch_home,
+        )?;
+        vset.set_knobs(db.knob_snapshot());
+        let run_script = generate_script(machine, ScriptKind::Run, &run_script_name, &vset, Phase::Run, run_uni_name)?;
+        let submit = match &sub_script_name {
+            Some(sub_script_name) => {
+                // Submit-phase ENV_SETUP under the submit universe (§6.1).
+                let mut submit_vars = vset.clone();
+                submit_vars.set("ENV_SETUP", machine.meta.phase_env(submit_uni_name, Phase::Submit));
+                let script = generate_script(
+                    machine,
+                    ScriptKind::Submit,
+                    sub_script_name,
+                    &submit_vars,
+                    Phase::Submit,
+                    submit_uni_name,
+                )?;
+                Some((submit_vars, script))
+            }
+            None => None,
+        };
+        Ok(Rendered { results_id, vset, run_script, submit })
+    };
+    // Rendered before anything is created, registered or stopped, for the
+    // result set this run would get: a script that refuses (a required
+    // allocation unset) leaves no run dir, registry entry or result set
+    // behind, and stops no old job. Re-rendered below only if, under the
+    // run's lock, the set turns out to be another one.
+    let mut rendered = render(match (overwrite, active_results_id(&run_dir)?) {
+        (true, Some(active)) => active,
+        _ => next_results_id(&run_dir)?,
+    })?;
+
     fs::create_dir_all(run_dir.join(".cactup"))
         .with_context(|| format!("Failed to create '{}'", run_dir.display()))?;
     link_arrangements(&run_dir, &cactus_root)?;
@@ -312,12 +381,19 @@ fn start_impl(
         }
     }
 
-    let identity = Identity::resolve(db, hostname_override);
     let sched = Scheduler::for_machine(machine);
 
     // A previous run of this config that is still in the queue must be dealt
     // with first (there is no reaper for tests — §11.6).
-    if let Ok(old) = TestRun::open(&run_dir) {
+    // A record a newer cactup wrote stops a re-run here, before anything of
+    // it (results directory, scripts) is touched.
+    let old = TestRun::open(&run_dir);
+    if let Err(e) = &old
+        && e.downcast_ref::<crate::format::Newer>().is_some()
+    {
+        return Err(old.err().expect("matched as an error"));
+    }
+    if let Ok(old) = old {
         if old.lock_live()? {
             bail!("Test run \"{name}\" is already running");
         }
@@ -404,12 +480,10 @@ fn start_impl(
     }
 
     // 4. Result set: next results-%04d, or the active one with --overwrite/-f.
-    let overwrite = args.overwrite || args.force;
     let mut run = TestRun {
         name: name.clone(),
         dir: run_dir.clone(),
         meta: TestMeta {
-            schema: SCHEMA,
             name: name.clone(),
             config: cfg_name.clone(),
             config_id: cfg.config_id.clone(),
@@ -442,44 +516,20 @@ fn start_impl(
         (true, Some(active)) => active,
         _ => next_results_id(&run_dir)?,
     };
+    if results_id != rendered.results_id {
+        rendered = render(results_id)?;
+    }
+    let Rendered { vset, run_script, submit: rendered_submit, .. } = rendered;
     fs::create_dir_all(results_dir(&run_dir, results_id))
         .with_context(|| "Failed to create the results directory")?;
     activate_results(&run_dir, results_id)?;
-
-    // Topology variable set (§8.5) + the §11.9 test-only group.
-    let mut vset = assemble_test_vars(
-        &name,
-        &run_dir,
-        results_id,
-        &test_home,
-        &cfg,
-        &cactus_root,
-        machine,
-        &topo,
-        &flesh_select,
-        &identity,
-        &inst.alias,
-        run_uni_name,
-        &machine.meta.path_for(db, "scratch-home")?.unwrap_or_default(),
-    )?;
-    // Effective knobs, `-K` overlay included, frozen for the compute node (§5, D11).
-    vset.set_knobs(db.knob_snapshot());
     run.meta.vars = freeze_vars(&vset);
     run.meta.knobs = freeze_knobs(&vset);
-
-    // 5. Scripts at the run root (§11.5): run-script always (the compute node
-    //    executes it), submit-script for `test submit`.
-    let run_script = generate_script(machine, ScriptKind::Run, &run_script_name, &vset, Phase::Run, run_uni_name)?;
     write_executable(&run_dir.join("run-script"), &run_script)?;
 
-    if let Some(sub_script_name) = &sub_script_name {
-        // Submit-phase ENV_SETUP under the submit universe (§6.1).
-        let mut submit_vars = vset.clone();
-        submit_vars.set("ENV_SETUP", machine.meta.phase_env(submit_uni_name, Phase::Submit));
-        let submit_script =
-            generate_script(machine, ScriptKind::Submit, sub_script_name, &submit_vars, Phase::Submit, submit_uni_name)?;
+    if let Some((submit_vars, submit_script)) = rendered_submit {
         write_executable(&run_dir.join("submit-script"), &submit_script)?;
-        run.store_meta()?;
+        run.store_fresh()?;
 
         let submitted = sched.submit(&submit_vars, submit_uni.as_ref().map(|(n, u)| (n.as_str(), *u)))?;
         run.meta.set_job(&submitted);
@@ -496,7 +546,7 @@ fn start_impl(
         Ok(())
     } else {
         run.meta.job_id = std::process::id().to_string();
-        run.store_meta()?;
+        run.store_fresh()?;
         drop(lock);
         run.log("test-run", &format!("running {} in the foreground (select: {select})", results_name(results_id)));
         println!("Running testsuite of {} into {}", name.bold(), results_name(results_id));
@@ -869,6 +919,45 @@ mod tests {
         assert_eq!(list_results_ids(&run_dir).unwrap(), vec![0, 1]);
     }
 
+    /// A submit script that refuses (a machine requiring an allocation, none
+    /// set) leaves nothing behind: no run dir or registry entry for a first
+    /// run, and on a re-run no new or re-activated result set, and the
+    /// previous run's record untouched.
+    #[test]
+    fn a_refused_test_submit_leaves_nothing_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let db = Database::new();
+        let run_dir = tmp.path().join("inst/testhome/tests/tests");
+        let scripts = machine.dir.join("submitscripts");
+        let refusing = |on: bool| {
+            if on {
+                fs::rename(scripts.join("test.sh"), scripts.join("test.sh.off")).unwrap();
+                fs::write(scripts.join("test.py"), "print(ALLOCATION or knob(\"allocation\"))\n").unwrap();
+            } else {
+                fs::remove_file(scripts.join("test.py")).unwrap();
+                fs::rename(scripts.join("test.sh.off"), scripts.join("test.sh")).unwrap();
+            }
+        };
+
+        refusing(true);
+        let err = start_impl(&inst, &machine, &db, &test_args(), true, false, Some("h")).unwrap_err();
+        assert!(format!("{err:#}").contains("knob allocation is unset"), "{err:#}");
+        assert!(!run_dir.exists(), "no run dir");
+        assert!(!inst.tests().unwrap().tests.contains_key("tests"), "not registered");
+
+        refusing(false);
+        start_impl(&inst, &machine, &db, &test_args(), true, false, Some("h")).unwrap();
+        assert_eq!(active_results_id(&run_dir).unwrap(), Some(0));
+
+        refusing(true);
+        start_impl(&inst, &machine, &db, &test_args(), true, false, Some("h")).unwrap_err();
+        assert_eq!(list_results_ids(&run_dir).unwrap(), vec![0], "no new result set");
+        assert_eq!(active_results_id(&run_dir).unwrap(), Some(0));
+        assert_eq!(TestRun::open(&run_dir).unwrap().meta.job_id, "JOB-T0", "the last run's record stands");
+    }
+
     #[test]
     fn foreground_run_refuses_outside_allocation() {
         let tmp = tempfile::tempdir().unwrap();
@@ -965,7 +1054,6 @@ mod tests {
         let cactus_root = inst.cactus_root();
         let config_dir = cactus_root.join("configs/tests");
         let attempt_meta = crate::build::attempt::BuildMeta {
-            schema: crate::database::SCHEMA,
             attempt_id: 0,
             config: "tests".to_owned(),
             optionlist_source: OptionlistSource::Flavor("default".to_owned()),

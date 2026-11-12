@@ -473,10 +473,21 @@ impl Machine {
         if meta.hardware.autodetect || incomplete {
             let detected = autodetect::detect();
             let hw = &mut meta.hardware;
-            hw.max_cpus_per_node = hw.max_cpus_per_node.or(Some(detected.cores));
+            if hw.max_cpus_per_node.is_none() {
+                hw.max_cpus_per_node = Some(detected.cores);
+                hw.max_cpus_per_node_detected = true;
+            }
             hw.memory = hw.memory.or(detected.memory_mb);
             hw.max_gpus_per_node = hw.max_gpus_per_node.or(detected.gpus);
             hw.threads_per_cpu = hw.threads_per_cpu.or(detected.threads_per_cpu);
+        }
+        // An overlay's top-level `max-cpus-per-node` counts as detected too
+        // (§8.5): `machine create` has long written this host's cores there —
+        // on a cluster, a login node's — so no node count is derived, and no
+        // layout refused, on it. A queue's own value, in either layer, and a
+        // system machine's top-level one are declared.
+        if layer == Layer::User && meta.hardware.max_cpus_per_node.is_some() {
+            meta.hardware.max_cpus_per_node_detected = true;
         }
 
         // [paths] values keep their @USER@/@ENV(NAME)@ tokens at load; they
@@ -912,9 +923,55 @@ mod tests {
         // §4.6: autodetect filled the missing hardware.
         assert!(generic.meta.hardware.max_cpus_per_node.unwrap() >= 1);
         assert!(generic.meta.hardware.memory.unwrap() > 0);
+        // …and says so, so no node count is derived from this host's cores
+        // (§8.5); a queue inherits that, while a declared value never is.
+        assert!(generic.meta.effective_hardware("local").unwrap().max_cpus_per_node_detected);
+        assert!(!db1.meta.effective_hardware("gpu").unwrap().max_cpus_per_node_detected);
         // generic has no paths: consumers use the ~/.cactup fallbacks.
         assert!(generic.meta.paths.simulation_home.is_none());
         assert_eq!(generic.select_optionlist(None).unwrap(), "default"); // sole flavor
+    }
+
+    /// An overlay's top-level `max-cpus-per-node` counts as detected (§8.5):
+    /// `machine create` wrote a login node's cores there. A queue's own value
+    /// is declared in either layer, and a system machine's top-level one too.
+    #[test]
+    fn an_overlays_top_level_node_size_counts_as_detected() {
+        let system = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let meta = r#"
+            [machine]
+            nickname = "m"
+            [hardware]
+            max-cpus-per-node = 16
+            memory = 1000
+            [queues.small]
+            default = true
+            [queues.big]
+            max-cpus-per-node = 128
+            [submitscripts]
+            "default" = ["small", "big"]
+            [runscripts]
+            "default" = ["small", "big"]
+        "#;
+        for root in [system.path(), user.path()] {
+            let dir = root.join(if root == system.path() { "sys" } else { "mine" });
+            fs::create_dir_all(dir.join("optionlists")).unwrap();
+            fs::create_dir_all(dir.join("runscripts")).unwrap();
+            fs::create_dir_all(dir.join("submitscripts")).unwrap();
+            fs::write(dir.join("meta.toml"), meta).unwrap();
+            fs::write(dir.join("optionlists/default.toml"), "[options]\nVERSION = \"1\"\n").unwrap();
+            fs::write(dir.join("runscripts/default.sh"), "#!/bin/sh\n").unwrap();
+            fs::write(dir.join("submitscripts/default.sh"), "#!/bin/sh\n").unwrap();
+        }
+        let mdb = Mdb::with_roots(system.path().to_owned(), user.path().to_owned());
+        let detected = |name: &str, queue: &str| {
+            let m = mdb.load(name).unwrap();
+            m.meta.effective_hardware(queue).unwrap().max_cpus_per_node_detected
+        };
+        assert!(!detected("sys", "small") && !detected("sys", "big"));
+        assert!(detected("mine", "small"), "an overlay's top level");
+        assert!(!detected("mine", "big"), "a queue's own value");
     }
 
     #[test]
