@@ -253,7 +253,8 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     let had_work = !plan.git.is_empty()
         || !plan.downloads.is_empty()
         || !plan.external.is_empty()
-        || !plan.links.is_empty();
+        || !plan.links.is_empty()
+        || !plan.libraries.is_empty();
     let report = fetch::execute(&plan, &inst.root)?;
 
     // Post-pass bookkeeping: record what we fetched (prune safety + the
@@ -1585,6 +1586,41 @@ mod tests {
         assert_eq!(fs::read_dir(pruning_dir(&inst)).unwrap().count(), 0);
     }
 
+    /// A library a package placed is a repo of the list like any other:
+    /// never an orphan while listed, so a prune leaves it alone. And when
+    /// its dependent is pruned (the package removed), the link inside it
+    /// goes with it, never what the link points at.
+    #[test]
+    fn a_prune_keeps_a_listed_library_and_never_follows_its_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inst = Installation::new("t", tmp.path());
+        let repos = tmp.path().join("Cactus/repos");
+        for repo in ["KadathThorn/src", "fuka/src", "old"] {
+            fs::create_dir_all(repos.join(repo)).unwrap();
+        }
+        fs::write(repos.join("fuka/src/kadath.cpp"), "x").unwrap();
+        std::os::unix::fs::symlink("../../fuka", repos.join("KadathThorn/src/fuka")).unwrap();
+        let record = |url: &str| fetch::RepoRecord { url: url.into(), branch: None, head: "a".repeat(40), commit: None };
+        let records = fetch::FetchRecords {
+            repos: ["KadathThorn", "fuka", "old"].iter().map(|r| (r.to_string(), record(r))).collect(),
+            downloads: Vec::new(),
+        };
+        fetch::FetchState::record(tmp.path(), &records).unwrap();
+        let list = thornlist::parse(
+            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\
+             !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://x/KadathThorn.git\n!REPO_PATH = ../$2\n!CHECKOUT =\nFuka/KadathThorn\n\n\
+             !TARGET = $ROOT/repos/KadathThorn/src\n!TYPE = git\n!URL = https://x/fuka\n!NAME = fuka\n!CHECKOUT = .\n",
+        )
+        .unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("plan");
+        let plan = fetch::plan(&list, tmp.path(), &mut progress).unwrap();
+        let orphans: Vec<String> = enumerate_orphans(&inst, &list, &plan).unwrap().into_iter().map(|o| o.repo).collect();
+        assert_eq!(orphans, ["old"]);
+
+        remove_pruned_repo(&inst, "KadathThorn", &repos.join("KadathThorn")).unwrap();
+        assert_eq!(fs::read_to_string(repos.join("fuka/src/kadath.cpp")).unwrap(), "x", "the library is untouched");
+    }
+
     #[test]
     fn overwrite_selection_splits_on_whitespace_and_commas_and_dedupes() {
         assert_eq!(
@@ -1652,6 +1688,7 @@ mod tests {
             downloads: Vec::new(),
             external: Vec::new(),
             links: Vec::new(),
+            libraries: Vec::new(),
             root: "Cactus".to_string(),
         }
     }

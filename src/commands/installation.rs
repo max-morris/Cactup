@@ -259,6 +259,10 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
             let what = crate::commands::add::describe(&package.package, &package.version);
             println!("  {label:<13} {what} ({}){replaces}{follows}", thorns.join(", "));
             println!("  {:<13}   problems? {}", "", package.contact.as_deref().unwrap_or(&package.url));
+            for library in &package.libraries {
+                let what = crate::commands::add::describe(&library.package, &library.version);
+                println!("  {:<13}   library {what} at {}/{}", "", library.inside, library.into);
+            }
             if let Some(why) = yanked.get(&format!("{}@{}", package.package, package.version)) {
                 println!("{}", format!("  {:<13}   yanked on the Cactarium{}", "", reason(why)).yellow());
             }

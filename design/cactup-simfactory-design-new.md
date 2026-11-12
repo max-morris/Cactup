@@ -4519,6 +4519,50 @@ is recomposed without it, and only the base repos it replaced are fetched again
 — back to the base's pins. The package's own repo stays on disk, unlisted, for
 `inst refetch --prune` to remove.
 
+**Libraries.** A package can build against a library package (`[package]
+library = true` in the registry: no thorns, e.g. et/fuka, which KadathThorn
+builds from source), declaring where its checkout goes relative to the
+package's own repo root (`into = "src/fuka"`; `ClaimInfo.into` in the API).
+`add` resolves every such dependency of the version it adds (its range or
+commit, as any spec; a commit no version names gets the same trust check),
+checks the target really is a library, and follows the library's own
+`into`-dependencies down the chain (a cycle is refused). Each is recorded
+under the package (`[[added.libraries]]`: package, version, tag, commit, URL,
+the clone it goes `inside`, and `into`) and composed as one whole-repo
+section, pinned, with `!CHECKOUT = .` on the `!` line (never a thorn):
+
+```
+!TARGET      = Cactus/repos/KadathThorn/src
+!TYPE        = git
+!URL         = https://bitbucket.org/fukaws/fuka
+!REPO_BRANCH = <tag>
+!REPO_COMMIT = <commit>
+!NAME        = fuka
+!CHECKOUT    = .
+```
+
+So the library is cloned as any repo, at `repos/<last part of into>`
+(fetched, pinned, recorded, refetched and pruned like every other), and
+`repos/KadathThorn/src/fuka` is one relative link to it: the arrangement the
+Einstein Toolkit's own list makes for FUKA (its `!TARGET` reaches into
+`repos/KadathThorn/src/fuka`), with nothing cloned inside another working
+tree. The fetch planner recognizes such a section (a `.` checkout whose
+target is inside `repos/<clone>`) as a placement and makes it in the link
+phase, after the worker pool has joined, a library inside another library
+after it. Placing checks, immediately before writing: `into` is a plain
+relative path (no `..`, no root, no `.git`); the dependent is really checked
+out (a directory, not a link; its `origin` and pin), and so is the library's
+clone; no symlink or non-directory on the way; nothing the dependent tracks
+at the path; nothing at the path but the link itself. It never overwrites,
+moves or deletes anything, and adds `/<into>` to the dependent's
+`.git/info/exclude` so the link is not an untracked file there. A library
+whose repository the base already checks out stays where the base puts it
+(a stack's or sim's own list places its libraries). Two libraries at one
+path, or in one directory of a clone (two `.` checkouts at one `!TARGET` read
+as one path), and a library clone name another source uses, are refused
+when composing. `cactup add owner/library` on its own is refused with what a
+library is, and so is a flesh package.
+
 **Collisions.** A package whose repository the base already has (same derived
 name or same normalized URL), or that checks out a thorn the base already
 checks out, is refused unless `--replace`, which records the base repos it

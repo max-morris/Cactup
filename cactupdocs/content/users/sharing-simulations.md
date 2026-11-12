@@ -239,6 +239,16 @@ lists such a package as `owner/name at commit 3f2c9e1a0011`. The package's
 repository must let a commit be fetched by its id, as GitHub, GitLab and other
 current git hosts do.
 
+Some packages build against a **library**: a package with no thorns, such as
+FUKA, which KadathThorn builds from source. The package says where the
+library goes in its own repository, and `cactup add` brings it along at the
+version the package asks for: `cactup add et/kadaththorn` puts FUKA at
+`repos/KadathThorn/src/fuka`, where KadathThorn's build looks for it. The
+library is cloned next to the other repositories (`repos/fuka`) and linked in
+there; cactup never replaces anything already at that path, and says so
+instead. `cactup inst show` lists each library under its package. A library
+is not added on its own; add the package that uses it.
+
 `cactup remove max/carpetx` takes a package out again, putting back any
 repository it replaced at the commit the base names.
 

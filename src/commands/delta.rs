@@ -53,7 +53,13 @@ fn nested_checkouts(
         if let Some((repo, rel)) = inside
             && *repo != c.repo
         {
-            let path = if rel.is_empty() { c.checkout.clone() } else { format!("{rel}/{}", c.checkout) };
+            // A whole-repo checkout (`.`: a library a package placed) is
+            // linked in under its `!NAME`.
+            let item = match (c.checkout.as_str(), c.name.as_deref()) {
+                (".", Some(name)) => name,
+                (checkout, _) => checkout,
+            };
+            let path = if rel.is_empty() { item.to_owned() } else { format!("{rel}/{item}") };
             nested.entry(repo.clone()).or_default().push(path);
         }
     }
@@ -696,6 +702,24 @@ mod tests {
         assert!(super::is_owned_elsewhere("src/fuka/", &nested["KadathThorn"]));
         assert!(super::is_owned_elsewhere("src/fuka/Cmake", &nested["KadathThorn"]));
         assert!(!super::is_owned_elsewhere("src/mine.txt", &nested["KadathThorn"]));
+    }
+
+    /// A library `cactup add` placed (a whole-repo `.` checkout under its
+    /// `!NAME`, linked in at `src/fuka`) is FUKA's too, not KadathThorn's.
+    #[test]
+    fn a_placed_library_is_not_its_dependent_s_untracked_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = tmp.path().join("Cactus");
+        std::fs::create_dir_all(cactus.join("repos/KadathThorn/src")).unwrap();
+        let list = crate::thornlist::parse(
+            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\
+             !TARGET = $ROOT/repos/KadathThorn/src\n!TYPE = git\n!URL = https://x/fuka\n!NAME = fuka\n!CHECKOUT = .\n\n\
+             !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://x/KadathThorn.git\n!REPO_PATH = ../$2\n!CHECKOUT =\nFuka/KadathThorn\n",
+        )
+        .unwrap();
+        let nested = super::nested_checkouts(&list, tmp.path());
+        assert_eq!(nested["KadathThorn"], ["src/fuka"]);
+        assert!(super::is_owned_elsewhere("src/fuka", &nested["KadathThorn"]));
     }
 
     use super::*;

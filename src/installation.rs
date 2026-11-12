@@ -84,6 +84,41 @@ pub struct AddedPackage {
     /// (its declared contact, else its repo).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact: Option<String>,
+    /// The libraries the package builds against (dependencies on a package
+    /// with `library = true`, which has no thorns), each checked out where
+    /// the dependency's `into` says: inside the package's clone, or, for a
+    /// library's own library, inside that library's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub libraries: Vec<AddedLibrary>,
+}
+
+/// One library an added package builds against, frozen at the commit the
+/// registry served for the version its dependency resolved to. Its clone is
+/// `repos/<the last part of into>`, linked in at `repos/<inside>/<into>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AddedLibrary {
+    /// `owner/name`.
+    pub package: String,
+    /// The exact version, or a full commit id for a dependency on a commit.
+    pub version: String,
+    /// The tag the version was cut from: a label beside the pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    pub commit: String,
+    pub url: String,
+    /// The clone it goes inside: the package's own, or another library's.
+    pub inside: String,
+    /// Where, relative to that clone's root: the dependency's `into`.
+    pub into: String,
+}
+
+impl AddedLibrary {
+    /// The library's own clone (and the name it is linked in under): the
+    /// last part of `into`.
+    pub fn clone_name(&self) -> &str {
+        self.into.rsplit('/').next().unwrap_or(&self.into)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -1555,6 +1555,7 @@ mod tests {
     fn errors_in_an_added_thorn_name_its_package() {
         use crate::installation::{AddedPackage, AddedThorn};
         let package = AddedPackage {
+            libraries: Vec::new(),
             package: "max/carpetx".into(),
             version: "1.0.0".into(),
             tag: None,
