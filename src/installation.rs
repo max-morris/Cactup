@@ -33,10 +33,11 @@ use std::path::{Path, PathBuf};
 /// a command (`unplace_dropped`, `dropped`), and `PutBack` undoes only what
 /// the run recorded, so a library link a v1 rewrite forgot (and its
 /// `.git/info/exclude` entry) would never be cleaned up, and prune's
-/// hidden-files check would keep flagging its path. So the bump: the
-/// down-step writes v1 whenever no package has libraries (an older binary
-/// keeps reading those installations), and only an installation that uses
-/// libraries gets v2, which an older binary refuses rather than corrupts.
+/// hidden-files check would keep flagging its path. So the bump: a file is
+/// written as v2 once some package has libraries, and it stays v2 thereafter
+/// even if they are removed (versions are sticky); an older binary refuses
+/// it rather than corrupts it. A file that never had libraries stays v1 (the
+/// down-step), so an older binary keeps reading those installations.
 // Spec §2.5 matrix; the v1 shape is fixtures/formats/installation/v1.toml.
 pub static INSTALLATION: Format<Toml> = Format {
     name: "installation record",
