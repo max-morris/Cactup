@@ -318,7 +318,8 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     if ctx.globals.verbose {
         for r in &report.repos {
             let mark = match (&r.detached, r.changed) {
-                (Some(branch), _) => format!("detached off {branch}"),
+                (Some(branch), true) => format!("updated, detached off {branch}"),
+                (Some(branch), false) => format!("detached off {branch}"),
                 (None, true) => "updated".to_owned(),
                 (None, false) => "up to date".to_owned(),
             };

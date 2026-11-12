@@ -340,43 +340,60 @@ impl ExecReport {
 /// to date" would bury the handful that moved. The caller's summary reports
 /// how many were already current; the scrollback is for what happened.
 /// `branch` is the one the repo went to: the item's, or the default branch
-/// `execute` asked the remote for. `detached` is the branch a pin took HEAD
-/// off: a pin always detaches, and leaving a branch HEAD was on is a change
-/// to the user's checkout, said in yellow even when the commit is the same.
+/// `execute` asked the remote for. `off` is the branch HEAD left, said even
+/// when the commit is the same: one a pin took HEAD off (a pin always
+/// detaches, and leaving a branch HEAD was on is a change to the user's
+/// checkout, said in yellow), or the one an align switched away from.
 fn announce_repo(
     line: &crate::progress::Line,
     item: &GitRepoPlan,
     branch: Option<&str>,
     head: gix::ObjectId,
     changed: bool,
-    detached: Option<&str>,
+    off: Option<&str>,
 ) {
+    match announce_text(item, branch, head, changed, off) {
+        Some((what, true)) => line.warned(what),
+        Some((what, false)) => line.succeeded(what),
+        None => {}
+    }
+}
+
+/// [`announce_repo`]'s line, and whether it is a warning; `None` for a repo
+/// that leaves no line.
+fn announce_text(
+    item: &GitRepoPlan,
+    branch: Option<&str>,
+    head: gix::ObjectId,
+    changed: bool,
+    off: Option<&str>,
+) -> Option<(String, bool)> {
     let head = head.to_string();
     let short = &head[..12.min(head.len())];
     let mut what = match (&item.action, branch) {
         (GitAction::Clone, _) if item.commit.is_some() => format!("cloned, pinned at {short}"),
         (GitAction::Pin, _) if changed => format!("pinned at {short}"),
-        (GitAction::Pin, _) if detached.is_some() => format!("detached at the pin {short}"),
+        (GitAction::Pin, _) if off.is_some() => format!("detached at the pin {short}"),
         (GitAction::Clone, Some(branch)) => format!("cloned {branch} at {short}"),
         (GitAction::Clone, None) => format!("cloned at {short}"),
-        (_, Some(branch)) if changed => format!("{branch} now at {short}"),
+        // A branch switch is news even when the commit is the same.
+        (_, Some(branch)) if changed || off.is_some() => format!("{branch} now at {short}"),
         (_, None) if changed => format!("now at {short}"),
         // Unchanged, but something else about the repo was: say what, since
         // the fetch itself has nothing to report.
         _ if item.forced.is_some() || item.retarget.is_some() => {
             format!("already at {short}")
         }
-        _ => return,
+        _ => return None,
     };
-    if let Some(off) = detached {
+    if let Some(off) = off {
         what.push_str(&format!(", off {off}"));
     }
-    match (&item.forced, &item.retarget) {
-        (Some(reason), _) => line.warned(format!("{what}; overwrote {reason}")),
-        (None, Some(url)) => line.warned(format!("{what}; origin re-pointed at {url}")),
-        (None, None) if detached.is_some() => line.warned(what),
-        (None, None) => line.succeeded(what),
-    }
+    Some(match (&item.forced, &item.retarget) {
+        (Some(reason), _) => (format!("{what}; overwrote {reason}"), true),
+        (None, Some(url)) => (format!("{what}; origin re-pointed at {url}"), true),
+        (None, None) => (what, matches!(item.action, GitAction::Pin) && off.is_some()),
+    })
 }
 
 /// Run the plan: git repos and downloads on a [`WORKERS`]-wide pool keyed by
@@ -587,14 +604,20 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                         match outcome {
                             Ok(head) => {
                                 let changed = before.as_ref().map(|(_, id)| *id) != Some(head);
-                                // A pin leaves HEAD detached, wherever it was.
-                                let detached = match (&item.action, &before) {
-                                    (GitAction::Pin, Some((was, _))) if was != git::DETACHED => {
+                                // The branch HEAD left, if it left one: a pin
+                                // leaves HEAD detached, wherever it was; an
+                                // align may switch branches.
+                                let off = match (&item.action, &before) {
+                                    (_, Some((was, _))) if was == git::DETACHED => None,
+                                    (GitAction::Pin, Some((was, _))) => Some(was.clone()),
+                                    (_, Some((was, _))) if branch.as_ref() != Some(was) => {
                                         Some(was.clone())
                                     }
                                     _ => None,
                                 };
-                                let off = detached.as_deref();
+                                let detached =
+                                    off.clone().filter(|_| matches!(item.action, GitAction::Pin));
+                                let off = off.as_deref();
                                 announce_repo(&line, item, branch.as_deref(), head, changed, off);
                                 report.repos.push(RepoResult {
                                     repo: item.repo.clone(),
@@ -2519,10 +2542,11 @@ pub(crate) mod tests {
         assert_eq!((record.branch.as_deref(), record.follows_default), (Some(default.as_str()), true));
     }
 
-    /// A branch made locally, with no counterpart on origin, in a repo whose
+    /// A branch made locally, with no remote-tracking ref, in a repo whose
     /// list names no branch: the probe cannot inspect it against origin, and
-    /// forced, it goes to the remote's default (aligning to a branch origin
-    /// does not have would fail every time). The local branch itself stays.
+    /// forced, it goes to the remote's default (aligning to a branch with no
+    /// remote-tracking ref would fail every time). The local branch itself
+    /// stays, with the work on it.
     #[test]
     fn a_forced_local_only_branch_goes_to_the_default() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2531,10 +2555,12 @@ pub(crate) mod tests {
         let dir = root.join("Cactus/repos/R");
         let list = list_without_a_branch(&upstream);
         refetch_once(&list, &root);
-        // `git checkout -b topic`.
+        // `git checkout -b topic`, and a commit on it.
         use gix::refs::transaction::PreviousValue::Any;
         gix::open(&dir).unwrap().reference("refs/heads/topic", tip, Any, "test").unwrap();
         point_head_at(&dir, "topic");
+        let work = git::testrepo::commit(&dir, "work on topic");
+        assert_ne!(work, tip);
 
         let mut plan = plan_for(&list, &root);
         assert!(matches!(plan.skipped[0].reason, DirtyReason::Unknown(_)), "{:?}", plan.skipped);
@@ -2544,7 +2570,44 @@ pub(crate) mod tests {
         let report = execute(&plan, &root).unwrap();
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert_eq!(git::head_of(&dir).unwrap(), (default, tip));
-        assert!(gix::open(&dir).unwrap().find_reference("refs/heads/topic").is_ok());
+        let topic = gix::open(&dir).unwrap().find_reference("refs/heads/topic").unwrap().id().detach();
+        assert_eq!(topic, work, "the work on topic is still there");
+    }
+
+    /// A forced align that switches branches says so even when the commit
+    /// stays the same, naming the branch HEAD left, rather than "already at".
+    #[test]
+    fn a_branch_switch_at_the_same_commit_names_both_branches() {
+        let head = gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567").unwrap();
+        let mut item = GitRepoPlan {
+            repo: "R".to_owned(),
+            dir: PathBuf::from("/nonexistent/R"),
+            url: "https://example.invalid/R.git".to_owned(),
+            branch: None,
+            follows_default: true,
+            named_branch: false,
+            commit: None,
+            action: GitAction::Align,
+            checkouts: vec!["R/T".to_owned()],
+            forced: Some("local modifications (Makefile)".to_owned()),
+            retarget: None,
+        };
+        let line = |item: &GitRepoPlan, changed: bool, off: Option<&str>| {
+            announce_text(item, Some("main"), head, changed, off)
+        };
+        let (what, warned) = line(&item, false, Some("topic")).unwrap();
+        assert_eq!(what, "main now at 0123456789ab, off topic; overwrote local modifications (Makefile)");
+        assert!(warned);
+        // Moved too: the same, said once.
+        assert_eq!(line(&item, true, Some("topic")).unwrap().0, what);
+        // Same branch, same commit, forced: "already at", as before.
+        let (what, _) = line(&item, false, None).unwrap();
+        assert_eq!(what, "already at 0123456789ab; overwrote local modifications (Makefile)");
+        // Unforced, a switch at the same commit still says so, in green.
+        item.forced = None;
+        let switched = ("main now at 0123456789ab, off topic".to_owned(), false);
+        assert_eq!(line(&item, false, Some("topic")).unwrap(), switched);
+        assert_eq!(line(&item, false, None), None);
     }
 
     /// A pin always detaches HEAD; off a branch, it says so, even when HEAD
