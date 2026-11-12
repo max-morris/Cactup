@@ -1,0 +1,5 @@
+# 2->3: keys renamed in place; setup lines that look like provisioning get
+# a note, nothing is moved.
+result-generation = 3
+outcome = "migrated"
+findings = ["renamed:env-build-setup->build-env-setup", "may-belong-in-provision"]

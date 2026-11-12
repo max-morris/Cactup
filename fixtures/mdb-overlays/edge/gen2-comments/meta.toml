@@ -1,0 +1,82 @@
+# Comment above everything: who owns this machine and why.
+
+# Comment above table [machine]
+[machine]
+name = "generic"  # trailing comment on name
+nickname = "fixture"
+location = "somewhere"
+description = "Single-node workstation, no batch system"
+status = "personal"
+hostname = "fixture.example.org"
+
+# Comment above table [paths]
+[paths]
+simulation-home = "/scratch/fixture-home/simulations"
+install-home = "/scratch/fixture-home/cacti"
+
+# Comment above table [hardware]
+[hardware]
+max-cpus-per-node = 16
+memory = 65536
+
+# Comment above table [build]
+[build]
+make = "make -j@MAKEJOBS@"  # trailing comment on make
+
+# Comment above table [scheduler]
+[scheduler]
+submit = "exec nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
+blocking-submit = "@SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
+get-status = "ps @JOB_ID@"
+stop = "pkill -g $(ps -o pgid= -p @JOB_ID@)"
+submit-pattern = "(.*)"
+status-pattern = "^ *@JOB_ID@ "
+queued-pattern = "$^"
+running-pattern = "^"
+holding-pattern = "$^"
+exec-host = "echo localhost"
+exec-host-pattern = "(.*)"
+
+# Comment above table [environment]
+[environment]
+env-setup = """
+export LIBRARY_PATH="${LIBRARY_PATH+$LIBRARY_PATH:}/usr/local/lib64:/usr/local/lib:/usr/lib64:/usr/lib:/lib64:/lib"
+export CPATH="${CPATH+$CPATH:}/usr/local/include:/usr/include:/include"
+"""
+# Comment before the build-phase additions.
+env-build-setup = "module load gcc"  # trailing comment on a key to rename
+
+# Comment between tables.
+# Comment above table [queues.local]
+[queues.local]
+gpu = false
+max-walltime = "8760:00:00"
+default = true
+
+# Comment above table [submitscripts.default]
+[submitscripts.default]
+queues = ["local"]
+
+# Comment above table [submitscripts.test]
+[submitscripts.test]
+queues = ["local"]
+test = true
+
+# Comment above table [runscripts.default]
+[runscripts.default]
+queues = ["local"]
+
+# Comment above table [runscripts.test]
+[runscripts.test]
+queues = ["local"]
+test = true
+
+# Comment above table [cactup]
+[cactup]
+mdb-generation = 2
+
+# Comment above table [cactup.origin]
+[cactup.origin]
+from = "generic"
+hash = "e39ee1e9b944a400"
+# Comment at the very end.

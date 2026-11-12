@@ -1,0 +1,5 @@
+# 2->3: env-build-setup and build-env-setup in one table. Not loadable by a
+# generation-2 binary (unknown key); deliberate.
+result-generation = 2
+outcome = "refused"
+findings = ["old-and-new-key-both-present", "environment.env-build-setup"]
