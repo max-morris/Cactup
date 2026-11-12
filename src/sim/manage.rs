@@ -1005,7 +1005,7 @@ fn live_jobs_refusal(name: &str, live: &[LiveJob], stops: Option<u32>) -> String
         .collect::<Vec<_>>()
         .join("; ");
     let what = if live.len() == 1 { "a live job" } else { "live jobs" };
-    format!("simulation \"{name}\" has {what} ({jobs}); {advice}")
+    format!("Simulation \"{name}\" has {what} ({jobs}); {advice}")
 }
 
 /// One simulation's derived display state (§8.6, §10) with the live scheduler
@@ -2588,9 +2588,10 @@ mod tests {
         meta: crate::mdb::meta::Meta,
     }
 
-    /// A stop the scheduler refuses as a job it does not know (Torque's
-    /// `qdel` refuses one so; Slurm's `scancel` takes it silently), and one
-    /// failing to reach the controller.
+    /// A stop the scheduler refuses as a job it does not know, in the
+    /// words of `scancel` (the fake's queue is Slurm-like; `unknown-job-pattern`
+    /// matching them is what makes it one), and one failing to reach the
+    /// controller.
     const FORGOTTEN: &str = "scancel: error: Kill job error on job id 4242: Invalid job id specified";
     const TRANSIENT: &str = "scancel: error: Unable to contact slurm controller (connect failure)";
 
@@ -2817,6 +2818,7 @@ mod tests {
         fake.set("state", "S");
         let sim = fake.sim("s", true);
         let refused = clear_live(&sim, &sched, "s", false).unwrap_err().to_string();
+        assert!(refused.starts_with("Simulation \"s\" has a live job (output-0000 = job 4242"), "{refused}");
         assert!(refused.contains("job 4242, listed in a state cactup does not recognize"), "{refused}");
         assert!(refused.ends_with("run `cactup sim stop -f s` first, or use -f to stop it and delete"), "{refused}");
         let refused = crate::sim::start::active_refusal_for_tests(&sim, &sched, 0);

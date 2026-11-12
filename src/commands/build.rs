@@ -342,9 +342,10 @@ fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force
                 if let crate::scheduler::EndedStop::NotKnown(said) =
                     sched.stop_judged(job, crate::scheduler::StopCase::Unread)?
                 {
+                    let what = crate::scheduler::unread_state(&format!("build job {}", job.id));
                     println!(
-                        "The scheduler does not know build job {} ({said}); treating it as ended",
-                        job.id
+                        "{}; its stop command says it does not know the job ({said}); treating it as ended",
+                        crate::scheduler::sentence(what)
                     );
                 }
             }

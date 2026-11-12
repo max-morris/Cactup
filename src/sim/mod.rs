@@ -340,10 +340,11 @@ pub fn create(
     // §7.9's build-submit feature makes this a real race, not a theoretical
     // one: `ensure_cached` below hard-links `exe_src` into the executable
     // cache, and a rebuild's `make` can be replacing those very bytes right
-    // now. Unlike everywhere else `in_flight_build` is consulted, this one
-    // is a hard error even though a machine is available to disambiguate —
-    // freezing a half-written binary into a simulation is real corruption,
-    // not just confusing advice, so only an explicit `-f` may proceed.
+    // now. Unlike everywhere else an in-flight build is consulted
+    // (`in_flight_build`, `in_flight_build_or_stop`), this one is a hard
+    // error even though a machine is available to disambiguate — freezing
+    // a half-written binary into a simulation is real corruption, not just
+    // confusing advice, so only an explicit `-f` may proceed.
     if !force && let Some((phrase, stop)) = build_cmd::in_flight_build_or_stop(&config_dir, &config, Some(machine)) {
         bail!(
             "{phrase}; wait for it to finish{stop}, or pass -f to proceed anyway (it may freeze a half-written \

@@ -495,9 +495,10 @@ fn start_impl(
                     if let crate::scheduler::EndedStop::NotKnown(said) =
                         sched.stop_judged(job, crate::scheduler::StopCase::Unread)?
                     {
+                        let what = crate::scheduler::unread_state(&format!("test job {}", job.id));
                         println!(
-                            "The scheduler does not know test job {} ({said}); treating it as ended",
-                            job.id
+                            "{}; its stop command says it does not know the job ({said}); treating it as ended",
+                            crate::scheduler::sentence(what)
                         );
                     }
                 }
