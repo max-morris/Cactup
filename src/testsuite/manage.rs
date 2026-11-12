@@ -309,9 +309,9 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
             if let EndedStop::NotKnown(said) = sched.stop_judged(job.job(), StopCase::Unread)? {
                 if run.lock_live()? {
                     println!(
-                        "{}, and the scheduler does not know it ({said}), but the run's running.lock is \
-                         held; nothing recorded. Run `cactup test stop {name}` again once the lock is \
-                         released (a stale lock expires within {} minutes).",
+                        "{}; its stop command says it does not know the job ({said}), but the run's \
+                         running.lock is held; nothing recorded. Run `cactup test stop {name}` again once the \
+                         lock is released (a stale lock expires within {} minutes).",
                         sentence(unread(job_id)),
                         crate::lock::LOCK_STALE_SECS / 60
                     );
@@ -320,7 +320,7 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
                 // Not stopped, and nothing of the run holds its lock: over,
                 // so `delete` and a new run go ahead.
                 println!(
-                    "{}, and the scheduler does not know it ({said}); treating it as ended",
+                    "{}; its stop command says it does not know the job ({said}); treating it as ended",
                     sentence(unread(job_id))
                 );
                 run.meta.timestamps.finished.get_or_insert_with(chrono::Utc::now);
@@ -575,15 +575,15 @@ fn clear_to_delete(run: &TestRun, sched: &Scheduler, name: &str, force: bool) ->
                 // Not stopped: over, unless something still holds the lock.
                 if run.lock_live()? {
                     bail!(
-                        "{}, but the scheduler does not know it ({said}), and the run's running.lock \
-                         is held; delete it once the lock is released (a stale lock expires within {} \
-                         minutes)",
-                        what,
+                        "{}; its stop command says it does not know the job ({said}), but the run's \
+                         running.lock is held; delete it once the lock is released (a stale lock expires \
+                         within {} minutes)",
+                        sentence(what),
                         crate::lock::LOCK_STALE_SECS / 60
                     );
                 }
                 println!(
-                    "{}, but the scheduler does not know it ({said}); deleting it",
+                    "{}; its stop command says it does not know the job ({said}); deleting it",
                     sentence(what)
                 );
             }
@@ -970,7 +970,9 @@ mod tests {
         assert!(clear_to_delete(&ended, &refusing, "t", false).unwrap_err().to_string().contains("use -f"));
         clear_to_delete(&ended, &refusing, "t", true).unwrap();
         let held_ended = crate::lock::LinkLock::acquire(&ended.running_lock_path()).unwrap();
-        assert!(clear_to_delete(&ended, &refusing, "t", true).unwrap_err().to_string().contains("running.lock is held"));
+        let err = clear_to_delete(&ended, &refusing, "t", true).unwrap_err().to_string();
+        assert!(err.contains("; its stop command says it does not know the job (qdel: Unknown Job Id"), "{err}");
+        assert!(err.contains("), but the run's running.lock is held"), "{err}");
         // With the lock held, `stop` records nothing; without it, the run
         // has ended, and `delete` then goes ahead without `-f`.
         let mut ended = TestRun::open(&ended.dir).unwrap();

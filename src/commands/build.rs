@@ -1499,16 +1499,16 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
                         if LinkLock::is_held_live(&attempt.running_lock_path())? =>
                     {
                         println!(
-                            "{}, and the scheduler does not know it ({said}), but the attempt's running.lock \
-                             is held; nothing recorded. Run `cactup build stop {name}` again once the lock is \
-                             released (a stale lock expires within {} minutes).",
+                            "{}; its stop command says it does not know the job ({said}), but the attempt's \
+                             running.lock is held; nothing recorded. Run `cactup build stop {name}` again once \
+                             the lock is released (a stale lock expires within {} minutes).",
                             crate::scheduler::sentence(what),
                             crate::lock::LOCK_STALE_SECS / 60
                         );
                         return Ok(());
                     }
                     crate::scheduler::EndedStop::NotKnown(said) => println!(
-                        "{}, and the scheduler does not know it ({said}); treating it as ended",
+                        "{}; its stop command says it does not know the job ({said}); treating it as ended",
                         crate::scheduler::sentence(what)
                     ),
                 }

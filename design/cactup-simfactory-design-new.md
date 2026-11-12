@@ -5206,16 +5206,18 @@ and start time beside it), so no caller can skip the checks.
   test runs, builds: `Scheduler::stop_judged`, by what cactup knows of
   the job, `StopCase`). A job the scheduler lists in a state its patterns
   read (`StopCase::Listed`: live, or listed after the end): any failure is
-  an error ("the stop command for job N failed: …"), nothing recorded,
+  an error ("The stop command for job N failed: …"), nothing recorded,
   deactivated or deleted, and `delete -f` and the guards' `-f` refuse
   with it. A job listed in a state no pattern reads (`StopCase::Unread`),
   or whose status query failed after the end (`StopCase::Unanswered`): a
   stop the scheduler takes settles the job, and so does one it refuses
   with output matching `unknown-job-pattern` (`EndedStop::NotKnown`:
   Torque's `qdel` of a forgotten job, "Unknown Job Id", exit 153), said
-  so ("the scheduler does not know job N (its stop command said: …):
-  taken as ended"), an ended active restart deactivated; any other
-  failure (Slurm's "Socket timed out on send/recv operation", "Unable to
+  so ("The scheduler does not know job N (…); treating it as ended"; for
+  a job listed in a state no pattern reads, "The scheduler lists job N in
+  a state cactup does not recognize; its stop command says it does not
+  know the job (…); treating it as ended"), an ended active restart
+  deactivated; any other failure (Slurm's "Socket timed out on send/recv operation", "Unable to
   contact slurm controller", exit 1; Torque's `qdel` of a completed job,
   "Invalid state") is an error that shows the stop's output, after a
   failed query the query's output too (where the unknown-job message

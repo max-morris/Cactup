@@ -235,16 +235,16 @@ fn stop_sim(sim: &Simulation, sched: &Scheduler, name: &str, force: bool) -> Res
                         ),
                         EndedStop::NotKnown(said) if crate::lock::LinkLock::is_held_live(&r.running_lock_path())? => {
                             println!(
-                                "{}, and the scheduler does not know it ({said}), but the restart's running.lock \
-                                 is held; nothing recorded. Run `cactup sim stop -f {name}` again once the lock is \
-                                 released (a stale lock expires within {} minutes).",
+                                "{}; its stop command says it does not know the job ({said}), but the restart's \
+                                 running.lock is held; nothing recorded. Run `cactup sim stop -f {name}` again \
+                                 once the lock is released (a stale lock expires within {} minutes).",
                                 sentence(what),
                                 crate::lock::LOCK_STALE_SECS / 60
                             );
                             return Ok(());
                         }
                         EndedStop::NotKnown(said) => println!(
-                            "{}, and the scheduler does not know it ({said}); treating it as ended",
+                            "{}; its stop command says it does not know the job ({said}); treating it as ended",
                             sentence(what)
                         ),
                     }
@@ -573,16 +573,16 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
                     let r = Restart::load(&sim.dir, l.id)?;
                     if crate::lock::LinkLock::is_held_live(&r.running_lock_path())? {
                         bail!(
-                            "{}, and the scheduler does not know it ({said}), but restart {}'s running.lock is \
-                             held. Run `cactup sim delete -f {name}` again once the lock is released (a stale \
-                             lock expires within {} minutes)",
+                            "{}; its stop command says it does not know the job ({said}), but restart {}'s \
+                             running.lock is held. Run `cactup sim delete -f {name}` again once the lock is \
+                             released (a stale lock expires within {} minutes)",
                             sentence(crate::scheduler::unread_state(&format!("job {}", l.job.id))),
                             restart::dir_name(l.id),
                             crate::lock::LOCK_STALE_SECS / 60
                         );
                     }
                     println!(
-                        "{}, and the scheduler does not know it ({said}); treating it as ended",
+                        "{}; its stop command says it does not know the job ({said}); treating it as ended",
                         sentence(crate::scheduler::unread_state(&format!("job {}", l.job.id)))
                     );
                 }
