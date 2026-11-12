@@ -181,6 +181,15 @@ cactup inst refetch
 This re-reads the live thornlist, updates every repo that's clean, and
 clones anything newly referenced that's still missing.
 
+A component whose thornlist entry names no `!REPO_BRANCH` follows its
+repository's default branch, as `git clone` does. Refetch asks the
+repository which branch that is each time, so when a project moves its
+default (from `master` to `main`, say), the next refetch moves the repo with
+it. Dropping `!REPO_BRANCH` from an entry, or a `!REPO_COMMIT` pin from an
+entry that names no branch, likewise puts the repo on the default branch. A
+branch you checked out yourself is left alone, like any other local state
+(see the skip contract below).
+
 ### Switching release or thornlist
 
 Refetch straight to another Einstein Toolkit release — this switches every
