@@ -80,7 +80,8 @@ pub struct GitRepoPlan {
     /// look for the commit when the server will not send it by id.
     pub branch: Option<String>,
     /// The thornlist names no branch and `branch` is the remote's default:
-    /// recorded, so the next plan need not ask the remote again.
+    /// recorded, so a plan that trusts the record need not ask again (see
+    /// [`DefaultBranches`]).
     pub follows_default: bool,
     /// The `!REPO_COMMIT` pin: `Clone` and `Pin` check this commit out.
     pub commit: Option<gix::ObjectId>,
@@ -202,6 +203,8 @@ pub struct RepoResult {
     pub url: String,
     /// The branch the repo is on after the action.
     pub branch: Option<String>,
+    /// `branch` is the remote's default, followed because the thornlist
+    /// names none (see [`RepoRecord::follows_default`]).
     pub follows_default: bool,
     /// The commit HEAD resolved to after the action (hex).
     pub head: String,
@@ -704,7 +707,9 @@ pub struct RepoRecord {
     pub url: String,
     pub branch: Option<String>,
     /// The thornlist named no branch and `branch` was the remote's default.
-    /// Missing in records written before it existed: the next plan then asks
+    /// Only a plan that trusts the record ([`DefaultBranches::Recorded`])
+    /// reads it, to spare asking the remote again; `refetch` always asks.
+    /// Missing in records written before it existed: such a plan then asks
     /// the remote once. Additive (spec §2.5): an older binary ignores it, and
     /// a record it rewrites without it costs one question to the remote.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1013,15 +1018,6 @@ fn is_flesh(root: &str, c: &Component) -> bool {
         && matches!(c.checkout.as_str(), "Makefile" | "lib" | "src")
 }
 
-/// Classify every component of `list` against the tree at `install_root`
-/// (the directory that contains `<root>/`, i.e. the installation root).
-/// Read-only. The network is touched only to ask a remote for its default
-/// branch: for a clean repo whose thornlist entry names no branch, unless the
-/// last fetch already found it on that branch. `progress` is init'ed to the
-/// repo count once the group map is built, then incremented as each repo's
-/// probe — a plain gix status walk — finishes. The probes run on the
-/// [`crate::par`] pool: even so, on ~80 repos they take long enough that
-/// without progress the command looks hung before anything appears.
 /// How a repo's source reads in a conflict message: its branch, and its pin.
 fn source_label(branch: Option<&str>, commit: Option<&str>) -> String {
     let branch = branch.unwrap_or("<default>");
@@ -1031,7 +1027,37 @@ fn source_label(branch: Option<&str>, commit: Option<&str>) -> String {
     }
 }
 
-pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree::Item) -> Res<Plan> {
+/// How [`plan`] learns the default branch of a repo whose thornlist entry
+/// names no `!REPO_BRANCH`: only its remote knows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefaultBranches {
+    /// Ask every such remote. What `refetch` does, so a remote that moved its
+    /// default branch — or renamed, or deleted, the one the repo is on — is
+    /// followed by the next refetch.
+    Ask,
+    /// Take the fetch record's word for a repo it found on its remote's
+    /// default branch, and ask only about the rest: for commands that fetch
+    /// a few repos of the list (`add`) or clone it (`install`), where a
+    /// round trip per repo they do not fetch would be all cost.
+    Recorded,
+}
+
+/// Classify every component of `list` against the tree at `install_root`
+/// (the directory that contains `<root>/`, i.e. the installation root).
+/// Read-only. The network is touched only to ask a remote for its default
+/// branch, for a clean repo whose thornlist entry names no branch and no
+/// pin. `defaults` says whether the fetch record can spare that
+/// question. `progress` is init'ed to the repo count once the group map is
+/// built, then incremented as each repo's probe — a plain gix status walk,
+/// plus that question where there is one — finishes. The probes run on the
+/// [`crate::par`] pool: even so, on ~80 repos they take long enough that
+/// without progress the command looks hung before anything appears.
+pub fn plan(
+    list: &Thornlist,
+    install_root: &Path,
+    defaults: DefaultBranches,
+    progress: &mut prodash::tree::Item,
+) -> Res<Plan> {
     let root = list.root().to_owned();
     let repos_dir = install_root.join(&root).join("repos");
 
@@ -1152,16 +1178,21 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
             }
         }
         // No !REPO_BRANCH means the remote's default branch, which only the
-        // remote knows. Ask it, unless the last fetch already found this repo
-        // on that branch. `None`: the remote did not answer.
+        // remote knows: ask it (a clean repo's `origin` is the thornlist's
+        // URL — the probe classifies any other as changed). `None`: the
+        // remote did not answer, or there was nothing to ask. A pinned repo
+        // sits at its commit, with no branch to follow.
+        let record = fetch_state.as_ref().and_then(|s| s.repos.get(repo));
         let default = match (&probe.state, &group.branch) {
-            // A pinned repo sits at its commit: no branch to follow.
-            (RepoState::Clean { head_branch }, None) if group.commit.is_none() => {
-                let record = fetch_state.as_ref().and_then(|s| s.repos.get(repo));
-                if record.is_some_and(|r| r.follows_default && r.branch.as_deref() == Some(head_branch)) {
+            _ if group.commit.is_some() => None,
+            (RepoState::Clean { head_branch }, None) => {
+                let recorded = record.is_some_and(|r| {
+                    r.follows_default && r.commit.is_none() && r.branch.as_deref() == Some(head_branch)
+                });
+                if defaults == DefaultBranches::Recorded && recorded {
                     Some(head_branch.clone())
                 } else {
-                    git::origin_default_branch(&dir).ok()
+                    git::ask_remote_default_branch(&group.url).ok()
                 }
             }
             _ => None,
@@ -1589,11 +1620,10 @@ pub(crate) mod tests {
         assert_eq!(plan.git[0].retarget, None);
     }
 
-    /// An upstream whose default branch is one commit past a second branch
-    /// `rel`, and an installation whose repo `R` was cloned on `rel` — what a
-    /// thornlist naming `!REPO_BRANCH = rel` leaves behind. Returns the
-    /// installation root, the upstream, its default branch and its tip.
-    fn cloned_on_a_release_branch(tmp: &Path) -> (PathBuf, PathBuf, String, gix::ObjectId) {
+    /// An upstream at `<tmp>/upstream` whose default branch is one commit
+    /// past a second branch `rel`. Returns the upstream, `rel`'s commit, the
+    /// default branch and its tip.
+    fn upstream_with_a_release_branch(tmp: &Path) -> (PathBuf, gix::ObjectId, String, gix::ObjectId) {
         let upstream = tmp.join("upstream");
         git::testrepo::init(&upstream);
         let release = git::testrepo::commit(&upstream, "release");
@@ -1604,6 +1634,15 @@ pub(crate) mod tests {
         let tip = git::testrepo::commit(&upstream, "after the release");
         let (default, _) = git::head_of(&upstream).unwrap();
         assert_ne!(default, "rel");
+        (upstream, release, default, tip)
+    }
+
+    /// An [`upstream_with_a_release_branch`], and an installation whose repo
+    /// `R` was cloned on `rel` — what a thornlist naming `!REPO_BRANCH = rel`
+    /// leaves behind. Returns the installation root, the upstream, its
+    /// default branch and its tip.
+    fn cloned_on_a_release_branch(tmp: &Path) -> (PathBuf, PathBuf, String, gix::ObjectId) {
+        let (upstream, _, default, tip) = upstream_with_a_release_branch(tmp);
 
         let root = tmp.join("install");
         let mut progress = prodash::tree::Root::new().add_child("test clone");
@@ -1614,16 +1653,95 @@ pub(crate) mod tests {
 
     /// `R` with no `!REPO_BRANCH`: the remote's default branch.
     fn list_without_a_branch(upstream: &Path) -> String {
+        list_naming(upstream, None, None)
+    }
+
+    /// `R` on `branch` (none: the remote's default), pinned at `pin` if any.
+    fn list_naming(upstream: &Path, branch: Option<&str>, pin: Option<gix::ObjectId>) -> String {
+        let branch = branch.map(|b| format!("!REPO_BRANCH = {b}\n")).unwrap_or_default();
+        let pin = pin.map(|c| format!("!REPO_COMMIT = {c}\n")).unwrap_or_default();
         format!(
             "!CRL_VERSION = 1.0\n\
              !DEFINE ROOT = Cactus\n\n\
              !TARGET   = $ROOT\n\
              !TYPE     = git\n\
              !URL      = {}\n\
+             {branch}{pin}\
              !NAME     = R\n\
              !CHECKOUT = Makefile\n",
             upstream.to_string_lossy()
         )
+    }
+
+    /// Plan `list_src` as `refetch` does, run it, insist nothing failed, and
+    /// record it: one refetch.
+    fn refetch_once(list_src: &str, root: &Path) -> (Plan, ExecReport) {
+        let plan = plan_for(list_src, root);
+        assert!(plan.skipped.is_empty(), "{:?}", plan.skipped);
+        let report = execute(&plan, root).unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        FetchState::record(root, &report.records()).unwrap();
+        (plan, report)
+    }
+
+    /// Point `dir`'s HEAD at its branch `branch`, as a checkout would,
+    /// without touching the worktree or the index.
+    fn point_head_at(dir: &Path, branch: &str) {
+        use gix::refs::transaction::{Change, LogChange, PreviousValue, RefEdit};
+        let target = gix::refs::Target::Symbolic(format!("refs/heads/{branch}").try_into().unwrap());
+        gix::open(dir)
+            .unwrap()
+            .edit_reference(RefEdit {
+                change: Change::Update {
+                    log: LogChange::default(),
+                    expected: PreviousValue::Any,
+                    new: target,
+                },
+                name: "HEAD".try_into().unwrap(),
+                deref: false,
+            })
+            .unwrap();
+    }
+
+    /// A repo that follows its remote's default keeps following it: when the
+    /// remote moves its default to another branch, and when it then renames
+    /// that branch away, the next refetch moves the repo along. A plan that
+    /// trusts the record (`add`) keeps it where the record says, offline.
+    #[test]
+    fn a_followed_default_branch_that_moves_is_followed_by_the_next_refetch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let upstream = tmp.path().join("upstream");
+        git::testrepo::init(&upstream);
+        git::testrepo::commit(&upstream, "first");
+        let (first, base) = git::head_of(&upstream).unwrap();
+        let root = tmp.path().join("install");
+        let dir = root.join("Cactus/repos/R");
+        let list = list_without_a_branch(&upstream);
+        let (plan, _) = refetch_once(&list, &root);
+        assert!(plan.git[0].follows_default);
+        assert_eq!(git::head_of(&dir).unwrap().0, first);
+
+        // The remote's default moves to a new branch; the old one stays.
+        let upstream_repo = gix::open(&upstream).unwrap();
+        use gix::refs::transaction::PreviousValue::Any;
+        upstream_repo.reference("refs/heads/next", base, Any, "test").unwrap();
+        point_head_at(&upstream, "next");
+        let next_tip = git::testrepo::commit(&upstream, "on next");
+        let recorded = plan_with(&list, &root, DefaultBranches::Recorded);
+        assert!(matches!(recorded.git[0].action, GitAction::Update));
+        assert_eq!(recorded.git[0].branch.as_deref(), Some(first.as_str()));
+        let (plan, _) = refetch_once(&list, &root);
+        assert!(matches!(plan.git[0].action, GitAction::Align));
+        assert_eq!(git::head_of(&dir).unwrap(), ("next".to_owned(), next_tip));
+
+        // The remote renames that branch: the old name is gone.
+        upstream_repo.reference("refs/heads/trunk", next_tip, Any, "test").unwrap();
+        point_head_at(&upstream, "trunk");
+        upstream_repo.find_reference("refs/heads/next").unwrap().delete().unwrap();
+        let (plan, _) = refetch_once(&list, &root);
+        assert_eq!(plan.git[0].branch.as_deref(), Some("trunk"));
+        assert_eq!(git::head_of(&dir).unwrap(), ("trunk".to_owned(), next_tip));
+        assert!(FetchState::read(&root).unwrap().unwrap().repos["R"].follows_default);
     }
 
     fn record_fetch(root: &Path, upstream: &Path, branch: &str, follows_default: bool) {
@@ -1683,8 +1801,9 @@ pub(crate) mod tests {
         assert!(plan.git[0].follows_default);
     }
 
-    /// A repo the last fetch found on the default branch is planned from the
-    /// record alone: with the upstream gone, asking it would have failed.
+    /// A plan that trusts the record plans a repo the last fetch found on
+    /// the default branch from the record alone: with the upstream gone,
+    /// asking it would have failed.
     #[test]
     fn a_repo_already_on_the_default_branch_is_not_asked_again() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1692,7 +1811,7 @@ pub(crate) mod tests {
         record_fetch(&root, &upstream, "rel", true);
         std::fs::remove_dir_all(&upstream).unwrap();
 
-        let plan = plan_for(&list_without_a_branch(&upstream), &root);
+        let plan = plan_with(&list_without_a_branch(&upstream), &root, DefaultBranches::Recorded);
         assert_eq!(plan.git.len(), 1);
         assert!(matches!(plan.git[0].action, GitAction::Update));
         assert_eq!(plan.git[0].branch.as_deref(), Some("rel"));
@@ -1778,7 +1897,7 @@ pub(crate) mod tests {
         // plan(): must classify `R` as dirty for exactly `RemoteUrlChanged`,
         // never silently fetchable and never some other dirty reason.
         let mut classify = prodash::tree::Root::new().add_child("test plan");
-        let mut plan = plan(&list, &root, &mut classify).unwrap();
+        let mut plan = plan(&list, &root, DefaultBranches::Ask, &mut classify).unwrap();
         assert!(plan.git.is_empty(), "a retargeted repo must not be silently fetchable");
         assert_eq!(plan.skipped.len(), 1);
         assert!(
@@ -1965,10 +2084,15 @@ pub(crate) mod tests {
 
     /// Parse `list_src` and run [`plan`] against it, with a throwaway
     /// progress sink — the shared first half of every placement case below.
+    /// Plan `list_src` as `refetch` does.
     fn plan_for(list_src: &str, install_root: &Path) -> Plan {
+        plan_with(list_src, install_root, DefaultBranches::Ask)
+    }
+
+    fn plan_with(list_src: &str, install_root: &Path, defaults: DefaultBranches) -> Plan {
         let list = crate::thornlist::parse(list_src).unwrap();
         let mut progress = prodash::tree::Root::new().add_child("test plan");
-        plan(&list, install_root, &mut progress).unwrap()
+        plan(&list, install_root, defaults, &mut progress).unwrap()
     }
 
     /// After a successful `execute()` of an [`et_shaped_thornlist`] plan:
@@ -2071,7 +2195,7 @@ pub(crate) mod tests {
         };
         let fetch = |list: &Thornlist| {
             let mut progress = prodash::tree::Root::new().add_child("test plan");
-            let planned = plan(list, &root, &mut progress).unwrap();
+            let planned = plan(list, &root, DefaultBranches::Ask, &mut progress).unwrap();
             let report = execute(&planned, &root).unwrap();
             assert!(report.failures.is_empty(), "{:?}", report.failures);
             FetchState::record(&root, &report.records()).unwrap();
@@ -2118,7 +2242,7 @@ pub(crate) mod tests {
         let tip = RepoRecord { url: url.clone(), branch: Some(branch.clone()), follows_default: false, head: c3.to_string(), commit: None };
         FetchState::record(&root, &FetchRecords { repos: vec![("R".to_owned(), tip)], downloads: Vec::new() }).unwrap();
         let mut progress = prodash::tree::Root::new().add_child("test plan");
-        let mut skipped = plan(&list(Some(&c3)), &root, &mut progress).unwrap();
+        let mut skipped = plan(&list(Some(&c3)), &root, DefaultBranches::Ask, &mut progress).unwrap();
         assert!(skipped.git.is_empty());
         assert!(matches!(skipped.skipped[0].reason, DirtyReason::DetachedHead(id) if id == c1));
         // Forcing it pins it all the same.

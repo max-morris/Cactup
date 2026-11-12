@@ -336,7 +336,12 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     // the renderer draws on stderr and must not fight it.
     let (progress, renderer) = manifest::setup_prodash();
     let mut classify = progress.add_child("classify repos");
-    let plan = crate::fetch::plan(&list, &install_dir, &mut classify)?;
+    let plan = crate::fetch::plan(
+        &list,
+        &install_dir,
+        crate::fetch::DefaultBranches::Recorded,
+        &mut classify,
+    )?;
     drop(classify);
     renderer.shutdown_and_wait();
 
@@ -677,7 +682,8 @@ mod tests {
         assert_eq!(list.components()[0].commit.as_deref(), Some(pinned.to_string().as_str()));
         let root = tmp.path().join("install");
         let mut progress = prodash::tree::Root::new().add_child("test plan");
-        let plan = crate::fetch::plan(&list, &root, &mut progress).unwrap();
+        let plan = crate::fetch::plan(&list, &root, crate::fetch::DefaultBranches::Recorded, &mut progress)
+            .unwrap();
         let report = crate::fetch::execute(&plan, &root).unwrap();
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         let repo = root.join("Cactus/repos/carpetx");

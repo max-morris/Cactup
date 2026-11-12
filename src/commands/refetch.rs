@@ -174,7 +174,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // stdout, so it must be shut down before any of that printing starts.
     let (progress, renderer) = manifest::setup_prodash();
     let mut classify = progress.add_child("classify repos");
-    let mut plan = fetch::plan(&list, &inst.root, &mut classify)?;
+    let mut plan = fetch::plan(&list, &inst.root, fetch::DefaultBranches::Ask, &mut classify)?;
     drop(classify);
     renderer.shutdown_and_wait();
 

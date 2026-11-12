@@ -186,7 +186,8 @@ fn probe_inner(repo_dir: &Path, wanted_url: &str, wanted_branch: &str) -> Res<Pr
     }
 
     // Branch placement. An empty wanted branch means "no !REPO_BRANCH":
-    // whatever branch the clone is on is the wanted one.
+    // whatever branch the clone is on passes here, and the planner weighs it
+    // against the remote's default branch, which only the remote knows.
     let wanted =
         if wanted_branch.is_empty() { head_branch.clone() } else { wanted_branch.to_owned() };
     if head_branch != wanted {
@@ -1469,7 +1470,12 @@ pub fn remote_default_branch(scratch: &Path, url: &str) -> Res<String> {
         .remote_refs
         .iter()
         .find_map(|r| match r {
-            gix::protocol::handshake::Ref::Symbolic { full_ref_name, target, .. } if full_ref_name == "HEAD" => {
+            // Unborn: the remote has no commits yet, but HEAD still names
+            // the branch its first one will be on.
+            gix::protocol::handshake::Ref::Symbolic { full_ref_name, target, .. }
+            | gix::protocol::handshake::Ref::Unborn { full_ref_name, target }
+                if full_ref_name == "HEAD" =>
+            {
                 Some(target.to_string())
             }
             _ => None,
@@ -1484,6 +1490,7 @@ pub fn remote_default_branch(scratch: &Path, url: &str) -> Res<String> {
 /// not outlast a Ctrl-C. On interrupt the thread is left to finish (or not)
 /// on its own; cactup is stopping.
 pub fn ask_remote_default_branch(url: &str) -> Res<String> {
+    let _span = crate::timing::span("git default branch");
     let (send, recv) = std::sync::mpsc::channel();
     let url = url.to_owned();
     std::thread::spawn(move || {
@@ -1570,40 +1577,6 @@ pub fn head_of(repo_dir: &Path) -> Res<(String, ObjectId)> {
         .unwrap_or_else(|| DETACHED.to_owned());
     let id = repo.head_id().with_context(|| "HEAD points at no commit")?.detach();
     Ok((branch, id))
-}
-
-/// The branch `origin`'s HEAD names: the one a clone without `!REPO_BRANCH`
-/// checks out. One ref advertisement, nothing fetched. The clone's own
-/// `refs/remotes/origin/HEAD` cannot answer this — gix stores it as a plain
-/// commit id, not as a symref to a branch.
-pub fn origin_default_branch(repo_dir: &Path) -> Res<String> {
-    let _span = crate::timing::span("git default branch");
-    let repo = gix::open(repo_dir)
-        .with_context(|| format!("Failed to open {}", repo_dir.display()))?;
-    let remote = repo.find_remote("origin").with_context(|| "no origin remote")?;
-    // A single-branch clone's refspec filters the advertisement down to that
-    // one branch; ask for HEAD explicitly, or it is left out.
-    let head = gix::refspec::parse("HEAD".into(), gix::refspec::parse::Operation::Fetch)
-        .expect("HEAD is a valid refspec")
-        .to_owned();
-    let options = gix::remote::ref_map::Options { extra_refspecs: vec![head], ..Default::default() };
-    let (map, _) = remote
-        .connect(Direction::Fetch)
-        .with_context(|| "failed to connect to origin")?
-        .ref_map(gix::progress::Discard, options)
-        .with_context(|| "failed to list origin's refs")?;
-    map.remote_refs
-        .iter()
-        .find_map(|r| match r {
-            gix::protocol::handshake::Ref::Symbolic { full_ref_name, target, .. }
-            | gix::protocol::handshake::Ref::Unborn { full_ref_name, target }
-                if full_ref_name == "HEAD" =>
-            {
-                target.strip_prefix(b"refs/heads/").map(|b| b.to_str_lossy().into_owned())
-            }
-            _ => None,
-        })
-        .ok_or_else(|| anyhow!("origin does not say which branch its HEAD is"))
 }
 
 /// A cheap early-out for the planner: is the repo already exactly at

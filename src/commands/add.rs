@@ -552,7 +552,12 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<
     let list = thornlist::parse(&composed)?;
     let (progress, renderer) = crate::manifest::setup_prodash();
     let mut classify = progress.add_child("classify repos");
-    let mut plan = crate::fetch::plan(&list, &inst.root, &mut classify)?;
+    let mut plan = crate::fetch::plan(
+        &list,
+        &inst.root,
+        crate::fetch::DefaultBranches::Recorded,
+        &mut classify,
+    )?;
     drop(classify);
     renderer.shutdown_and_wait();
     if let Some(skipped) = plan.skipped.iter().find(|s| repos.contains(s.repo.as_str())) {
@@ -637,7 +642,12 @@ pub fn remove(ctx: &Ctx, package: &str, force: bool) -> Res<()> {
         let list = thornlist::parse(&composed)?;
         let (progress, renderer) = crate::manifest::setup_prodash();
         let mut classify = progress.add_child("classify repos");
-        let mut plan = crate::fetch::plan(&list, &inst.root, &mut classify)?;
+        let mut plan = crate::fetch::plan(
+            &list,
+            &inst.root,
+            crate::fetch::DefaultBranches::Recorded,
+            &mut classify,
+        )?;
         drop(classify);
         renderer.shutdown_and_wait();
         if let Some(skipped) = plan.skipped.iter().find(|s| touched.contains(s.repo.as_str())) {
@@ -775,7 +785,8 @@ mod tests {
         let list = thornlist::parse(&text).unwrap();
         let root = tmp.path().join("install");
         let mut progress = prodash::tree::Root::new().add_child("plan");
-        let plan = crate::fetch::plan(&list, &root, &mut progress).unwrap();
+        let plan = crate::fetch::plan(&list, &root, crate::fetch::DefaultBranches::Recorded, &mut progress)
+            .unwrap();
         let report = crate::fetch::execute(&plan, &root).unwrap();
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         for (checkout, content) in
@@ -1013,7 +1024,8 @@ mod tests {
         let list = thornlist::parse(&compose(&base_text, &[package]).unwrap()).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let mut progress = prodash::tree::Root::new().add_child("plan");
-        crate::fetch::plan(&list, tmp.path(), &mut progress).unwrap_or_else(|e| panic!("{e:#}"));
+        crate::fetch::plan(&list, tmp.path(), crate::fetch::DefaultBranches::Recorded, &mut progress)
+            .unwrap_or_else(|e| panic!("{e:#}"));
 
         // Another commit: refused.
         let mut other = wanted("1.1.0", "v1.1.0", &"d".repeat(40));
