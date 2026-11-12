@@ -359,7 +359,7 @@ fn resolve_all(
                 crate::progress::Layout::for_names([resolved.slug.as_str()]),
             );
             line.phase("asking its repository for its default branch");
-            let branch = crate::fetch::git::ask_remote_default_branch(&url);
+            let branch = crate::fetch::git::ask_remote_default_branch(None, &url);
             drop(line);
             if let Some(renderer) = renderer {
                 renderer.shutdown_and_wait();

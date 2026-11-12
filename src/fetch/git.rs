@@ -1459,18 +1459,26 @@ pub fn remote_tip(scratch: &Path, url: &str, git_ref: Option<&str>) -> Res<Objec
     }
 }
 
-/// The name of the remote's default branch (what its `HEAD` points at), as
-/// `git ls-remote --symref <url> HEAD` says it, without fetching anything.
-/// `scratch` is as for [`remote_tip`].
-pub fn remote_default_branch(scratch: &Path, url: &str) -> Res<String> {
+/// The name of the default branch (what its `HEAD` points at) of the remote
+/// at `url`, as `git ls-remote --symref <url> HEAD` says it, without
+/// fetching anything, asked from `repo`. Its `origin`, when that names
+/// `url`, is the remote asked: what the repo configures for it (a
+/// proxy, say) applies, as it does to a fetch. Otherwise a remote at `url`,
+/// rewritten by the repo's `insteadOf` rules. Everything happens in memory:
+/// the refspec is replaced on this handle only, and nothing is written.
+fn default_branch_from(repo: &gix::Repository, url: &str) -> Res<String> {
     const LOCAL: &str = "refs/cactup/head";
-    let repo = gix::open(scratch).with_context(|| format!("Failed to open '{}'", scratch.display()))?;
     let spec = format!("HEAD:{LOCAL}");
-    let remote = repo
-        .remote_at(url)
-        .with_context(|| format!("Invalid remote URL {url}"))?
-        .with_refspecs(Some(spec.as_str()), Direction::Fetch)
-        .context("Invalid refspec")?;
+    let origin = repo.find_remote("origin").ok().filter(|origin| {
+        origin
+            .url(Direction::Fetch)
+            .is_some_and(|u| normalize_url(&u.to_bstring().to_string()) == normalize_url(url))
+    });
+    let mut remote = match origin {
+        Some(origin) => origin,
+        None => repo.remote_at(url).with_context(|| format!("Invalid remote URL {url}"))?,
+    };
+    remote.replace_refspecs(Some(spec.as_str()), Direction::Fetch).context("Invalid refspec")?;
     let (map, _) = remote
         .connect(Direction::Fetch)
         .with_context(|| format!("Failed to connect to {url}"))?
@@ -1494,21 +1502,34 @@ pub fn remote_default_branch(scratch: &Path, url: &str) -> Res<String> {
     Ok(head.strip_prefix("refs/heads/").unwrap_or(&head).to_owned())
 }
 
-/// [`remote_default_branch`] asked on a thread of its own, from a scratch
-/// repository it makes, while this one polls the interrupt flag: the gix
-/// connection takes no interrupt flag of its own, and a stalled remote must
-/// not outlast a Ctrl-C. On interrupt the thread is left to finish (or not)
-/// on its own; cactup is stopping.
-pub fn ask_remote_default_branch(url: &str) -> Res<String> {
+/// [`default_branch_from`] asked on a thread of its own while this one
+/// polls the interrupt flag: the gix connection takes no interrupt flag of
+/// its own, and a stalled remote must not outlast a Ctrl-C. On interrupt the
+/// thread is left to finish (or not) on its own; cactup is stopping.
+///
+/// Asked from `clone`, the repo's own clone, when there is one, so that its
+/// configuration applies (see [`default_branch_from`]); nothing is written
+/// to it. With none, from a scratch repository made here, not on the
+/// thread, so that it is deleted on the way out even when the thread is
+/// abandoned.
+pub fn ask_remote_default_branch(clone: Option<&Path>, url: &str) -> Res<String> {
     let _span = crate::timing::span("git default branch");
+    // Held until this returns, by whichever way it does: dropping it is
+    // what deletes the scratch repository.
+    let (from, _scratch) = match clone {
+        Some(clone) => (clone.to_owned(), None),
+        None => {
+            let scratch = tempfile::tempdir().context("Failed to create a scratch directory")?;
+            gix::init_bare(scratch.path()).context("Failed to create a scratch repository")?;
+            (scratch.path().to_owned(), Some(scratch))
+        }
+    };
     let (send, recv) = std::sync::mpsc::channel();
     let url = url.to_owned();
     std::thread::spawn(move || {
-        let answer = (|| {
-            let scratch = tempfile::tempdir().context("Failed to create a scratch directory")?;
-            gix::init_bare(scratch.path()).context("Failed to create a scratch repository")?;
-            remote_default_branch(scratch.path(), &url)
-        })();
+        let answer = gix::open(&from)
+            .with_context(|| format!("Failed to open '{}'", from.display()))
+            .and_then(|repo| default_branch_from(&repo, &url));
         let _ = send.send(answer);
     });
     loop {

@@ -466,7 +466,7 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                         let branch = match (&item.action, &item.branch, item.commit) {
                             (GitAction::Update | GitAction::Align, None, None) => {
                                 line.phase("asking for the default branch".to_string());
-                                git::ask_remote_default_branch(&item.url).map(|default| {
+                                git::ask_remote_default_branch(Some(&item.dir), &item.url).map(|default| {
                                     line.phase(format!("switching to {default}"));
                                     Some(default)
                                 })
@@ -1077,13 +1077,25 @@ pub enum DefaultBranches {
     Recorded,
 }
 
+/// What asking a remote for its default branch came to, in [`plan`].
+enum Asked {
+    /// Nothing to ask: the list names a branch or a pin, or the repo is not
+    /// cactup's to move.
+    Nothing,
+    /// The remote's answer (or the record's, when the plan trusts it).
+    Default(String),
+    /// The remote did not answer; why.
+    Failed(String),
+}
+
 /// Classify every component of `list` against the tree at `install_root`
 /// (the directory that contains `<root>/`, i.e. the installation root).
 /// Read-only. The network is touched only to ask a remote for its default
 /// branch, for a repo whose thornlist entry names no branch and no pin and
 /// that cactup may move: a clean one, or one detached where cactup's last
 /// fetch left it. `defaults` says whether the fetch record can spare that
-/// question. `progress` is init'ed to the repo count once the group map is
+/// question. A clean repo whose remote does not answer stays where it is,
+/// with a warning on its line of `progress`. `progress` is init'ed to the repo count once the group map is
 /// built, then incremented as each repo's probe — a plain gix status walk,
 /// plus that question where there is one — finishes. The probes run on the
 /// [`crate::par`] pool: even so, on ~80 repos they take long enough that
@@ -1190,7 +1202,7 @@ pub fn plan(
     let groups: Vec<(String, Group)> = git_groups.into_iter().collect();
     let progress = std::sync::Mutex::new(progress);
     let probes = crate::par::parallel_map(&groups, |(repo, group)| {
-        let current = progress.lock().expect("plan progress poisoned").add_child(repo.clone());
+        let mut current = progress.lock().expect("plan progress poisoned").add_child(repo.clone());
         let dir = repos_dir.join(repo);
         // A pinned repo is checked out by commit, so the branch it happens to
         // be on is no reason to skip it — only edits and local commits are.
@@ -1214,31 +1226,50 @@ pub fn plan(
             }
         }
         // No !REPO_BRANCH means the remote's default branch, which only the
-        // remote knows: ask it (a clean repo's `origin` is the thornlist's
-        // URL — the probe classifies any other as changed). `None`: the
-        // remote did not answer, or there was nothing to ask. A pinned repo
-        // sits at its commit, with no branch to follow; a repo detached
-        // anywhere but where cactup's last fetch left it is the user's,
-        // skipped whatever the default is.
+        // remote knows: ask it, from the clone, whose `origin` is the
+        // thornlist's URL (the probe classifies any other as changed). A
+        // pinned repo sits at its commit, with no branch to follow; a repo
+        // detached anywhere but where cactup's last fetch left it is the
+        // user's, skipped whatever the default is. Asked here on the probe
+        // pool, not on `execute`'s fetch workers, because the plan needs the
+        // answer to choose the repo's action; each question is one ref
+        // advertisement, abandoned on Ctrl-C like the probes around it.
         let record = fetch_state.as_ref().and_then(|s| s.repos.get(repo));
+        let ask = || match git::ask_remote_default_branch(Some(&dir), &group.url) {
+            Ok(default) => Asked::Default(default),
+            Err(e) => Asked::Failed(format!("{e:#}")),
+        };
         let default = match (&probe.state, &group.branch) {
-            _ if group.commit.is_some() => None,
+            _ if group.commit.is_some() => Asked::Nothing,
             (RepoState::Clean { head_branch }, None) => {
                 let recorded = record.is_some_and(|r| {
                     r.follows_default && r.commit.is_none() && r.branch.as_deref() == Some(head_branch)
                 });
                 if defaults == DefaultBranches::Recorded && recorded {
-                    Some(head_branch.clone())
+                    Asked::Default(head_branch.clone())
                 } else {
-                    git::ask_remote_default_branch(&group.url).ok()
+                    let asked = ask();
+                    // Said here, on the repo's own line, since nothing else
+                    // would: the plan keeps the repo where it is (below).
+                    if let Asked::Failed(why) = &asked
+                        && !gix::interrupt::is_triggered()
+                    {
+                        use colored::Colorize;
+                        let warning =
+                            format!("could not ask for its default branch, so it stays on {head_branch}: {why}");
+                        current.info(warning.yellow().to_string());
+                    }
+                    asked
                 }
             }
+            // No warning on a failure here: `execute` asks again, and fails
+            // the repo with its own error if the remote still does not say.
             (RepoState::Detached { head }, None)
                 if record.is_some_and(|r| r.head == head.to_string()) =>
             {
-                git::ask_remote_default_branch(&group.url).ok()
+                ask()
             }
-            _ => None,
+            _ => Asked::Nothing,
         };
         drop(current);
         progress.lock().expect("plan progress poisoned").inc();
@@ -1283,11 +1314,18 @@ pub fn plan(
             RepoState::Clean { head_branch } => {
                 let (wanted, follows_default) = match (group.branch, default) {
                     (Some(branch), _) => (branch, false),
-                    (None, Some(default)) => (default, true),
-                    // The remote did not say: stay on the current branch. The
-                    // fetch goes to the same remote and reports the failure;
-                    // the next plan asks again.
-                    (None, None) => (head_branch.clone(), false),
+                    (None, Asked::Default(default)) => (default, true),
+                    // The remote did not say (the probe warned): stay on the
+                    // current branch, following what the record says it
+                    // follows, so that one unanswered question changes
+                    // nothing. The fetch goes to the same remote and reports
+                    // the failure; the next plan asks again.
+                    (None, _) => {
+                        let followed = record.is_some_and(|r| {
+                            r.follows_default && r.commit.is_none() && r.branch.as_deref() == Some(head_branch.as_str())
+                        });
+                        (head_branch.clone(), followed)
+                    }
                 };
                 // Off the default branch with no !REPO_BRANCH: switch only if
                 // cactup put the repo there (an earlier thornlist named that
@@ -1340,17 +1378,14 @@ pub fn plan(
                         Some((GitAction::Pin, group.branch.clone(), false))
                     }
                     // Off the pin, onto the branch the list names; with none,
-                    // the remote's default; only when the remote did not say,
-                    // the branch the pin was taken from. A branchless pin's
-                    // record names no branch either: then `execute` asks the
-                    // remote itself, and fails the repo if it cannot say.
+                    // the remote's default. When the remote did not say,
+                    // `execute` asks it again, and fails the repo if it
+                    // still cannot: the branch the pin was taken from is not
+                    // what the list asks for.
                     None if ours => Some(match (group.branch.clone(), default) {
                         (Some(branch), _) => (GitAction::Align, Some(branch), false),
-                        (None, Some(default)) => (GitAction::Align, Some(default), true),
-                        (None, None) => match record.and_then(|r| r.branch.clone()) {
-                            Some(branch) => (GitAction::Align, Some(branch), false),
-                            None => (GitAction::Align, None, true),
-                        },
+                        (None, Asked::Default(default)) => (GitAction::Align, Some(default), true),
+                        (None, _) => (GitAction::Align, None, true),
                     }),
                     _ => None,
                 };
@@ -2025,20 +2060,52 @@ pub(crate) mod tests {
         assert!(plan.git[0].follows_default);
     }
 
-    /// When the remote cannot say, the repo stays where it is and nothing
-    /// claims it follows the default, so the next plan asks again.
+    /// When the remote cannot say, the repo stays where it is, following
+    /// what its record says it follows (one unanswered question changes
+    /// nothing; the next plan asks again), and its line says why.
     #[test]
     fn an_unanswered_lookup_leaves_the_repo_on_its_branch() {
+        for followed in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let (root, upstream, _, _) = cloned_on_a_release_branch(tmp.path());
+            record_fetch(&root, &upstream, "rel", followed);
+            std::fs::remove_dir_all(&upstream).unwrap();
+
+            let (plan, messages) = plan_with_messages(&list_without_a_branch(&upstream), &root);
+            assert_eq!(plan.git.len(), 1);
+            assert!(matches!(plan.git[0].action, GitAction::Update));
+            assert_eq!(plan.git[0].branch.as_deref(), Some("rel"));
+            assert_eq!(plan.git[0].follows_default, followed);
+            assert!(
+                matches!(messages.as_slice(), [m] if m.contains("could not ask for its default branch, so it stays on rel")),
+                "{messages:?}"
+            );
+        }
+    }
+
+    /// Dropping a branchless pin while its remote cannot say which branch is
+    /// its default: the plan still moves cactup's detached HEAD (it does not
+    /// blame the user, nor guess a branch), and the fetch fails the repo
+    /// with the remote's own error, leaving it where it was.
+    #[test]
+    fn a_default_the_remote_cannot_name_fails_the_repo_at_execute() {
         let tmp = tempfile::tempdir().unwrap();
-        let (root, upstream, _, _) = cloned_on_a_release_branch(tmp.path());
-        record_fetch(&root, &upstream, "rel", false);
+        let (root, upstream, _, pin, _) = cloned_on_a_branchless_pin(tmp.path());
         std::fs::remove_dir_all(&upstream).unwrap();
 
         let plan = plan_for(&list_without_a_branch(&upstream), &root);
-        assert_eq!(plan.git.len(), 1);
-        assert!(matches!(plan.git[0].action, GitAction::Update));
-        assert_eq!(plan.git[0].branch.as_deref(), Some("rel"));
-        assert!(!plan.git[0].follows_default);
+        assert!(plan.skipped.is_empty(), "{:?}", plan.skipped);
+        assert!(matches!(plan.git[0].action, GitAction::Align));
+        assert_eq!(plan.git[0].branch, None);
+        assert!(plan.git[0].follows_default);
+        let report = execute(&plan, &root).unwrap();
+        assert!(report.repos.is_empty(), "{:?}", report.repos);
+        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+        assert_eq!(report.failures[0].what, "R");
+        let error = &report.failures[0].error;
+        assert!(error.contains(&*upstream.to_string_lossy()), "{error}");
+        let dir = root.join("Cactus/repos/R");
+        assert_eq!(git::head_of(&dir).unwrap(), (git::DETACHED.to_owned(), pin));
     }
 
     /// End-to-end: `plan()` classifies a repo whose `origin` has drifted from
@@ -2289,17 +2356,29 @@ pub(crate) mod tests {
         )
     }
 
-    /// Parse `list_src` and run [`plan`] against it, with a throwaway
-    /// progress sink — the shared first half of every placement case below.
-    /// Plan `list_src` as `refetch` does.
+    /// Plan `list_src` as `refetch` does: [`plan_with`], asking every remote.
+    /// The shared first half of every placement case below.
     fn plan_for(list_src: &str, install_root: &Path) -> Plan {
         plan_with(list_src, install_root, DefaultBranches::Ask)
     }
 
+    /// Parse `list_src` and run [`plan`] against it, asking the remotes as
+    /// `defaults` says, with a throwaway progress sink.
     fn plan_with(list_src: &str, install_root: &Path, defaults: DefaultBranches) -> Plan {
         let list = crate::thornlist::parse(list_src).unwrap();
         let mut progress = prodash::tree::Root::new().add_child("test plan");
         plan(&list, install_root, defaults, &mut progress).unwrap()
+    }
+
+    /// [`plan_for`], and the messages the plan left on its progress lines.
+    fn plan_with_messages(list_src: &str, install_root: &Path) -> (Plan, Vec<String>) {
+        let list = crate::thornlist::parse(list_src).unwrap();
+        let root = prodash::tree::Root::new();
+        let mut progress = root.add_child("test plan");
+        let plan = plan(&list, install_root, DefaultBranches::Ask, &mut progress).unwrap();
+        let mut messages = Vec::new();
+        root.copy_messages(&mut messages);
+        (plan, messages.into_iter().map(|m| m.message).collect())
     }
 
     /// After a successful `execute()` of an [`et_shaped_thornlist`] plan:
