@@ -225,7 +225,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     if !forced_repo_names.is_empty() {
         let to_force: Vec<&fetch::SkippedRepo> =
             plan.skipped.iter().filter(|s| forced_repo_names.contains(&s.repo)).collect();
-        if let Some(backup_root) = backup_dirty(&inst, &to_force)? {
+        if let Some(backup_root) = backup_dirty(&inst, &to_force, &backups_root())? {
             println!(
                 "Backed up modified files to {}.",
                 format!("'{}'", backup_root.display()).bold()
@@ -478,7 +478,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
         finish_interrupted_prunes(&inst)?;
     }
     if args.prune && !orphans.is_empty() {
-        prune_orphans(&inst, &orphans, &configs, &args)?;
+        prune_orphans(&inst, &orphans, &configs, &args, &backups_root())?;
     }
 
     // Config interaction (§7.5): a refetch does not, by itself, cause any
@@ -954,11 +954,14 @@ fn report_orphans(orphans: &[Orphan]) {
 
 /// `--prune`: remove prunable orphans and their arrangement symlinks, behind
 /// a single confirmation. Only `-f` bypasses the confirmation (never `-s`).
+/// A dirty repo pruned with `-f` is backed up under `backups` first (see
+/// [`backups_root`]).
 fn prune_orphans(
     inst: &Installation,
     orphans: &[Orphan],
     configs: &[(String, Option<crate::build::ConfigMeta>)],
     args: &RefetchArgs,
+    backups: &Path,
 ) -> Res<()> {
     // §11.5: test runs execute from the live source tree; pruning deletes
     // reference data they need. Follow the config-delete precedent: refuse
@@ -1081,7 +1084,7 @@ fn prune_orphans(
         );
         let dirty = !pristine(&probe.state, record) || !probe.untracked.is_empty() || hides_user_files(&o.dir);
         if dirty {
-            let backup = backup_dir(&inst.alias)?.join(&o.repo);
+            let backup = backup_dir(backups, &inst.alias)?.join(&o.repo);
             copy_tree(&o.dir, &backup)?;
             println!("Backed up {} to '{}'.", o.repo, backup.display());
         }
@@ -1221,7 +1224,11 @@ fn print_dry_run(
 /// `Ok(None)` when none of `skipped` actually has file contents to save (e.g.
 /// a --overwrite selection that only hit local-commit/detached-HEAD repos) —
 /// callers must not report a backup path, or create a backup dir, in that case.
-fn backup_dirty(inst: &Installation, skipped: &[&fetch::SkippedRepo]) -> Res<Option<PathBuf>> {
+fn backup_dirty(
+    inst: &Installation,
+    skipped: &[&fetch::SkippedRepo],
+    backups: &Path,
+) -> Res<Option<PathBuf>> {
     // Local commits / detached HEADs stay recoverable through the repo's own
     // reflog (align force-moves refs with a reflog entry); only
     // WorktreeModified and RemoteUrlChanged have file contents worth copying
@@ -1243,7 +1250,7 @@ fn backup_dirty(inst: &Installation, skipped: &[&fetch::SkippedRepo]) -> Res<Opt
         return Ok(None);
     }
 
-    let root = backup_dir(&inst.alias)?;
+    let root = backup_dir(backups, &inst.alias)?;
     for (s, rel) in files {
         // An unfinished backup must stop the forced fetch that would
         // overwrite what it has not copied yet.
@@ -1327,9 +1334,17 @@ fn remove_tree_until(path: &Path, stop: &AtomicBool) -> Res<()> {
     fs::remove_dir(path).with_context(|| format!("Failed to remove '{}'", path.display()))
 }
 
-fn backup_dir(alias: &str) -> Res<PathBuf> {
+/// Where refetch backs files up before it overwrites or prunes them:
+/// `~/.cactup/refetch-backups/`, outside every installation. Production
+/// callers pass this; tests pass a scratch directory, never the real home.
+fn backups_root() -> PathBuf {
+    crate::CACTUP_ROOT.join("refetch-backups")
+}
+
+/// A fresh `<backups>/<alias>/<timestamp>/`, created.
+fn backup_dir(backups: &Path, alias: &str) -> Res<PathBuf> {
     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-    let dir = crate::CACTUP_ROOT.join("refetch-backups").join(alias).join(ts.to_string());
+    let dir = backups.join(alias).join(ts.to_string());
     fs::create_dir_all(&dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
     Ok(dir)
 }
@@ -1639,7 +1654,7 @@ mod tests {
         let up = tmp.path().join("up/KadathThorn");
         testrepo::init(&up);
         crate::fetch::tests::commit_files(&up, &[("src/build.sh", "x\n")]);
-        let alias = format!("prune-{}", tmp.path().file_name().unwrap().to_string_lossy());
+        let alias = "prune".to_owned();
         let inst = Installation::new(alias.clone(), tmp.path().join("inst"));
         let dir = tmp.path().join("inst/Cactus/repos/KadathThorn");
         let url = up.display().to_string();
@@ -1663,12 +1678,14 @@ mod tests {
             crate::args::Commands::Inst(crate::args::InstallationCommand::Refetch(args)) => args,
             other => panic!("{other:?}"),
         };
-        prune_orphans(&inst, &[orphan()], &[], &args(&["cactup", "inst", "refetch", "--prune"])).unwrap();
+        let backups = tmp.path().join("refetch-backups");
+        let prune = |argv: &[&str]| prune_orphans(&inst, &[orphan()], &[], &args(argv), &backups);
+        prune(&["cactup", "inst", "refetch", "--prune"]).unwrap();
         assert!(dir.join("src/fuka/my-work.cpp").is_file(), "kept without -f");
 
-        prune_orphans(&inst, &[orphan()], &[], &args(&["cactup", "inst", "refetch", "--prune", "-f"])).unwrap();
+        prune(&["cactup", "inst", "refetch", "--prune", "-f"]).unwrap();
         assert!(!dir.exists(), "pruned with -f");
-        let backups = crate::CACTUP_ROOT.join("refetch-backups").join(&alias);
+        let backups = backups.join(&alias);
         let saved: Vec<std::path::PathBuf> = fs::read_dir(&backups)
             .unwrap()
             .map(|e| e.unwrap().path().join("KadathThorn/src/fuka/my-work.cpp"))
@@ -1676,7 +1693,6 @@ mod tests {
             .collect();
         assert_eq!(saved.len(), 1, "backed up first, under {}", backups.display());
         assert_eq!(fs::read_to_string(&saved[0]).unwrap(), "weeks of work\n");
-        let _ = fs::remove_dir_all(&backups);
     }
 
     /// A library a package placed is a repo of the list like any other:
