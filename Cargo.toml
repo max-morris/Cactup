@@ -38,7 +38,7 @@ regex = "1.13.0"
 # stacks, slugs and track versions), shared with the Cactarium registry. Pure
 # Rust with no system libraries (MUSL-safe, D13). Pinned by rev and bumped on
 # purpose, never by branch, so every build is reproducible.
-cactup-ecosystem-common = { git = "https://github.com/max-morris/cactup-ecosystem-common", rev = "ede90f956bc7368c17cd973e71d1a8725e8c1021" }
+cactup-ecosystem-common = { git = "https://github.com/max-morris/cactup-ecosystem-common", rev = "11d376026e9cf48628b8d4156c7f5ea6f1b664bb" }
 gethostname = "1.1.0"
 tempfile = "3.27.0"
 chrono = { version = "0.4.45", features = ["serde"] }
@@ -56,7 +56,7 @@ ratatui = { version = "0.30", default-features = false, features = ["crossterm_0
 # which must pass a signal on to the compiler it runs; std can only SIGKILL.
 # Already in the tree (tempfile, crossterm) and pure Rust on Linux: it makes
 # the system calls itself, without libc, so the binary stays static.
-rustix = { version = "1.1", features = ["param", "process"] }
+rustix = { version = "1.1", features = ["fs", "param", "process"] }
 # Compresses the build cache's unit records (src/objcache/store.rs). Already
 # in the tree (gix's zlib), pure Rust: nothing for the static binary to load.
 zlib-rs = "0.6"

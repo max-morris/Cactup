@@ -67,7 +67,7 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
                 Some(name) => name,
                 None => installation.meta()?.active_config()?.to_owned(),
             };
-            let config_dir = installation.cactus_root().join("configs").join(&name);
+            let config_dir = installation.cactus_root()?.join("configs").join(&name);
             if !config_dir.is_dir() {
                 bail!("No config named \"{name}\" in installation {} (see `cactup config list`)", installation.alias);
             }
@@ -598,7 +598,7 @@ impl Recorded {
     /// `mode` is the build-cache knob's value a build to look at would have
     /// been made with, for the message when there is none.
     fn open(installation: &Installation, name: &str, attempt: Option<u32>, not: Option<u32>, mode: &str) -> Res<Self> {
-        let config_dir = installation.cactus_root().join("configs").join(name);
+        let config_dir = installation.cactus_root()?.join("configs").join(name);
         if !config_dir.is_dir() {
             bail!("No config named \"{name}\" in installation {} (see `cactup config list`)", installation.alias);
         }
@@ -1072,7 +1072,7 @@ mod tests {
     fn finds_the_newest_recorded_attempt() {
         let tmp = tempfile::tempdir().unwrap();
         let installation = Installation::new("et", tmp.path());
-        let config_dir = installation.cactus_root().join("configs/sim");
+        let config_dir = installation.cactus_root().unwrap().join("configs/sim");
         let record = |attempt: u32, events: &[Event]| {
             let log = log_path(&config_dir, attempt);
             std::fs::create_dir_all(log.parent().unwrap()).unwrap();
