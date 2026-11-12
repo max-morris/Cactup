@@ -807,6 +807,49 @@ thornlist's URL, persisted to `.git/config` and always reported, before
 fetching and checking out from it; this is the fork-adoption path (point the
 thornlist at a fork of a component, then `refetch --overwrite <that repo>`).
 
+**No `!REPO_BRANCH`: the remote's default branch.** A git section that names
+no branch (and no pin) follows whatever branch the remote's `HEAD` names, as
+`git clone` does — not whatever branch the clone happens to be on. A clone
+lands there by itself; for an existing repo the planner asks the remote (one
+ref advertisement, nothing fetched, interrupt-aware, asked from the repo's
+own clone so that its git configuration applies, nothing written to it) and
+treats the answer as the thornlist branch: a repo already on it is updated;
+one elsewhere is switched to it when its fetch record says cactup put it
+there — unpinned, on a branch an earlier list named or on the remote's
+default — and is otherwise skipped as a branch switch: a branch the user
+checked out, a branch checked out after a pin, or one a record written by
+an older cactup names (those recorded whatever branch such a repo was on,
+so they cannot tell the user's choice from a list's). `refetch` asks every
+time, so a remote that moves its default — or renames the branch the repo
+was on — is followed by the next refetch. A remote that does not answer
+leaves a repo on a branch its record vouches for where it is, following
+what the record says it followed, with a warning on its line; its fetch, to
+the same remote, reports the failure. On any other branch, and on any
+branch at all when its record is an older cactup's (even the default), the
+repo is not fetched (`its remote did not say which branch is its
+default`), the branch left alone: an update is not known to be what the
+list asks, and a fast-forward must not land on the user's branch in the
+remote's stead. The remote, not local state, is what stopped it, so
+`refetch` reports it among its failures and exits nonzero, and records it
+in `unfetched-repos` as failed, not skipped; `-f` is not offered as the
+remedy, since refetching once the remote answers is (`add` and `install`
+refuse, saying the same). `fetch-state.toml` records `follows-default =
+true` for a repo fetched this way and `named-branch = true` for one on the
+branch its list named; commands that fetch only part of a list (`add`) or
+start from nothing (`install`) take the record's word for a repo it found
+on its default branch rather than asking every remote. A forced refetch of
+a skipped repo whose list names no branch and no pin goes to the remote's
+default (asked again; the repo fails if the remote still does not answer)
+when it was skipped as a branch switch or for an unanswered ask (with
+nothing on disk to overwrite, its line names only the branch it left), when
+it sits on a branch its record vouches for (skipped for local edits, say,
+or a re-pointed `origin`: forcing it does what the list asks, and leaves no
+claim behind that would skip it again), from a detached HEAD, and from a
+branch with no remote-tracking ref (one made locally, which an align could
+never reach; the check is local, and clones are single-branch). A repo
+skipped for anything else on the user's own branch stays on that branch,
+and one whose HEAD cannot be read fails, saying why.
+
 **Pinned repos: `!REPO_COMMIT`.** A git section may carry
 `!REPO_COMMIT = <full commit id>` (40 hex digits, or 64 for a SHA-256 repo;
 abbreviations are refused, and so is a pin on any other `!TYPE`). It is a
@@ -845,7 +888,15 @@ state, and whether cactup may move it depends on who put it there:
 `fetch-state.toml` records, per repo, the commit each fetch left HEAD at and
 the pin it fetched to (`commit`). Detached at the pin, or where cactup's
 last fetch left it, the repo is cactup's to move — to a new pin, or back
-onto its branch when the list drops the pin. Detached anywhere else is the
+onto its branch when the list drops the pin: the branch the list now
+names, or with none the remote's default (asked then; when the remote does
+not answer, the fetch asks again and fails the repo if it still cannot).
+A pin always leaves HEAD detached, even when the repo already sat at the
+commit on a branch (a ref edit, no tree written; the repo's line says which
+branch it left, in yellow, and the summary counts it as updated), so a
+branch the user checks out after a pin is the user's, whatever branch the
+pin was taken from. A pin with no `!REPO_BRANCH` — what `cactup add owner/name#<sha>` and
+`sim export` write — records no branch at all. Detached anywhere else is the
 user's doing and is skipped (`detached HEAD at …`) unless forced; forcing a
 pinned repo pins it. `installation delta` compares a pinned repo by commit
 alone (its recorded branch is a label, not a branch HEAD should be on), and
@@ -5929,7 +5980,7 @@ Port of `simfactory-docs.txt` §22, adapted to Rust (`anyhow`, existing style):
 | Substitution | `@NAME@` + `@(expr)@` + `@ENV()@` | **`@NAME@` + `@ENV(NAME)@`** (unset/empty env = hard error); `.py` for logic (JSON-on-stdin convention, §6.1) |
 | cactup binary var | `@SIMFACTORY@` | `@CACTUP@` |
 | Machine detection | `aliaspattern` regex on hostname | `hostname.regexp` first, `discover.py` second (all scripts in one `python3`); result cached in DB as one `detected` record stamped with hostname + login session, re-verified when either changes (§4.3) |
-| Per-installation state | n/a | `<installation home>/.cactup/installation.toml` (active config, sim-home, test-home, root-dir) + `simulations.toml` (name→dir registry) + `fetch-state.toml` (per-repo URL/branch/HEAD from the last fetch — §3.2) + `<installation home>/installation-source.th` (pristine as-fetched thornlist, the hand-edit guard baseline — §3.2) |
+| Per-installation state | n/a | `<installation home>/.cactup/installation.toml` (active config, sim-home, test-home, root-dir) + `simulations.toml` (name→dir registry) + `fetch-state.toml` (per-repo URL/branch/HEAD, pin, and whether the branch is the remote's default or the one the list named, from the last fetch — §3.2) + `<installation home>/installation-source.th` (pristine as-fetched thornlist, the hand-edit guard baseline — §3.2) |
 | Sim root key | machine `basedir` | machine `simulation-home` (optional; falls back to `~/.cactup/simulations`) — §8.1 |
 | Test-suite command | `sim create --testsuite` (overloads `sim`) | `cactup test run`/`submit` against any built config (own command tree — §11) |
 | Test output root | inside a simulation dir (`output-NNNN/exe/…`) | machine `test-home` (optional; falls back to `~/.cactup/tests`) — §11.5 |

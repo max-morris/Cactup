@@ -641,7 +641,8 @@ mod tests {
             .replace("!NAME = carpetx\n", &format!("!NAME = carpetx\n!REPO_COMMIT = {v1}\n"));
         let list = crate::thornlist::parse(&live).unwrap();
         let mut progress = prodash::tree::Root::new().add_child("test plan");
-        let plan = crate::fetch::plan(&list, &root, &mut progress).unwrap();
+        let plan = crate::fetch::plan(&list, &root, crate::fetch::DefaultBranches::Recorded, &mut progress)
+            .unwrap();
         let report = crate::fetch::execute(&plan, &root).unwrap();
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         std::fs::create_dir_all(inst.live_thornlist().unwrap().parent().unwrap()).unwrap();

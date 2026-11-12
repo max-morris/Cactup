@@ -358,6 +358,18 @@ fn check_registry_source(slug: &str, url: &str, commit: &str, label: Option<&str
 }
 
 /// Every clone a package is fetched into.
+/// The refusal for a repo the plan skipped, named by `subject`, with `and`
+/// (what else the refusal has to say) worked in. A repo whose remote did not
+/// answer has nothing of the user's in the way: it says so, and that trying
+/// again later is the fix.
+fn left_alone(skipped: &crate::fetch::SkippedRepo, subject: &str, and: &str) -> String {
+    let why = skipped.reason.describe();
+    match skipped.reason.remote_did_not_answer() {
+        true => format!("{subject} was not fetched{and}: {why}; try again once the remote answers"),
+        false => format!("{subject} has {why}; it was left alone{and}"),
+    }
+}
+
 fn package_repos(a: &AddedPackage) -> BTreeSet<String> {
     a.thorns.iter().map(|t| clone_of(&a.repo, t)).collect()
 }
@@ -600,7 +612,7 @@ fn resolve_all(
                 crate::progress::Layout::for_names([resolved.slug.as_str()]),
             );
             line.phase("asking its repository for its default branch");
-            let branch = crate::fetch::git::ask_remote_default_branch(&url);
+            let branch = crate::fetch::git::ask_remote_default_branch(None, &url);
             drop(line);
             if let Some(renderer) = renderer {
                 renderer.shutdown_and_wait();
@@ -935,11 +947,16 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<
     check_library_dirs(&inst.root, list.root(), &added)?;
     let (progress, renderer) = crate::manifest::setup_prodash();
     let mut classify = progress.add_child("classify repos");
-    let mut plan = crate::fetch::plan(&list, &inst.root, &mut classify)?;
+    let mut plan = crate::fetch::plan(
+        &list,
+        &inst.root,
+        crate::fetch::DefaultBranches::Recorded,
+        &mut classify,
+    )?;
     drop(classify);
     renderer.shutdown_and_wait();
     if let Some(skipped) = plan.skipped.iter().find(|s| repos.contains(s.repo.as_str())) {
-        bail!("Repo {} in the installation has {}; it was left alone", skipped.repo, skipped.reason.describe());
+        bail!("{}", left_alone(skipped, &format!("Repo {} in the installation", skipped.repo), ""));
     }
     narrow(&mut plan, &repos);
     // After every refusal, just before the fetch: a placement the add drops
@@ -1049,11 +1066,17 @@ pub fn remove(ctx: &Ctx, package: &str, force: bool) -> Res<()> {
         let list = thornlist::parse(&composed)?;
         let (progress, renderer) = crate::manifest::setup_prodash();
         let mut classify = progress.add_child("classify repos");
-        let mut plan = crate::fetch::plan(&list, &inst.root, &mut classify)?;
+        let mut plan = crate::fetch::plan(
+            &list,
+            &inst.root,
+            crate::fetch::DefaultBranches::Recorded,
+            &mut classify,
+        )?;
         drop(classify);
         renderer.shutdown_and_wait();
         if let Some(skipped) = plan.skipped.iter().find(|s| touched.contains(s.repo.as_str())) {
-            bail!("Repo {} has {}; it was left alone, and {entry} is still added", skipped.repo, skipped.reason.describe());
+            let and = format!(", and {entry} is still added");
+            bail!("{}", left_alone(skipped, &format!("Repo {}", skipped.repo), &and));
         }
         narrow(&mut plan, &touched);
         restore = Some(plan);
@@ -1202,7 +1225,8 @@ mod tests {
         let list = thornlist::parse(&text).unwrap();
         let root = tmp.path().join("install");
         let mut progress = prodash::tree::Root::new().add_child("plan");
-        let plan = crate::fetch::plan(&list, &root, &mut progress).unwrap();
+        let plan = crate::fetch::plan(&list, &root, crate::fetch::DefaultBranches::Recorded, &mut progress)
+            .unwrap();
         let report = crate::fetch::execute(&plan, &root).unwrap();
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         for (checkout, content) in
@@ -1443,7 +1467,8 @@ mod tests {
         let list = thornlist::parse(&compose(&base_text, &[package]).unwrap()).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let mut progress = prodash::tree::Root::new().add_child("plan");
-        crate::fetch::plan(&list, tmp.path(), &mut progress).unwrap_or_else(|e| panic!("{e:#}"));
+        crate::fetch::plan(&list, tmp.path(), crate::fetch::DefaultBranches::Recorded, &mut progress)
+            .unwrap_or_else(|e| panic!("{e:#}"));
 
         // Another commit: refused.
         let mut other = wanted("1.1.0", "v1.1.0", &"d".repeat(40));
@@ -1668,7 +1693,8 @@ mod tests {
         let list = thornlist::parse(&text).unwrap();
         let root = tmp.path().join("install");
         let mut progress = prodash::tree::Root::new().add_child("plan");
-        let plan = crate::fetch::plan(&list, &root, &mut progress).unwrap();
+        let defaults = crate::fetch::DefaultBranches::Recorded;
+        let plan = crate::fetch::plan(&list, &root, defaults, &mut progress).unwrap();
         assert_eq!(plan.libraries.len(), 1);
         let report = crate::fetch::execute(&plan, &root).unwrap();
         assert!(report.failures.is_empty(), "{:?}", report.failures);
@@ -1728,7 +1754,14 @@ mod tests {
         let err = format!("{:#}", check_library_dirs(tmp.path(), "Cactus", std::slice::from_ref(&package)).unwrap_err());
         assert!(err.contains("has no fetch record") && err.contains("move it aside"), "{err}");
         let record = |url: &str| crate::fetch::FetchRecords {
-            repos: vec![("fuka".into(), crate::fetch::RepoRecord { url: url.into(), branch: None, head: "b".repeat(40), commit: None })],
+            repos: vec![("fuka".into(), crate::fetch::RepoRecord {
+                url: url.into(),
+                branch: None,
+                follows_default: false,
+                named_branch: false,
+                head: "b".repeat(40),
+                commit: None,
+            })],
             downloads: Vec::new(),
         };
         crate::fetch::FetchState::record(tmp.path(), &record("https://elsewhere/fuka")).unwrap();
@@ -1843,7 +1876,8 @@ mod tests {
         fn fetch(&self, text: &str) {
             let list = thornlist::parse(text).unwrap();
             let mut progress = prodash::tree::Root::new().add_child("plan");
-            let plan = crate::fetch::plan(&list, &self.inst.root, &mut progress).unwrap();
+            let defaults = crate::fetch::DefaultBranches::Recorded;
+            let plan = crate::fetch::plan(&list, &self.inst.root, defaults, &mut progress).unwrap();
             let report = crate::fetch::execute(&plan, &self.inst.root).unwrap();
             assert!(report.failures.is_empty(), "{:?}", report.failures);
             crate::fetch::FetchState::record(&self.inst.root, &report.records()).unwrap();

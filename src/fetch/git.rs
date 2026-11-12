@@ -52,11 +52,24 @@ pub enum DirtyReason {
     /// override (via [`set_origin_url`] + a normal align), so it is also the
     /// one whose backup pass needs to know what to save *before* that happens.
     RemoteUrlChanged { on_disk: String, wanted: String, modified: Vec<String> },
+    /// Clean, on a branch cactup cannot vouch for, with no `!REPO_BRANCH`,
+    /// and the remote did not say which branch is its default (`why`): the
+    /// planner cannot tell an update from a branch switch, so the branch is
+    /// left alone. Not a probe result; the planner's.
+    DefaultUnknown { head: String, why: String },
     /// Any probe failure. Never silently "clean".
     Unknown(String),
 }
 
 impl DirtyReason {
+    /// Whether the repo was skipped because its remote did not answer
+    /// ([`DirtyReason::DefaultUnknown`]), not for anything on disk: a failure
+    /// to report as one, which retrying later fixes, and nothing to back up
+    /// or to preserve.
+    pub fn remote_did_not_answer(&self) -> bool {
+        matches!(self, DirtyReason::DefaultUnknown { .. })
+    }
+
     /// One-line user-facing description.
     pub fn describe(&self) -> String {
         match self {
@@ -81,6 +94,10 @@ impl DirtyReason {
                     s.push_str(&format!(" ({} local modification(s))", modified.len()));
                 }
                 s
+            }
+            DirtyReason::DefaultUnknown { head, why } => {
+                let what = "its remote did not say which branch is its default";
+                format!("{what}, so cactup cannot tell whether {head} is the one to follow ({why})")
             }
             DirtyReason::Unknown(err) => format!("could not inspect the repo ({err})"),
         }
@@ -186,7 +203,8 @@ fn probe_inner(repo_dir: &Path, wanted_url: &str, wanted_branch: &str) -> Res<Pr
     }
 
     // Branch placement. An empty wanted branch means "no !REPO_BRANCH":
-    // whatever branch the clone is on is the wanted one.
+    // whatever branch the clone is on passes here, and the planner weighs it
+    // against the remote's default branch, which only the remote knows.
     let wanted =
         if wanted_branch.is_empty() { head_branch.clone() } else { wanted_branch.to_owned() };
     if head_branch != wanted {
@@ -647,10 +665,12 @@ fn delete_pin_ref(repo: &gix::Repository) {
 /// pin, §3.2), fetching the commit only when the repo lacks it, and returning
 /// it. A repo already at the commit is left alone without touching the
 /// network — which is what keeps a refetch from ever moving a pinned repo,
-/// and keeps it offline. `git_ref` is the branch or tag the pin was taken
-/// from, used only to find the commit when the server will not hand it out
-/// by id. As with [`align`], only what changed is written unless
-/// `force_overwrite`.
+/// and keeps it offline — except that a HEAD still on a branch is detached
+/// there: a ref edit, no tree written. A pinned repo is always detached, so
+/// a branch HEAD is on later is never the pin's doing. `git_ref` is the
+/// branch or tag the pin was taken from, used only to find the commit when
+/// the server will not hand it out by id. As with [`align`], only what
+/// changed is written unless `force_overwrite`.
 pub fn pin(
     repo_dir: &Path,
     git_ref: Option<&str>,
@@ -665,6 +685,14 @@ pub fn pin(
     let _ = repo.committer_or_set_generic_fallback();
 
     if !force_overwrite && repo.head_id().ok().map(|id| id.detach()) == Some(commit) {
+        // Already at the pin, but perhaps still on the branch it was taken
+        // from (a list that named the branch, then pinned its tip). The
+        // planner reads a branch HEAD is on as the user's choice whenever
+        // the record holds a pin, so detach it here.
+        if repo.head_name().ok().flatten().is_some() {
+            let edit = update_ref(head_ref_name(), Target::Object(commit), PIN_REFLOG_MESSAGE);
+            repo.edit_reference(edit).with_context(|| "Failed to detach HEAD at the pin")?;
+        }
         clear_align_marker(&repo);
         return Ok(commit);
     }
@@ -1448,18 +1476,26 @@ pub fn remote_tip(scratch: &Path, url: &str, git_ref: Option<&str>) -> Res<Objec
     }
 }
 
-/// The name of the remote's default branch (what its `HEAD` points at), as
-/// `git ls-remote --symref <url> HEAD` says it, without fetching anything.
-/// `scratch` is as for [`remote_tip`].
-pub fn remote_default_branch(scratch: &Path, url: &str) -> Res<String> {
+/// The name of the default branch (what its `HEAD` points at) of the remote
+/// at `url`, as `git ls-remote --symref <url> HEAD` says it, without
+/// fetching anything, asked from `repo`. Its `origin`, when that names
+/// `url`, is the remote asked: what the repo configures for it (a
+/// proxy, say) applies, as it does to a fetch. Otherwise a remote at `url`,
+/// rewritten by the repo's `insteadOf` rules. Everything happens in memory:
+/// the refspec is replaced on this handle only, and nothing is written.
+fn default_branch_from(repo: &gix::Repository, url: &str) -> Res<String> {
     const LOCAL: &str = "refs/cactup/head";
-    let repo = gix::open(scratch).with_context(|| format!("Failed to open '{}'", scratch.display()))?;
     let spec = format!("HEAD:{LOCAL}");
-    let remote = repo
-        .remote_at(url)
-        .with_context(|| format!("Invalid remote URL {url}"))?
-        .with_refspecs(Some(spec.as_str()), Direction::Fetch)
-        .context("Invalid refspec")?;
+    let origin = repo.find_remote("origin").ok().filter(|origin| {
+        origin
+            .url(Direction::Fetch)
+            .is_some_and(|u| normalize_url(&u.to_bstring().to_string()) == normalize_url(url))
+    });
+    let mut remote = match origin {
+        Some(origin) => origin,
+        None => repo.remote_at(url).with_context(|| format!("Invalid remote URL {url}"))?,
+    };
+    remote.replace_refspecs(Some(spec.as_str()), Direction::Fetch).context("Invalid refspec")?;
     let (map, _) = remote
         .connect(Direction::Fetch)
         .with_context(|| format!("Failed to connect to {url}"))?
@@ -1469,7 +1505,12 @@ pub fn remote_default_branch(scratch: &Path, url: &str) -> Res<String> {
         .remote_refs
         .iter()
         .find_map(|r| match r {
-            gix::protocol::handshake::Ref::Symbolic { full_ref_name, target, .. } if full_ref_name == "HEAD" => {
+            // Unborn: the remote has no commits yet, but HEAD still names
+            // the branch its first one will be on.
+            gix::protocol::handshake::Ref::Symbolic { full_ref_name, target, .. }
+            | gix::protocol::handshake::Ref::Unborn { full_ref_name, target }
+                if full_ref_name == "HEAD" =>
+            {
                 Some(target.to_string())
             }
             _ => None,
@@ -1478,20 +1519,34 @@ pub fn remote_default_branch(scratch: &Path, url: &str) -> Res<String> {
     Ok(head.strip_prefix("refs/heads/").unwrap_or(&head).to_owned())
 }
 
-/// [`remote_default_branch`] asked on a thread of its own, from a scratch
-/// repository it makes, while this one polls the interrupt flag: the gix
-/// connection takes no interrupt flag of its own, and a stalled remote must
-/// not outlast a Ctrl-C. On interrupt the thread is left to finish (or not)
-/// on its own; cactup is stopping.
-pub fn ask_remote_default_branch(url: &str) -> Res<String> {
+/// [`default_branch_from`] asked on a thread of its own while this one
+/// polls the interrupt flag: the gix connection takes no interrupt flag of
+/// its own, and a stalled remote must not outlast a Ctrl-C. On interrupt the
+/// thread is left to finish (or not) on its own; cactup is stopping.
+///
+/// Asked from `clone`, the repo's own clone, when there is one, so that its
+/// configuration applies (see [`default_branch_from`]); nothing is written
+/// to it. With none, from a scratch repository made here, not on the
+/// thread, so that it is deleted on the way out even when the thread is
+/// abandoned.
+pub fn ask_remote_default_branch(clone: Option<&Path>, url: &str) -> Res<String> {
+    let _span = crate::timing::span("git default branch");
+    // Held until this returns, by whichever way it does: dropping it is
+    // what deletes the scratch repository.
+    let (from, _scratch) = match clone {
+        Some(clone) => (clone.to_owned(), None),
+        None => {
+            let scratch = tempfile::tempdir().context("Failed to create a scratch directory")?;
+            gix::init_bare(scratch.path()).context("Failed to create a scratch repository")?;
+            (scratch.path().to_owned(), Some(scratch))
+        }
+    };
     let (send, recv) = std::sync::mpsc::channel();
     let url = url.to_owned();
     std::thread::spawn(move || {
-        let answer = (|| {
-            let scratch = tempfile::tempdir().context("Failed to create a scratch directory")?;
-            gix::init_bare(scratch.path()).context("Failed to create a scratch repository")?;
-            remote_default_branch(scratch.path(), &url)
-        })();
+        let answer = gix::open(&from)
+            .with_context(|| format!("Failed to open '{}'", from.display()))
+            .and_then(|repo| default_branch_from(&repo, &url));
         let _ = send.send(answer);
     });
     loop {
@@ -1570,6 +1625,15 @@ pub fn head_of(repo_dir: &Path) -> Res<(String, ObjectId)> {
         .unwrap_or_else(|| DETACHED.to_owned());
     let id = repo.head_id().with_context(|| "HEAD points at no commit")?.detach();
     Ok((branch, id))
+}
+
+/// Whether `branch` has a remote-tracking ref (`refs/remotes/origin/<branch>`)
+/// in the repo: false for a branch created locally, or a repo that cannot be
+/// opened. A local check, no network: cactup's clones are single-branch, so
+/// a branch the remote does have may have no remote-tracking ref either.
+pub fn tracks_origin(repo_dir: &Path, branch: &str) -> bool {
+    let tracking = format!("refs/remotes/origin/{branch}");
+    gix::open(repo_dir).is_ok_and(|repo| repo.find_reference(&tracking).is_ok())
 }
 
 /// A cheap early-out for the planner: is the repo already exactly at

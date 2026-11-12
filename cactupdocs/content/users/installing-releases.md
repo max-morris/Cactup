@@ -181,6 +181,27 @@ cactup inst refetch
 This re-reads the live thornlist, updates every repo that's clean, and
 clones anything newly referenced that's still missing.
 
+A component whose thornlist entry names no `!REPO_BRANCH` follows its
+repository's default branch, as `git clone` does. Refetch asks the
+repository which branch that is each time, so when a project moves its
+default (from `master` to `main`, say), the next refetch moves the repo with
+it. Dropping `!REPO_BRANCH` from an entry, or a `!REPO_COMMIT` pin from an
+entry that names no branch, likewise puts the repo on the default branch. A
+branch you checked out yourself is left alone, like any other local state
+(see the skip contract below). Older versions of cactup did not record
+whether a branch was yours or the thornlist's, so after an upgrade such a
+repo sitting on a branch other than the default is skipped as a switched
+branch until you say otherwise: `cactup inst refetch --overwrite <repo>`
+moves it to the default branch. The same goes, once, for switching to a
+release or thornlist that names a branch the repo already has locally:
+such a repo is skipped as a switched branch, and `--overwrite <repo>` moves
+it. When the repository cannot be asked which branch is its default (the
+server is unreachable, say), a repo on a branch cactup put it on stays
+there. One on a branch you checked out is not fetched, left alone, and so
+is one whose fetch record an older version of cactup wrote, even on the
+default branch: refetch reports each as a failure and exits nonzero, and
+refetching once the server answers again fetches them.
+
 ### Switching release or thornlist
 
 Refetch straight to another Einstein Toolkit release — this switches every

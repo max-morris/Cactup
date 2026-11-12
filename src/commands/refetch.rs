@@ -174,7 +174,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // stdout, so it must be shut down before any of that printing starts.
     let (progress, renderer) = manifest::setup_prodash();
     let mut classify = progress.add_child("classify repos");
-    let mut plan = fetch::plan(&list, &inst.root, &mut classify)?;
+    let mut plan = fetch::plan(&list, &inst.root, fetch::DefaultBranches::Ask, &mut classify)?;
     drop(classify);
     renderer.shutdown_and_wait();
 
@@ -309,12 +309,16 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             report.downloads.len()
         );
     }
+    // `changed` is what moved the sources (and so what the configs hear
+    // about, below); a pin that only took HEAD off a branch changed the
+    // checkout, not the sources, and counts as updated here alone.
     let changed = report.repos.iter().filter(|r| r.changed).count();
-    let up_to_date = report.repos.len() - changed;
+    let updated = report.repos.iter().filter(|r| r.changed || r.detached.is_some()).count();
+    let up_to_date = report.repos.len() - updated;
     println!(
         "Fetched {} repo(s): {} updated, {} already up to date; {} download(s).",
         report.repos.len(),
-        changed,
+        updated,
         up_to_date,
         report.downloads.len()
     );
@@ -333,7 +337,12 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     }
     if ctx.globals.verbose {
         for r in &report.repos {
-            let mark = if r.changed { "updated" } else { "up to date" };
+            let mark = match (&r.detached, r.changed) {
+                (Some(branch), true) => format!("updated, detached off {branch}"),
+                (Some(branch), false) => format!("detached off {branch}"),
+                (None, true) => "updated".to_owned(),
+                (None, false) => "up to date".to_owned(),
+            };
             let forced = r.forced.as_deref().map(|f| format!(" (forced: {f})")).unwrap_or_default();
             println!("  {} @ {}: {mark}{forced}", r.repo, r.branch.as_deref().unwrap_or("<default>"));
         }
@@ -360,7 +369,10 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // Thornlist writes. The pristine as-fetched copy always tracks what was
     // fetched; the live copy is only replaced by an explicit source (and the
     // old live copy is snapshotted first).
-    let fetch_ok = report.failures.is_empty();
+    // A repo skipped because its remote did not answer is a failure too:
+    // the remote, not local state, kept it from being fetched.
+    let failures = failure_lines(&plan.skipped, &report.failures);
+    let fetch_ok = failures.is_empty();
     let mut recorded = false;
     if fetch_ok || had_work {
         if source.is_explicit() {
@@ -491,19 +503,33 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
         report_configs(&inst, &configs, matches!(source, Source::Release { .. }));
     }
 
-    if !report.failures.is_empty() {
-        println!("{}", format!("{} fetch failure(s):", report.failures.len()).bright_red().bold());
-        for f in &report.failures {
-            println!("  {}: {}", f.what.bold(), f.error);
+    if !failures.is_empty() {
+        println!("{}", format!("{} fetch failure(s):", failures.len()).bright_red().bold());
+        for (what, error) in &failures {
+            println!("  {}: {error}", what.bold());
         }
         println!(
             "The recorded thornlist {}.",
             if recorded { "was updated despite the failures" } else { "is unchanged" }
         );
-        bail!("Refetch completed with {} failure(s)", report.failures.len());
+        bail!("Refetch completed with {} failure(s)", failures.len());
     }
 
     Ok(())
+}
+
+/// Every failure of a refetch, as (what, why): the fetch's own, then each
+/// repo the plan skipped because its remote did not say which branch is its
+/// default. Such a skip is a failure, not a choice to keep local state: the
+/// remote is what is in the way, and refetching once it answers is the fix.
+/// Non-empty exactly when the refetch must exit nonzero.
+fn failure_lines(skipped: &[fetch::SkippedRepo], failures: &[fetch::Failure]) -> Vec<(String, String)> {
+    let fetched = failures.iter().map(|f| (f.what.clone(), f.error.clone()));
+    let unanswered = skipped.iter().filter(|s| s.reason.remote_did_not_answer()).map(|s| {
+        let why = format!("not fetched: {}; refetch again once the remote answers", s.reason.describe());
+        (s.repo.clone(), why)
+    });
+    fetched.chain(unanswered).collect()
 }
 
 /// `owner/stack` with no version, for an installation on a release of that
@@ -743,6 +769,12 @@ fn skip_status_lines(
 ) -> Vec<(Tone, String)> {
     let (forced_repos, kept): (Vec<&fetch::SkippedRepo>, Vec<&fetch::SkippedRepo>) =
         skipped.iter().partition(|s| forced.contains(&s.repo));
+    // A repo whose remote did not answer is not keeping local state: nothing
+    // on disk is in the way, and `-f` backs nothing up. It is a failure, with
+    // a headline of its own up front and a place among the failures in the
+    // summary.
+    let (unanswered, kept): (Vec<&fetch::SkippedRepo>, Vec<&fetch::SkippedRepo>) =
+        kept.into_iter().partition(|s| s.reason.remote_did_not_answer());
     let mut lines = Vec::new();
 
     let detail = |lines: &mut Vec<(Tone, String)>, s: &fetch::SkippedRepo| {
@@ -781,6 +813,26 @@ fn skip_status_lines(
                      HEADs stay in the repo's reflog.",
                     "~/.cactup/refetch-backups/<alias>/".bold()
                 ),
+            ));
+        }
+    }
+
+    if !unanswered.is_empty() && matches!(phase, SkipPhase::BeforeFetch) {
+        let verb = if dry_run { "would not be fetched" } else { "will not be fetched" };
+        lines.push((
+            Tone::Alarm,
+            format!(
+                "{} repo(s) {verb}: the remote did not say which branch is its default.",
+                unanswered.len()
+            ),
+        ));
+        if !silent {
+            for s in &unanswered {
+                detail(&mut lines, s);
+            }
+            lines.push((
+                Tone::Plain,
+                "  Nothing on disk is in the way; refetch again once the remote answers.".to_owned(),
             ));
         }
     }
@@ -1164,6 +1216,8 @@ fn print_dry_run(
                 "FORCE:".bright_red(),
                 s.reason.describe()
             );
+        } else if s.reason.remote_did_not_answer() {
+            println!("  {}: {} {}", s.repo.bold(), "FAIL:".bright_red(), s.reason.describe());
         } else {
             println!("  {}: {} {}", s.repo.bold(), "SKIP:".yellow(), s.reason.describe());
         }
@@ -1398,10 +1452,11 @@ fn summarize_names(names: &[String], shown: usize) -> String {
 }
 
 /// The repos an `installation refetch` did not fetch — skipped as dirty, or
-/// failed — mapped to why and the thorns they back (§2.1's
-/// `unfetched_repos`). A skip is a supported workflow (the user may have
-/// local work there); a failure is an error the user asked to avoid and did
-/// not, so failures are inserted last and unconditionally: `plan.skipped`
+/// failed (a skip because the remote did not answer included) — mapped to
+/// why and the thorns they back (§2.1's `unfetched_repos`). A skip is a
+/// supported workflow (the user may have local work there); a failure is an
+/// error the user asked to avoid and did not, so the fetch's failures are
+/// inserted last and unconditionally: `plan.skipped`
 /// and `report.failures` cannot name the same repo in practice (a skipped
 /// repo never reaches `execute`), but this order — skips via `entry`/
 /// `or_insert`, failures via a plain `insert` — is used anyway so a future
@@ -1410,8 +1465,14 @@ fn summarize_names(names: &[String], shown: usize) -> String {
 fn unfetched_repos(plan: &fetch::Plan, report: &fetch::ExecReport) -> IndexMap<String, UnfetchedRepo> {
     let mut out: IndexMap<String, UnfetchedRepo> = IndexMap::new();
     for s in &plan.skipped {
+        // A remote that did not answer is a failure, not a skip: nothing of
+        // the user's is kept there, and `-f` is not the remedy.
+        let reason = match s.reason.remote_did_not_answer() {
+            true => UnfetchedReason::Failed,
+            false => UnfetchedReason::Skipped,
+        };
         out.entry(s.repo.clone()).or_insert_with(|| UnfetchedRepo {
-            reason: UnfetchedReason::Skipped,
+            reason,
             thorns: s.checkouts.clone(),
             detail: Some(s.reason.describe()),
         });
@@ -1661,7 +1722,14 @@ mod tests {
         let mut progress = prodash::tree::Root::new().add_child("clone");
         fetch::git::clone(&url, None, &dir, &mut progress).unwrap();
         let (branch, head) = fetch::git::head_of(&dir).unwrap();
-        let record = fetch::RepoRecord { url: url.clone(), branch: Some(branch), head: head.to_string(), commit: None };
+        let record = fetch::RepoRecord {
+            url: url.clone(),
+            branch: Some(branch),
+            follows_default: true,
+            named_branch: false,
+            head: head.to_string(),
+            commit: None,
+        };
         let records = fetch::FetchRecords { repos: vec![("KadathThorn".into(), record)], downloads: Vec::new() };
         fetch::FetchState::record(&inst.root, &records).unwrap();
         let exclude = dir.join(".git/info/exclude");
@@ -1709,7 +1777,14 @@ mod tests {
         }
         fs::write(repos.join("fuka/src/kadath.cpp"), "x").unwrap();
         std::os::unix::fs::symlink("../../fuka", repos.join("KadathThorn/src/fuka")).unwrap();
-        let record = |url: &str| fetch::RepoRecord { url: url.into(), branch: None, head: "a".repeat(40), commit: None };
+        let record = |url: &str| fetch::RepoRecord {
+            url: url.into(),
+            branch: None,
+            follows_default: false,
+            named_branch: false,
+            head: "a".repeat(40),
+            commit: None,
+        };
         let records = fetch::FetchRecords {
             repos: ["KadathThorn", "fuka", "old"].iter().map(|r| (r.to_string(), record(r))).collect(),
             downloads: Vec::new(),
@@ -1722,7 +1797,7 @@ mod tests {
         )
         .unwrap();
         let mut progress = prodash::tree::Root::new().add_child("plan");
-        let plan = fetch::plan(&list, tmp.path(), &mut progress).unwrap();
+        let plan = fetch::plan(&list, tmp.path(), fetch::DefaultBranches::Ask, &mut progress).unwrap();
         let orphans: Vec<String> = enumerate_orphans(&inst, &list, &plan).unwrap().into_iter().map(|o| o.repo).collect();
         assert_eq!(orphans, ["old"]);
 
@@ -1769,6 +1844,8 @@ mod tests {
             dir: PathBuf::from(format!("/nonexistent/{repo}")),
             url: "https://example.invalid/repo.git".to_string(),
             branch: Some("main".to_string()),
+            follows_default: false,
+            named_branch: true,
             commit: None,
             reason: fetch::git::DirtyReason::WorktreeModified(vec!["src/foo.c".to_string()]),
             untracked: Vec::new(),
@@ -1782,6 +1859,8 @@ mod tests {
             dir: PathBuf::from(format!("/nonexistent/{repo}")),
             url: "https://example.invalid/repo.git".to_string(),
             branch: Some("main".to_string()),
+            follows_default: false,
+            named_branch: true,
             commit: None,
             action: GitAction::Update,
             checkouts: checkouts.iter().map(|s| s.to_string()).collect(),
@@ -1906,6 +1985,95 @@ mod tests {
         assert_eq!(lines[0].0, Tone::Alarm);
         assert_eq!(lines[1].0, Tone::Warn);
         assert!(!joined(&lines).contains("thorns:"), "{:?}", joined(&lines));
+    }
+
+    /// A refetch whose plan skipped a repo because its remote did not say
+    /// which branch is its default (unreachable, and nothing vouches for
+    /// the branch the clone is on) fails: the repo is among the failures,
+    /// so the refetch exits nonzero, recorded as failed, not skipped, and
+    /// nowhere counted as a skip whose local state was preserved or offered
+    /// `-f` as the remedy.
+    #[test]
+    fn an_unanswered_default_branch_fails_the_refetch_rather_than_skipping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let upstream = tmp.path().join("upstream");
+        fetch::git::testrepo::init(&upstream);
+        fetch::git::testrepo::commit(&upstream, "initial");
+        let root = tmp.path().join("install");
+        let mut progress = prodash::tree::Root::new().add_child("test clone");
+        fetch::git::clone(&upstream.to_string_lossy(), None, &root.join("Cactus/repos/R"), &mut progress)
+            .unwrap();
+        // No fetch record vouches for the clone's branch, and the remote is gone.
+        std::fs::rename(&upstream, tmp.path().join("away")).unwrap();
+        let list = thornlist::parse(&format!(
+            "!CRL_VERSION = 1.0\n\
+             !DEFINE ROOT = Cactus\n\n\
+             !TARGET   = $ROOT\n\
+             !TYPE     = git\n\
+             !URL      = {}\n\
+             !NAME     = R\n\
+             !CHECKOUT = Makefile\n",
+            upstream.to_string_lossy()
+        ))
+        .unwrap();
+        let mut classify = prodash::tree::Root::new().add_child("test plan");
+        let plan = fetch::plan(&list, &root, fetch::DefaultBranches::Ask, &mut classify).unwrap();
+        assert!(plan.git.is_empty(), "{:?}", plan.git);
+        assert!(plan.skipped[0].reason.remote_did_not_answer(), "{:?}", plan.skipped);
+        let report = fetch::ExecReport::default();
+
+        let failures = failure_lines(&plan.skipped, &report.failures);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert_eq!(failures[0].0, "R");
+        assert!(failures[0].1.contains("refetch again once the remote answers"), "{}", failures[0].1);
+
+        let unfetched = unfetched_repos(&plan, &report);
+        assert_eq!(unfetched["R"].reason, UnfetchedReason::Failed);
+
+        for phase in [SkipPhase::BeforeFetch, SkipPhase::Summary] {
+            let lines = skip_status_lines(&plan.skipped, &BTreeSet::new(), false, false, false, phase);
+            let all = joined(&lines);
+            assert!(!all.contains("skipped"), "{all}");
+            assert!(!all.contains("local state preserved"), "{all}");
+            assert!(!all.contains("--overwrite"), "{all}");
+            match phase {
+                SkipPhase::BeforeFetch => {
+                    let alarm = only_at(&lines, Tone::Alarm);
+                    let said = "1 repo(s) will not be fetched: the remote did not say which branch is its default.";
+                    assert_eq!(lines[alarm].1, said);
+                    assert!(all.contains("refetch again once the remote answers"), "{all}");
+                }
+                // Reported among the failures instead.
+                SkipPhase::Summary => assert!(lines.is_empty(), "{all}"),
+            }
+        }
+    }
+
+    /// Beside a repo kept for its local state, an unanswered one counts only
+    /// under its own headline, and the `-f` remedy names only the kept one.
+    #[test]
+    fn skip_status_lines_count_an_unanswered_repo_apart_from_the_kept_ones() {
+        let unanswered = fetch::SkippedRepo {
+            branch: None,
+            follows_default: true,
+            named_branch: false,
+            reason: fetch::git::DirtyReason::DefaultUnknown {
+                head: "rel".to_owned(),
+                why: "Failed to connect".to_owned(),
+            },
+            ..skipped("Cottonmouth", &["Cottonmouth/Foo"])
+        };
+        let repos = vec![unanswered, skipped("SpacetimeX", &["SpacetimeX/WeylScal4"])];
+        let lines = skip_status_lines(&repos, &BTreeSet::new(), false, false, true, SkipPhase::BeforeFetch);
+
+        let alarm = only_at(&lines, Tone::Alarm);
+        let warn = only_at(&lines, Tone::Warn);
+        assert!(lines[alarm].1.starts_with("1 repo(s) would not be fetched"), "{}", lines[alarm].1);
+        assert!(lines[warn].1.contains("1 repo(s) would be skipped (local state preserved)"), "{}", lines[warn].1);
+        let at = |name: &str| lines.iter().position(|(_, l)| l.contains(name)).unwrap();
+        assert!(alarm < at("Cottonmouth") && at("Cottonmouth") < warn, "{:?}", joined(&lines));
+        assert!(joined(&lines).contains("--overwrite SpacetimeX"), "{:?}", joined(&lines));
+        assert!(!joined(&lines).contains("--overwrite Cottonmouth"), "{:?}", joined(&lines));
     }
 
     #[test]

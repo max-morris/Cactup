@@ -336,25 +336,52 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     // the renderer draws on stderr and must not fight it.
     let (progress, renderer) = manifest::setup_prodash();
     let mut classify = progress.add_child("classify repos");
-    let plan = crate::fetch::plan(&list, &install_dir, &mut classify)?;
+    let plan = crate::fetch::plan(
+        &list,
+        &install_dir,
+        crate::fetch::DefaultBranches::Recorded,
+        &mut classify,
+    )?;
     drop(classify);
     renderer.shutdown_and_wait();
 
     // Installing over a directory that already holds repos (a re-run after an
     // interrupted install, say): one that is modified, or only partly checked
     // out, would be left as it is and the tree registered anyway, missing
-    // files and all. Refuse instead, naming them.
+    // files and all. Refuse instead, naming them. One skipped because its
+    // remote did not say which branch is its default is refused too, but
+    // nothing on disk is in its way: installing again once the remote
+    // answers is the fix, and its message says that instead.
     if !plan.skipped.is_empty() {
         let repos_dir = crate::installation::cactus_root_of(&install_dir, &root).join("repos");
-        let mut message = format!(
-            "{} repo(s) in '{}' have local changes or an incomplete checkout:",
-            plan.skipped.len(),
-            repos_dir.display()
-        );
-        for s in &plan.skipped {
-            message.push_str(&format!("\n  {}: {}", s.repo, s.reason.describe()));
+        let (unanswered, dirty): (Vec<_>, Vec<_>) =
+            plan.skipped.iter().partition(|s| s.reason.remote_did_not_answer());
+        let mut message = String::new();
+        if !dirty.is_empty() {
+            message.push_str(&format!(
+                "{} repo(s) in '{}' have local changes or an incomplete checkout:",
+                dirty.len(),
+                repos_dir.display()
+            ));
+            for s in &dirty {
+                message.push_str(&format!("\n  {}: {}", s.repo, s.reason.describe()));
+            }
+            message.push_str("\nDelete them or the installation directory, then install again.");
         }
-        message.push_str("\nDelete them or the installation directory, then install again.");
+        if !unanswered.is_empty() {
+            if !message.is_empty() {
+                message.push('\n');
+            }
+            message.push_str(&format!(
+                "{} repo(s) in '{}' could not be checked against their remote:",
+                unanswered.len(),
+                repos_dir.display()
+            ));
+            for s in &unanswered {
+                message.push_str(&format!("\n  {}: {}", s.repo, s.reason.describe()));
+            }
+            message.push_str("\nInstall again once the remote answers.");
+        }
         bail!(message);
     }
 
@@ -677,7 +704,8 @@ mod tests {
         assert_eq!(list.components()[0].commit.as_deref(), Some(pinned.to_string().as_str()));
         let root = tmp.path().join("install");
         let mut progress = prodash::tree::Root::new().add_child("test plan");
-        let plan = crate::fetch::plan(&list, &root, &mut progress).unwrap();
+        let plan = crate::fetch::plan(&list, &root, crate::fetch::DefaultBranches::Recorded, &mut progress)
+            .unwrap();
         let report = crate::fetch::execute(&plan, &root).unwrap();
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         let repo = root.join("Cactus/repos/carpetx");
