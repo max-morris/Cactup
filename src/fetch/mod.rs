@@ -1863,6 +1863,29 @@ pub(crate) mod tests {
         assert!(!plan.git[0].follows_default);
     }
 
+    /// A list names a branch, then pins the commit the repo already sits at:
+    /// the pin moves nothing, but leaves HEAD detached, as every pin does.
+    /// Dropping both later is then cactup's detached HEAD to move, to the
+    /// remote's default, not a branch switch the user has to force.
+    #[test]
+    fn a_pin_at_the_head_detaches_it_and_dropping_it_reaches_the_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (upstream, release, default, tip) = upstream_with_a_release_branch(tmp.path());
+        let root = tmp.path().join("install");
+        let dir = root.join("Cactus/repos/R");
+        refetch_once(&list_naming(&upstream, Some("rel"), None), &root);
+        assert_eq!(git::head_of(&dir).unwrap(), ("rel".to_owned(), release));
+
+        let (plan, report) = refetch_once(&list_naming(&upstream, Some("rel"), Some(release)), &root);
+        assert!(matches!(plan.git[0].action, GitAction::Pin));
+        assert!(!report.repos[0].changed, "the pin moved nothing");
+        assert_eq!(git::head_of(&dir).unwrap(), (git::DETACHED.to_owned(), release));
+
+        let (plan, _) = refetch_once(&list_without_a_branch(&upstream), &root);
+        assert!(matches!(plan.git[0].action, GitAction::Align));
+        assert_eq!(git::head_of(&dir).unwrap(), (default, tip));
+    }
+
     /// A branch the user checked out after a branchless pin is theirs: the
     /// pin's record names no branch, and that must not read as "cactup's".
     #[test]

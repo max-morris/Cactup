@@ -648,10 +648,12 @@ fn delete_pin_ref(repo: &gix::Repository) {
 /// pin, §3.2), fetching the commit only when the repo lacks it, and returning
 /// it. A repo already at the commit is left alone without touching the
 /// network — which is what keeps a refetch from ever moving a pinned repo,
-/// and keeps it offline. `git_ref` is the branch or tag the pin was taken
-/// from, used only to find the commit when the server will not hand it out
-/// by id. As with [`align`], only what changed is written unless
-/// `force_overwrite`.
+/// and keeps it offline — except that a HEAD still on a branch is detached
+/// there: a ref edit, no tree written. A pinned repo is always detached, so
+/// a branch HEAD is on later is never the pin's doing. `git_ref` is the
+/// branch or tag the pin was taken from, used only to find the commit when
+/// the server will not hand it out by id. As with [`align`], only what
+/// changed is written unless `force_overwrite`.
 pub fn pin(
     repo_dir: &Path,
     git_ref: Option<&str>,
@@ -666,6 +668,14 @@ pub fn pin(
     let _ = repo.committer_or_set_generic_fallback();
 
     if !force_overwrite && repo.head_id().ok().map(|id| id.detach()) == Some(commit) {
+        // Already at the pin, but perhaps still on the branch it was taken
+        // from (a list that named the branch, then pinned its tip). The
+        // planner reads a branch HEAD is on as the user's choice whenever
+        // the record holds a pin, so detach it here.
+        if repo.head_name().ok().flatten().is_some() {
+            let edit = update_ref(head_ref_name(), Target::Object(commit), PIN_REFLOG_MESSAGE);
+            repo.edit_reference(edit).with_context(|| "Failed to detach HEAD at the pin")?;
+        }
         clear_align_marker(&repo);
         return Ok(commit);
     }
