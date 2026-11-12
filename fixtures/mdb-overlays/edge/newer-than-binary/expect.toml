@@ -1,0 +1,4 @@
+# mdb-generation = 99, newer than any binary: refused, files left as they are.
+result-generation = 99
+outcome = "refused"
+findings = ["overlay-newer-than-binary", "files-untouched"]
