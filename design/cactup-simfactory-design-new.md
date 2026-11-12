@@ -1991,14 +1991,17 @@ ordinal `0`–`4`, and is always rendered as the name (`cactup knob` shows
 `normal`, `database.json` holds `"2"`). `wisdom-kind` accepts and stores
 `relevant|all`.
 
-Additionally three **maintenance** knobs for distribution (D14, §17):
+Additionally four **maintenance** knobs for distribution and the registry (D14, §17, §8.10):
 `autoupdate` (`auto`, the default, `|notify|off`; read leniently — garbage
 means `auto`), `update-url` (https base of the site serving `latest.json` —
 plain `http://` only for a loopback host, `127.0.0.1`/`localhost`/`[::1]`,
 since what it serves is installed unasked; trailing `/` stripped; default
 `https://max-morris.github.io/Cactup`) and
 `mdb-url` (git URL whose `mdb` branch is synced; default
-`https://github.com/max-morris/Cactup.git`). Their `KnobSpec` has
+`https://github.com/max-morris/Cactup.git`) and `cactarium-url` (the
+registry's base URL, `http(s)://`, no query or fragment, trailing `/`
+stripped; default `https://cactarium.cct.lsu.edu`; `CACTARIUM_URL`
+outranks it, §8.10). Their `KnobSpec` has
 `snapshot = false`: they configure the cactup installation, not a job, so
 `knob_snapshot()` never freezes them into restart/build/test metadata.
 
@@ -4423,7 +4426,8 @@ kind of install-time provenance, `simfile`, beside `release` and `thornlist`;
 `cactup import <file.sim>` reproduces a `.sim` in one step: `install
 --simfile` under the file's name (or `--alias`), `cactup build` of a config of
 that name — in the foreground, or, on a machine that queues builds, submitted
-and blocked on (§7.9) — then `sim create` from the file's parfile, and with
+and blocked on (§7.9), with `--flavor` and `-j`/`--make-jobs` passed to it —
+then `sim create` from the file's parfile, and with
 `--submit`/`--run` the simulation started. `import` takes every flag of the
 groups `sim submit` and `sim run` start with — the TOPOLOGY flags (§8.5), the
 universe flags (§4.8) and the start flags `--force-queue`, `--ignore-machine`,
@@ -4603,6 +4607,22 @@ whole anywhere adds all of them, and two specs resolving to different versions
 of one package are refused. A later add of the same package updates it,
 adding named thorns to those already enabled. All the packages are fetched in
 one pass and recorded together.
+
+**At a commit.** `owner/name[/Thorn]#<sha>` names only a commit: a full id or
+an abbreviation of at least 7 lowercase hex digits, which the registry
+resolves against the repository's history (an ambiguous or unknown prefix is
+its error). `owner/name@<x>` is read as a version, range or track first, and
+as a commit only when it names none of those. When a published version was
+frozen at that commit, the registry answers with that version
+(`owner/name@X.Y.Z`) and the add is an ordinary one. Otherwise it answers
+with the package read at that commit, `owner/name#<full id>`: no tag, and the
+registry's trust verdict, which cactup applies as for a branch tip (an
+untrusted package is refused or asked about,
+`--risky-allow-untrusted-artifacts`). cactup records it at the full id,
+pinned by `!REPO_COMMIT` with no `!REPO_BRANCH`; `inst show` and `add` name
+it `owner/name at commit <first 12 digits>`, and the yank check skips it (no
+version to yank). An answer whose commit does not start with what was asked
+for is refused.
 
 **The model.** `installation.toml` records each added package under
 `[[added]]` (package, exact version, tag, commit, URL, repo name, the

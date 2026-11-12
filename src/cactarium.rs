@@ -26,6 +26,25 @@ pub const DEFAULT_URL: &str = "https://cactarium.cct.lsu.edu";
 /// The knob naming another registry (a test instance, a mirror).
 pub const URL_KNOB: &str = "cactarium-url";
 
+/// Check a `cactarium-url` value: an `http(s)://host[:port][/path]` URL with
+/// no query or fragment, stored without a trailing slash. Plain http is
+/// accepted for a test instance on a private network.
+pub fn validate_url(value: &str) -> Res<String> {
+    let url = value.trim().trim_end_matches('/');
+    let parsed = (!url.contains(char::is_whitespace)).then(|| reqwest::Url::parse(url).ok()).flatten();
+    match parsed {
+        Some(p)
+            if matches!(p.scheme(), "http" | "https")
+                && p.host_str().is_some_and(|h| !h.is_empty())
+                && p.query().is_none()
+                && p.fragment().is_none() =>
+        {
+            Ok(url.to_owned())
+        }
+        _ => bail!("Invalid {URL_KNOB} \"{value}\": give the registry's address, like {DEFAULT_URL}"),
+    }
+}
+
 /// A connection to one registry: its base URL and, for writes, the token.
 pub struct Client {
     base: String,
@@ -95,11 +114,12 @@ impl Client {
         json(self.send(crate::fetch::download::client().get(&url))?)
     }
 
-    /// A package's branch tip (`head` or `master`: both its default branch),
-    /// its thorns at the tip's commit, and whether the Cactarium does not
-    /// trust it (then nobody has reviewed that code).
-    pub fn package_tip(&self, owner: &str, name: &str, tip: &str) -> Res<(cactup_ecosystem_common::api::PackageVersion, bool)> {
-        let url = self.url(&format!("/packages/{owner}/{name}/versions/{tip}"));
+    /// A package read at something no published version names: a branch
+    /// tip (`head` or `master`: both its default branch) or a full commit
+    /// id. Its thorns there, and whether the Cactarium does not trust it
+    /// (then nobody has reviewed that code).
+    pub fn package_at(&self, owner: &str, name: &str, at: &str) -> Res<(cactup_ecosystem_common::api::PackageVersion, bool)> {
+        let url = self.url(&format!("/packages/{owner}/{name}/versions/{at}"));
         let response = self.send(crate::fetch::download::client().get(&url))?;
         // Missing: untrusted, as for a stack tip.
         let untrusted = response.headers().get(UNTRUSTED_HEADER).is_none_or(|v| v.as_bytes() == b"true");
@@ -315,7 +335,7 @@ pub fn stack_release_text(db: &Database, req: &str, allow_untrusted: bool) -> Re
     let StackResponse { stack, unpinned, untrusted, contact } =
         client.stack_release(slug.owner.as_str(), slug.name.as_str(), &version)?;
     if untrusted {
-        confirm_untrusted(&stack.stack.to_string(), "stack", allow_untrusted)?;
+        confirm_untrusted(&stack.stack.to_string(), "stack", Unreviewed::Tip, allow_untrusted)?;
     }
     let pin_failed = || format!("Failed to pin stack {}", stack.stack);
     let (pins, unchecked) = crate::thornlist::recorded_pins(&stack.thornlist.text, &stack.repos).with_context(pin_failed)?;
@@ -333,34 +353,58 @@ pub fn stack_release_text(db: &Database, req: &str, allow_untrusted: bool) -> Re
     Ok(StackRelease { slug: stack.stack.to_string(), text, unpinned, contact })
 }
 
-/// The warning for an untrusted stack's branch tip, then the yes it needs:
-/// typed at a terminal, or given up front by the flag. Without either there
-/// is nobody to ask, so it is refused.
-pub(crate) fn confirm_untrusted(slug: &str, kind: &str, allow: bool) -> Res<()> {
+/// What an untrusted, unreviewed source is: a branch tip, or a commit no
+/// published version names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unreviewed {
+    Tip,
+    Commit,
+}
+
+impl Unreviewed {
+    fn noun(self) -> &'static str {
+        match self {
+            Unreviewed::Tip => "branch tip",
+            Unreviewed::Commit => "commit",
+        }
+    }
+}
+
+/// Whether there is a terminal to ask a question on.
+pub(crate) fn interactive() -> bool {
     use std::io::IsTerminal;
-    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-    confirm_untrusted_on(slug, kind, allow, interactive)
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// The warning for an untrusted stack's or package's unreviewed source,
+/// then the yes it needs: typed at a terminal, or given up front by the
+/// flag. Without either there is nobody to ask, so it is refused.
+pub(crate) fn confirm_untrusted(slug: &str, kind: &str, what: Unreviewed, allow: bool) -> Res<()> {
+    confirm_untrusted_on(slug, kind, what, allow, interactive())
 }
 
 /// [`confirm_untrusted`], told whether there is a terminal to ask on.
-fn confirm_untrusted_on(slug: &str, kind: &str, allow: bool, interactive: bool) -> Res<()> {
-    eprintln!(
-        "{}",
-        format!(
-            "WARNING: {slug} is a branch tip of a {kind} the Cactarium does not trust. Branch tips of untrusted \
-             {kind}s are never reviewed: installing it may fetch and build arbitrary code."
-        )
-        .red()
-        .bold()
-    );
+pub(crate) fn confirm_untrusted_on(slug: &str, kind: &str, what: Unreviewed, allow: bool, interactive: bool) -> Res<()> {
+    let why = match what {
+        Unreviewed::Tip => format!(
+            "{slug} is a branch tip of a {kind} the Cactarium does not trust. Branch tips of untrusted {kind}s \
+             are never reviewed"
+        ),
+        Unreviewed::Commit => format!(
+            "{slug} is a commit of a {kind} the Cactarium does not trust, and no published version names it, \
+             so nobody has reviewed it"
+        ),
+    };
+    eprintln!("{}", format!("WARNING: {why}: installing it may fetch and build arbitrary code.").red().bold());
     if allow {
         eprintln!("{}", "Going on anyway, as --risky-allow-untrusted-artifacts says.".yellow());
         return Ok(());
     }
     if !interactive {
         bail!(
-            "Refusing the untrusted branch tip {slug} without a terminal to confirm it on; use a release \
-             (owner/name@X.Y.Z or a range), or pass --risky-allow-untrusted-artifacts"
+            "Refusing the untrusted {} {slug} without a terminal to confirm it on; use a release \
+             (owner/name@X.Y.Z or a range), or pass --risky-allow-untrusted-artifacts",
+            what.noun()
         );
     }
     use std::io::Write;
@@ -476,6 +520,16 @@ mod tests {
     }
 
     #[test]
+    fn the_url_knob_takes_a_registry_address() {
+        assert_eq!(validate_url("https://cactarium.example.org/").unwrap(), "https://cactarium.example.org");
+        assert_eq!(validate_url(" http://localhost:8000 ").unwrap(), "http://localhost:8000");
+        for bad in ["cactarium.example.org", "ftp://x.org", "https://x.org/?a=1", "https://x.org/#f", "https:// x.org", ""] {
+            assert!(validate_url(bad).is_err(), "{bad}");
+        }
+        assert!(crate::database::knob_spec(URL_KNOB).is_some(), "a built-in knob");
+    }
+
+    #[test]
     fn an_unreachable_registry_is_one_line_naming_it() {
         // A port nothing listens on: bound, then let go.
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
@@ -527,8 +581,8 @@ mod tests {
         assert!(tip.unpinned && tip.untrusted);
         assert!(!response("max").untrusted);
 
-        confirm_untrusted_on("et/et-stack@head", "stack", true, false).unwrap();
-        let err = format!("{:#}", confirm_untrusted_on("et/et-stack@head", "stack", false, false).unwrap_err());
+        confirm_untrusted_on("et/et-stack@head", "stack", Unreviewed::Tip, true, false).unwrap();
+        let err = format!("{:#}", confirm_untrusted_on("et/et-stack@head", "stack", Unreviewed::Tip, false, false).unwrap_err());
         assert!(err.contains("without a terminal") && err.contains("--risky-allow-untrusted-artifacts"), "{err}");
     }
 
