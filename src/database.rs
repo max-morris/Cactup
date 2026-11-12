@@ -715,6 +715,7 @@ mod tests {
                 hostname: "workstation".to_owned(),
                 session: Some("4242:1234567".to_owned()),
             }),
+            overlaid: Vec::new(),
         }
     }
 
