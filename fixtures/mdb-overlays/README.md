@@ -58,7 +58,8 @@ The script fails if the real home, host name or user name still appears.
 Each is a snapshot with only what the case needs changed, plus `expect.toml`:
 
 - `result-generation`: the overlay's generation after the load (`0`: none
-  recorded).
+  recorded; `"current"`: the running binary's, for a case that migrates all
+  the way, so a later bump does not edit it).
 - `outcome`: `"migrated"`, `"refused"`, or `"untouched"` (not migrated, loads
   with a warning).
 - `findings`: short strings naming the notes or refusal kinds expected.
