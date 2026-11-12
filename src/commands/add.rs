@@ -843,8 +843,8 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<
     let mut meta = locked.meta()?;
     let pristine = std::fs::read_to_string(inst.source_thornlist_to_read())
         .context("This installation has no pristine thornlist to add to")?;
-    let live_path = inst.live_thornlist();
-    let live = std::fs::read_to_string(inst.live_thornlist_to_read()).unwrap_or_default();
+    let live_path = inst.live_thornlist()?;
+    let live = std::fs::read_to_string(inst.live_thornlist_to_read()?).unwrap_or_default();
     // The live list must be what cactup composed, or the add would silently
     // discard edits made to it by hand.
     let before = compose(&pristine, &meta.added)?;
@@ -1028,8 +1028,8 @@ pub fn remove(ctx: &Ctx, package: &str, force: bool) -> Res<()> {
     };
     let pristine = std::fs::read_to_string(inst.source_thornlist_to_read())
         .context("This installation has no pristine thornlist")?;
-    let live_path = inst.live_thornlist();
-    let live = std::fs::read_to_string(inst.live_thornlist_to_read()).unwrap_or_default();
+    let live_path = inst.live_thornlist()?;
+    let live = std::fs::read_to_string(inst.live_thornlist_to_read()?).unwrap_or_default();
     let before = compose(&pristine, &meta.added)?;
     let edits = super::refetch::component_divergence(&live, &before);
     if !edits.is_empty() && !force {
@@ -1835,8 +1835,8 @@ mod tests {
             let composed = compose(&pristine, &meta.added).unwrap();
             let it = Installed { tmp, ctx, inst, kadath_url, fuka_url, k, f };
             it.fetch(&composed);
-            std::fs::create_dir_all(it.inst.live_thornlist().parent().unwrap()).unwrap();
-            std::fs::write(it.inst.live_thornlist(), &composed).unwrap();
+            std::fs::create_dir_all(it.inst.live_thornlist().unwrap().parent().unwrap()).unwrap();
+            std::fs::write(it.inst.live_thornlist().unwrap(), &composed).unwrap();
             it
         }
 
@@ -2108,7 +2108,7 @@ mod tests {
         let result = super::super::refetch::dispatch(&it.ctx, args);
         std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(result.is_err(), "the prune fails");
-        let live = std::fs::read_to_string(it.inst.live_thornlist()).unwrap();
+        let live = std::fs::read_to_string(it.inst.live_thornlist().unwrap()).unwrap();
         assert!(live.contains("$ARR/Fuka/KadathThorn/src/fuka/../../../../repos/KadathThorn/src/fuka"), "{live}");
         assert!(!it.exclude().contains("/src/fuka"), "the dropped placement stays dropped: {}", it.exclude());
         assert!(it.kadath_dir().join("src/fuka/Cmake/CMakeLists.txt").is_file());

@@ -318,7 +318,7 @@ pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
 
 /// `cactup config delta [NAME]` — divergence from the last build.
 pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) -> Res<()> {
-    let cactus_root = inst.cactus_root();
+    let cactus_root = inst.cactus_root()?;
     let name = match name {
         Some(name) => name,
         None => inst.meta()?.active_config.ok_or_else(|| {
@@ -418,7 +418,7 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
         return Ok(());
     }
 
-    let repos_dir = inst.cactus_root().join("repos");
+    let repos_dir = inst.cactus_root()?.join("repos");
     // The per-repo detail (which commit, which files) is a second status walk
     // of just the changed repos; after a big refetch that can be most of the
     // tree, so it runs on the parallel pool before any of it is printed.
@@ -531,9 +531,9 @@ pub fn warn_if_sources_diverged(inst: &Installation, meta: &ConfigMeta, silent: 
         return Ok(());
     }
     let processed =
-        inst.cactus_root().join("configs").join(&meta.name).join(build::THORNLIST_PROCESSED);
+        inst.cactus_root()?.join("configs").join(&meta.name).join(build::THORNLIST_PROCESSED);
     let Ok(text) = std::fs::read_to_string(&processed) else { return Ok(()) };
-    let Ok(live) = fetch::probe_sources(&inst.root, &inst.cactus_root(), &text)? else { return Ok(()) };
+    let Ok(live) = fetch::probe_sources(&inst.root, &inst.cactus_root()?, &text)? else { return Ok(()) };
     let (delta, change) = build::source_delta(meta.sources.as_ref(), Some(&live));
     if matches!(delta, SourceDelta::Unknown | SourceDelta::Unchanged) {
         return Ok(());
@@ -668,7 +668,7 @@ fn short(id: &str) -> String {
 /// The installation's live thornlist — the same file `build::resolve_thornlist`
 /// treats as the default, falling back to the pristine as-fetched copy.
 fn read_live_thornlist(inst: &Installation) -> Res<crate::thornlist::Thornlist> {
-    let live = inst.live_thornlist_to_read();
+    let live = inst.live_thornlist_to_read()?;
     let pristine = inst.source_thornlist_to_read();
     let path: &Path = if live.is_file() { &live } else { &pristine };
     let text = std::fs::read_to_string(path)

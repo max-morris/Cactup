@@ -140,8 +140,8 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // the current one: the guard must still see hand edits in a file left
     // under the pre-rename name (§3.2), or an installation the name migration
     // could not reach would have those edits silently overwritten.
-    let live_path = inst.live_thornlist();
-    let live_read = inst.live_thornlist_to_read();
+    let live_path = inst.live_thornlist()?;
+    let live_read = inst.live_thornlist_to_read()?;
     let pristine_path = inst.source_thornlist();
     let pristine_read = inst.source_thornlist_to_read();
     let added = inst.meta()?.added;
@@ -213,7 +213,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // Orphans and config interactions are computed up front too — dry-run
     // prints all of it, and the real run needs them after the fetch anyway.
     let orphans = enumerate_orphans(&inst, &list, &plan)?;
-    let configs = crate::commands::config::list_configs(&inst.cactus_root())?;
+    let configs = crate::commands::config::list_configs(&inst.cactus_root()?)?;
 
     if args.dry_run {
         print_dry_run(&inst, &plan, &orphans, &configs, &divergence, &args, &forced_repo_names);
@@ -585,7 +585,7 @@ fn resolve_source(ctx: &Ctx, inst: &Installation, args: &RefetchArgs) -> Res<Sou
             fs::read_to_string(&path).with_context(|| format!("Failed to read '{}'", path.display()))?;
         return Ok(Source::File { path, bytes });
     }
-    let live = inst.live_thornlist_to_read();
+    let live = inst.live_thornlist_to_read()?;
     let path = if live.exists() { live } else { inst.source_thornlist_to_read() };
     let bytes =
         fs::read_to_string(&path).with_context(|| format!("Failed to read '{}'", path.display()))?;
@@ -862,7 +862,7 @@ fn enumerate_orphans(inst: &Installation, list: &Thornlist, plan: &fetch::Plan) 
     let mut referenced: BTreeSet<String> = list.components().iter().map(|c| c.repo.clone()).collect();
     // Resolve each #DISABLED thorn's arrangement symlink to the repo backing
     // it, and keep that repo too.
-    let arrangements = inst.cactus_root().join("arrangements");
+    let arrangements = inst.cactus_root()?.join("arrangements");
     for thorn in list.disabled_thorns() {
         let link = arrangements.join(thorn);
         if let Ok(target) = fs::read_link(&link)
@@ -983,7 +983,7 @@ fn prune_orphans(
     // never pruned — that config's build would fail outright.
     let mut in_use: BTreeSet<String> = BTreeSet::new();
     for (name, _) in configs {
-        let processed = inst.cactus_root().join("configs").join(name).join("cactup-thornlist.th");
+        let processed = inst.cactus_root()?.join("configs").join(name).join("cactup-thornlist.th");
         if let Ok(text) = fs::read_to_string(&processed) {
             for orphan in orphans {
                 for link in &orphan.symlinks {
@@ -1483,8 +1483,11 @@ fn report_configs(
     // machine is known here, so this is only an approximation; the build
     // itself makes the authoritative call via `provider_delta`. Any parse
     // failure silently disables the note below — a report must never fail
-    // the refetch.
-    let live_path = inst.live_thornlist_to_read();
+    // the refetch. The root cannot fail to resolve here (the refetch
+    // resolved it already, and it is cached), but if it did, no report.
+    let (Ok(live_path), Ok(cactus_root)) = (inst.live_thornlist_to_read(), inst.cactus_root()) else {
+        return;
+    };
     let live_list = fs::read_to_string(&live_path)
         .ok()
         .and_then(|text| thornlist::parse_with_base(&text, live_path.parent()).ok());
@@ -1497,7 +1500,7 @@ fn report_configs(
     // fetch itself, and a report must never fail the refetch.
     let fresh_shapes = live_list
         .as_ref()
-        .and_then(|list| crate::build::thorn_shapes_with_progress(&inst.cactus_root(), list).ok())
+        .and_then(|list| crate::build::thorn_shapes_with_progress(&cactus_root, list).ok())
         .map(|scan| scan.shapes);
 
     println!("{}", "Existing configs pick the refetched sources up on their next build:".bold());
@@ -1515,7 +1518,8 @@ fn report_configs(
             );
             continue;
         }
-        let custom = meta.as_ref().is_some_and(|m| !inst.is_live_thornlist(&m.thornlist));
+        let custom =
+            meta.as_ref().is_some_and(|m| inst.is_live_thornlist(&m.thornlist).is_ok_and(|live| !live));
         if custom {
             println!(
                 "  {}: `cactup build {name}` recompiles the refetched sources but keeps its own \

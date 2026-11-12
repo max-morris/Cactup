@@ -187,7 +187,7 @@ fn matching_installation(ctx: &Ctx, sim: &SimFile) -> Res<Option<String>> {
 fn differences(inst: &Installation, sim: &SimFile) -> Res<Vec<String>> {
     use crate::fetch::git::normalize_url;
     let wanted = crate::thornlist::parse(&sim.thornlist.text).context("The file's thornlist does not parse")?;
-    let live_path = inst.live_thornlist_to_read();
+    let live_path = inst.live_thornlist_to_read()?;
     let live_text = std::fs::read_to_string(&live_path)
         .with_context(|| format!("Failed to read '{}'", live_path.display()))?;
     let live = crate::thornlist::parse(&live_text)
@@ -217,7 +217,7 @@ fn differences(inst: &Installation, sim: &SimFile) -> Res<Vec<String>> {
         .iter()
         .filter_map(|r| Some((r.name.as_str(), r.commit.as_deref()?, repo_dirs.get(&r.name)?.clone())))
         .collect();
-    let repos_dir = inst.cactus_root().join("repos");
+    let repos_dir = inst.cactus_root()?.join("repos");
     let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
     let item = progress.add_child(format!("compare {} with the file's pins", inst.alias));
     item.init(Some(pins.len()), Some(prodash::unit::label("repos")));
@@ -636,8 +636,8 @@ mod tests {
         let plan = crate::fetch::plan(&list, &root, &mut progress).unwrap();
         let report = crate::fetch::execute(&plan, &root).unwrap();
         assert!(report.failures.is_empty(), "{:?}", report.failures);
-        std::fs::create_dir_all(inst.live_thornlist().parent().unwrap()).unwrap();
-        std::fs::write(inst.live_thornlist(), &live).unwrap();
+        std::fs::create_dir_all(inst.live_thornlist().unwrap().parent().unwrap()).unwrap();
+        std::fs::write(inst.live_thornlist().unwrap(), &live).unwrap();
 
         assert_eq!(differences(&inst, &sim("Makefile", v1)).unwrap(), Vec::<String>::new());
         let at_v2 = differences(&inst, &sim("Makefile", v2)).unwrap();

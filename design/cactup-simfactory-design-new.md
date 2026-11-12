@@ -555,7 +555,7 @@ written older).
 | File | Descriptor | Key | Current | `frozen_read` |
 |---|---|---|---|---|
 | `~/.cactup/database.json` | `database::DATABASE` (JSON; `legacy`: bare `detected-machine`) | `schema` | 1 | no |
-| `<inst>/.cactup/installation.toml` | `installation::INSTALLATION` (chain `[1 → 2]`, a no-op; down-step `[2 → 1]` unless some `[[added]]` has `libraries`, which an older writer would drop) | `schema` | 2 | no |
+| `<inst>/.cactup/installation.toml` | `installation::INSTALLATION` (chain `[1 → 2]`, a no-op; down-step `[2 → 1]` unless some `[[added]]` has `libraries`, which an older writer would drop. Binaries released before the bump read a schema-2 file's `root-dir` as `Cactus` on some paths, so with a custom `!DEFINE ROOT` they may report a missing tree instead of "upgrade") | `schema` | 2 | no |
 | `simulations.toml` | `installation::SIM_REGISTRY` | `schema` | 1 | no |
 | `tests.toml` | `installation::TEST_REGISTRY` | `schema` | 1 | no |
 | `<inst>/.cactup/fetch-state.toml` | `fetch::FETCH_STATE` | `schema` | 1 | no |
@@ -3671,7 +3671,10 @@ key (an installation from before root tracking landed) means the historical
 default, `Cactus`. `Installation::cactus_root()` resolves
 `<installation home>/<root-dir>` from this one recorded value, and every
 path that needs the source tree — build, sim, test, config, refetch,
-delta — goes through it rather than assuming a literal `Cactus`.
+delta — goes through it rather than assuming a literal `Cactus`. An
+`installation.toml` that cannot be read (above all one a newer cactup wrote,
+§2.5) is an error there, never the default: the user gets the upgrade
+message, not a missing tree under a guessed root.
 
 **Per-simulation directory & the registry.** A simulation's directory defaults to
 `<sim-home>/<config>/<SimName>` (grouping simulations by the config that produced

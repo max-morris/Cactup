@@ -70,7 +70,7 @@ fn auto_with(ctx: &Ctx, machine: &Machine, installation: &Installation, start: B
         // `submitted` is None when the config was already up to date: there
         // is no job, so there is nothing to block on either.
         let Some((name, attempt_id)) = submitted.filter(|_| start.block) else { return Ok(()) };
-        let config_dir = installation.cactus_root().join("configs").join(&name);
+        let config_dir = installation.cactus_root()?.join("configs").join(&name);
         watch_build(machine, &config_dir, attempt_id, Watch::Block)
     } else {
         if start.block {
@@ -85,12 +85,16 @@ fn auto_with(ctx: &Ctx, machine: &Machine, installation: &Installation, start: B
 /// report problems with it. Silent when nothing points at one: it is only a
 /// hint, read off the log.
 fn added_package_hint(installation: &Installation, name: Option<&str>) {
+    // Silent on an unreadable installation.toml too: a newer cactup's file
+    // never gets this far (`Installation::resolve` refuses it with the
+    // upgrade message), and the build's own error is what the user needs.
     let Ok(meta) = installation.meta() else { return };
     if meta.added.is_empty() {
         return;
     }
     let Some(name) = name.map(str::to_owned).or_else(|| meta.active_config.clone()) else { return };
-    let config_dir = installation.cactus_root().join("configs").join(&name);
+    let Ok(cactus_root) = installation.cactus_root() else { return };
+    let config_dir = cactus_root.join("configs").join(&name);
     let Ok(Some(id)) = BuildAttempt::latest_id(&config_dir) else { return };
     let Ok(attempt) = BuildAttempt::open(&config_dir, id) else { return };
     let mut text = String::new();
@@ -377,7 +381,7 @@ fn start_name(inst: &Installation, name: Option<&str>) -> Res<String> {
     }
     // Best-effort: the configs that do exist are exactly what the user needs
     // to pick a name from, so listing them saves a `cactup config list` hop.
-    let existing: Vec<String> = super::config::list_configs(&inst.cactus_root())
+    let existing: Vec<String> = super::config::list_configs(&inst.cactus_root()?)
         .unwrap_or_default()
         .into_iter()
         .map(|(name, _)| name)
@@ -410,7 +414,7 @@ fn run_with(machine: &Machine, installation: &Installation, args: BuildStartArgs
 
     // Builds never chain (§7.9): a config with a live attempt already in
     // flight refuses a second one, foreground included.
-    let config_dir = installation.cactus_root().join("configs").join(&name);
+    let config_dir = installation.cactus_root()?.join("configs").join(&name);
     let sched = Scheduler::for_machine(machine);
     guard_no_live_attempt(&config_dir, &name, &sched, args.opts.force)?;
 
@@ -453,7 +457,7 @@ fn submit(ctx: &Ctx, args: BuildSubmitArgs) -> Res<()> {
         (false, true) => Watch::Follow,
         (false, false) => return Ok(()),
     };
-    let config_dir = installation.cactus_root().join("configs").join(&name);
+    let config_dir = installation.cactus_root()?.join("configs").join(&name);
     watch_build(&machine, &config_dir, attempt_id, mode)
 }
 
@@ -488,7 +492,7 @@ fn submit_impl(
     }
 
     let name = start_name(inst, args.name.as_deref())?;
-    let cactus_root = inst.cactus_root();
+    let cactus_root = inst.cactus_root()?;
     let config_dir = cactus_root.join("configs").join(&name);
     let sched = Scheduler::for_machine(machine);
     guard_no_live_attempt(&config_dir, &name, &sched, args.opts.force)?;
@@ -1016,7 +1020,7 @@ fn humanize_ago(d: chrono::Duration) -> String {
 /// just an idempotent readdir plus an `nlink() == 1` check, and pointing
 /// `active_config` at a built config is itself a no-op once it is set.
 fn reconcile_finished_builds(inst: &Installation) -> Res<()> {
-    let configs = super::config::list_configs(&inst.cactus_root())?;
+    let configs = super::config::list_configs(&inst.cactus_root()?)?;
     let Some((first_built, _)) =
         configs.iter().find(|(_, m)| m.as_ref().and_then(|m| m.built).is_some())
     else {
@@ -1131,7 +1135,7 @@ fn list_impl(machine: &Machine, installations: &[Installation], all: bool, long:
 
     let configs_per_inst: Vec<Vec<(String, Option<crate::build::ConfigMeta>)>> = installations
         .iter()
-        .map(|inst| super::config::list_configs(&inst.cactus_root()))
+        .map(|inst| super::config::list_configs(&inst.cactus_root()?))
         .collect::<Res<_>>()?;
     if configs_per_inst.iter().all(Vec::is_empty) {
         println!("No configs (see `cactup config list`)");
@@ -1141,12 +1145,11 @@ fn list_impl(machine: &Machine, installations: &[Installation], all: bool, long:
     // Gather every row on a fixed-width pool (§2.4): each is a handful of
     // small local reads (a `.cactup-builds` scan, one `build.toml`, a lock
     // probe), latency-bound the same way a sim's row is.
-    let dirs: Vec<PathBuf> = installations
+    let roots: Vec<PathBuf> = installations.iter().map(Installation::cactus_root).collect::<Res<_>>()?;
+    let dirs: Vec<PathBuf> = roots
         .iter()
         .zip(&configs_per_inst)
-        .flat_map(|(inst, configs)| {
-            configs.iter().map(move |(name, _)| inst.cactus_root().join("configs").join(name))
-        })
+        .flat_map(|(root, configs)| configs.iter().map(move |(name, _)| root.join("configs").join(name)))
         .collect();
     let rows = crate::par::parallel_map(&dirs, |dir| gather_row(dir))?;
 
@@ -1188,7 +1191,7 @@ fn show_impl(machine: &Machine, inst: &Installation, name: Option<&str>, long: b
         Some(n) => n.to_owned(),
         None => inst.meta()?.active_config()?.to_owned(),
     };
-    let config_dir = inst.cactus_root().join("configs").join(&name);
+    let config_dir = inst.cactus_root()?.join("configs").join(&name);
     if !config_dir.is_dir() {
         bail!("No config named \"{name}\" in this installation (see `cactup config list`)");
     }
@@ -1302,7 +1305,7 @@ fn log(ctx: &Ctx, name: Option<String>, mode: crate::tail::FollowMode) -> Res<()
         Some(n) => n,
         None => inst.meta()?.active_config()?.to_owned(),
     };
-    let config_dir = inst.cactus_root().join("configs").join(&name);
+    let config_dir = inst.cactus_root()?.join("configs").join(&name);
     let Some(id) = BuildAttempt::latest_id(&config_dir)? else {
         bail!("Config \"{name}\" has no build attempts yet");
     };
@@ -1326,7 +1329,7 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
         Some(n) => n.to_owned(),
         None => inst.meta()?.active_config()?.to_owned(),
     };
-    let config_dir = inst.cactus_root().join("configs").join(&name);
+    let config_dir = inst.cactus_root()?.join("configs").join(&name);
     let Some(id) = BuildAttempt::latest_id(&config_dir)? else {
         println!("Config {} has no build attempts; nothing to stop", name.bold());
         return Ok(());
@@ -1520,7 +1523,7 @@ fn prune_impl(machine: &Machine, inst: &Installation, name: Option<&str>, keep: 
         None => inst.meta()?.active_config()?.to_owned(),
     };
     let keep = keep.unwrap_or(DEFAULT_KEEP_ATTEMPTS) as usize;
-    let config_dir = inst.cactus_root().join("configs").join(&name);
+    let config_dir = inst.cactus_root()?.join("configs").join(&name);
     let ids = BuildAttempt::scan(&config_dir)?;
     if ids.len() <= keep {
         println!(

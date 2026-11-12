@@ -182,7 +182,14 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     };
     let active = database.active_installation.as_deref() == Some(&alias);
     let inst = Installation::new(entry.alias.clone(), &entry.path);
-    let meta = inst.meta().ok();
+    // Lenient: the registry's view above is still worth showing when
+    // installation.toml cannot be read. Except a newer cactup's file: that
+    // is not "no homes, no packages" but "upgrade cactup", so say that.
+    let meta = match inst.meta() {
+        Ok(meta) => Some(meta),
+        Err(e) if e.downcast_ref::<crate::format::Newer>().is_some() => return Err(e),
+        Err(_) => None,
+    };
     // Asked before anything is printed, so its progress never splits the output.
     let yanked = yanked_since(&database, entry, meta.as_ref().map_or(&[][..], |m| &m.added[..]))?;
 
@@ -562,5 +569,59 @@ mod tests {
         };
         let err = show_installation(&ctx, None).unwrap_err().to_string();
         assert!(err.contains("\"nope\""), "{err}");
+    }
+
+    /// An installation.toml a newer cactup wrote is refused with the upgrade
+    /// message on every path, not read around: with a custom `!DEFINE ROOT`
+    /// in it, guessing `Cactus` would send the user hunting for a tree that
+    /// was never there, and `show` would print no homes and no packages.
+    #[test]
+    fn a_newer_installation_toml_asks_for_an_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("inst");
+        std::fs::create_dir_all(home.join(".cactup")).unwrap();
+        let current = crate::installation::INSTALLATION.current;
+        std::fs::write(
+            home.join(".cactup/installation.toml"),
+            format!("schema = {}\nroot-dir = \"CactusMin\"\n", current + 1),
+        )
+        .unwrap();
+        let db = crate::database::Db::in_dir(dir.path());
+        db.update(|d| {
+            let mut et = entry(IndexMap::new());
+            et.path = home.display().to_string();
+            d.installations.insert("et".to_owned(), et);
+            d.active_installation = Some("et".to_owned());
+            Ok(())
+        })
+        .unwrap();
+        let ctx = Ctx {
+            globals: crate::args::GlobalOpts {
+                verbose: false,
+                trace: false,
+                manifest_url: String::new(),
+                mdb_path: None,
+                machine: None,
+                installation: None,
+                hostname: None,
+                knob: Vec::new(),
+                risky_allow_untrusted_artifacts: false,
+            },
+            db,
+        };
+        let newer = |err: anyhow::Error| {
+            assert!(err.downcast_ref::<crate::format::Newer>().is_some(), "{err:#}");
+            assert!(format!("{err:#}").contains("upgrade cactup"), "{err:#}");
+        };
+        let inst = Installation::new("et", &home);
+        newer(inst.cactus_root().unwrap_err());
+        newer(inst.live_thornlist_to_read().unwrap_err());
+        // A failure is not cached as the default root.
+        newer(inst.cactus_root().unwrap_err());
+        // Every command that resolves the installation (build, sim, config,
+        // ...), and `installation show`, which reads it leniently otherwise.
+        newer(Installation::resolve(&ctx).err().unwrap());
+        newer(show_installation(&ctx, None).unwrap_err());
+        newer(show_installation(&ctx, Some("et".to_owned())).unwrap_err());
     }
 }
