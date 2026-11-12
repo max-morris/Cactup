@@ -381,7 +381,9 @@ fn start_name(inst: &Installation, name: Option<&str>) -> Res<String> {
     }
     // Best-effort: the configs that do exist are exactly what the user needs
     // to pick a name from, so listing them saves a `cactup config list` hop.
-    let existing: Vec<String> = super::config::list_configs(&inst.cactus_root()?)
+    let existing: Vec<String> = inst
+        .cactus_root()
+        .and_then(|root| super::config::list_configs(&root))
         .unwrap_or_default()
         .into_iter()
         .map(|(name, _)| name)
