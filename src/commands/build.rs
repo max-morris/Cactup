@@ -2034,6 +2034,63 @@ mod tests {
         assert!(BuildAttempt::open(&config_dir, 0).unwrap().meta.submitted, "the good submit is attempt 0");
     }
 
+    /// The built-in `generic` machine (what `machine create` copies) can
+    /// queue a build, yet a bare `cactup build` still runs in the foreground.
+    /// Its own build-submit script, rendered by a real submit, re-invokes
+    /// exactly the compute-node build that completes the attempt. Only the
+    /// `make` and the submit command are faked: the real submit would start
+    /// the script, and with it this test binary as `@CACTUP@`.
+    #[test]
+    fn generic_submits_builds_through_its_own_script() {
+        let system = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb");
+        let mut machine =
+            crate::mdb::Mdb::with_roots(system, PathBuf::from("/nonexistent-user-mdb")).load("generic").unwrap();
+        assert!(machine.meta.can_submit_builds());
+        assert!(!choose_submit(&machine, &BuildOpts::default_for_tests()).unwrap(), "a bare build runs here");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = tmp.path().join("inst/Cactus");
+        let fake_make = tmp.path().join("fakemake");
+        fs::write(
+            &fake_make,
+            format!("#!/bin/sh\ncase \"$2\" in\n{}\nesac\n", completing_make_body(&cactus, "sim")),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&fake_make, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        machine.meta.build.make = Some(format!("{} -j@MAKEJOBS@", fake_make.display()));
+        machine.meta.scheduler.submit = Some("echo 4242".to_owned());
+        fs::create_dir_all(cactus.join("thornlists")).unwrap();
+        fs::write(cactus.join("thornlists").join(crate::installation::LIVE_THORNLIST), "A/B\n").unwrap();
+        let inst = Installation::new("et", tmp.path().join("inst"));
+
+        submit_impl(&inst, &machine, &Database::new(), &submit_args("sim", bare_topology()), Some("subhost")).unwrap();
+
+        let config_dir = cactus.join("configs/sim");
+        let attempt = BuildAttempt::open(&config_dir, 0).unwrap();
+        assert_eq!(attempt.meta.job_id, "4242");
+        assert_eq!(attempt.meta.reservation.as_ref().unwrap().queue, "local");
+        // generic's real `submit` redirects the job's output into these.
+        for var in ["STDOUT_FILE", "STDERR_FILE"] {
+            assert!(attempt.meta.vars.get(var).is_some_and(|v| v.as_str().is_some_and(|s| !s.is_empty())), "{var}");
+        }
+        let script = fs::read_to_string(attempt.submit_script_path()).unwrap();
+        let exec = format!(
+            "build run sim \\\n    --installation=et --config-dir={} --machine=generic \\\n    --attempt-id=0\n",
+            config_dir.display()
+        );
+        assert!(script.contains(&exec), "{script}");
+        assert!(script.contains(&format!("cd {} || exit 1", cactus.display())), "{script}");
+        assert!(!script.lines().any(|l| !l.starts_with('#') && l.contains('@')), "unexpanded token:\n{script}");
+
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        run(&ctx, start_args(Some(config_dir.clone()), Some(0))).unwrap();
+        assert!(crate::build::is_complete(&cactus, "sim"));
+    }
+
     // ---- the build job's queue is not the binary's (§7.9) ------------------
 
     /// A machine with a GPU and a CPU partition, a GPU and a CPU optionlist

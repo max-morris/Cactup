@@ -26,6 +26,12 @@ autodetect = true
 
 [build]
 make = "make -j@MAKEJOBS@"
+# A workstation builds in the foreground: a bare `cactup build` runs `make`
+# right here, as it always has. The build-submit script below only adds
+# `cactup build submit`, which backgrounds the build like any other job
+# (design §7.9). Without this line its presence would turn a bare
+# `cactup build` into a background job.
+default-action = "run"
 
 [scheduler]
 # No scheduler: background the script, echo its PID as the job id; ps/pkill for
@@ -68,8 +74,8 @@ gpu          = false
 max-walltime = "8760:00:00"
 default      = true
 
-# One normal script of each kind plus a testsuite one, each serving the one
-# queue it lists (design §4.2, §11.2). A script may also set tasks = N — the default TASKS when no -n/-T/-t flag is
+# One normal script of each kind plus a testsuite one (none for builds), each
+# serving the one queue it lists (design §4.2, §11.2). A script may also set tasks = N — the default TASKS when no -n/-T/-t flag is
 # given, instead of filling the node (§8.5); testsuite runs already default to
 # 2 without it (§11.6).
 [submitscripts]
@@ -79,3 +85,6 @@ default      = true
 [runscripts]
 "default" = { queues = ["local"] }
 "test"    = { queues = ["local"], test = true }   # used by `cactup test run`
+
+[buildsubmitscripts]
+"default" = { queues = ["local"] }                # used by `cactup build submit`

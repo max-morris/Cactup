@@ -930,6 +930,11 @@ mod tests {
         // generic has no paths: consumers use the ~/.cactup fallbacks.
         assert!(generic.meta.paths.simulation_home.is_none());
         assert_eq!(generic.select_optionlist(None).unwrap(), "default"); // sole flavor
+        // A build can be queued (backgrounded) on its one queue, but a bare
+        // `cactup build` stays in the foreground.
+        assert!(generic.meta.can_submit_builds());
+        assert_eq!(generic.meta.scripts(ScriptKind::BuildSubmit).route("local", HOST_UNIVERSE, false).unwrap().0, "default");
+        assert_eq!(generic.meta.build.default_action, Some(BuildAction::Run));
     }
 
     /// An overlay's top-level `max-cpus-per-node` counts as detected (§8.5):
