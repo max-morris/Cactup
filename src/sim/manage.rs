@@ -2485,26 +2485,35 @@ mod tests {
         assert!(run_is_live(&live, &r).unwrap());
 
         // Gone from the queue: the stop took effect, and the probe returns at
-        // once rather than sitting out GRACEFUL_WAIT_SECS.
-        let gone_meta = meta("true");
+        // once rather than sitting out GRACEFUL_WAIT_SECS. "At once" is
+        // counted in queries, not timed: a second query comes only after a
+        // poll tick's sleep, and a wall-clock bound near the (test-short)
+        // wait would fail on a loaded machine.
+        let queries = root.join("queries.log");
+        let asked = || {
+            let n = fs::read_to_string(&queries).map(|t| t.lines().count()).unwrap_or(0);
+            let _ = fs::remove_file(&queries);
+            n
+        };
+        let gone_meta = meta(&format!("echo q >> {}; true", queries.display()));
         let gone = Scheduler::new(&gone_meta);
         assert!(!run_is_live(&gone, &r).unwrap());
-        let waited = std::time::Instant::now();
+        asked();
         assert!(await_run_exit(&sim, &gone, &r).unwrap());
-        assert!(waited.elapsed() < std::time::Duration::from_secs(GRACEFUL_WAIT_SECS));
+        assert_eq!(asked(), 1, "the wait polled again");
 
         // The run acted on the trigger and recorded its end while the wait
         // ran (the restart read before it says otherwise), its job listed
         // as over (`CD`, a state no pattern reads): the ended job, gone.
-        let ended_meta = meta("echo '@JOB_ID@ CD'");
+        let ended_meta = meta(&format!("echo q >> {}; echo '@JOB_ID@ CD'", queries.display()));
         let ended = Scheduler::new(&ended_meta);
         assert!(run_is_live(&ended, &r).unwrap(), "before its end, an unread state is live");
         let path = restart::restart_dir(&sim.dir, 0).join(".cactup/restart.toml");
         let text = fs::read_to_string(&path).unwrap();
         fs::write(&path, format!("{text}terminated = true\nfinished = \"{}\"\n", chrono::Utc::now().to_rfc3339())).unwrap();
-        let waited = std::time::Instant::now();
+        asked();
         assert!(await_run_exit(&sim, &ended, &r).unwrap());
-        assert!(waited.elapsed() < std::time::Duration::from_secs(GRACEFUL_WAIT_SECS));
+        assert_eq!(asked(), 1, "the wait polled again");
         fs::write(&path, text).unwrap();
 
         // A foreground run has no job: its liveness marker decides instead.
@@ -2568,9 +2577,10 @@ mod tests {
         assert!(!untouched.exists(), "empty pending list runs the command zero times");
     }
 
-    /// A batch scheduler for the unread-state tests: `get-status` prints
-    /// the job in the state the `state` file holds (`gone`: the unknown-job
-    /// line), then moves a `next` file, if any, over `state`; `stop` leaves
+    /// A batch scheduler for the unread-state tests: `get-status` counts
+    /// itself in a `queries` file and prints the job in the state the
+    /// `state` file holds (`gone`: the unknown-job line), then moves a
+    /// `next` file, if any, over `state`; `stop` leaves
     /// a `stopped` file, then fails printing the `refuse` file while it
     /// exists.
     struct UnreadFake {
@@ -2597,7 +2607,8 @@ mod tests {
             fs::write(
                 tmp.path().join("status.sh"),
                 format!(
-                    "s=$(cat {dir}/state)\n\
+                    "echo q >> {dir}/queries\n\
+                     s=$(cat {dir}/state)\n\
                      if [ \"$s\" = gone ]; then echo 'slurm_load_jobs error: Invalid job id specified'; \
                      else echo \"$1 $s\"; fi\n\
                      if [ -e {dir}/next ]; then mv {dir}/next {dir}/state; fi\n"
@@ -2645,6 +2656,14 @@ mod tests {
             let _ = fs::remove_file(self.tmp.path().join(file));
         }
 
+        /// How many status queries ran since the last call.
+        fn queries(&self) -> usize {
+            let path = self.tmp.path().join("queries");
+            let n = fs::read_to_string(&path).map(|t| t.lines().count()).unwrap_or(0);
+            let _ = fs::remove_file(path);
+            n
+        }
+
         /// Whether the stop command ran since the last call.
         fn stopped(&self) -> bool {
             let path = self.tmp.path().join("stopped");
@@ -2688,9 +2707,12 @@ mod tests {
         fake.set("state", "S");
         let sim = fake.sim("at-once", true);
         let before = record(&sim);
-        let started = std::time::Instant::now();
+        fake.queries();
         stop_sim(&sim, &sched, "at-once", false).unwrap();
-        assert!(started.elapsed() < std::time::Duration::from_secs(GRACEFUL_WAIT_SECS), "waited for it");
+        // Not waited for: counted in queries, not timed (the wait polls
+        // again only after a tick's sleep, and a wall-clock bound near the
+        // test-short wait would fail on a loaded machine).
+        assert_eq!(fake.queries(), 1, "waited for it");
         let terminate = restart::restart_dir(&sim.dir, 0).join("TERMINATE");
         assert_eq!(fs::read_to_string(&terminate).unwrap(), "1\n");
         assert_eq!(record(&sim), before, "recorded something");
