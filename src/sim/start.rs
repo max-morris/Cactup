@@ -139,8 +139,8 @@ pub(crate) fn resolve_submit_universe<'m>(
 /// build is running. Shared by `submit_impl`/`run_interactive` below.
 fn config_missing_error(cactus_root: &Path, machine: &Machine, config: &str) -> anyhow::Error {
     let config_dir = cactus_root.join("configs").join(config);
-    if let Some(phrase) = build_cmd::in_flight_build(&config_dir, config, Some(machine)) {
-        return anyhow!("{phrase}; wait for it to finish (see `cactup build show {config}`)");
+    if let Some((phrase, stop)) = build_cmd::in_flight_build_or_stop(&config_dir, config, Some(machine)) {
+        return anyhow!("{phrase}; wait for it to finish{stop} (see `cactup build show {config}`)");
     }
     anyhow!("Config \"{config}\" no longer exists")
 }

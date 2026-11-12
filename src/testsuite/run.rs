@@ -228,8 +228,8 @@ fn start_impl(
     let cfg = match ConfigMeta::load(&cactus_root, &cfg_name)? {
         Some(cfg) => cfg,
         None => {
-            if let Some(phrase) = build_cmd::in_flight_build(&config_dir, &cfg_name, Some(machine)) {
-                bail!("{phrase}; wait for it, or watch it with `cactup build log {cfg_name}`");
+            if let Some((phrase, stop)) = build_cmd::in_flight_build_or_stop(&config_dir, &cfg_name, Some(machine)) {
+                bail!("{phrase}; wait for it{stop}, or watch it with `cactup build log {cfg_name}`");
             }
             bail!("Config \"{cfg_name}\" has never been built (`cactup build {cfg_name}`)");
         }
@@ -242,8 +242,8 @@ fn start_impl(
         args.ignore_machine || args.force,
     )?;
     if !build::is_complete(&cactus_root, &cfg_name) {
-        if let Some(phrase) = build_cmd::in_flight_build(&config_dir, &cfg_name, Some(machine)) {
-            bail!("{phrase}; wait for it, or watch it with `cactup build log {cfg_name}`");
+        if let Some((phrase, stop)) = build_cmd::in_flight_build_or_stop(&config_dir, &cfg_name, Some(machine)) {
+            bail!("{phrase}; wait for it{stop}, or watch it with `cactup build log {cfg_name}`");
         }
         bail!("Config \"{cfg_name}\" is incomplete; rebuild it (`cactup build {cfg_name} -f`)");
     }

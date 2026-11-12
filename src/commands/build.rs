@@ -971,6 +971,25 @@ fn requeue_query<'m>(meta: &'m BuildMeta, sched: &Scheduler) -> Option<JobRef<'m
 /// scheduler query all yield `None`, never an error — this must never turn
 /// someone else's command into a failure.
 pub fn in_flight_build(config_dir: &Path, name: &str, machine: Option<&Machine>) -> Option<String> {
+    in_flight(config_dir, name, machine).map(|(phrase, _)| phrase)
+}
+
+/// [`in_flight_build`]'s phrase, with the way out besides waiting: for a
+/// build job the scheduler lists in a state no pattern reads (suspended, or
+/// over before the attempt recorded its outcome, which no wait ends), `",
+/// or run `cactup build stop NAME`"`, to follow "wait for it"; else empty.
+pub fn in_flight_build_or_stop(config_dir: &Path, name: &str, machine: Option<&Machine>) -> Option<(String, String)> {
+    let (phrase, unread) = in_flight(config_dir, name, machine)?;
+    let stop = match unread {
+        true => format!(", or run `cactup build stop {name}`"),
+        false => String::new(),
+    };
+    Some((phrase, stop))
+}
+
+/// [`in_flight_build`], and whether the scheduler lists the build's job in
+/// a state no pattern reads.
+fn in_flight(config_dir: &Path, name: &str, machine: Option<&Machine>) -> Option<(String, bool)> {
     let id = BuildAttempt::latest_id(config_dir).ok().flatten()?;
     let attempt = BuildAttempt::open(config_dir, id).ok()?;
     if attempt.meta.outcome.is_some() {
@@ -983,10 +1002,11 @@ pub fn in_flight_build(config_dir: &Path, name: &str, machine: Option<&Machine>)
         // scheduler id — running.lock is the only liveness signal there is,
         // and it needs no scheduler to check.
         return lock_live.then(|| {
-            format!(
+            let phrase = format!(
                 "a build of config \"{name}\" is RUNNING in the foreground (pid {})",
                 attempt.meta.job_id
-            )
+            );
+            (phrase, false)
         });
     }
     if attempt.meta.job_id == NO_JOB_ID {
@@ -1005,30 +1025,29 @@ pub fn in_flight_build(config_dir: &Path, name: &str, machine: Option<&Machine>)
             BuildDisplayState::Queued => "QUEUED",
             BuildDisplayState::Holding => "HOLDING",
             BuildDisplayState::Error => {
-                return Some(format!(
+                let phrase = format!(
                     "a build of config \"{name}\" is listed by the scheduler in a state cactup does not \
                      recognize (job {job_id}{submitted_suffix})"
-                ));
+                );
+                return Some((phrase, true));
             }
             _ => return None,
         };
-        return Some(format!(
-            "a build of config \"{name}\" is {word} on the queue (job {job_id}{submitted_suffix})"
-        ));
+        let phrase = format!("a build of config \"{name}\" is {word} on the queue (job {job_id}{submitted_suffix})");
+        return Some((phrase, false));
     }
 
     // No machine to query: fall back to what the attempt's own record can
     // say without a scheduler round-trip. A held lock means it is actually
     // executing right now, wherever it landed; otherwise "submitted, not
     // yet reported back" is as specific as this gets.
-    if lock_live {
-        return Some(format!(
-            "a build of config \"{name}\" is RUNNING on the queue (job {job_id}{submitted_suffix})"
-        ));
-    }
-    Some(format!(
-        "a build of config \"{name}\" was submitted and has not reported back (job {job_id}{submitted_suffix})"
-    ))
+    let phrase = match lock_live {
+        true => format!("a build of config \"{name}\" is RUNNING on the queue (job {job_id}{submitted_suffix})"),
+        false => format!(
+            "a build of config \"{name}\" was submitted and has not reported back (job {job_id}{submitted_suffix})"
+        ),
+    };
+    Some((phrase, false))
 }
 
 /// A short "Ns/m/h/d ago" rendering for [`in_flight_build`]'s phrase.
@@ -3034,6 +3053,12 @@ mod tests {
         assert!(refused.contains("in a state cactup does not recognize") && refused.contains("`cactup build stop sim`"), "{refused}");
         assert!(attempt_is_live(&open, &sched).unwrap(), "prune removed an attempt whose job is suspended");
         assert_eq!(shown_state(&open.meta, Some(Some(JobStatus::Error)), false), BuildDisplayState::Error);
+        // What waits on a build in flight (`sim create`, `sim run`, `test
+        // run`) offers `build stop` too: no wait ends a job over before
+        // the attempt recorded its outcome.
+        let (phrase, stop) = in_flight_build_or_stop(&config_dir, "sim", Some(&listing)).unwrap();
+        assert!(phrase.contains("in a state cactup does not recognize (job 4242"), "{phrase}");
+        assert_eq!(stop, ", or run `cactup build stop sim`");
         // A stop that fails otherwise than as a job the scheduler does not
         // know: an error for `-f` and `build stop`, no outcome recorded.
         fs::write(&refuse, transient).unwrap();
@@ -3300,6 +3325,8 @@ mod tests {
             in_flight_build(&config_dir, "sim", Some(&machine)).expect("queued per the fake scheduler");
         assert!(phrase.contains("QUEUED"), "{phrase}");
         assert!(phrase.contains("JOB-1"), "{phrase}");
+        // Waiting ends a queued build: no stop is offered.
+        assert_eq!(in_flight_build_or_stop(&config_dir, "sim", Some(&machine)).map(|(_, stop)| stop).as_deref(), Some(""));
     }
 
     /// A foreground build's `job_id` is a pid, not a scheduler id —
