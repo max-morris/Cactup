@@ -53,4 +53,4 @@ generation is assumed current and never rewritten. Hidden directories are not
 machines (`machine create` rejects a name starting with '.'). Migration never
 runs on the compute path (D11), and there is no `cactup machine migrate`.
 
-Also adjust the "Relation to \"no backward compatibility\"" paragraph that follows: its "no migrations" means the published MDB itself (bump instead); overlays are now migrated forward by the binary. Say so in one clause.
+Also adjust the "Relation to on-disk formats" paragraph that follows: its "no migrations" means the published MDB itself (bump instead); overlays are now migrated forward by the binary. Say so in one clause.
