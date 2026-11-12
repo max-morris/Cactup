@@ -103,7 +103,9 @@ Do all of this in **one commit**:
    edits, notes a change that can only show up later as a loud error, and
    stops where the machine could quietly do something different. It never
    applies an optional change, never edits a script, and never writes a key
-   the new generation's first binary lacks.
+   the new generation's first binary lacks. Its checks read the files as
+   generation N wrote them, never through today's schema, which a later
+   generation may change.
 4. Migrate every machine under `mdb/` in the repository to the new
    generation.
 5. Make the cactup source understand it: a binary built from this commit
@@ -112,9 +114,11 @@ Do all of this in **one commit**:
 Checks back this up. Unit tests fail the build when `mdb/GENERATIONS.md` has
 no entry for every generation up to the number in `mdb/GENERATION`, when
 `STEPS` lacks a step for any older generation, when `fixtures/mdb-overlays/`
-lacks a snapshot for one, and when any snapshot (or hand-written edge case
-beside them) fails to migrate to the current generation, load, and leave
-itself untouched on the second load. The `mdb-compat` CI job loads every
+lacks a snapshot for one, and when a snapshot or a hand-written edge case
+beside them does not do what it should: a generation-1 snapshot and each
+refusal case must be refused with its files untouched, and every other one
+must migrate to the current generation, load, and leave itself untouched on
+the second load. The `mdb-compat` CI job loads every
 machine in both directions of the rule (the MDB at your commit with the
 generation's first binary, and the generation's first MDB with your binary)
 and tells you to bump if either fails. It checks loading only: a changed
@@ -153,7 +157,9 @@ earlier steps it finished. The message names the machine and file, what
 stopped it, and the next step on a line of its own: the entry of
 `GENERATIONS.md` to follow by hand. Make that change, set `mdb-generation` to
 the generation the message names, and run any cactup command again; cactup
-carries on from there. Notes the update prints (such as a setup that may now
+carries on from there. If it says it could not update the machine just now
+(another cactup held it too long, or a file could not be read or written),
+nothing needs editing: clear that and run the command again. Notes the update prints (such as a setup that may now
 belong in a provisioning key) are for you to read; nothing breaks if you do
 not.
 
@@ -164,10 +170,18 @@ never rewritten (the warning says so, and names the generation its keys look
 like when they give it away).
 
 If the message offers to start over, it gives a command that moves the
-machine's directory aside to a hidden `.<name>.old` beside it, which cactup
-never lists or loads, and creates the machine again from the same base; your
-own edits are then in the moved directory. Another cactup sharing the same
-`~/.cactup` that is still on the older generation will ask you to run
-`cactup update`. To go back after an update, copy the backup over the
-machine directory.
+machine's directory aside to a hidden `.<name>.old` beside it (or
+`.<name>.old.2`, and so on, when that is taken), which cactup never lists or
+loads, and creates the machine again from the same base; your own edits are
+then in the moved directory. Another cactup sharing the same `~/.cactup` that
+is still on the older generation will ask you to run `cactup update`. The
+backup is for that older cactup, or for reading: copied back over the machine
+directory, it is the old generation again, and the current cactup brings it
+forward again the next time it loads it.
+
+A cactup older than this feature does not update overlays: it refuses an
+older one. To bring a machine forward for such a cactup by hand, apply the
+recipe of every `GENERATIONS.md` entry after the machine's generation, in
+order, then set `mdb-generation` to the newest of them, and check that it
+loads with `cactup machine show <name>`.
 

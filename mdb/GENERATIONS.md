@@ -26,15 +26,23 @@ mdb-generation = 3
 to match the running cactup's generation, with a warning. A cactup newer than
 an overlay brings it forward on its own the first time it loads it, and keeps
 a copy of the old files in `~/.cactup/machine-backups/<name>/generation-<N>/`
-(forever; to go back, copy them over the machine's directory). Each entry
-below says what that migration does for you and what it leaves to you. Where
-it cannot keep the machine behaving exactly as before, it stops and says what
-to change by hand: follow the recipe of that entry, then set `mdb-generation`
-to its number, and cactup goes on from there. Changes marked optional are
-never made for you, and scripts are never edited. A generation-1 overlay is
-not migrated automatically: follow Generation 2's recipe by hand. (cactup
-builds older than this feature refuse every older overlay; the recipes below
-are written for that case too.)
+(kept forever; the copy is for reading, or for a cactup still on the old
+generation: copied back, it is brought forward again by the next load). Each
+entry below says what that migration does for you and what it leaves to you.
+Where it cannot keep the machine behaving exactly as before, it stops and
+says what to change by hand: follow the recipe of that entry, then set
+`mdb-generation` to its number, and cactup goes on from there. If it could
+not update the machine just now (another cactup held it too long, or a file
+could not be read or written), nothing needs editing: clear that and run the
+command again. Changes marked optional are never made for you, and scripts
+are never edited. A generation-1 overlay is not migrated automatically:
+follow Generation 2's recipe by hand. An overlay newer than the running
+cactup is refused: run `cactup update`.
+
+A cactup older than this feature does not update overlays: it refuses an
+older one. To use it, apply the recipe of every entry below after the
+overlay's generation, in order, then set `mdb-generation` to the newest of
+them.
 
 ## Generation 1
 
@@ -183,8 +191,9 @@ nothing, when one table has both the old and the new name of a setup (it
 cannot tell which you mean), when the renamed `meta.toml` would not load, or
 when a build-submit script (a `.py` one that prints `ENV_SETUP`, or a `.sh`
 one with `@ENV_SETUP@` inline) would now get a different environment block
-for a build universe its route serves: do step 3 by hand. Step 4 is
-optional and never made for you.
+for a build universe its route serves. Nothing is changed then, not even
+step 1's renames: follow the recipe below by hand, step 1 included, then set
+`mdb-generation = 3`. Step 4 is optional and never made for you.
 
 To bring a generation-2 overlay forward:
 

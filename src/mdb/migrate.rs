@@ -2,11 +2,12 @@
 //! (design/mdb-overlay-migration-plan.md).
 //!
 //! A login command that loads an overlay older than the binary rewrites it
-//! on disk, once: under a `LinkLock`, after a full copy into
-//! `<CACTUP_HOME>/machine-backups/<name>/generation-<N>/`, verified by
-//! today's parse and validation before anything is written, `meta.toml`
-//! last (its stamp is the commit point). Every later load, by any process,
-//! finds a current overlay and says nothing.
+//! on disk, once. Under a `LinkLock`, the steps run in memory and the result
+//! must pass today's parse and validation; only then is a full copy made in
+//! `<CACTUP_HOME>/machine-backups/<name>/generation-<N>/` and the changed
+//! files written, `meta.toml` last (its stamp is the commit point). A
+//! refusal writes nothing, not even the copy. Every later load, by any
+//! process, finds a current overlay and says nothing.
 //!
 //! A step preserves behavior or refuses: it applies mechanical edits, notes
 //! a difference that can only surface as a loud error, and stops where the

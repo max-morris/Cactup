@@ -5974,12 +5974,13 @@ is accepted, for fixtures).
 `design/mdb-overlay-migration-plan.md`). The first login command that loads
 an older overlay takes a `LinkLock` beside it (`.<name>.migrate.lock`, never
 inside the directory; a holder is waited for, up to 60 s, with one line on
-stderr), re-reads the stamp, copies the whole overlay into
+stderr), re-reads the stamp, runs `STEPS[N-1..]` in memory over `meta.toml`
+and the optionlists (`toml_edit`: comments survive), checks that the result
+loads under today's schema, and only then copies the whole overlay into
 `<CACTUP_HOME>/machine-backups/<name>/generation-<N>/` (`.2`, `.3`, … when
-one is kept already; backups are never pruned), runs `STEPS[N-1..]` in
-memory over `meta.toml` and the optionlists (`toml_edit`: comments survive),
-checks that the result loads under today's schema, and writes the changed
-files atomically, `meta.toml` last, its stamp the commit point. The copy
+one is kept already; backups are never pruned) and writes the changed files
+atomically, `meta.toml` last, its stamp the commit point. A refusal from the
+first step, or from the check, writes nothing, not even the copy. The copy
 carries `.committing` before the first write and `.complete` plus a
 `NOTES.txt` after the last, so a crashed run is finished by the next load
 from the same copy. One line says what was updated and where the old files
@@ -5996,12 +5997,17 @@ ambiguous rename or a build-submit script whose `ENV_SETUP` would change, and
 generation found and wanted, what stopped, then a line of its own pointing at
 that generation's section of `GENERATIONS.md` and the stamp to set, and, when
 the base still exists, a start-over command that moves the overlay to a hidden
-`.<name>.old` and runs `machine create`. Transient failures (the lock, I/O)
+`.<name>.old` (`.<name>.old.2`, … when that is taken) and runs
+`machine create`. Transient failures (the lock, I/O)
 say nothing needs editing and finish on the next run. Nothing here runs on the
 compute path (D11). Enforcement: `every_generation_has_a_migration`,
 `every_older_generation_has_snapshots` and `every_snapshot_migrates` (over
 `fixtures/mdb-overlays/gen-N/`, taken by `ci/overlay-fixtures.sh`, plus the
-`edge/` cases), so every bump ships its step.
+`edge/` cases: generation-1 snapshots and the refusal cases must be refused
+untouched, the rest must migrate, load, and stay put on the next load), so
+every bump ships its step. A step's checks read the files at the step's own
+generation, never through today's schema, which later generations may
+change.
 
 ---
 
