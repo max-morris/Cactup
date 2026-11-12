@@ -202,6 +202,7 @@ fn stop_sim(sim: &Simulation, sched: &Scheduler, name: &str, force: bool) -> Res
         }
         println!("{} stopped", restart::dir_name(active).bold());
     } else {
+        let mut logged = format!("stopped job {} ({})", r.meta.job_id, restart::dir_name(active));
         if r.meta.foreground && r.meta.scheduler_job(sched).is_none() {
             // A foreground run on a batch scheduler's machine: its pid is no
             // job, and only its lock says whether it runs.
@@ -250,8 +251,26 @@ fn stop_sim(sim: &Simulation, sched: &Scheduler, name: &str, force: bool) -> Res
                     }
                 }
                 // Not known to a scheduler that tells a job it does not know
-                // from a failed query: nothing to stop.
-                _ => println!("The scheduler does not know job {}; nothing to stop", r.meta.job_id),
+                // from a failed query: nothing to stop, and over, unless
+                // something of its run still holds the restart's lock.
+                _ if crate::lock::LinkLock::is_held_live(&r.running_lock_path())? => {
+                    println!(
+                        "The scheduler does not know job {}, but the restart's running.lock is held; nothing \
+                         recorded. Run `cactup sim stop -f {name}` again once the lock is released (a stale \
+                         lock expires within {} minutes).",
+                        r.meta.job_id,
+                        crate::lock::LOCK_STALE_SECS / 60
+                    );
+                    return Ok(());
+                }
+                _ => {
+                    println!("The scheduler does not know job {}; nothing to stop", r.meta.job_id);
+                    logged = format!(
+                        "the scheduler does not know job {} ({}); nothing stopped",
+                        r.meta.job_id,
+                        restart::dir_name(active)
+                    );
+                }
             }
         } else if let Some(job) = r.meta.scheduler_job(sched) {
             match sched.stop(job)? {
@@ -274,7 +293,7 @@ fn stop_sim(sim: &Simulation, sched: &Scheduler, name: &str, force: bool) -> Res
                 ),
             }
         }
-        sim.log("stop", &format!("stopped job {} ({})", r.meta.job_id, restart::dir_name(active)));
+        sim.log("stop", &logged);
     }
 
     // finish: mark terminated + deactivate (§8.6). Read afresh first: the run
