@@ -139,8 +139,8 @@ pub(crate) fn resolve_submit_universe<'m>(
 /// build is running. Shared by `submit_impl`/`run_interactive` below.
 fn config_missing_error(cactus_root: &Path, machine: &Machine, config: &str) -> anyhow::Error {
     let config_dir = cactus_root.join("configs").join(config);
-    if let Some(phrase) = build_cmd::in_flight_build(&config_dir, config, Some(machine)) {
-        return anyhow!("{phrase}; wait for it to finish (see `cactup build show {config}`)");
+    if let Some((phrase, stop)) = build_cmd::in_flight_build_or_stop(&config_dir, config, Some(machine)) {
+        return anyhow!("{phrase}; wait for it to finish{stop} (see `cactup build show {config}`)");
     }
     anyhow!("Config \"{config}\" no longer exists")
 }
@@ -354,9 +354,11 @@ fn submit_impl(
             );
         }
         let chain = match r.meta.terminated {
+            // Not reaped: its job is listed, or the reaper's throttles kept
+            // it from asking; either way the run has not recorded its end.
             false => {
                 println!(
-                    "Restart {} is still live (job {}); chaining the new submission behind it",
+                    "Restart {} has not recorded its end (job {}); chaining the new submission behind it",
                     restart::dir_name(active),
                     r.meta.job_id
                 );
@@ -624,6 +626,38 @@ pub(crate) fn refuse_beside_listed_for_tests(sim: &Simulation, sched: &Scheduler
     refuse_beside_listed(sim, sched, force)
 }
 
+/// `sim run`'s refusal beside `sim`'s active restart `active`. A job listed
+/// in a state no pattern reads is `sim stop -f`'s: a graceful `sim stop`
+/// only writes the trigger and says so. Asked only on the way to the
+/// refusal; a query that fails leaves the usual advice, and Ctrl-C during
+/// it is "Interrupted" instead.
+fn active_refusal(sim: &Simulation, sched: &Scheduler, active: u32) -> anyhow::Error {
+    let unread = Restart::load(&sim.dir, active)
+        .ok()
+        .filter(|r| crate::sim::manage::listed_unread(sim, sched, r).unwrap_or(false));
+    // Ctrl-C during the query is no failed query: not the usual advice.
+    if gix::interrupt::is_triggered() {
+        return anyhow!("Interrupted");
+    }
+    let (job, stop) = match unread {
+        Some(r) => (
+            format!(", and {}", crate::scheduler::unread_state(&format!("its job {}", r.meta.job_id))),
+            format!("cactup sim stop -f {}", sim.name),
+        ),
+        None => (String::new(), format!("cactup sim stop {}", sim.name)),
+    };
+    anyhow!(
+        "Simulation \"{}\" already has an active restart ({}){job}; wait for it, or run `{stop}` first",
+        sim.name,
+        restart::dir_name(active)
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn active_refusal_for_tests(sim: &Simulation, sched: &Scheduler, active: u32) -> String {
+    active_refusal(sim, sched, active).to_string()
+}
+
 /// Refuse to start a foreground run beside the newest ended restart's job,
 /// which the scheduler still lists after the restart ended (§8.6: leaving
 /// the queue, or starting again), or could not be asked about: both might
@@ -722,13 +756,7 @@ fn run_interactive(
         active = None;
     }
     if let Some(active) = active {
-        bail!(
-            "Simulation \"{}\" already has an active restart ({}); wait for it, or \
-             `cactup sim stop {}` first",
-            sim.name,
-            restart::dir_name(active),
-            sim.name
-        );
+        return Err(active_refusal(sim, &sched, active));
     }
 
     let run_scripts = machine.meta.scripts(ScriptKind::Run);

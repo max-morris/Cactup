@@ -147,9 +147,9 @@ telling whether a job is still alive.
   later ones do, with no further generation: with `"pids"` they record the
   submitting host and the process's start time with each job id and ask
   `ps`/`stop` only there and only while the pid is still that process, and
-  stop only a job whose process leads its own process group (so such a
-  machine's `submit` must start each job with `setsid`, as the in-repo
-  ones now do);
+  stop only a job whose process group holds nothing but the job and the
+  processes it started (so such a machine's `submit` should start each
+  job in a group of its own with `setsid`, as the in-repo ones now do);
   with `unknown-job-pattern`, a status query whose output has neither a
   line for the job nor a line the pattern matches is a failed query, which
   `stop` and `delete` refuse on, so the pattern must match what the command

@@ -319,8 +319,8 @@ pub fn create(
     let cfg = match ConfigMeta::load(&cactus_root, &config)? {
         Some(cfg) => cfg,
         None => {
-            if let Some(phrase) = build_cmd::in_flight_build(&config_dir, &config, Some(machine)) {
-                bail!("{phrase}; wait for it to finish (see `cactup build show {config}`)");
+            if let Some((phrase, stop)) = build_cmd::in_flight_build_or_stop(&config_dir, &config, Some(machine)) {
+                bail!("{phrase}; wait for it to finish{stop} (see `cactup build show {config}`)");
             }
             bail!("Config \"{config}\" has never been built (see `cactup config list`)");
         }
@@ -329,8 +329,8 @@ pub fn create(
     crate::commands::delta::check_machine(machine, &cfg.machine, &format!("config \"{config}\""), ignore_machine)?;
     let exe_src = build::executable_path(&cactus_root, &config);
     if !exe_src.is_file() {
-        if let Some(phrase) = build_cmd::in_flight_build(&config_dir, &config, Some(machine)) {
-            bail!("{phrase}; wait for it to finish (see `cactup build show {config}`)");
+        if let Some((phrase, stop)) = build_cmd::in_flight_build_or_stop(&config_dir, &config, Some(machine)) {
+            bail!("{phrase}; wait for it to finish{stop} (see `cactup build show {config}`)");
         }
         bail!(
             "Config \"{config}\" has no executable at '{}'; run `cactup build {config}`",
@@ -340,12 +340,16 @@ pub fn create(
     // §7.9's build-submit feature makes this a real race, not a theoretical
     // one: `ensure_cached` below hard-links `exe_src` into the executable
     // cache, and a rebuild's `make` can be replacing those very bytes right
-    // now. Unlike everywhere else `in_flight_build` is consulted, this one
-    // is a hard error even though a machine is available to disambiguate —
-    // freezing a half-written binary into a simulation is real corruption,
-    // not just confusing advice, so only an explicit `-f` may proceed.
-    if !force && let Some(phrase) = build_cmd::in_flight_build(&config_dir, &config, Some(machine)) {
-        bail!("{phrase}; wait for it to finish, or pass -f to proceed anyway (it may freeze a half-written executable)");
+    // now. Unlike everywhere else an in-flight build is consulted
+    // (`in_flight_build`, `in_flight_build_or_stop`), this one is a hard
+    // error even though a machine is available to disambiguate — freezing
+    // a half-written binary into a simulation is real corruption, not just
+    // confusing advice, so only an explicit `-f` may proceed.
+    if !force && let Some((phrase, stop)) = build_cmd::in_flight_build_or_stop(&config_dir, &config, Some(machine)) {
+        bail!(
+            "{phrase}; wait for it to finish{stop}, or pass -f to proceed anyway (it may freeze a half-written \
+             executable)"
+        );
     }
 
     // 2. Parfile name validation (collision guard, §8.2).

@@ -4115,6 +4115,114 @@ failed, nothing recorded; once `qstat` no longer knew it, `test stop`
 said it is not in the queue and `test delete` went ahead. The earlier
 scenarios as before.
 
+### Liveness follow-ups (after PR #9)
+
+Branch `fix/liveness-followups` on master `02c2b8d` (PR #9 merged), for
+round 11's notes and the known cases A1, A3, A4:
+
+- **A1, a job listed in a state no pattern reads before its end** (Slurm
+  `S`, Torque `E`, or over before its run recorded it) is live for sims
+  and builds as it was for test runs (`is_live(Error, false)` is now
+  true): `sim delete` refuses it, naming the state, and `-f` stops it by
+  `stop_judged(StopCase::Unread)` (refused as not known: deleted unless
+  the restart's lock is held); a graceful `sim stop` writes `TERMINATE`
+  and returns at once, saying `-f` stops it; `build stop` stops it by the
+  same rule and records the outcome (master said "not in the queue"); a
+  new build refuses (`-f` stops it); `build list` shows ERROR (RUNNING
+  while the lock is held) and `build prune` keeps it. `test run`/`test
+  submit` beside such a job now refuse, `-f` stopping it by the same rule
+  (reviewer B's note: master replaced the job id, losing the job). `sim
+  submit` chains behind it, `sim run` refuses, the reaper keeps it, as
+  before.
+- **A3:** `sim submit` beside an active restart that has not recorded its
+  end says that ("has not recorded its end (job N); chaining"), not
+  "still live", which the reaper's throttles may not have asked.
+- **A4 and the hints:** `stop_judged`'s error after a failed query says
+  "the stop command failed too" (no "may not have been reached"), with
+  the `unknown-job-pattern` hint once, after both outputs (the query's
+  own hint, `QUERY_HINT`, is cut from its text there); for a job listed
+  in an unread state it adds to try again once the scheduler no longer
+  lists the job (Torque's `C`).
+- **Wording:** the stop messages after the end name the state read
+  (`listed_state_words`); "leads its own process group" corrected to "a
+  group of its own" in `GENERATIONS.md`, the generic machine's comment,
+  the spec and the doc comments; `live_jobs`' doc; `sentence` moved to
+  `scheduler.rs` beside `unread_state`, shared.
+- **Reviewer B's `setsid` note:** with `setsid` in the workstation
+  machines' `blocking-submit`, Ctrl-C during `build submit --block` ends
+  only the wait, never the job, as the user docs already said; the spec
+  (§7.9) now says so.
+
+Checked with real binaries, a fake Slurm 24.11 (the round 11 harness):
+a build job listed `S` before its outcome: `build list` ERROR, `build`
+and `build submit` refused naming the state, with `scancel` down `build
+-f` and `build stop` failed with the new hint and `build.toml`
+unchanged, with it up `build stop` canceled it (`CA`) and recorded the
+outcome. A sim's job `S`: `sim list` ERROR, `sim delete` refused naming
+the state, `sim run` refused, a graceful `sim stop` with `TERMINATE`
+present wrote it and returned, the restart left active; `sim delete -f`
+with `scancel` down failed, the sim kept; `sim submit` chained ("has not
+recorded its end"); `sim delete -f` with `scancel` up canceled and
+deleted. A test run's job `S`: `test submit` and `test run` refused,
+`-f` with `scancel` down failed (`test.toml` unchanged), with it up
+canceled the old job and submitted. A sim's job `PD` after its end:
+`sim stop` said "(queued again)"; with `squeue` and `scancel` down the
+error carried the hint once.
+
+Round 1 (`e557d7c`): both reviewers blocked on the same two findings.
+(1) A graceful `sim stop` whose run acts on the trigger within the wait
+reported "still in the queue" and left the restart active: the wait
+reused the restart read before it, so once the run recorded its end and
+the job was listed `CD` (Torque `E`, `C`), `is_live(Error, false)` kept
+it live. Fixed: each poll reads the restart afresh (`await_run_exit`),
+and a wait that ends with the job listed in an unread state says so
+(`listed_unread`, `left_unread`, which also logs it). (2) For a job
+Torque lists `C` before its run's end, the early return promised that
+`sim stop -f` stops it, and `-f` failed with a bare `qdel` error: `sim
+stop -f` now asks the scheduler first on a batch machine
+(`batch_status`) and stops an unread-state job by `stop_judged(Unread)`,
+with its hint and the lock check `sim delete -f` has; a job a scheduler
+with `unknown-job-pattern` says it does not know gets no stop ("does not
+know job N; nothing to stop", master sent one that Torque's `qdel`
+refused); the advice says `-f` "asks the scheduler to stop it". Torque's
+`C` before the end now holds a sim's stop and delete until Torque lets
+the job go, where master's graceful stop finished the restart: the cost
+round 10 accepted for test runs, now for sims and builds too (unverified
+on a real Torque). Non-blocking, done: the docs and spec said such a job
+shows ERROR and refuses `sim delete`, but the `get-status-many` paths
+(`sim list`, `sim delete`, `test list`, `build list`) see only what
+`squeue -u` lists, suspended jobs and not ended ones: said so; the hint
+names no pattern where the machine sets none, and says to try again once
+the scheduler answers; `build follow`/`--block` keep waiting on such a
+job and `sim create` counts the build in flight (`in_flight_build`); a
+test doc comment still said "lead". Checked with the reviewers' own
+scripts: the graceful stop ending the run 3 s in said "output-0000
+stopped" within a second; on the fake Torque, `C` before the end: `sim
+stop` left the restart active with the new advice, `sim stop -f` and
+`sim delete -f` failed with the hint, and once `qstat` no longer knew
+the job, `sim stop -f` said there is nothing to stop and `sim delete`
+went ahead; Slurm `S`: `sim stop -f` canceled it (`CA`) and finished the
+restart.
+
+Round 2 (`717c111`): both reviewers signed off. Both round 1 findings
+fixed (ran: Slurm `CD`, Torque `C` and `E` after the run's end; Torque
+`C` before it); `sim stop -f`'s query checked for `R`, `S`, `CD` before
+the end, a forgotten job, `squeue` down, no `unknown-job-pattern`,
+Ctrl-C during the query, a run dying or suspended mid-wait. Non-blocking
+notes, for a later commit: the "nothing to stop" branch of `sim stop -f`
+has no `running.lock` check, which the branch above it has (both; it
+matters for a home shared by two clusters, where `sim delete` is
+unguarded already); its log line says "stopped job N" (as master's for a
+pid gone); the spec's list of `get-status-many` paths leaves out `sim
+show`, `test show`, `build show`; `stop_sim` stores the restart read
+before a successful graceful wait, overwriting the run's own `finished`
+and `status` (as on master); after 30 s with the run's end recorded and
+the job still listed `CG`, the message's "Cactus acts on the trigger at
+its next termination check" is false (as on master), and a run that
+records its end between the last poll and the final read gets that
+message too; on crux (`Unknown Job Id|Job has finished`) a finished job
+is said not to be known.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -4335,9 +4443,10 @@ The cache is on master with `cache doctor` and on by default (above).
 MDB generation 3 is on master (PR #7), and the docs tidy-up after it
 (PR #8). The test-run liveness work on `feature/test-run-liveness`, with
 decision 35's scheduler behavior (above), passed its gate in eleven
-rounds and is PR #9, rebased onto PR #8. Then round 11's non-blocking
-notes and the known cases (above), M4b (Cray), M5b (the whole-file
-cases), M6 (HIP). The every-flag search on `feature/doctor-every-flag`
+rounds and was merged as PR #9. The follow-ups for round 11's notes and
+the known cases passed their gate in two rounds on
+`fix/liveness-followups` (above); round 2's notes are left for a later
+commit. Then M4b (Cray), M5b (the whole-file cases), M6 (HIP). The every-flag search on `feature/doctor-every-flag`
 is shelved (Max, 2026-10-16).
 
 M5 (`cactup cache doctor`) in two parts, each through the review gate.

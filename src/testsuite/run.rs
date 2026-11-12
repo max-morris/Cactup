@@ -228,8 +228,8 @@ fn start_impl(
     let cfg = match ConfigMeta::load(&cactus_root, &cfg_name)? {
         Some(cfg) => cfg,
         None => {
-            if let Some(phrase) = build_cmd::in_flight_build(&config_dir, &cfg_name, Some(machine)) {
-                bail!("{phrase}; wait for it, or watch it with `cactup build log {cfg_name}`");
+            if let Some((phrase, stop)) = build_cmd::in_flight_build_or_stop(&config_dir, &cfg_name, Some(machine)) {
+                bail!("{phrase}; wait for it{stop}, or watch it with `cactup build log {cfg_name}`");
             }
             bail!("Config \"{cfg_name}\" has never been built (`cactup build {cfg_name}`)");
         }
@@ -242,8 +242,8 @@ fn start_impl(
         args.ignore_machine || args.force,
     )?;
     if !build::is_complete(&cactus_root, &cfg_name) {
-        if let Some(phrase) = build_cmd::in_flight_build(&config_dir, &cfg_name, Some(machine)) {
-            bail!("{phrase}; wait for it, or watch it with `cactup build log {cfg_name}`");
+        if let Some((phrase, stop)) = build_cmd::in_flight_build_or_stop(&config_dir, &cfg_name, Some(machine)) {
+            bail!("{phrase}; wait for it{stop}, or watch it with `cactup build log {cfg_name}`");
         }
         bail!("Config \"{cfg_name}\" is incomplete; rebuild it (`cactup build {cfg_name} -f`)");
     }
@@ -401,27 +401,36 @@ fn start_impl(
         // state its patterns read (leaving the queue, or starting again),
         // or could not be asked about, may run beside a new run: refused,
         // the safe reading for starting new work (§10).
-        use crate::scheduler::AfterEnd;
+        use crate::scheduler::{AfterEnd, JobStatus};
         let finished = old.meta.timestamps.finished.is_some();
-        // `Some(answer)`: live; after the end, `answer` is the scheduler's
+        // What the scheduler says of a live job: after the end, its answer
         // (listed in a state, or the failed query's text where it could not
-        // be asked).
-        let live = |job| -> Res<Option<Option<AfterEnd>>> {
+        // be asked); before it, the state it lists the job in (one no
+        // pattern reads too: suspended, or over before the run recorded it).
+        enum Answer {
+            After(AfterEnd),
+            Before(JobStatus),
+        }
+        let live = |job| -> Res<Option<Answer>> {
             Ok(match finished {
                 true => match sched.ask_after_end(job)? {
                     AfterEnd::Over(_) => None,
-                    answer => Some(Some(answer)),
+                    answer => Some(Answer::After(answer)),
                 },
-                false => crate::scheduler::is_live(sched.get_status(job)?, false).then_some(None),
+                false => {
+                    let status = sched.get_status(job)?;
+                    crate::scheduler::is_live(status, false).then_some(Answer::Before(status))
+                }
             })
         };
         if let Some(job) = old.pending_job(&sched)
             && let Some(answer) = live(job)?
         {
             let failed = match &answer {
-                Some(AfterEnd::Unanswered(failed)) => Some(failed.clone()),
+                Answer::After(AfterEnd::Unanswered(failed)) => Some(failed.clone()),
                 _ => None,
             };
+            let unread = matches!(answer, Answer::Before(JobStatus::Error));
             // An older record's pid, or one sharing its process group (§10):
             // never stopped, `-f` neither.
             if sched.unverified(job) {
@@ -440,7 +449,7 @@ fn start_impl(
                     job.id
                 );
             }
-            if let Some(AfterEnd::Listed(status)) = answer
+            if let Answer::After(AfterEnd::Listed(status)) = answer
                 && !args.force
             {
                 bail!(
@@ -450,10 +459,16 @@ fn start_impl(
                     crate::scheduler::listed_after_end(status, &format!("cactup test stop {name}"))
                 );
             }
+            if unread && !args.force {
+                bail!(
+                    "Test run \"{name}\": {}; run `cactup test stop {name}` first, or pass -f to stop it",
+                    crate::scheduler::unread_state(&format!("its job {}", job.id))
+                );
+            }
             if !args.force {
                 bail!(
                     "Test run \"{name}\" still has a live job ({}); \
-                     `cactup test stop {name}` first, or pass -f to stop it",
+                     run `cactup test stop {name}` first, or pass -f to stop it",
                     job.id
                 );
             }
@@ -469,6 +484,21 @@ fn start_impl(
                         println!(
                             "The scheduler does not know test job {} ({said}); treating it as ended",
                             job.id
+                        );
+                    }
+                }
+                // Listed in a state no pattern reads: a stop the scheduler
+                // refuses saying it does not know the job is taken as the job
+                // ended (nothing of the run holds its lock, above); any other
+                // failure of the stop command is an error.
+                false if unread => {
+                    if let crate::scheduler::EndedStop::NotKnown(said) =
+                        sched.stop_judged(job, crate::scheduler::StopCase::Unread)?
+                    {
+                        let what = crate::scheduler::unread_state(&format!("test job {}", job.id));
+                        println!(
+                            "{}; its stop command says it does not know the job ({said}); treating it as ended",
+                            crate::scheduler::sentence(what)
                         );
                     }
                 }

@@ -3,7 +3,9 @@
 
 use crate::commands::Ctx;
 use crate::installation::Installation;
-use crate::scheduler::{AfterEnd, EndedStop, JobRef, JobStatus, Scheduler, SharedGroup, StopCase, Stopped, UnverifiedPid};
+use crate::scheduler::{
+    sentence, AfterEnd, EndedStop, JobRef, JobStatus, Scheduler, SharedGroup, StopCase, Stopped, UnverifiedPid,
+};
 use crate::sim::cache;
 use crate::testsuite::{active_results_id, list_results_ids, results_name, TestRun};
 use crate::Res;
@@ -307,9 +309,9 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
             if let EndedStop::NotKnown(said) = sched.stop_judged(job.job(), StopCase::Unread)? {
                 if run.lock_live()? {
                     println!(
-                        "{}, and the scheduler does not know it ({said}), but the run's running.lock is \
-                         held; nothing recorded. Run `cactup test stop {name}` again once the lock is \
-                         released (a stale lock expires within {} minutes).",
+                        "{}; its stop command says it does not know the job ({said}), but the run's \
+                         running.lock is held; nothing recorded. Run `cactup test stop {name}` again once the \
+                         lock is released (a stale lock expires within {} minutes).",
                         sentence(unread(job_id)),
                         crate::lock::LOCK_STALE_SECS / 60
                     );
@@ -318,7 +320,7 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
                 // Not stopped, and nothing of the run holds its lock: over,
                 // so `delete` and a new run go ahead.
                 println!(
-                    "{}, and the scheduler does not know it ({said}); treating it as ended",
+                    "{}; its stop command says it does not know the job ({said}); treating it as ended",
                     sentence(unread(job_id))
                 );
                 run.meta.timestamps.finished.get_or_insert_with(chrono::Utc::now);
@@ -349,15 +351,19 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
                 _ => StopCase::Listed,
             };
             match sched.stop_judged(job.job(), case)? {
-                EndedStop::Sent if unanswered => println!(
-                    "Could not query test job {}; asked the scheduler to stop it in case it was \
-                     queued again",
-                    job_id.bold()
-                ),
-                EndedStop::Sent => println!(
-                    "Asked the scheduler to stop test job {}, still listed after the run ended",
-                    job_id.bold()
-                ),
+                EndedStop::Sent => match &state {
+                    Job::Listed(status) => println!(
+                        "Asked the scheduler to stop test job {}, still listed after the run ended ({})",
+                        job_id.bold(),
+                        crate::scheduler::listed_state_words(*status)
+                    ),
+                    // Unanswered.
+                    _ => println!(
+                        "Could not query test job {}; asked the scheduler to stop it in case it was \
+                         queued again",
+                        job_id.bold()
+                    ),
+                },
                 // After a failed query, a stop the scheduler refuses as a job
                 // it does not know (by `unknown-job-pattern`) is taken as the
                 // job ended; the run's end stands.
@@ -504,18 +510,9 @@ fn send_stop(sched: &Scheduler, job: JobRef<'_>) -> Res<Stopped> {
     })
 }
 
-/// `text` with its first letter capitalized, for a line of its own.
-fn sentence(text: String) -> String {
-    let mut chars = text.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().chain(chars).collect(),
-        None => text,
-    }
-}
-
 /// What `stop` and `delete` say of a [`Job::Unread`] job.
 fn unread(job_id: &str) -> String {
-    format!("the scheduler lists test job {job_id} in a state cactup does not recognize")
+    crate::scheduler::unread_state(&format!("test job {job_id}"))
 }
 
 /// Refuse to delete `run` while it runs, unless `force` and it is a job the
@@ -554,15 +551,15 @@ fn clear_to_delete(run: &TestRun, sched: &Scheduler, name: &str, force: bool) ->
             crate::scheduler::listed_after_end(status, &format!("cactup test stop {name}"))
         ),
         Job::Live if !force => bail!(
-            "Test run \"{name}\" has a live job ({job_id}); `cactup test stop {name}` first, or use \
+            "Test run \"{name}\" has a live job ({job_id}); run `cactup test stop {name}` first, or use \
              -f to stop and delete"
         ),
         Job::Live => {
             send_stop(sched, job)?;
         }
         Job::Unread if !force => bail!(
-            "{}: `cactup test stop {name}` first, or use -f to stop it and delete",
-            unread(job_id)
+            "{}; run `cactup test stop {name}` first, or use -f to stop it and delete",
+            sentence(unread(job_id))
         ),
         state @ (Job::Unread | Job::Listed(_)) => {
             let (what, case) = match state {
@@ -578,15 +575,15 @@ fn clear_to_delete(run: &TestRun, sched: &Scheduler, name: &str, force: bool) ->
                 // Not stopped: over, unless something still holds the lock.
                 if run.lock_live()? {
                     bail!(
-                        "{}, but the scheduler does not know it ({said}), and the run's running.lock \
-                         is held; delete it once the lock is released (a stale lock expires within {} \
-                         minutes)",
-                        what,
+                        "{}; its stop command says it does not know the job ({said}), but the run's \
+                         running.lock is held; delete it once the lock is released (a stale lock expires \
+                         within {} minutes)",
+                        sentence(what),
                         crate::lock::LOCK_STALE_SECS / 60
                     );
                 }
                 println!(
-                    "{}, but the scheduler does not know it ({said}); deleting it",
+                    "{}; its stop command says it does not know the job ({said}); deleting it",
                     sentence(what)
                 );
             }
@@ -887,7 +884,8 @@ mod tests {
 
         // A listed job: refused without `-f`, stopped with it.
         let listed = open(true, false, "JOB-5");
-        assert!(clear_to_delete(&listed, &sched, "t", false).unwrap_err().to_string().contains("has a live job (JOB-5)"));
+        let refused = clear_to_delete(&listed, &sched, "t", false).unwrap_err().to_string();
+        assert!(refused.contains("has a live job (JOB-5); run `cactup test stop t` first"), "{refused}");
         assert!(!stopped.exists());
         clear_to_delete(&listed, &sched, "t", true).unwrap();
         assert!(stopped.exists());
@@ -918,7 +916,8 @@ mod tests {
         let exiting = Scheduler::new(&exiting);
         let mut ending = open(true, false, "JOB-6");
         let _held_ending = crate::lock::LinkLock::acquire(&ending.running_lock_path()).unwrap();
-        assert!(clear_to_delete(&ending, &exiting, "t", false).unwrap_err().to_string().contains("in a state cactup does not recognize"));
+        let refused = clear_to_delete(&ending, &exiting, "t", false).unwrap_err().to_string();
+        assert!(refused.starts_with("The scheduler lists test job JOB-6 in a state cactup does not recognize; run `cactup test stop t` first"), "{refused}");
         assert!(!stopped.exists());
         stop_run(&mut ending, &exiting, "t").unwrap();
         assert!(stopped.exists());
@@ -973,7 +972,9 @@ mod tests {
         assert!(clear_to_delete(&ended, &refusing, "t", false).unwrap_err().to_string().contains("use -f"));
         clear_to_delete(&ended, &refusing, "t", true).unwrap();
         let held_ended = crate::lock::LinkLock::acquire(&ended.running_lock_path()).unwrap();
-        assert!(clear_to_delete(&ended, &refusing, "t", true).unwrap_err().to_string().contains("running.lock is held"));
+        let err = clear_to_delete(&ended, &refusing, "t", true).unwrap_err().to_string();
+        assert!(err.contains("; its stop command says it does not know the job (qdel: Unknown Job Id"), "{err}");
+        assert!(err.contains("), but the run's running.lock is held"), "{err}");
         // With the lock held, `stop` records nothing; without it, the run
         // has ended, and `delete` then goes ahead without `-f`.
         let mut ended = TestRun::open(&ended.dir).unwrap();
