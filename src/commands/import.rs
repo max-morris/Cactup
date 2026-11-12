@@ -84,11 +84,9 @@ pub fn dispatch(ctx: &Ctx, args: ImportArgs) -> Res<()> {
     };
 
     // 3. The build: in the foreground, or queued and waited for.
-    let mut build = vec!["build".to_owned(), config.clone()];
-    if let Some(flavor) = &args.flavor {
-        build.extend(["--flavor".to_owned(), flavor.clone()]);
-    }
-    let Commands::Build { start, .. } = parse(&build)? else { unreachable!("parsed as build") };
+    let Commands::Build { start, .. } = parse(&build_command(&args, &config))? else {
+        unreachable!("parsed as build")
+    };
     super::build::build_to_completion(&ctx, *start)?;
 
     // 4. The simulation, from the file's parfile, with its knob inputs.
@@ -514,6 +512,19 @@ fn settle_inputs(
     Ok(knobs)
 }
 
+/// The `cactup build` command line the import runs: its config, with the
+/// flavor and make jobs given to import.
+fn build_command(args: &ImportArgs, config: &str) -> Vec<String> {
+    let mut build = vec!["build".to_owned(), config.to_owned()];
+    if let Some(flavor) = &args.flavor {
+        build.extend(["--flavor".to_owned(), flavor.clone()]);
+    }
+    if let Some(jobs) = args.make_jobs {
+        build.extend(["--make-jobs".to_owned(), jobs.to_string()]);
+    }
+    build
+}
+
 /// The flags for `sim submit`/`run`: every start, universe and TOPOLOGY flag
 /// given to import, passed through as given; the `.sim`'s run hints fill in
 /// tasks, CPUs and GPUs per task and wall time where those give none. A
@@ -868,6 +879,25 @@ mod tests {
         };
         assert_eq!(short(import), None);
         assert_eq!(short(sim.find_subcommand("submit").unwrap()), Some('a'));
+    }
+
+    /// `-j` reaches import's build, with or without --submit/--run, and is
+    /// not the TOPOLOGY's `-J` (job name).
+    #[test]
+    fn import_make_jobs_reaches_the_build() {
+        use crate::args::MakeJobs;
+        let jobs_of = |words: &[&str]| {
+            let args = ImportArgs::try_parse_from_args(words);
+            match parse(&build_command(&args, "c")).unwrap() {
+                Commands::Build { start, .. } => (start.opts.make_jobs, args.topology.job_name),
+                _ => unreachable!(),
+            }
+        };
+        assert_eq!(jobs_of(&["s.sim", "--submit", "-j", "8"]), (Some(MakeJobs::Count(8)), None));
+        assert_eq!(jobs_of(&["s.sim", "--run", "--make-jobs", "max"]), (Some(MakeJobs::Max), None));
+        assert_eq!(jobs_of(&["s.sim", "-j", "2"]), (Some(MakeJobs::Count(2)), None));
+        assert_eq!(jobs_of(&["s.sim", "--submit", "-J", "x"]), (None, Some("x".to_owned())));
+        assert_eq!(jobs_of(&["s.sim"]), (None, None));
     }
 
     impl ImportArgs {

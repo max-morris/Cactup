@@ -4374,7 +4374,8 @@ kind of install-time provenance, `simfile`, beside `release` and `thornlist`;
 `cactup import <file.sim>` reproduces a `.sim` in one step: `install
 --simfile` under the file's name (or `--alias`), `cactup build` of a config of
 that name — in the foreground, or, on a machine that queues builds, submitted
-and blocked on (§7.9) — then `sim create` from the file's parfile, and with
+and blocked on (§7.9), with `--flavor` and `-j`/`--make-jobs` passed to it —
+then `sim create` from the file's parfile, and with
 `--submit`/`--run` the simulation started. `import` takes every flag of the
 groups `sim submit` and `sim run` start with — the TOPOLOGY flags (§8.5), the
 universe flags (§4.8) and the start flags `--force-queue`, `--ignore-machine`,

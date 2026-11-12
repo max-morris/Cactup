@@ -231,6 +231,16 @@ pub(crate) enum MakeJobs {
     Max,
 }
 
+impl std::fmt::Display for MakeJobs {
+    /// The `-j` word that parses back to this value.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MakeJobs::Count(n) => write!(f, "{n}"),
+            MakeJobs::Max => f.write_str("max"),
+        }
+    }
+}
+
 /// clap adapter for `-j`: a positive integer or the word `max`.
 fn parse_make_jobs(s: &str) -> Result<MakeJobs, String> {
     if s.eq_ignore_ascii_case("max") {
@@ -1067,6 +1077,10 @@ pub(crate) struct ImportArgs {
     /// Optionlist flavor to build with, when the machine has several and none is the default.
     #[clap(long, value_name = "FLAVOR")]
     pub flavor: Option<String>,
+    // §7.6: passed to the import's build, which runs with or without --submit/--run.
+    /// Parallel make jobs for the build: a number, or `max` for all threads available in the build context (default: machine make-jobs, else 1).
+    #[clap(long, short = 'j', value_name = "N|max", value_parser = parse_make_jobs)]
+    pub make_jobs: Option<MakeJobs>,
     /// A value for one of the parfile's knob inputs; repeat for several. Stored with the simulation, never as a global knob.
     #[clap(long = "input", value_name = "KNOB=VALUE")]
     pub inputs: Vec<String>,
