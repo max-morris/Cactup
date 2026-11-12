@@ -629,11 +629,16 @@ pub(crate) fn refuse_beside_listed_for_tests(sim: &Simulation, sched: &Scheduler
 /// `sim run`'s refusal beside `sim`'s active restart `active`. A job listed
 /// in a state no pattern reads is `sim stop -f`'s: a graceful `sim stop`
 /// only writes the trigger and says so. Asked only on the way to the
-/// refusal; a query that fails leaves the usual advice.
+/// refusal; a query that fails leaves the usual advice, and Ctrl-C during
+/// it is "Interrupted" instead.
 fn active_refusal(sim: &Simulation, sched: &Scheduler, active: u32) -> anyhow::Error {
     let unread = Restart::load(&sim.dir, active)
         .ok()
         .filter(|r| crate::sim::manage::listed_unread(sim, sched, r).unwrap_or(false));
+    // Ctrl-C during the query is no failed query: not the usual advice.
+    if gix::interrupt::is_triggered() {
+        return anyhow!("Interrupted");
+    }
     let (job, stop) = match unread {
         Some(r) => (
             format!(", and {}", crate::scheduler::unread_state(&format!("its job {}", r.meta.job_id))),
