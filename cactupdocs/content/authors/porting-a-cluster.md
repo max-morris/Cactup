@@ -47,12 +47,21 @@ This creates `~/.cactup/machines/myclu/` with:
   runscripts/
     default.sh
     test.sh
+  buildsubmitscripts/
+    default.sh
   hostname.regexp
 ```
 
-There's no `buildsubmitscripts/` directory yet — that one's optional, and only
-needed if your cluster forbids compiling on the login node. Step 4 below
-covers when and how to add it.
+(A clone of another cluster has whatever scripts that cluster has; the
+`buildsubmitscripts/` directory above is `generic`'s.)
+
+`generic`'s `buildsubmitscripts/default.sh` backgrounds a build on the
+workstation it was submitted from (`cactup build submit`); `generic` itself
+sets `[build].default-action = "run"`, so a bare `cactup build` still compiles
+in the foreground. On a cluster you either rewrite that script with your
+scheduler's directives or delete it along with its `[buildsubmitscripts]`
+table: it is optional, and only needed if your cluster forbids compiling on
+the login node. Step 4 below covers when and how.
 
 ## Step 2: Edit meta.toml
 
@@ -367,10 +376,12 @@ srun @EXECUTABLE@ @PARFILE@
 ### Build submit scripts: does your cluster need one?
 
 Most clusters let you compile on the login node, and don't need anything
-here — skip this subsection entirely. Some clusters (often GPU clusters with
+here: delete the `buildsubmitscripts/` directory and the `[buildsubmitscripts]`
+table a clone of `generic` came with, and skip the rest of this subsection.
+Some clusters (often GPU clusters with
 a strict login-node policy) forbid it, the same way they'd forbid running a
-simulation there. If yours is one of them, add a fourth script directory
-alongside the three above:
+simulation there. If yours is one of them, keep (or add) a fourth script
+directory alongside the three above:
 
 ```
 ~/.cactup/machines/myclu/
@@ -392,7 +403,8 @@ flavor on `gpu`. Neither the flavor's `[cactup.runs-on]` nor a queue's
 `build-universes` is checked for a build job.
 
 And in `[build]`, tell cactup an unqualified `cactup build` should go to the
-queue rather than trying (and failing) to compile on the login node:
+queue rather than trying (and failing) to compile on the login node (a clone
+of `generic` says `default-action = "run"`; change it):
 
 ```toml
 [build]

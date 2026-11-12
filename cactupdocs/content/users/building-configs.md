@@ -50,6 +50,12 @@ cactup build run myconfig       # always foreground, even if the machine can sub
 cactup build submit myconfig    # always submit — errors if the machine can't
 ```
 
+On a workstation (the built-in `generic` machine, or one `cactup machine
+create` made from it) there is no batch system: `build submit` starts the
+build in the background on this host, as `sim submit` does a simulation, and
+prints its process id as the job id. Log out and it keeps going; `build log`
+and `build stop` work on it as on any queued build.
+
 `build submit` accepts `--follow` to stream the build's output and block
 until it finishes, instead of returning as soon as the job is queued:
 
