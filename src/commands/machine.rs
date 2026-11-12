@@ -1060,6 +1060,23 @@ mod tests {
         assert_eq!(mine.meta.hardware.max_cpus_per_node, Some(crate::mdb::autodetect::detect().cores));
     }
 
+    /// A machine created from `generic` (the default base, and what an
+    /// unknown host gets) has a script of every kind, a build-submit script
+    /// included, and still builds in the foreground by default.
+    #[test]
+    fn create_from_generic_has_every_kind_of_script() {
+        let sb = sandbox();
+        create_machine(&sb.db, &sb.mdb, Some("mine".into()), None, true, true, Some("mine.example.org")).unwrap();
+        let mine = sb.mdb.load("mine").unwrap();
+        for kind in [ScriptKind::Submit, ScriptKind::Run, ScriptKind::BuildSubmit] {
+            let (script, _) = mine.meta.scripts(kind).route("local", crate::mdb::HOST_UNIVERSE, false).unwrap();
+            assert_eq!(script, "default");
+            assert!(mine.script_path(kind, script).is_ok(), "{kind:?} script file copied");
+        }
+        assert!(mine.meta.can_submit_builds());
+        assert_eq!(mine.meta.build.default_action, Some(crate::mdb::BuildAction::Run));
+    }
+
     #[test]
     fn ensure_local_machine_creates_on_unknown_host_only() {
         // Unknown host: a user-MDB machine is persisted silently and cached

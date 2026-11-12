@@ -1785,7 +1785,10 @@ It describes a single-node workstation with **no batch system**:
   `ps @JOB_ID@`, `stop` = `pkill` the process group (§10: cactup stops only
   a job that leads its own group).
 - A single `local` queue (`gpu = false`, `default = true`) and a single
-  `default` script of each kind, plus a single `default` flavor.
+  `default` script of each kind — submit, run and build-submit — plus a
+  single `default` flavor. The build-submit script lets `cactup build submit`
+  background a build like any other job (§7.9); `[build].default-action =
+  "run"` keeps a bare `cactup build` in the foreground, as on any workstation.
 - It ships no matcher file — `generic` is never auto-matched; it is the
   explicit zero-match fallback (§4.3) and is always selectable via
   `--machine generic`.
