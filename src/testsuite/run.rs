@@ -461,14 +461,14 @@ fn start_impl(
             }
             if unread && !args.force {
                 bail!(
-                    "Test run \"{name}\": {}; `cactup test stop {name}` first, or pass -f to stop it",
+                    "Test run \"{name}\": {}; run `cactup test stop {name}` first, or pass -f to stop it",
                     crate::scheduler::unread_state(&format!("its job {}", job.id))
                 );
             }
             if !args.force {
                 bail!(
                     "Test run \"{name}\" still has a live job ({}); \
-                     `cactup test stop {name}` first, or pass -f to stop it",
+                     run `cactup test stop {name}` first, or pass -f to stop it",
                     job.id
                 );
             }

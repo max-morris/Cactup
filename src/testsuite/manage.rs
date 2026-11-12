@@ -551,15 +551,15 @@ fn clear_to_delete(run: &TestRun, sched: &Scheduler, name: &str, force: bool) ->
             crate::scheduler::listed_after_end(status, &format!("cactup test stop {name}"))
         ),
         Job::Live if !force => bail!(
-            "Test run \"{name}\" has a live job ({job_id}); `cactup test stop {name}` first, or use \
+            "Test run \"{name}\" has a live job ({job_id}); run `cactup test stop {name}` first, or use \
              -f to stop and delete"
         ),
         Job::Live => {
             send_stop(sched, job)?;
         }
         Job::Unread if !force => bail!(
-            "{}: `cactup test stop {name}` first, or use -f to stop it and delete",
-            unread(job_id)
+            "{}; run `cactup test stop {name}` first, or use -f to stop it and delete",
+            sentence(unread(job_id))
         ),
         state @ (Job::Unread | Job::Listed(_)) => {
             let (what, case) = match state {
@@ -884,7 +884,8 @@ mod tests {
 
         // A listed job: refused without `-f`, stopped with it.
         let listed = open(true, false, "JOB-5");
-        assert!(clear_to_delete(&listed, &sched, "t", false).unwrap_err().to_string().contains("has a live job (JOB-5)"));
+        let refused = clear_to_delete(&listed, &sched, "t", false).unwrap_err().to_string();
+        assert!(refused.contains("has a live job (JOB-5); run `cactup test stop t` first"), "{refused}");
         assert!(!stopped.exists());
         clear_to_delete(&listed, &sched, "t", true).unwrap();
         assert!(stopped.exists());
@@ -915,7 +916,8 @@ mod tests {
         let exiting = Scheduler::new(&exiting);
         let mut ending = open(true, false, "JOB-6");
         let _held_ending = crate::lock::LinkLock::acquire(&ending.running_lock_path()).unwrap();
-        assert!(clear_to_delete(&ending, &exiting, "t", false).unwrap_err().to_string().contains("in a state cactup does not recognize"));
+        let refused = clear_to_delete(&ending, &exiting, "t", false).unwrap_err().to_string();
+        assert!(refused.starts_with("The scheduler lists test job JOB-6 in a state cactup does not recognize; run `cactup test stop t` first"), "{refused}");
         assert!(!stopped.exists());
         stop_run(&mut ending, &exiting, "t").unwrap();
         assert!(stopped.exists());
