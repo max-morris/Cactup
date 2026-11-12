@@ -54,6 +54,9 @@ knobs with `@KNOB(name)@`; see [Running Simulations](../users/running-simulation
 - `~/.cactup/mdb-builtin/` — the built-in `generic` machine, unpacked from
   the binary when no system machine database provides one.
 - `~/.cactup/machines/` — your own machine definitions (the user overlay).
+- `~/.cactup/machine-backups/<name>/generation-<N>/` — a machine's files as
+  they were before cactup brought it forward from MDB generation `N`. Kept
+  until you remove them.
 - `~/.cactup/refetch-backups/<alias>/<timestamp>/` — files backed up before
   `cactup installation refetch --overwrite-modified` (or `-f`, or a targeted
   `--overwrite <name>`) fetches over a repo with local changes.

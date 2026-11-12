@@ -82,23 +82,43 @@ gaining support for something the MDB does not use yet.
 
 Do all of this in **one commit**:
 
+0. Before touching anything, on the tree as it is (the last one at the old
+   generation), snapshot that generation's overlays:
+   `ci/overlay-fixtures.sh N OUTDIR` builds the tree, has it create an overlay
+   from each of a fixed list of shipped machines, scrubs what depends on your
+   host, and copies them. Commit the result as
+   `fixtures/mdb-overlays/gen-N/`. These are real output of the generation's
+   own binary, which is what users have on disk; never edit a committed
+   snapshot.
 1. Increment the number in `mdb/GENERATION`.
-2. Append a `## Generation N+1` entry to `mdb/GENERATIONS.md`: what changed,
-   and the recipe for bringing an overlay machine forward (which keys to
-   rename, add or remove, which variables changed). Users will follow it
-   step by step.
-3. Migrate every machine under `mdb/` in the repository to the new
+2. Append a `## Generation N+1` entry to `mdb/GENERATIONS.md`: what changed;
+   an "Automatically:" paragraph saying what the overlay migration does for
+   this step and when it stops; and the recipe for bringing an overlay
+   machine forward by hand (which keys to rename, add or remove, which
+   variables changed), including what the migration refuses and what is
+   optional. Users follow it step by step.
+3. Add the overlay migration step for N to N+1 to `STEPS` in
+   `src/mdb/migrate.rs`. A step that only raises the number is still a step
+   (`raise`). A step preserves behavior or refuses: it does the mechanical
+   edits, notes a change that can only show up later as a loud error, and
+   stops where the machine could quietly do something different. It never
+   applies an optional change, never edits a script, and never writes a key
+   the new generation's first binary lacks.
+4. Migrate every machine under `mdb/` in the repository to the new
    generation.
-4. Make the cactup source understand it: a binary built from this commit
+5. Make the cactup source understand it: a binary built from this commit
    embeds the new number.
 
-Two checks back this up. A unit test fails the build when
-`mdb/GENERATIONS.md` has no entry for the number in `mdb/GENERATION`. The
-`mdb-compat` CI job loads every machine in both directions of the rule (the
-MDB at your commit with the generation's first binary, and the generation's
-first MDB with your binary) and tells you to bump if either fails. It checks
-loading only: a changed template variable or a changed `.py` protocol still
-needs your judgment.
+Checks back this up. Unit tests fail the build when `mdb/GENERATIONS.md` has
+no entry for every generation up to the number in `mdb/GENERATION`, when
+`STEPS` lacks a step for any older generation, when `fixtures/mdb-overlays/`
+lacks a snapshot for one, and when any snapshot (or hand-written edge case
+beside them) fails to migrate to the current generation, load, and leave
+itself untouched on the second load. The `mdb-compat` CI job loads every
+machine in both directions of the rule (the MDB at your commit with the
+generation's first binary, and the generation's first MDB with your binary)
+and tells you to bump if either fails. It checks loading only: a changed
+template variable or a changed `.py` protocol still needs your judgment.
 
 After a bump, users on older builds see the "moved to generation" warning
 until they update; an older build keeps working with the last MDB of its
@@ -117,24 +137,37 @@ mdb-generation = 5
 `cactup machine create` writes the current generation for you. A machine
 without the key loads with a warning that cactup is assuming its own
 generation; add the key to silence it. A machine written for an older
-generation is brought forward the first time a newer cactup loads it, with
-its old files kept under `~/.cactup/machine-backups/<name>/`; where that
-cannot be done automatically, cactup refuses the machine and names the one
-`GENERATIONS.md` entry to follow by hand. One written for a newer generation
-asks for `cactup update`.
+generation is brought forward by a newer cactup, as described next. One
+written for a newer generation asks for `cactup update`.
 
 ### Updating an overlay machine
 
-If your overlay machine says `mdb-generation = N` and cactup is at a newer
-generation:
+cactup updates an overlay machine itself the first time it loads it after an
+upgrade, and prints one line saying so and where the old files went: a full
+copy in `~/.cactup/machine-backups/<name>/generation-<N>/`, kept for good,
+with a `NOTES.txt` of what was done. The edits are mechanical and keep your
+comments; scripts are never touched, and the optional changes in a
+generation's entry are never made for you. Where the update could change what
+the machine does without saying so, it stops instead and keeps whatever
+earlier steps it finished. The message names the machine and file, what
+stopped it, and the next step on a line of its own: the entry of
+`GENERATIONS.md` to follow by hand. Make that change, set `mdb-generation` to
+the generation the message names, and run any cactup command again; cactup
+carries on from there. Notes the update prints (such as a setup that may now
+belong in a provisioning key) are for you to read; nothing breaks if you do
+not.
 
-1. Open `GENERATIONS.md` (the error message says where it is; it is also in
-   `~/.cactup/mdb/gen-<M>/GENERATIONS.md`).
-2. Apply the recipe of every entry after yours, in order: `## Generation N+1`,
-   then `N+2`, up to the current one.
-3. Set `mdb-generation` to the current generation.
-4. Check that it loads: `cactup machine show <name>`.
+An overlay written for generation 1 is not updated automatically: cactup
+refuses it untouched, and the recipe under Generation 2 is followed by hand.
+A machine whose `meta.toml` has no `mdb-generation` is assumed current and
+never rewritten (the warning says so, and names the generation its keys look
+like when they give it away).
 
-If your machine was copied from a shipped one with `--from-existing` and you
-changed little, it can be simpler to delete it and copy it again from the
-updated MDB.
+If the message offers to start over, it gives a command that moves the
+machine's directory aside to a hidden `.<name>.old` beside it, which cactup
+never lists or loads, and creates the machine again from the same base; your
+own edits are then in the moved directory. Another cactup sharing the same
+`~/.cactup` that is still on the older generation will ask you to run
+`cactup update`. To go back after an update, copy the backup over the
+machine directory.
+
