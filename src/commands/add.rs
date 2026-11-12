@@ -948,8 +948,9 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<
     // sections resolved through it. Until the new list and record are
     // written, any failure (the fetch, a `?` below) undoes that, and takes
     // away the placements this add newly made.
-    let undo = crate::fetch::library::PutBack::drop_placements(&inst.root, &before, &composed)?;
+    let mut undo = crate::fetch::library::PutBack::drop_placements(&inst.root, &before, &composed)?;
     let report = crate::fetch::execute(&plan, &inst.root)?;
+    undo.made(&plan, &report);
     if !report.failures.is_empty() {
         // What did fetch is recorded all the same, so a later prune knows
         // cactup made it.
@@ -960,9 +961,10 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<
     crate::fetch::FetchState::record(&inst.root, &report.records())?;
 
     std::fs::write(&live_path, &composed).with_context(|| format!("Failed to write '{}'", live_path.display()))?;
+    // The list is written: what it drops stays dropped, whatever follows.
+    let unplacing = undo.commit();
     locked.set_meta(&meta)?;
     drop(locked);
-    let unplacing = undo.commit();
 
     for package in &added {
         let checkouts: Vec<&str> = package.thorns.iter().map(|t| t.checkout.as_str()).collect();
@@ -1060,9 +1062,10 @@ pub fn remove(ctx: &Ctx, package: &str, force: bool) -> Res<()> {
     // (only what placing made; whatever else is at those paths is left, with
     // a note). Until the new list and record are written, any failure puts
     // them back.
-    let undo = crate::fetch::library::PutBack::drop_placements(&inst.root, &before, &composed)?;
+    let mut undo = crate::fetch::library::PutBack::drop_placements(&inst.root, &before, &composed)?;
     if let Some(plan) = restore {
         let report = crate::fetch::execute(&plan, &inst.root)?;
+        undo.made(&plan, &report);
         if !report.failures.is_empty() {
             let why: Vec<String> = report.failures.iter().map(|f| format!("{}: {}", f.what, f.error)).collect();
             bail!("Failed to restore {}:\n  {}", removed.replaces.join(", "), why.join("\n  "));
@@ -1070,9 +1073,10 @@ pub fn remove(ctx: &Ctx, package: &str, force: bool) -> Res<()> {
         crate::fetch::FetchState::record(&inst.root, &report.records())?;
     }
     std::fs::write(&live_path, &composed).with_context(|| format!("Failed to write '{}'", live_path.display()))?;
+    // The list is written: what it drops stays dropped, whatever follows.
+    let unplacing = undo.commit();
     locked.set_meta(&meta)?;
     drop(locked);
-    let unplacing = undo.commit();
 
     println!("Removed {} from the thornlist.", removed.package.bold());
     for link in unplacing.links() {
@@ -2063,5 +2067,50 @@ mod tests {
         let meta = it.inst.meta().unwrap();
         assert_eq!(meta.added[0].libraries.len(), 1);
         assert_eq!(meta.added[0].libraries[0].into, "src/fuka");
+    }
+
+    /// A refetch whose prune fails after the fetch went through keeps what
+    /// it did: the new list is written first, so the placement it drops
+    /// stays dropped (here the base took FUKA over).
+    #[test]
+    fn a_refetch_whose_prune_fails_keeps_the_new_list() {
+        use std::os::unix::fs::PermissionsExt;
+        let it = Installed::new("src/fuka", "", &[]);
+        // An interrupted prune's leftover that cannot be deleted.
+        let stuck = it.inst.root.join(".cactup/pruning/old.1/locked");
+        std::fs::create_dir_all(&stuck).unwrap();
+        std::fs::write(stuck.join("f"), "x").unwrap();
+        std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::remove_file(stuck.join("f")).is_ok() {
+            return; // root: permissions do not bind
+        }
+        let new_base = format!(
+            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!DEFINE ARR = $ROOT/arrangements\n\n\
+             !TARGET = $ARR/Fuka/KadathThorn/src/fuka/../../../../repos/KadathThorn/src/fuka\n!TYPE = git\n!URL = {}\n\
+             !REPO_COMMIT = {}\n!CHECKOUT = Cmake src\n",
+            it.fuka_url, it.f
+        );
+        let file = it.tmp.path().join("new-base.th");
+        std::fs::write(&file, &new_base).unwrap();
+        let args = match <crate::args::Args as clap::Parser>::try_parse_from([
+            "cactup",
+            "inst",
+            "refetch",
+            "--prune",
+            file.to_str().unwrap(),
+        ])
+        .unwrap()
+        .command
+        {
+            crate::args::Commands::Inst(crate::args::InstallationCommand::Refetch(args)) => args,
+            other => panic!("{other:?}"),
+        };
+        let result = super::super::refetch::dispatch(&it.ctx, args);
+        std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(result.is_err(), "the prune fails");
+        let live = std::fs::read_to_string(it.inst.live_thornlist()).unwrap();
+        assert!(live.contains("$ARR/Fuka/KadathThorn/src/fuka/../../../../repos/KadathThorn/src/fuka"), "{live}");
+        assert!(!it.exclude().contains("/src/fuka"), "the dropped placement stays dropped: {}", it.exclude());
+        assert!(it.kadath_dir().join("src/fuka/Cmake/CMakeLists.txt").is_file());
     }
 }

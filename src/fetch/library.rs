@@ -390,9 +390,38 @@ struct Exclude {
 
 pub(crate) const EXCLUDE_COMMENT: &str = "# A library cactup placed (a link to its own clone)";
 
-/// The one temporary [`Exclude::remove`] writes the new exclude to, in
-/// `.git/info`, before renaming it over the exclude.
-const EXCLUDE_TEMP: &str = ".exclude.cactup-tmp";
+/// The prefix of the temporaries [`Exclude::remove`] writes the new exclude
+/// to, in `.git/info`, before renaming it over the exclude: each is
+/// `<prefix><pid>-<n>`, unique to its process.
+const EXCLUDE_TEMP: &str = ".exclude.cactup-";
+
+/// Unlink the temporaries a dead process left in `info`: names with the
+/// exact [`EXCLUDE_TEMP`] prefix whose pid is not running (or that carry no
+/// pid, as an older cactup's fixed name did). Unlinking never follows a
+/// link, and nothing is ever written through one; a live process's
+/// temporary is left alone. Best effort.
+fn clear_stale_temporaries(info: &OwnedFd) {
+    let Ok(dir) = rustix::fs::Dir::read_from(info) else { return };
+    let mut stale = Vec::new();
+    for entry in dir.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(rest) = name.strip_prefix(EXCLUDE_TEMP) else { continue };
+        let pid = rest
+            .split('-')
+            .next()
+            .and_then(|p| p.parse::<i32>().ok())
+            .and_then(rustix::process::Pid::from_raw);
+        let alive = pid.is_some_and(|pid| {
+            !matches!(rustix::process::test_kill_process(pid), Err(rustix::io::Errno::SRCH))
+        });
+        if !alive {
+            stale.push(name);
+        }
+    }
+    for name in stale {
+        let _ = rustix::fs::unlinkat(info, name.as_str(), AtFlags::empty());
+    }
+}
 
 /// A line of the exclude without its line ending (`\n`, and a `\r` before it).
 fn bare(line: &[u8]) -> &[u8] {
@@ -492,10 +521,10 @@ impl Exclude {
     /// Take away the comment and path pair [`Exclude::add`] appended for
     /// `into`, leaving every other line byte for byte: the new bytes go to a
     /// temporary file beside it, which then replaces it in one rename. The
-    /// temporary has one fixed name, [`EXCLUDE_TEMP`]: whatever a crash left
-    /// there is unlinked first (unlink never follows a link), then it is made
-    /// afresh, exclusively and never through a link. Returns whether there
-    /// was a pair.
+    /// temporary is this process's own (`<EXCLUDE_TEMP><pid>-<n>`), made
+    /// exclusively and never through a link, so two cactups never meet on
+    /// it; a dead process's left there is cleared first. Returns whether
+    /// there was a pair.
     fn remove(&mut self, into: &str) -> Res<bool> {
         let Some(info) = &self.info else { return Ok(false) };
         let Some((text, mode)) = self.read(info)? else { return Ok(false) };
@@ -518,26 +547,21 @@ impl Exclude {
         if !removed {
             return Ok(false);
         }
-        match rustix::fs::unlinkat(info, EXCLUDE_TEMP, AtFlags::empty()) {
-            Ok(()) | Err(rustix::io::Errno::NOENT) => {}
-            Err(e) => {
-                return Err(anyhow!(e).context(format!(
-                    "Failed to clear '{}'",
-                    self.shown.with_file_name(EXCLUDE_TEMP).display()
-                )));
-            }
-        }
+        clear_stale_temporaries(info);
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let temp = format!("{EXCLUDE_TEMP}{}-{n}", std::process::id());
+        let temp = temp.as_str();
         let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let out =
-            rustix::fs::openat(info, EXCLUDE_TEMP, flags, Mode::from_raw_mode(mode)).map_err(|e| {
-                anyhow!(e).context(format!("Failed to write beside '{}'", self.shown.display()))
-            })?;
+        let out = rustix::fs::openat(info, temp, flags, Mode::from_raw_mode(mode)).map_err(|e| {
+            anyhow!(e).context(format!("Failed to write beside '{}'", self.shown.display()))
+        })?;
         let written = std::fs::File::from(out).write_all(&kept);
         let renamed = written.map_err(anyhow::Error::from).and_then(|()| {
-            rustix::fs::renameat(info, EXCLUDE_TEMP, info, "exclude").map_err(anyhow::Error::from)
+            rustix::fs::renameat(info, temp, info, "exclude").map_err(anyhow::Error::from)
         });
         if let Err(e) = renamed {
-            let _ = rustix::fs::unlinkat(info, EXCLUDE_TEMP, AtFlags::empty());
+            let _ = rustix::fs::unlinkat(info, temp, AtFlags::empty());
             return Err(e.context(format!("Failed to rewrite '{}'", self.shown.display())));
         }
         Ok(true)
@@ -955,9 +979,10 @@ impl Unplacing {
 /// how.
 pub struct PutBack<'a> {
     install_root: &'a Path,
-    before: String,
-    after: String,
     unplacing: Unplacing,
+    /// The placements this run made (`Created` in its fetch report), as
+    /// `(root, dependent, into, repo)`: the only ones an undo takes away.
+    made: Vec<(String, String, String, String)>,
     armed: bool,
 }
 
@@ -966,13 +991,19 @@ impl<'a> PutBack<'a> {
     /// ([`unplace_dropped`]), armed to undo that.
     pub fn drop_placements(install_root: &'a Path, before: &str, after: &str) -> Res<PutBack<'a>> {
         let unplacing = unplace_dropped(install_root, before, after)?;
-        Ok(PutBack {
-            install_root,
-            before: before.to_owned(),
-            after: after.to_owned(),
-            unplacing,
-            armed: true,
-        })
+        Ok(PutBack { install_root, unplacing, made: Vec::new(), armed: true })
+    }
+
+    /// Note the placements `report` says this run created (a link that was
+    /// there already reads `Unchanged`, and is never this run's to undo).
+    pub fn made(&mut self, plan: &super::Plan, report: &super::ExecReport) {
+        for p in &plan.libraries {
+            let label = p.label();
+            if report.links.iter().any(|(l, o)| *l == label && *o == LinkOutcome::Created) {
+                self.made
+                    .push((plan.root.clone(), p.dependent.clone(), p.into.clone(), p.repo.clone()));
+            }
+        }
     }
 
     /// What was dropped, and the notes on what was left.
@@ -990,10 +1021,12 @@ impl<'a> PutBack<'a> {
     pub fn undo(&mut self) -> Vec<String> {
         self.armed = false;
         let mut problems = Vec::new();
-        match unplace_dropped(self.install_root, &self.after, &self.before) {
-            Ok(made) => problems.extend(made.notes),
-            Err(e) => problems
-                .push(format!("The libraries this run placed could not all be taken away: {e:#}")),
+        for (root, dependent, into, repo) in std::mem::take(&mut self.made) {
+            if let Err(e) = unplace(self.install_root, &root, &dependent, &into, &repo, &mut problems) {
+                problems.push(format!(
+                    "{dependent}/{into}, which this run placed, could not be taken away: {e:#}"
+                ));
+            }
         }
         problems.extend(self.unplacing.restore(self.install_root));
         problems
@@ -2315,15 +2348,22 @@ mod tests {
         let info = s.repos().join("KadathThorn/.git/info");
         let victim = s.tmp.path().join("victim");
         std::fs::write(&victim, "precious\n").unwrap();
-        std::os::unix::fs::symlink(&victim, info.join(EXCLUDE_TEMP)).unwrap();
+        // A dead process's temporary (a link to somewhere else), and an
+        // older cactup's fixed name: both cleared, never written through.
+        // A live process's (this one's pid) is left alone.
+        std::os::unix::fs::symlink(&victim, info.join(".exclude.cactup-tmp")).unwrap();
+        std::os::unix::fs::symlink(&victim, info.join(format!("{EXCLUDE_TEMP}999999999-0"))).unwrap();
+        let live = format!("{EXCLUDE_TEMP}{}-999999", std::process::id());
+        std::fs::write(info.join(&live), "in use\n").unwrap();
         unplace_dropped(&s.install(), &placed, &without_fuka(&s, &k)).unwrap();
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious\n");
         assert!(!std::fs::read_to_string(info.join("exclude")).unwrap().contains("/src/fuka"));
-        let names: Vec<String> = std::fs::read_dir(&info)
+        let mut names: Vec<String> = std::fs::read_dir(&info)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, ["exclude"]);
+        names.sort();
+        assert_eq!(names, [live.as_str(), "exclude"]);
     }
 
     /// Putting a link back where something sits now says to move that aside
@@ -2362,9 +2402,14 @@ mod tests {
         let new = old.replace("$ROOT/repos/KadathThorn/src\n", "$ROOT/repos/KadathThorn/ext\n");
         let install = s.install();
         {
-            let undo = PutBack::drop_placements(&install, &old, &new).unwrap();
+            let mut undo = PutBack::drop_placements(&install, &old, &new).unwrap();
             assert_eq!(undo.unplacing().links(), ["KadathThorn/src/fuka"]);
-            assert!(s.fetch(&new).failures.is_empty());
+            let list = crate::thornlist::parse(&new).unwrap();
+            let mut progress = prodash::tree::Root::new().add_child("plan");
+            let plan = super::super::plan(&list, &install, &mut progress).unwrap();
+            let report = super::super::execute(&plan, &install).unwrap();
+            assert!(report.failures.is_empty(), "{:?}", report.failures);
+            undo.made(&plan, &report);
             assert!(s.repos().join("KadathThorn/ext/fuka").exists());
             // A failure here: the undo runs as it goes out of scope.
         }
@@ -2383,5 +2428,32 @@ mod tests {
         undo.commit();
         assert!(s.repos().join("KadathThorn/ext/fuka").exists());
         assert!(std::fs::symlink_metadata(s.repos().join("KadathThorn/src/fuka")).is_err());
+    }
+
+    // From the fourth review.
+
+    /// A link that was there before the command, in a placement `before`
+    /// does not name but `after` does: an armed undo leaves it, since this
+    /// run did not make it (the fetch report would say `Unchanged`).
+    #[test]
+    fn review4_undo_removes_a_link_it_did_not_make() {
+        let s = Setup::new();
+        let k = commit_entries(&s.kadath, &[("src/build.sh", "1\n", false)]);
+        let f = commit_entries(&s.fuka, &[("Cmake/CMakeLists.txt", "fuka\n", false)]);
+        let placed = s.list(&k, &f, "");
+        assert!(s.fetch(&placed).failures.is_empty());
+        let link = s.repos().join("KadathThorn/src/fuka");
+        let root = s.install();
+        {
+            let mut undo = PutBack::drop_placements(&root, &without_fuka(&s, &k), &placed).unwrap();
+            // The run fetches `placed` again: the link reads Unchanged.
+            let list = crate::thornlist::parse(&placed).unwrap();
+            let mut progress = prodash::tree::Root::new().add_child("plan");
+            let plan = super::super::plan(&list, &root, &mut progress).unwrap();
+            let report = super::super::execute(&plan, &root).unwrap();
+            undo.made(&plan, &report);
+            // ...and then fails: the undo runs as it goes out of scope.
+        }
+        assert!(std::fs::symlink_metadata(&link).is_ok(), "pre-existing link removed by undo");
     }
 }

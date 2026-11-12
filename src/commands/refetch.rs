@@ -263,14 +263,18 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     let before = fs::read_to_string(&live_read).unwrap_or_default();
     // Until the new list is adopted (below), any way out of here (an error,
     // an interrupt, a list not adopted) undoes that.
-    let undo = fetch::library::PutBack::drop_placements(&inst.root, &before, &composed)?;
-    for link in undo.unplacing().links() {
+    let mut undo = Some(fetch::library::PutBack::drop_placements(&inst.root, &before, &composed)?);
+    let dropping = undo.as_ref().expect("just made").unplacing();
+    for link in dropping.links() {
         println!("Took away the old library link at {link}.");
     }
-    for note in &undo.unplacing().notes {
+    for note in &dropping.notes {
         println!("{note}");
     }
     let report = fetch::execute(&plan, &inst.root)?;
+    if let Some(undo) = undo.as_mut() {
+        undo.made(&plan, &report);
+    }
 
     // Post-pass bookkeeping: record what we fetched (prune safety + the
     // future rebuild-decision hookup), then report.
@@ -353,15 +357,6 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // genuinely left alone.
     print_skip_status(&plan.skipped, &forced_repo_names, overwrite_modified, &args, SkipPhase::Summary);
 
-    // Orphan handling: always reported; removed only under --prune.
-    report_orphans(&orphans);
-    if args.prune {
-        finish_interrupted_prunes(&inst)?;
-    }
-    if args.prune && !orphans.is_empty() {
-        prune_orphans(&inst, &orphans, &configs, &args)?;
-    }
-
     // Thornlist writes. The pristine as-fetched copy always tracks what was
     // fetched; the live copy is only replaced by an explicit source (and the
     // old live copy is snapshotted first).
@@ -372,6 +367,11 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             snapshot_live(&inst, &live_read)?;
             fs::write(&live_path, &composed)
                 .with_context(|| format!("Failed to write '{}'", live_path.display()))?;
+            // The list is written: the placements it drops stay dropped,
+            // whatever follows.
+            if let Some(undo) = undo.take() {
+                undo.commit();
+            }
             // Writing the current name beside a pre-rename copy would leave two
             // thornlists where reads only ever consult one — exactly the
             // ambiguity the rename removes. The old copy was just snapshotted,
@@ -392,7 +392,9 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             }
         }
         // The list is adopted: the placements it drops stay dropped.
-        undo.commit();
+        if let Some(undo) = undo.take() {
+            undo.commit();
+        }
 
         // DB provenance (§2.1): the thornlist is adopted on disk above
         // regardless of whether every repo behind it was actually fetched
@@ -466,6 +468,17 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             };
             print_partial_adoption(&header_line, &unfetched);
         }
+    }
+
+    // Orphan handling: always reported; removed only under --prune, and only
+    // after the list is written, so a prune that fails cannot undo the
+    // placements of a fetch that went through.
+    report_orphans(&orphans);
+    if args.prune {
+        finish_interrupted_prunes(&inst)?;
+    }
+    if args.prune && !orphans.is_empty() {
+        prune_orphans(&inst, &orphans, &configs, &args)?;
     }
 
     // Config interaction (§7.5): a refetch does not, by itself, cause any

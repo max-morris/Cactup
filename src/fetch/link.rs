@@ -100,6 +100,11 @@ fn user_tree(path: &Path, repos_dir: &Path) -> Option<PathBuf> {
     for _ in 0..40 {
         let Ok(to) = std::fs::read_link(&hop) else { break };
         let parent = physical_resolve(hop.parent().unwrap_or(Path::new("/")));
+        // A hop whose own directory is reached through `repos/` (a directory
+        // symlink in the middle of the path) is a repo's content too.
+        if parent.starts_with(repos_dir) {
+            return None;
+        }
         let next = join_normalized(&parent, &to);
         if next.starts_with(repos_dir) || physical_resolve(&next).starts_with(repos_dir) {
             return None;
@@ -217,7 +222,12 @@ fn plan_link(pass: &LinkPass, component: &Component) -> crate::Res<LinkPlan> {
     // `arrangements` link checked out there would carry every later thorn
     // link wherever it points.
     let link_path = target_dir.join(&link_name);
-    if pass.reserved.contains(&link_path) {
+    // Compared without case: on a case-insensitive filesystem (macOS)
+    // `Cactus/Arrangements` is `Cactus/arrangements`.
+    let same = |a: &Path, b: &Path| {
+        a.as_os_str().as_encoded_bytes().eq_ignore_ascii_case(b.as_os_str().as_encoded_bytes())
+    };
+    if pass.reserved.iter().any(|r| same(r, &link_path)) {
         bail!(
             "'{}' ({} {}) would make '{}' a link; the Cactus root, its arrangements/ and its repos/ are never links \
              a thornlist makes",
@@ -911,5 +921,41 @@ mod tests {
         let err = LinkPass::new(&install_root, "Cactus").link(&thorn).unwrap_err();
         assert!(format!("{err:#}").contains("outside the installation"), "{err:#}");
         assert_eq!(std::fs::read_dir(&victim).unwrap().count(), 0);
+    }
+
+    /// From the fourth review: an `arrangements/` link whose chain reaches
+    /// `repos/` through a directory symlink in the middle of a hop is a
+    /// repo's content too, and nothing is linked through it to outside.
+    #[test]
+    fn review4_user_tree_indirect_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("inst");
+        let victim = dir.path().join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        make_repo(&install_root, "evil");
+        make_repo(&install_root, "B");
+        std::fs::create_dir_all(install_root.join("Cactus/repos/B/Thorn")).unwrap();
+        std::os::unix::fs::symlink(&victim, install_root.join("Cactus/repos/evil/arr")).unwrap();
+        std::os::unix::fs::symlink("repos/evil", install_root.join("Cactus/dirlink")).unwrap();
+        std::os::unix::fs::symlink("dirlink/arr", install_root.join("Cactus/arrangements")).unwrap();
+        let thorn = git_component("Arr/Thorn", "B");
+        let err = LinkPass::new(&install_root, "Cactus").link(&thorn).unwrap_err();
+        assert!(format!("{err:#}").contains("outside the installation"), "{err:#}");
+        assert_eq!(std::fs::read_dir(&victim).unwrap().count(), 0);
+    }
+
+    /// The tree's skeleton is compared without case (a case-insensitive
+    /// filesystem, as macOS has, sees `Arrangements` as `arrangements`).
+    #[test]
+    fn the_reserved_paths_compare_without_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("inst");
+        make_repo(&install_root, "evil");
+        for (target, checkout) in [("Cactus", "Arrangements"), ("Cactus", "REPOS"), ("", "cactus")] {
+            let mut c = git_component(checkout, "evil");
+            c.target = target.to_owned();
+            let err = link_component(&install_root, "Cactus", &c).unwrap_err();
+            assert!(format!("{err:#}").contains("never links"), "{target} {checkout}: {err:#}");
+        }
     }
 }
