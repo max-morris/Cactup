@@ -65,7 +65,10 @@ export CACTUP_HOME=$home
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$tree/target}/gen$gen
 bin=$(cd "$tree" && cargo build --locked --bin cactup --message-format=json-render-diagnostics \
     | sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' | tail -n 1)
-[ -n "$bin" ] && [ -x "$bin" ] || { echo "cargo built no cactup binary" >&2; exit 1; }
+if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+    echo "cargo built no cactup binary" >&2
+    exit 1
+fi
 
 for m in "${machines[@]}"; do
     [ -d "$tree/mdb/$m" ] || { echo "machine $m is not in $tree/mdb" >&2; exit 1; }
