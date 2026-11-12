@@ -651,7 +651,7 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool, purge: bool) -> Res<()> {
 /// from a manual `make <cfg>-testsuite` or a pre-fix cactup run.
 pub fn clean(ctx: &Ctx) -> Res<()> {
     let inst = Installation::resolve(ctx)?;
-    let removed = clean_tree(&inst.cactus_root())?;
+    let removed = clean_tree(&inst.cactus_root()?)?;
     if removed.is_empty() {
         println!("No in-tree testsuite output to clean.");
     } else {

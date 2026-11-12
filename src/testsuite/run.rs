@@ -216,7 +216,7 @@ fn start_impl(
 
     let inst_meta = inst.meta()?;
     let test_home = inst_meta.test_home()?.to_owned();
-    let cactus_root = inst.cactus_root();
+    let cactus_root = inst.cactus_root()?;
 
     // 1. Config: --config → the active config (fatal in the null-config
     //    state — §7.1).
@@ -820,7 +820,7 @@ mod tests {
             meta.test_home = Some(test_home);
             locked.set_meta(&meta).unwrap();
         }
-        let root = inst.cactus_root();
+        let root = inst.cactus_root().unwrap();
         let cfg_dir = root.join("configs").join("tests");
         fs::create_dir_all(cfg_dir.join("config-data")).unwrap();
         fs::write(cfg_dir.join("config-data/cctk_Config.h"), "#define X\n").unwrap();
@@ -884,7 +884,7 @@ mod tests {
         let machine = fake_machine(&tmp.path().join("mdb-fake"));
         let inst = fake_installation(&tmp.path().join("inst"));
         let db = Database::new();
-        fs::write(inst.cactus_root().join("failcount"), "0").unwrap();
+        fs::write(inst.cactus_root().unwrap().join("failcount"), "0").unwrap();
 
         // Submit: registers the run, activates results-0000, stores metadata.
         start_impl(&inst, &machine, &db, &test_args(), true, false, Some("testhost")).unwrap();
@@ -895,7 +895,7 @@ mod tests {
         // resolving from $TESTS_DIR/<config>/<thorn> (link_arrangements).
         assert_eq!(
             fs::read_link(run_dir.join("arrangements")).unwrap(),
-            inst.cactus_root().join("arrangements")
+            inst.cactus_root().unwrap().join("arrangements")
         );
         assert_eq!(active_results_id(&run_dir).unwrap(), Some(0));
         let run = TestRun::open(&run_dir).unwrap();
@@ -921,7 +921,7 @@ mod tests {
         assert_eq!(harness.trim(), "selection= procs=2 config=tests");
 
         // A second foreground run with failures: new result set, non-zero.
-        fs::write(inst.cactus_root().join("failcount"), "2").unwrap();
+        fs::write(inst.cactus_root().unwrap().join("failcount"), "2").unwrap();
         let mut args = test_args();
         args.tests = vec!["McLachlan/ML_BSSN".to_owned(), "Arrangement".to_owned()];
         let err = start_impl(&inst, &machine, &db, &args, false, false, Some("testhost"))
@@ -939,7 +939,7 @@ mod tests {
 
         // --overwrite reuses the active set instead of allocating (§11.5);
         // an explicit -T beats the testsuite tasks default.
-        fs::write(inst.cactus_root().join("failcount"), "0").unwrap();
+        fs::write(inst.cactus_root().unwrap().join("failcount"), "0").unwrap();
         let mut args = test_args();
         args.overwrite = true;
         args.topology.tasks = Some(4);
@@ -997,7 +997,7 @@ mod tests {
         machine.meta.scheduler.allocation_env = vec!["CACTUP_SURELY_UNSET_ALLOC".to_owned()];
         let inst = fake_installation(&tmp.path().join("inst"));
         let db = Database::new();
-        fs::write(inst.cactus_root().join("failcount"), "0").unwrap();
+        fs::write(inst.cactus_root().unwrap().join("failcount"), "0").unwrap();
 
         // Foreground `test run` is refused, with actionable guidance.
         let err = start_impl(&inst, &machine, &db, &test_args(), false, false, Some("h"))
@@ -1018,8 +1018,8 @@ mod tests {
         let machine = fake_machine(&tmp.path().join("mdb-fake"));
         let inst = fake_installation(&tmp.path().join("inst"));
         let db = Database::new();
-        fs::write(inst.cactus_root().join("failcount"), "0").unwrap();
-        let cfg_path = inst.cactus_root().join("configs/tests/cactup-config.toml");
+        fs::write(inst.cactus_root().unwrap().join("failcount"), "0").unwrap();
+        let cfg_path = inst.cactus_root().unwrap().join("configs/tests/cactup-config.toml");
         let text = fs::read_to_string(&cfg_path)
             .unwrap()
             .replace("machine = \"fake\"", "machine = \"elsewhere\"");
@@ -1081,7 +1081,7 @@ mod tests {
 
         // No cactup-config.toml at all — genuinely never finished a build —
         // but a submitted attempt with no recorded outcome sits queued.
-        let cactus_root = inst.cactus_root();
+        let cactus_root = inst.cactus_root().unwrap();
         let config_dir = cactus_root.join("configs/tests");
         let attempt_meta = crate::build::attempt::BuildMeta {
             attempt_id: 0,

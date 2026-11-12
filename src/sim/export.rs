@@ -332,8 +332,8 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
     let (repos, published, text, list) = if ctx.globals.installation.is_some() {
         let inst = Installation::resolve(ctx)?;
         let (text, list) =
-            if args.trim { trimmed(text, &list, &inst.cactus_root(), &parfile)? } else { (text, list) };
-        let repos_dir = inst.cactus_root().join("repos");
+            if args.trim { trimmed(text, &list, &inst.cactus_root()?, &parfile)? } else { (text, list) };
+        let repos_dir = inst.cactus_root()?.join("repos");
         let states = installed_states(&repos_dir, &list)?;
         let hashes = installed_download_hashes(&inst.root, &list)?;
         let repos = repo_pins(&list, |repo| states.get(repo).cloned(), |repo| hashes.get(repo).cloned());
@@ -514,7 +514,7 @@ fn frozen_config(inst: &Installation, sim: &Simulation) -> Res<ConfigMeta> {
     if let Some(config) = sim.frozen_config()? {
         return Ok(config);
     }
-    match ConfigMeta::load(&inst.cactus_root(), &sim.meta.configuration)? {
+    match ConfigMeta::load(&inst.cactus_root()?, &sim.meta.configuration)? {
         Some(config) if config.build_id == sim.meta.build_id => Ok(config),
         _ => bail!(
             "Simulation \"{}\" was created before cactup recorded the sources of the build it runs, and config \

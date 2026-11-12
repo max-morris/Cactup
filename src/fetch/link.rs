@@ -80,6 +80,38 @@ pub struct LinkPass {
     /// leading components, so resolving the rest from here gives the same
     /// answer as resolving the whole path.
     physical_root: PathBuf,
+    /// Where else a target may resolve to: the Cactus root, and its
+    /// `arrangements/`, each resolved physically. Either (and `repos/`, above)
+    /// may be a symlink out of the installation, to scratch space say, but
+    /// only one the user made: a link whose chain passes through `repos/`
+    /// is a repo's content, not the user's choice, and is not trusted.
+    trees: Vec<PathBuf>,
+    /// Where no link is ever made: the Cactus root, its `arrangements/` and
+    /// its `repos/` themselves (each parent resolved, the last part not).
+    reserved: [PathBuf; 3],
+}
+
+/// `path`, resolved physically, as a place targets may resolve under: unless
+/// it is a symlink whose chain passes through `repos_dir`, which makes it a
+/// repo's content (a list checked out a repo's own link there), not a
+/// directory of the user's.
+fn user_tree(path: &Path, repos_dir: &Path) -> Option<PathBuf> {
+    let mut hop = path.to_path_buf();
+    for _ in 0..40 {
+        let Ok(to) = std::fs::read_link(&hop) else { break };
+        let parent = physical_resolve(hop.parent().unwrap_or(Path::new("/")));
+        // A hop whose own directory is reached through `repos/` (a directory
+        // symlink in the middle of the path) is a repo's content too.
+        if parent.starts_with(repos_dir) {
+            return None;
+        }
+        let next = join_normalized(&parent, &to);
+        if next.starts_with(repos_dir) || physical_resolve(&next).starts_with(repos_dir) {
+            return None;
+        }
+        hop = next;
+    }
+    Some(physical_resolve(path))
 }
 
 impl LinkPass {
@@ -89,7 +121,14 @@ impl LinkPass {
         // contains symlinks.
         let repos_dir = std::fs::canonicalize(install_root.join(root).join("repos"))
             .unwrap_or_else(|_| lexical_normalize(&install_root.join(root).join("repos")));
-        LinkPass { repos_dir, physical_root: physical_resolve(install_root) }
+        let cactus = install_root.join(root);
+        let trees =
+            [cactus.clone(), cactus.join("arrangements")].iter().filter_map(|t| user_tree(t, &repos_dir)).collect();
+        let cactus_name = cactus.file_name().map(PathBuf::from).unwrap_or_default();
+        let cactus_at = physical_resolve(cactus.parent().unwrap_or(install_root)).join(cactus_name);
+        let resolved = physical_resolve(&cactus);
+        let reserved = [cactus_at, resolved.join("arrangements"), resolved.join("repos")];
+        LinkPass { repos_dir, physical_root: physical_resolve(install_root), trees, reserved }
     }
 
     /// [`link_component`] within this pass.
@@ -130,6 +169,23 @@ fn plan_link(pass: &LinkPass, component: &Component) -> crate::Res<LinkPlan> {
     } else {
         Path::new(&component.target).join(&checkout_dir)
     });
+    // Resolved physically, a target may leave the installation: a `..`
+    // after a symlink climbs from wherever the link points. Nothing is made
+    // or linked outside the installation (its Cactus root, `repos/` or
+    // `arrangements/`, wherever those are), whatever the list says.
+    let inside = std::iter::once(&pass.physical_root)
+        .chain(std::iter::once(&pass.repos_dir))
+        .chain(&pass.trees)
+        .any(|tree| target_dir.starts_with(tree));
+    if !inside {
+        bail!(
+            "The !TARGET of '{}' ({}) resolves to '{}', outside the installation '{}'; not linking there",
+            component.checkout,
+            component.target,
+            target_dir.display(),
+            pass.physical_root.display()
+        );
+    }
 
     // The three cases, lines 1568-1615 (see the module doc for the ln -nsf
     // divergence in how each result is applied).
@@ -162,9 +218,28 @@ fn plan_link(pass: &LinkPass, component: &Component) -> crate::Res<LinkPlan> {
     if link_name.is_empty() {
         bail!("Component '{}' resolves to an empty symlink name", component.checkout);
     }
+    // The tree's own skeleton is never a link a list makes: a repo's
+    // `arrangements` link checked out there would carry every later thorn
+    // link wherever it points.
+    let link_path = target_dir.join(&link_name);
+    // Compared without case: on a case-insensitive filesystem (macOS)
+    // `Cactus/Arrangements` is `Cactus/arrangements`.
+    let same = |a: &Path, b: &Path| {
+        a.as_os_str().as_encoded_bytes().eq_ignore_ascii_case(b.as_os_str().as_encoded_bytes())
+    };
+    if pass.reserved.iter().any(|r| same(r, &link_path)) {
+        bail!(
+            "'{}' ({} {}) would make '{}' a link; the Cactus root, its arrangements/ and its repos/ are never links \
+             a thornlist makes",
+            component.checkout,
+            component.target,
+            component.repo,
+            link_path.display()
+        );
+    }
 
     Ok(LinkPlan {
-        link_path: target_dir.join(&link_name),
+        link_path,
         repos_dir,
         target_dir,
         desired: desired_absolute,
@@ -771,5 +846,116 @@ mod tests {
         let c = git_component(".", "Whole");
         let err = link_component(&f.install_root, "Cactus", &c).unwrap_err();
         assert!(format!("{err:#}").contains("!NAME"));
+    }
+
+    /// A `!TARGET` that, resolved physically (through a symlink, then `..`),
+    /// leaves the installation is refused, and nothing is made out there:
+    /// neither the target directory nor the link.
+    #[test]
+    fn a_target_resolving_outside_the_installation_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("inst");
+        make_repo(&install_root, "A");
+        make_repo(&install_root, "B");
+        // Inside the installation, a link to the directory holding it.
+        std::os::unix::fs::symlink(dir.path(), install_root.join("Cactus/repos/A/up")).unwrap();
+        let mut c = git_component("Thorn", "B");
+        c.target = "Cactus/repos/A/up/escape".to_owned();
+        let err = link_component(&install_root, "Cactus", &c).unwrap_err();
+        assert!(format!("{err:#}").contains("outside the installation"), "{err:#}");
+        assert!(!dir.path().join("escape").exists(), "nothing made outside");
+        // `..` past a link, as the Einstein Toolkit's FUKA section spells it.
+        c.target = "Cactus/repos/A/up/inst/Cactus/repos/A/up/../../escape2".to_owned();
+        assert!(link_component(&install_root, "Cactus", &c).is_err());
+        assert!(std::fs::read_dir(dir.path()).unwrap().count() == 1, "only the installation there");
+        // Inside, through the same link: fine.
+        c.target = "Cactus/repos/A/up/inst/Cactus/arrangements".to_owned();
+        assert_eq!(link_component(&install_root, "Cactus", &c).unwrap(), LinkOutcome::Created);
+    }
+
+    /// From the third review: on a fresh tree, a list section checking a
+    /// repo's own `arrangements` link out at `$ROOT` would make
+    /// `Cactus/arrangements` a link out of the installation, and every later
+    /// thorn link would land there. Refused: the Cactus root, its
+    /// `arrangements/` and `repos/` are never links a list makes.
+    #[test]
+    fn review3_arrangements_made_a_link_by_the_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("inst");
+        let victim = dir.path().join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        make_repo(&install_root, "evil");
+        make_repo(&install_root, "B");
+        std::fs::create_dir_all(install_root.join("Cactus/repos/B/Thorn")).unwrap();
+        std::os::unix::fs::symlink(&victim, install_root.join("Cactus/repos/evil/arrangements")).unwrap();
+        let mut evil = git_component("arrangements", "evil");
+        evil.target = "Cactus".to_owned();
+        let err = link_component(&install_root, "Cactus", &evil).unwrap_err();
+        assert!(format!("{err:#}").contains("never links"), "{err:#}");
+        for (target, checkout) in [("Cactus", "repos"), ("", "Cactus"), ("Cactus/arrangements/..", "arrangements")] {
+            let mut c = git_component(checkout, "evil");
+            c.target = target.to_owned();
+            assert!(link_component(&install_root, "Cactus", &c).is_err(), "{target} {checkout}");
+        }
+        let thorn = git_component("Arr/Thorn", "B");
+        assert_eq!(LinkPass::new(&install_root, "Cactus").link(&thorn).unwrap(), LinkOutcome::Created);
+        assert_eq!(std::fs::read_dir(&victim).unwrap().count(), 0, "wrote outside the installation");
+        assert!(!std::fs::symlink_metadata(install_root.join("Cactus/arrangements")).unwrap().file_type().is_symlink());
+    }
+
+    /// An `arrangements/` that is already a link through `repos/` (made by
+    /// an older cactup from such a list) is a repo's content, not the user's
+    /// own symlink: nothing is linked through it to outside.
+    #[test]
+    fn an_arrangements_link_through_repos_is_not_trusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("inst");
+        let victim = dir.path().join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        make_repo(&install_root, "evil");
+        make_repo(&install_root, "B");
+        std::fs::create_dir_all(install_root.join("Cactus/repos/B/Thorn")).unwrap();
+        std::os::unix::fs::symlink(&victim, install_root.join("Cactus/repos/evil/arrangements")).unwrap();
+        std::os::unix::fs::symlink("repos/evil/arrangements", install_root.join("Cactus/arrangements")).unwrap();
+        let thorn = git_component("Arr/Thorn", "B");
+        let err = LinkPass::new(&install_root, "Cactus").link(&thorn).unwrap_err();
+        assert!(format!("{err:#}").contains("outside the installation"), "{err:#}");
+        assert_eq!(std::fs::read_dir(&victim).unwrap().count(), 0);
+    }
+
+    /// From the fourth review: an `arrangements/` link whose chain reaches
+    /// `repos/` through a directory symlink in the middle of a hop is a
+    /// repo's content too, and nothing is linked through it to outside.
+    #[test]
+    fn review4_user_tree_indirect_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("inst");
+        let victim = dir.path().join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        make_repo(&install_root, "evil");
+        make_repo(&install_root, "B");
+        std::fs::create_dir_all(install_root.join("Cactus/repos/B/Thorn")).unwrap();
+        std::os::unix::fs::symlink(&victim, install_root.join("Cactus/repos/evil/arr")).unwrap();
+        std::os::unix::fs::symlink("repos/evil", install_root.join("Cactus/dirlink")).unwrap();
+        std::os::unix::fs::symlink("dirlink/arr", install_root.join("Cactus/arrangements")).unwrap();
+        let thorn = git_component("Arr/Thorn", "B");
+        let err = LinkPass::new(&install_root, "Cactus").link(&thorn).unwrap_err();
+        assert!(format!("{err:#}").contains("outside the installation"), "{err:#}");
+        assert_eq!(std::fs::read_dir(&victim).unwrap().count(), 0);
+    }
+
+    /// The tree's skeleton is compared without case (a case-insensitive
+    /// filesystem, as macOS has, sees `Arrangements` as `arrangements`).
+    #[test]
+    fn the_reserved_paths_compare_without_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("inst");
+        make_repo(&install_root, "evil");
+        for (target, checkout) in [("Cactus", "Arrangements"), ("Cactus", "REPOS"), ("", "cactus")] {
+            let mut c = git_component(checkout, "evil");
+            c.target = target.to_owned();
+            let err = link_component(&install_root, "Cactus", &c).unwrap_err();
+            assert!(format!("{err:#}").contains("never links"), "{target} {checkout}: {err:#}");
+        }
     }
 }

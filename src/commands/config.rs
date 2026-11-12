@@ -18,7 +18,7 @@ pub fn dispatch(ctx: &Ctx, cmd: ConfigCommand) -> Res<()> {
         ConfigCommand::List => list(&installation),
         ConfigCommand::Show { name } => show(ctx, &installation, name.as_deref()),
         ConfigCommand::Use { name } => {
-            if ConfigMeta::load(&installation.cactus_root(), &name)?.is_none() {
+            if ConfigMeta::load(&installation.cactus_root()?, &name)?.is_none() {
                 bail!("No config named \"{name}\" in this installation (see `cactup config list`)");
             }
             let locked = installation.locked()?;
@@ -84,7 +84,7 @@ fn list_suffix(cactus_root: &Path, name: &str, meta: Option<&ConfigMeta>) -> Str
 /// `cactup config list`: every config in the active installation (port of
 /// list-configurations, §7.1).
 fn list(installation: &Installation) -> Res<()> {
-    let cactus_root = installation.cactus_root();
+    let cactus_root = installation.cactus_root()?;
     let configs = list_configs(&cactus_root)?;
     if configs.is_empty() {
         println!("{}", "No configs in this installation.".bright_red());
@@ -140,7 +140,7 @@ fn live_thornlist_source(entry: &crate::database::CactusInstallation) -> String 
 
 /// `cactup config show [name]`: the active config, or a named one, in detail.
 pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -> Res<()> {
-    let cactus_root = installation.cactus_root();
+    let cactus_root = installation.cactus_root()?;
 
     // No name → the contextually-relevant config: the active one.
     let name = match name {
@@ -169,7 +169,7 @@ pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -
     // the path alone can't say whether it's stock or custom. Say which
     // resolution rule produced the path and, for the live list, what it
     // actually holds.
-    let provenance = if installation.is_live_thornlist(&meta.thornlist) {
+    let provenance = if installation.is_live_thornlist(&meta.thornlist)? {
         let source = ctx
             .db
             .read()
@@ -223,7 +223,7 @@ pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -
 }
 
 fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
-    let cactus_root = installation.cactus_root();
+    let cactus_root = installation.cactus_root()?;
     let config_dir = cactus_root.join("configs").join(name);
     if !config_dir.is_dir() {
         bail!("No config named \"{name}\" in this installation");
@@ -429,7 +429,7 @@ mod tests {
             locked.set_meta(&meta).unwrap();
         }
 
-        let root = inst.cactus_root();
+        let root = inst.cactus_root().unwrap();
         let cfg_dir = root.join("configs").join("bbh");
         fs::create_dir_all(&cfg_dir).unwrap();
         fs::write(
@@ -526,7 +526,7 @@ mod tests {
     fn delete_refuses_while_a_build_is_live_and_succeeds_with_force() {
         let tmp = tempfile::tempdir().unwrap();
         let inst = Installation::new("et", tmp.path().join("et"));
-        let root = inst.cactus_root();
+        let root = inst.cactus_root().unwrap();
         let config_dir = root.join("configs").join("mp");
         fs::create_dir_all(&config_dir).unwrap();
         make_in_flight_attempt(&config_dir, &root, "mp", "JOB-1");
