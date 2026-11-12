@@ -73,12 +73,12 @@ fn extract_builtin_generic() -> Res<PathBuf> {
 /// entry's file name (paths are relative to the embed root).
 fn extract_embedded_dir(dir: &Dir, dest: &Path) -> Res<()> {
     std::fs::create_dir_all(dest)
-        .with_context(|| format!("Failed to create {}", dest.display()))?;
+        .with_context(|| format!("Failed to create '{}'", dest.display()))?;
     for file in dir.files() {
         let name = file.path().file_name().expect("embedded file has a name");
         let path = dest.join(name);
         std::fs::write(&path, file.contents())
-            .with_context(|| format!("Failed to write {}", path.display()))?;
+            .with_context(|| format!("Failed to write '{}'", path.display()))?;
     }
     for sub in dir.dirs() {
         let name = sub.path().file_name().expect("embedded dir has a name");
@@ -146,7 +146,7 @@ impl Mdb {
         for (root, layer) in [(&self.system_root, Layer::System), (&self.user_root, Layer::User)] {
             let entries = match std::fs::read_dir(root) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                other => other.with_context(|| format!("Failed to list MDB root {}", root.display()))?,
+                other => other.with_context(|| format!("Failed to list MDB root '{}'", root.display()))?,
             };
             for entry in entries {
                 let entry = entry?;
@@ -189,7 +189,7 @@ impl Mdb {
     pub fn load(&self, name: &str) -> Res<Machine> {
         let (dir, layer) = self
             .machine_dir(name)
-            .ok_or_else(|| anyhow!("no machine named \"{name}\" in the MDB (try `cactup machine list`)"))?;
+            .ok_or_else(|| anyhow!("No machine named \"{name}\" in the MDB (try `cactup machine list`)"))?;
         Machine::load(name, dir, layer, &self.generations_guide())
     }
 
@@ -211,7 +211,7 @@ impl Mdb {
     pub fn check_overlay(&self, name: &str, dir: &Path) -> Res<()> {
         let meta_path = dir.join("meta.toml");
         let text = std::fs::read_to_string(&meta_path)
-            .with_context(|| format!("Failed to read {}", meta_path.display()))?;
+            .with_context(|| format!("Failed to read '{}'", meta_path.display()))?;
         check_overlay_generation(name, &meta_path, &text, &self.generations_guide())?;
         Ok(())
     }
@@ -298,12 +298,12 @@ pub fn read_generation(root: &Path) -> Res<Option<u32>> {
     let path = root.join("GENERATION");
     let text = match std::fs::read_to_string(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        other => other.with_context(|| format!("Failed to read {}", path.display()))?,
+        other => other.with_context(|| format!("Failed to read '{}'", path.display()))?,
     };
     match parse_generation(&text) {
         Some(generation) => Ok(Some(generation)),
         None => {
-            bail!("{} does not hold an MDB generation (one positive integer): {text:?}", path.display())
+            bail!("Invalid MDB generation in '{}' (expected a positive integer): {text:?}", path.display())
         }
     }
 }
@@ -315,7 +315,7 @@ fn check_root_generation(root: &Path) -> Res<()> {
     let want = crate::build_info::MDB_GENERATION;
     match read_generation(root)? {
         Some(found) if found != want => bail!(
-            "the MDB at {} is generation {found}, but this cactup reads generation {want}; \
+            "The MDB at '{}' is generation {found}, but this cactup reads generation {want}; \
              point --mdb-path at a generation-{want} MDB{}",
             root.display(),
             if found > want { " or run `cactup update`" } else { "" }
@@ -348,7 +348,7 @@ impl OverlayGenerationError {
     pub fn brief(&self) -> String {
         if self.found < self.want {
             format!(
-                "written for MDB generation {}, this cactup reads {}; `cactup machine show {}` explains",
+                "written for MDB generation {}, this cactup reads {}; see `cactup machine show {}`",
                 self.found, self.want, self.name
             )
         } else {
@@ -363,17 +363,17 @@ impl std::fmt::Display for OverlayGenerationError {
         if found < want {
             write!(
                 f,
-                "user-MDB machine \"{name}\" ({}) was written for MDB generation {found}, but this cactup \
-                 reads generation {want}. Bring it forward as described in {guide} and then set \
-                 `mdb-generation = {want}` under [cactup], or re-create it with `cactup machine delete {name}` \
-                 followed by `cactup machine create {name}`.",
+                "user-MDB machine \"{name}\" in '{}' was written for MDB generation {found}, but this \
+                 cactup reads generation {want}; migrate it as described in {guide} and set \
+                 `mdb-generation = {want}` under [cactup], or re-create it with \
+                 `cactup machine delete {name}` and `cactup machine create {name}`",
                 path.display()
             )
         } else {
             write!(
                 f,
-                "user-MDB machine \"{name}\" ({}) was written for MDB generation {found}, which requires a \
-                 newer cactup than this one (generation {want}); run `cactup update`.",
+                "user-MDB machine \"{name}\" in '{}' was written for MDB generation {found}, which \
+                 requires a newer cactup; run `cactup update`",
                 path.display()
             )
         }
@@ -410,7 +410,7 @@ fn check_overlay_generation(
                 eprintln!(
                     "{}",
                     format!(
-                        "Warning: user-MDB machine \"{name}\" ({}) records no MDB generation; assuming \
+                        "Warning: user-MDB machine \"{name}\" in '{}' records no MDB generation; assuming \
                          generation {want}. Add `mdb-generation = {want}` under [cactup] to silence this.",
                         meta_path.display()
                     )
@@ -445,7 +445,7 @@ impl Machine {
     fn load(name: &str, dir: PathBuf, layer: Layer, generations_guide: &str) -> Res<Machine> {
         let meta_path = dir.join("meta.toml");
         let text = std::fs::read_to_string(&meta_path)
-            .with_context(|| format!("Failed to read {}", meta_path.display()))?;
+            .with_context(|| format!("Failed to read '{}'", meta_path.display()))?;
         // An overlay of another generation may not even parse under this
         // binary's closed schema, so its generation is checked first, on the
         // raw table, to report the real problem.
@@ -453,7 +453,7 @@ impl Machine {
             check_overlay_generation(name, &meta_path, &text, generations_guide)?;
         }
         let mut meta: Meta = toml::from_str(&text)
-            .with_context(|| format!("Failed to parse {}", meta_path.display()))?;
+            .with_context(|| format!("Failed to parse '{}'", meta_path.display()))?;
         meta.validate(name)?;
 
         // §4.6: fill missing hardware from the OS when asked to (or when some
@@ -473,10 +473,21 @@ impl Machine {
         if meta.hardware.autodetect || incomplete {
             let detected = autodetect::detect();
             let hw = &mut meta.hardware;
-            hw.max_cpus_per_node = hw.max_cpus_per_node.or(Some(detected.cores));
+            if hw.max_cpus_per_node.is_none() {
+                hw.max_cpus_per_node = Some(detected.cores);
+                hw.max_cpus_per_node_detected = true;
+            }
             hw.memory = hw.memory.or(detected.memory_mb);
             hw.max_gpus_per_node = hw.max_gpus_per_node.or(detected.gpus);
             hw.threads_per_cpu = hw.threads_per_cpu.or(detected.threads_per_cpu);
+        }
+        // An overlay's top-level `max-cpus-per-node` counts as detected too
+        // (§8.5): `machine create` has long written this host's cores there —
+        // on a cluster, a login node's — so no node count is derived, and no
+        // layout refused, on it. A queue's own value, in either layer, and a
+        // system machine's top-level one are declared.
+        if layer == Layer::User && meta.hardware.max_cpus_per_node.is_some() {
+            meta.hardware.max_cpus_per_node_detected = true;
         }
 
         // [paths] values keep their @USER@/@ENV(NAME)@ tokens at load; they
@@ -499,7 +510,7 @@ impl Machine {
         }
         if self.flavors()?.is_empty() {
             bail!(
-                "machine \"{}\" has no flavors: {} holds no .toml optionlist",
+                "Machine \"{}\" has no flavors: no .toml optionlist in '{}'",
                 self.name,
                 self.dir.join("optionlists").display()
             );
@@ -521,13 +532,13 @@ impl Machine {
             (true, false) => Ok(ScriptFile { path: sh, python: false }),
             (false, true) => Ok(ScriptFile { path: py, python: true }),
             (true, true) => bail!(
-                "machine \"{}\" has both {} and {} — a script may be .sh or .py, not both",
+                "Machine \"{}\" has both '{}' and '{}'; a script may be .sh or .py, not both",
                 self.name,
                 sh.display(),
                 py.display()
             ),
             (false, false) => bail!(
-                "machine \"{}\" routes {} script \"{script}\" but neither {} nor {} exists",
+                "Machine \"{}\" routes {} script \"{script}\" but neither '{}' nor '{}' exists",
                 self.name,
                 kind.dir_name(),
                 sh.display(),
@@ -543,11 +554,11 @@ impl Machine {
         let dir = self.dir.join("optionlists");
         let entries = match fs::read_dir(&dir) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            other => other.with_context(|| format!("Failed to read {}", dir.display()))?,
+            other => other.with_context(|| format!("Failed to read '{}'", dir.display()))?,
         };
         let mut flavors = Vec::new();
         for entry in entries {
-            let path = entry.with_context(|| format!("Failed to read {}", dir.display()))?.path();
+            let path = entry.with_context(|| format!("Failed to read '{}'", dir.display()))?.path();
             if path.extension().is_some_and(|e| e == "toml")
                 && path.is_file()
                 && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
@@ -570,7 +581,7 @@ impl Machine {
                 .iter()
                 .find(|n| *n == name)
                 .cloned()
-                .ok_or_else(|| anyhow!("no optionlist flavor named \"{name}\" (known: {})", listed.join(", ")));
+                .ok_or_else(|| anyhow!("No optionlist flavor named \"{name}\" (known: {})", listed.join(", ")));
         }
 
         if let [single] = listed.as_slice() {
@@ -584,15 +595,15 @@ impl Machine {
         }
         match defaults.as_slice() {
             [single] => Ok((*single).clone()),
-            [] if listed.is_empty() => bail!("machine \"{}\" has no optionlist flavor", self.name),
+            [] if listed.is_empty() => bail!("Machine \"{}\" has no optionlist flavor", self.name),
             [] => bail!(
-                "machine \"{}\" has several optionlist flavors ({}) and none is marked \
+                "Machine \"{}\" has several optionlist flavors ({}) and none is marked \
                  default = true; pick one with --flavor", // §4.4
                 self.name,
                 listed.join(", ")
             ),
             several => bail!(
-                "machine \"{}\" marks several optionlist flavors default = true ({}); \
+                "Machine \"{}\" marks several optionlist flavors default = true ({}); \
                  pick one with --flavor", // §4.4
                 self.name,
                 several.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
@@ -912,9 +923,55 @@ mod tests {
         // §4.6: autodetect filled the missing hardware.
         assert!(generic.meta.hardware.max_cpus_per_node.unwrap() >= 1);
         assert!(generic.meta.hardware.memory.unwrap() > 0);
+        // …and says so, so no node count is derived from this host's cores
+        // (§8.5); a queue inherits that, while a declared value never is.
+        assert!(generic.meta.effective_hardware("local").unwrap().max_cpus_per_node_detected);
+        assert!(!db1.meta.effective_hardware("gpu").unwrap().max_cpus_per_node_detected);
         // generic has no paths: consumers use the ~/.cactup fallbacks.
         assert!(generic.meta.paths.simulation_home.is_none());
         assert_eq!(generic.select_optionlist(None).unwrap(), "default"); // sole flavor
+    }
+
+    /// An overlay's top-level `max-cpus-per-node` counts as detected (§8.5):
+    /// `machine create` wrote a login node's cores there. A queue's own value
+    /// is declared in either layer, and a system machine's top-level one too.
+    #[test]
+    fn an_overlays_top_level_node_size_counts_as_detected() {
+        let system = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let meta = r#"
+            [machine]
+            nickname = "m"
+            [hardware]
+            max-cpus-per-node = 16
+            memory = 1000
+            [queues.small]
+            default = true
+            [queues.big]
+            max-cpus-per-node = 128
+            [submitscripts]
+            "default" = ["small", "big"]
+            [runscripts]
+            "default" = ["small", "big"]
+        "#;
+        for root in [system.path(), user.path()] {
+            let dir = root.join(if root == system.path() { "sys" } else { "mine" });
+            fs::create_dir_all(dir.join("optionlists")).unwrap();
+            fs::create_dir_all(dir.join("runscripts")).unwrap();
+            fs::create_dir_all(dir.join("submitscripts")).unwrap();
+            fs::write(dir.join("meta.toml"), meta).unwrap();
+            fs::write(dir.join("optionlists/default.toml"), "[options]\nVERSION = \"1\"\n").unwrap();
+            fs::write(dir.join("runscripts/default.sh"), "#!/bin/sh\n").unwrap();
+            fs::write(dir.join("submitscripts/default.sh"), "#!/bin/sh\n").unwrap();
+        }
+        let mdb = Mdb::with_roots(system.path().to_owned(), user.path().to_owned());
+        let detected = |name: &str, queue: &str| {
+            let m = mdb.load(name).unwrap();
+            m.meta.effective_hardware(queue).unwrap().max_cpus_per_node_detected
+        };
+        assert!(!detected("sys", "small") && !detected("sys", "big"));
+        assert!(detected("mine", "small"), "an overlay's top level");
+        assert!(!detected("mine", "big"), "a queue's own value");
     }
 
     #[test]

@@ -162,6 +162,11 @@ pub struct Paths {
     /// fill it. For a site whose builds belong somewhere else.
     // §18.7
     pub build_cache_home: Option<String>,
+    /// Where `cactup import` keeps a `.sim`'s downloaded and unpacked inputs;
+    /// fallback `~/.cactup/inputs`. On a cluster, a work or scratch
+    /// filesystem the compute nodes see, not the home quota.
+    // §8.9
+    pub inputs_home: Option<String>,
 }
 
 // §4.2, §8.5 (the layout rules these keys feed).
@@ -201,13 +206,22 @@ pub struct Hardware {
     // §4.6
     #[serde(default)]
     pub autodetect: bool,
-    // §8.5
+    // §8.5 (the GPU bound on a derived TASKS_PER_NODE is detailed there)
     /// CPUs/cores available per node — the availability fact the fill-the-node
     /// rule divides by `CPUS_PER_TASK` to get `TASKS_PER_NODE` (on a GPU run a
-    /// fully derived result — no `--tpn`/`--tasks` — is bounded by
-    /// `max-gpus-per-node`, so a machine may declare a `default-cpus-per-task`
-    /// that deliberately leaves CPUs idle).
+    /// derived one is also bounded by `max-gpus-per-node`, so a machine may
+    /// declare a `default-cpus-per-task` that deliberately leaves CPUs idle),
+    /// and that a missing `--nodes` is derived from — when it is declared
+    /// (`max_cpus_per_node_detected` below).
     pub max_cpus_per_node: Option<u32>,
+    // §4.6 (filled at load), §8.5 (nothing derived from a detected value)
+    /// Whether `max_cpus_per_node` counts as detected rather than declared:
+    /// filled from this host at load, or the top-level value of a user-layer
+    /// overlay, where `machine create` writes this host's cores. A login
+    /// node's cores say nothing about a compute node's, so no node count is
+    /// derived, and no layout refused, on a detected value.
+    #[serde(skip)]
+    pub max_cpus_per_node_detected: bool,
     /// Request-side default for `CPUS_PER_TASK` when `--cpus` is omitted.
     // §8.5
     pub default_cpus_per_task: Option<u32>,
@@ -847,7 +861,7 @@ impl Universe {
                 let mut vars = vars.clone();
                 vars.set("COMMAND", shell_quote(inner));
                 Ok(WrappedCommand::Shell(
-                    vars.substitute(template, Syntax::Shell)
+                    vars.substitute(template, Syntax::ShellLine)
                         .context("Failed to substitute universe wrapper template")?,
                 ))
             }
@@ -855,7 +869,7 @@ impl Universe {
             // bare, exactly like every caller's no-universe branch.
             (None, None) => Ok(WrappedCommand::Shell(inner.to_owned())),
             // Rejected by Meta::validate.
-            (Some(_), Some(_)) => bail!("universe declares both wrapper-argv and wrapper"),
+            (Some(_), Some(_)) => bail!("Universe declares both wrapper-argv and wrapper"),
         }
     }
 }
@@ -927,9 +941,9 @@ impl ScriptTable {
             format!(" for configs built in universe \"{universe}\"")
         };
         if served.is_empty() {
-            bail!("no {what} serves queue \"{queue}\"{context}, nor any other queue");
+            bail!("No {what} serves queue \"{queue}\"{context}, nor any other queue");
         }
-        bail!("no {what} serves queue \"{queue}\"{context} (served: {}); pick one of those with -q", served.join(", "));
+        bail!("No {what} serves queue \"{queue}\"{context} (served: {}); pick one of those with -q", served.join(", "));
     }
 }
 
@@ -972,7 +986,7 @@ impl Meta {
     pub fn queue(&self, name: &str) -> Res<&Queue> {
         self.queues.get(name).ok_or_else(|| {
             anyhow!(
-                "no queue named \"{name}\" (known: {})",
+                "No queue named \"{name}\" (known: {})",
                 self.queues.keys().cloned().collect::<Vec<_>>().join(", ")
             )
         })
@@ -988,6 +1002,8 @@ impl Meta {
         Ok(Hardware {
             autodetect: self.hardware.autodetect,
             max_cpus_per_node: q.max_cpus_per_node.or(self.hardware.max_cpus_per_node),
+            max_cpus_per_node_detected: q.max_cpus_per_node.is_none()
+                && self.hardware.max_cpus_per_node_detected,
             default_cpus_per_task: q.default_cpus_per_task.or(self.hardware.default_cpus_per_task),
             max_gpus_per_node: q.max_gpus_per_node.or(self.hardware.max_gpus_per_node),
             default_gpus_per_task: q.default_gpus_per_task.or(self.hardware.default_gpus_per_task),
@@ -1020,7 +1036,7 @@ impl Meta {
             known.push(HOST_UNIVERSE);
         }
         Err(anyhow!(
-            "no universe named \"{name}\" on this machine (known: {})",
+            "No universe named \"{name}\" on this machine (known: {})",
             known.join(", ")
         ))
     }
@@ -1085,6 +1101,44 @@ impl Meta {
         })
     }
 
+    /// The node count of the job allocation this process runs in, where its
+    /// environment says (§8.5): beside a set Slurm `allocation-env` variable,
+    /// `SLURM_JOB_NUM_NODES` (or the older `SLURM_NNODES`); beside a PBS one,
+    /// Torque's `PBS_NUM_NODES`. `None` outside an allocation, or when the
+    /// family offers no count.
+    pub fn allocation_nodes(&self) -> Option<u32> {
+        let read = |path: &std::path::Path| std::fs::read_to_string(path).ok();
+        self.allocation_nodes_with(|name| std::env::var(name).ok(), read)
+    }
+
+    /// The `allocation_nodes` core, taking the env lookup and the file read
+    /// as closures.
+    pub(crate) fn allocation_nodes_with(
+        &self,
+        get: impl Fn(&str) -> Option<String>,
+        read: impl Fn(&std::path::Path) -> Option<String>,
+    ) -> Option<u32> {
+        let set = |name: &str| get(name).is_some_and(|v| !v.is_empty());
+        let count = |name: &str| get(name)?.trim().parse::<u32>().ok().filter(|&n| n > 0);
+        self.scheduler.allocation_env.iter().filter(|var| set(var)).find_map(|var| {
+            if var.starts_with("SLURM_") {
+                count("SLURM_JOB_NUM_NODES").or_else(|| count("SLURM_NNODES"))
+            } else if var.starts_with("PBS_") {
+                // PBS Pro sets no PBS_NUM_NODES: its node file lists one line
+                // per slot, so the distinct host names are the nodes. A file
+                // missing or unreadable leaves the count unknown.
+                count("PBS_NUM_NODES").or_else(|| {
+                    let text = read(std::path::Path::new(&get("PBS_NODEFILE")?))?;
+                    let hosts: std::collections::BTreeSet<&str> =
+                        text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+                    u32::try_from(hosts.len()).ok().filter(|&n| n > 0)
+                })
+            } else {
+                None
+            }
+        })
+    }
+
     /// The `in_allocation` core, taking the env lookup as a closure so it can
     /// be exercised without touching the process environment.
     fn allocation_status(&self, is_set: impl Fn(&str) -> bool) -> Option<bool> {
@@ -1099,16 +1153,16 @@ impl Meta {
     /// errors; call before the Meta is used.
     pub fn validate(&self, machine: &str) -> Res<()> {
         self.validate_inner()
-            .with_context(|| format!("invalid meta.toml for machine \"{machine}\""))
+            .with_context(|| format!("Invalid meta.toml for machine \"{machine}\""))
     }
 
     fn validate_inner(&self) -> Res<()> {
         if self.queues.is_empty() {
-            bail!("no [queues.*] declared; every machine needs at least one queue");
+            bail!("No [queues.*] declared");
         }
         let defaults: Vec<_> = self.queues.iter().filter(|(_, q)| q.default).map(|(n, _)| n).collect();
         if defaults.len() > 1 {
-            bail!("more than one queue is marked default = true: {}", defaults.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
+            bail!("More than one queue is marked default = true: {}", defaults.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
         }
 
         // Queue build-universe gates (§4.4), mirroring the script-route lists:
@@ -1117,13 +1171,13 @@ impl Meta {
             if let Some(universes) = &queue.build_universes {
                 if universes.is_empty() {
                     bail!(
-                        "queue \"{name}\" declares an empty build-universes list; omit the key \
+                        "Queue \"{name}\" declares an empty build-universes list; omit the key \
                          to be compatible with all universes"
                     );
                 }
                 for u in universes {
                     if !self.is_known_universe(u) {
-                        bail!("queue \"{name}\" lists unknown build universe \"{u}\"");
+                        bail!("Queue \"{name}\" lists unknown build universe \"{u}\"");
                     }
                 }
             }
@@ -1135,10 +1189,7 @@ impl Meta {
         // Declaring one without the other is therefore always a mistake, and a
         // silent one: it would surface as a machine that submits nothing.
         if self.scheduler.blocking_submit.is_some() && self.scheduler.submit.is_none() {
-            bail!(
-                "[scheduler].blocking-submit is declared without [scheduler].submit; it is the \
-                 blocking flavor of that command, not a substitute for it"
-            );
+            bail!("[scheduler].blocking-submit is declared without [scheduler].submit");
         }
 
         // §10: the pattern is compiled per query with the job id put in, as
@@ -1152,25 +1203,24 @@ impl Meta {
 
         for kind in [ScriptKind::Submit, ScriptKind::Run, ScriptKind::BuildSubmit] {
             self.validate_script_kind(kind)
-                .with_context(|| format!("in [{}]", kind.table_name()))?;
+                .with_context(|| format!("In [{}]", kind.table_name()))?;
         }
 
         for (name, universe) in &self.universes {
             match (&universe.wrapper_argv, &universe.wrapper) {
-                (Some(_), Some(_)) => bail!("universe \"{name}\" defines both wrapper-argv and wrapper; pick one"), // §4.8
+                (Some(_), Some(_)) => bail!("Universe \"{name}\" defines both wrapper-argv and wrapper; pick one"), // §4.8
                 // Neither wrapper = identity universe (§4.8): legal, e.g. as a
                 // pure env-setup override carrier.
                 (None, None) => {}
                 (None, Some(t)) => {
                     if !t.contains("@COMMAND@") {
-                        bail!("universe \"{name}\"'s wrapper template does not contain @COMMAND@") // §4.8
+                        bail!("Universe \"{name}\"'s wrapper template does not contain @COMMAND@") // §4.8
                     }
                     if let Some(pos) = command_token_in_quotes(t) {
                         bail!(
-                            "universe \"{name}\"'s wrapper template puts @COMMAND@ inside a \
-                             quoted string (byte {pos}); wrap() supplies @COMMAND@ already \
-                             shell-quoted, so it must sit OUTSIDE the template's own quotes \
-                             — e.g. `bash -lc '… && '@COMMAND@`" // §4.8
+                            "Universe \"{name}\"'s wrapper template puts @COMMAND@ inside a \
+                             quoted string (byte {pos}); @COMMAND@ is already shell-quoted, so \
+                             place it outside the quotes, e.g. `bash -lc '… && '@COMMAND@`" // §4.8
                         )
                     }
                 }
@@ -1227,7 +1277,7 @@ impl Meta {
         for (name, entry) in &sv.routes {
             for queue in &entry.queues {
                 if !self.queues.contains_key(queue) {
-                    bail!("script \"{name}\" maps unknown queue \"{queue}\"");
+                    bail!("Script \"{name}\" maps unknown queue \"{queue}\"");
                 }
             }
             // A build job is never a test and takes its shape from [build],
@@ -1235,19 +1285,19 @@ impl Meta {
             if kind == ScriptKind::BuildSubmit && (entry.test || entry.tasks.is_some()) {
                 bail!(
                     "build-submit script \"{name}\" sets `test` or `tasks`, which a build job \
-                     never reads (its shape comes from [build])"
+                     never reads; set its shape in [build]"
                 );
             }
             if let Some(universes) = &entry.build_universes {
                 if universes.is_empty() {
                     bail!(
-                        "script \"{name}\" declares an empty build-universes list; omit the key \
+                        "Script \"{name}\" declares an empty build-universes list; omit the key \
                          to be compatible with all universes" // §4.4
                     );
                 }
                 for u in universes {
                     if !self.is_known_universe(u) {
-                        bail!("script \"{name}\" lists unknown build universe \"{u}\"");
+                        bail!("Script \"{name}\" lists unknown build universe \"{u}\"");
                     }
                 }
             }
@@ -1263,7 +1313,7 @@ impl Meta {
             let owes_coverage = !test && kind != ScriptKind::BuildSubmit;
             if partition.is_empty() {
                 if owes_coverage && !self.queues.is_empty() {
-                    bail!("no normal scripts declared");
+                    bail!("No normal scripts declared");
                 }
                 continue;
             }
@@ -1282,13 +1332,13 @@ impl Meta {
                         .collect();
                     if serving.len() > 1 {
                         bail!(
-                            "queue \"{queue}\" is mapped by more than one {label}script \
+                            "Queue \"{queue}\" is mapped by more than one {label}script \
                              compatible with universe \"{universe}\": {}",
                             serving.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
                         );
                     }
                     if owes_coverage && *universe == HOST_UNIVERSE && serving.is_empty() {
-                        bail!("queue \"{queue}\" is served by no script"); // §4.2
+                        bail!("Queue \"{queue}\" is served by no script"); // §4.2
                     }
                 }
             }
@@ -1327,18 +1377,19 @@ impl Meta {
         let field = path_fields(&mut paths)
             .into_iter()
             .find_map(|(name, field)| (name == key).then(|| field.take()))
-            .with_context(|| format!("no [paths] key \"{key}\""))?;
+            .with_context(|| format!("No [paths] key \"{key}\""))?;
         field.map(|value| resolve_path(key, &value)).transpose()
     }
 
-    /// Every `[paths]` key by [`Meta::path_for`], but the build cache's
-    /// place, which is left `None`: that one is the cache's to resolve and
-    /// fall back from (`objcache::store_root`), never a reason to fail a
-    /// build, a simulation or an install.
+    /// Every `[paths]` key by [`Meta::path_for`], but the build cache's and
+    /// the inputs' places, which are left `None`: those are the cache's
+    /// (`objcache::store_root`) and the importer's (`inputs::inputs_dir`) to
+    /// resolve and fall back from, never a reason to fail a build, a
+    /// simulation or an install.
     pub fn paths_for(&self, db: &crate::database::Database) -> Res<Paths> {
         let mut paths = Paths::default();
         for (key, field) in path_fields(&mut paths) {
-            if key != "build-cache-home" {
+            if key != "build-cache-home" && key != "inputs-home" {
                 *field = self.path_for(db, key)?;
             }
         }
@@ -1348,13 +1399,14 @@ impl Meta {
 
 /// Each `[paths]` key with its field, by the name of the knob that
 /// overrides it for one user (§4.2, §5).
-fn path_fields(paths: &mut Paths) -> [(&'static str, &mut Option<String>); 5] {
+fn path_fields(paths: &mut Paths) -> [(&'static str, &mut Option<String>); 6] {
     [
         ("install-home", &mut paths.install_home),
         ("simulation-home", &mut paths.simulation_home),
         ("test-home", &mut paths.test_home),
         ("scratch-home", &mut paths.scratch_home),
         ("build-cache-home", &mut paths.build_cache_home),
+        ("inputs-home", &mut paths.inputs_home),
     ]
 }
 
@@ -1377,6 +1429,7 @@ pub fn fallback_home(key: &str) -> Option<std::path::PathBuf> {
         "install-home" => "cacti",
         "simulation-home" => "simulations",
         "test-home" => "tests",
+        "inputs-home" => "inputs",
         _ => return None,
     };
     Some(crate::CACTUP_ROOT.join(dir))
@@ -1386,7 +1439,7 @@ pub fn fallback_home(key: &str) -> Option<std::path::PathBuf> {
 fn resolve_path(key: &str, value: &str) -> Res<String> {
     let mut vars = VarSet::new();
     vars.set("USER", super::whoami());
-    vars.substitute(value, Syntax::Plain).with_context(|| format!("in [paths].{key}"))
+    vars.substitute(value, Syntax::Plain).with_context(|| format!("In [paths].{key}"))
 }
 
 /// Knob validator (§5) for the path knobs, one per `[paths]` key: an absolute
@@ -1394,7 +1447,7 @@ fn resolve_path(key: &str, value: &str) -> Res<String> {
 pub fn validate_path_knob(key: &str, value: &str) -> Res<String> {
     let value = value.trim();
     if !std::path::Path::new(value).is_absolute() || value.contains(['\n', '\0']) {
-        bail!("invalid {key} \"{value}\": it must be an absolute path");
+        bail!("Invalid {key} '{value}': it must be an absolute path");
     }
     Ok(value.to_owned())
 }
@@ -1608,7 +1661,7 @@ mod tests {
         let meta = mike();
         let rs = meta.scripts(ScriptKind::Run);
         let err = format!("{:#}", rs.route("gpu", "host", true).unwrap_err());
-        assert!(err.contains("no test run script serves queue \"gpu\" (served: checkpt, single)"), "{err}");
+        assert!(err.contains("No test run script serves queue \"gpu\" (served: checkpt, single)"), "{err}");
 
         let mut meta = mike();
         meta.runscripts.routes.shift_remove("test-cpu");
@@ -1635,7 +1688,7 @@ mod tests {
         let meta: Meta = toml::from_str(&partial).unwrap();
         meta.validate("mike").unwrap();
         let err = format!("{:#}", meta.scripts(ScriptKind::BuildSubmit).route("single", "host", false).unwrap_err());
-        assert!(err.contains("no build-submit script serves queue \"single\" (served: gpu)"), "{err}");
+        assert!(err.contains("No build-submit script serves queue \"single\" (served: gpu)"), "{err}");
     }
 
     #[test]
@@ -1746,6 +1799,26 @@ mod tests {
             panic!("expected shell form");
         };
         assert_eq!(cmd, "ssh headnode 'cd /src && ''echo it'\\''s here'");
+
+        // A wrapper is one command: a drop-line token, which would drop the
+        // line holding @COMMAND@ and run nothing, is refused, as it is in a
+        // wrapper-argv word.
+        vars.set_knobs(Default::default());
+        for drop in [
+            Universe {
+                wrapper_argv: None,
+                wrapper: Some("ssh -l @KNOB-OR-DROP-LINE(user)@ headnode @COMMAND@".to_owned()),
+                environment: Environment::default(),
+            },
+            Universe {
+                wrapper_argv: Some(vec!["ssh".into(), "@KNOB-OR-DROP-LINE(user)@".into()]),
+                wrapper: None,
+                environment: Environment::default(),
+            },
+        ] {
+            let err = format!("{:#}", drop.wrap(&vars, "true").unwrap_err());
+            assert!(err.contains("no lines to drop"), "{err}");
+        }
     }
 
     /// A script table has no reserved keys: the old `default-universe`
@@ -1779,8 +1852,8 @@ mod tests {
         let meta: Meta = toml::from_str(&no_runscripts).unwrap();
         assert!(meta.runscripts.routes.is_empty(), "fixture edit missed the runscript table");
         let err = format!("{:#}", meta.validate("mike").unwrap_err());
-        assert!(err.contains("no normal scripts declared"), "unexpected error: {err}");
-        assert!(err.contains("in [runscripts]"), "unexpected error: {err}");
+        assert!(err.contains("No normal scripts declared"), "unexpected error: {err}");
+        assert!(err.contains("In [runscripts]"), "unexpected error: {err}");
     }
 
     /// `build submit` groundwork (not yet wired to a command): a machine that
@@ -1929,6 +2002,27 @@ mod tests {
             assert!(path_knob_unset(key).is_some_and(|note| note.contains("machine's value")), "{key}");
         }
         assert_eq!(path_knob_unset("queue"), None);
+    }
+
+    /// `inputs-home`: the knob, else the machine's value resolved; and like
+    /// `build-cache-home`, an unresolvable machine value fails only its own
+    /// reader, never `paths_for` (a build, a simulation, an install).
+    #[test]
+    fn inputs_home_is_a_path_key_only_import_resolves() {
+        let user = super::super::whoami();
+        let with = |value: &str| -> Meta {
+            toml::from_str(&MIKE.replacen("simulation-home", &format!("inputs-home = \"{value}\"\nsimulation-home"), 1)).unwrap()
+        };
+        let mut db = crate::database::Database::new();
+        let meta = with("/work/@USER@/inputs");
+        assert_eq!(meta.path_for(&db, "inputs-home").unwrap(), Some(format!("/work/{user}/inputs")));
+        assert_eq!(meta.paths_for(&db).unwrap().inputs_home, None, "paths_for leaves it to the importer");
+        let broken = with("@ENV(CACTUP_SURELY_UNSET_VARIABLE)@/inputs");
+        assert!(broken.paths_for(&db).is_ok());
+        assert!(broken.path_for(&db, "inputs-home").is_err());
+        db.set_knob("inputs-home", "/scratch/mine".to_owned());
+        assert_eq!(broken.path_for(&db, "inputs-home").unwrap().as_deref(), Some("/scratch/mine"));
+        assert!(path_knob_unset("inputs-home").unwrap().ends_with("inputs"));
     }
 
     #[test]
@@ -2345,6 +2439,29 @@ mod tests {
         assert_eq!(meta.scheduler.allocation_env, ["SLURM_JOB_ID", "PBS_JOBID"]);
         assert_eq!(meta.allocation_status(|n| n == "PBS_JOBID"), Some(true));
         assert_eq!(meta.allocation_status(|_| false), Some(false));
+
+        // The allocation's node count, from the family of the set variable.
+        let env = |vars: &'static [(&'static str, &'static str)]| {
+            move |name: &str| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.to_string())
+        };
+        let nodes = |vars| meta.allocation_nodes_with(env(vars), |_| None);
+        assert_eq!(nodes(&[]), None);
+        assert_eq!(nodes(&[("SLURM_JOB_ID", "7"), ("SLURM_JOB_NUM_NODES", "4")]), Some(4));
+        assert_eq!(nodes(&[("SLURM_JOB_ID", "7"), ("SLURM_NNODES", "2")]), Some(2));
+        assert_eq!(nodes(&[("PBS_JOBID", "7"), ("PBS_NUM_NODES", "3")]), Some(3));
+        // A count without its allocation variable, or one that is no count, is none.
+        assert_eq!(nodes(&[("SLURM_JOB_NUM_NODES", "4")]), None);
+        assert_eq!(nodes(&[("SLURM_JOB_ID", "7"), ("SLURM_JOB_NUM_NODES", "0")]), None);
+        assert_eq!(nodes(&[("PBS_JOBID", "7"), ("SLURM_NNODES", "2")]), None);
+        // PBS Pro: the distinct hosts of $PBS_NODEFILE; no file, no count.
+        let pro = env(&[("PBS_JOBID", "7"), ("PBS_NODEFILE", "/var/spool/pbs/aux/7")]);
+        let file = |p: &std::path::Path| {
+            let lines = "n1\nn1\nn2\n\nn3\nn2\n";
+            (p == std::path::Path::new("/var/spool/pbs/aux/7")).then(|| lines.to_owned())
+        };
+        assert_eq!(meta.allocation_nodes_with(pro, file), Some(3));
+        assert_eq!(meta.allocation_nodes_with(pro, |_| None), None);
+        assert_eq!(meta.allocation_nodes_with(pro, |_| Some(String::new())), None);
     }
 
     #[test]

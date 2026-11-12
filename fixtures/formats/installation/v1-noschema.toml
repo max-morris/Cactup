@@ -1,0 +1,3 @@
+active-config = "sim"
+sim-home = "/scratch/sims/et"
+test-home = "/scratch/tests/et"

@@ -6,7 +6,7 @@ use crate::args::{SimRunArgs, SimStartArgs, UniverseFlags};
 use crate::build::ConfigMeta;
 use crate::commands::build as build_cmd;
 use crate::commands::Ctx;
-use crate::database::{Database, SCHEMA};
+use crate::database::Database;
 use crate::installation::Installation;
 use crate::lock::{LinkLock, HEARTBEAT_SECS};
 use crate::mdb::{discover, Machine, Phase, ScriptKind, Universe, WrappedCommand, HOST_UNIVERSE};
@@ -37,7 +37,7 @@ fn obtain_sim(
         (None, true) => Simulation::locate(inst, &args.sim),
         // §8.3
         (None, false) => bail!(
-            "no simulation named \"{}\" — pass a parfile to create it",
+            "No simulation named \"{}\"; pass a parfile to create it",
             args.sim
         ),
         (Some(par), false) => crate::sim::create(
@@ -46,7 +46,7 @@ fn obtain_sim(
             inst,
             &crate::sim::CreateRequest {
                 force: false,
-                ignore_machine: args.ignore_machine || args.force,
+                ignore_machine: args.start_flags.ignore_machine || args.force,
                 name: &args.sim,
                 parfile: par,
                 config: args.config.as_deref(),
@@ -56,7 +56,7 @@ fn obtain_sim(
         (Some(par), true) => {
             if !(args.overwrite || args.force) {
                 bail!(
-                    "simulation \"{}\" already exists but a parfile was given; \
+                    "Simulation \"{}\" already exists but a parfile was given; \
                      use --overwrite (or -f) to replace it",
                     args.sim
                 );
@@ -67,7 +67,7 @@ fn obtain_sim(
                 inst,
                 &crate::sim::CreateRequest {
                     force: true,
-                    ignore_machine: args.ignore_machine || args.force,
+                    ignore_machine: args.start_flags.ignore_machine || args.force,
                     name: &args.sim,
                     parfile: par,
                     config: args.config.as_deref(),
@@ -140,12 +140,9 @@ pub(crate) fn resolve_submit_universe<'m>(
 fn config_missing_error(cactus_root: &Path, machine: &Machine, config: &str) -> anyhow::Error {
     let config_dir = cactus_root.join("configs").join(config);
     if let Some(phrase) = build_cmd::in_flight_build(&config_dir, config, Some(machine)) {
-        return anyhow!(
-            "{phrase} — this simulation's config is being (re)built; wait for it \
-             (`cactup build log {config}` / `cactup build show {config}`)"
-        );
+        return anyhow!("{phrase}; wait for it to finish (see `cactup build show {config}`)");
     }
-    anyhow!("config \"{config}\" (which created this simulation) no longer exists")
+    anyhow!("Config \"{config}\" no longer exists")
 }
 
 /// Insert the phase's effective env-setup into a substituted `.sh` script
@@ -204,16 +201,16 @@ pub(crate) fn generate_script(
         vars.run_py_script(&script.path)
     } else {
         let template = fs::read_to_string(&script.path)
-            .with_context(|| format!("Failed to read {}", script.path.display()))?;
+            .with_context(|| format!("Failed to read '{}'", script.path.display()))?;
         let substituted = vars
             .substitute(&template, Syntax::Shell)
-            .with_context(|| format!("substituting {}", script.path.display()))?;
+            .with_context(|| format!("Substituting '{}'", script.path.display()))?;
         Ok(prepend_env(&substituted, &machine.meta.phase_env(universe, phase), kind))
     }
 }
 
 pub(crate) fn write_executable(path: &Path, content: &str) -> Res<()> {
-    fs::write(path, content).with_context(|| format!("Failed to write {}", path.display()))?;
+    fs::write(path, content).with_context(|| format!("Failed to write '{}'", path.display()))?;
     use std::os::unix::fs::PermissionsExt;
     let mut perms = fs::metadata(path)?.permissions();
     perms.set_mode(perms.mode() | 0o755);
@@ -233,9 +230,9 @@ fn check_parfile(sim: &Simulation, vars: &VarSet) -> Res<()> {
     }
     let master = sim.master_parfile();
     let template = fs::read_to_string(&master)
-        .with_context(|| format!("Failed to read parfile master copy {}", master.display()))?;
+        .with_context(|| format!("Failed to read parfile master copy '{}'", master.display()))?;
     vars.check(&template, Syntax::Parfile)
-        .with_context(|| format!("parfile {} cannot be substituted", master.display()))
+        .with_context(|| format!("Parfile '{}' cannot be substituted", master.display()))
 }
 
 /// Resolve the parfile into the restart (§6.2/§8.4): `.par` is
@@ -248,11 +245,11 @@ fn resolve_parfile(sim: &Simulation, restart_dir: &Path, vars: &VarSet) -> Res<P
         vars.run_py_script(&master)?
     } else {
         let template = fs::read_to_string(&master)
-            .with_context(|| format!("Failed to read parfile master copy {}", master.display()))?;
+            .with_context(|| format!("Failed to read parfile master copy '{}'", master.display()))?;
         vars.substitute(&template, Syntax::Parfile)
-            .with_context(|| format!("substituting parfile {}", master.display()))?
+            .with_context(|| format!("Substituting parfile '{}'", master.display()))?
     };
-    fs::write(&out, content).with_context(|| format!("Failed to write {}", out.display()))?;
+    fs::write(&out, content).with_context(|| format!("Failed to write '{}'", out.display()))?;
     Ok(out)
 }
 
@@ -303,11 +300,19 @@ fn submit_impl(
     let cactus_root = inst.cactus_root();
     let cfg = ConfigMeta::load(&cactus_root, &sim.meta.configuration)?
         .ok_or_else(|| config_missing_error(&cactus_root, machine, &sim.meta.configuration))?;
-    check_sim_machine(machine, sim, &cfg, args.ignore_machine || args.force)?;
+    check_sim_machine(machine, sim, &cfg, args.start_flags.ignore_machine || args.force)?;
     crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.silent)?;
-    let force_queue = args.force_queue || args.force;
+    let force_queue = args.start_flags.force_queue || args.force;
     let fit = vars::BinaryFit::for_config(machine, &cfg)?;
-    let mut topo = vars::resolve_topology(&args.topology, machine, db, Some(&fit), force_queue)?;
+    let placement = vars::Placement::submit(machine);
+    let mut topo =
+        vars::resolve_topology(&args.topology, machine, db, Some(&fit), force_queue, placement)?;
+    // The effective knobs — global, then the simulation's own, then the
+    // command line's (`-K`, and `-a` as `-K allocation=`) — frozen with the
+    // vars so the compute node resolves @KNOB(…)@ without the DB (§5, D11).
+    // @ALLOCATION@ is an alias of the allocation knob in it.
+    let knobs = sim.knob_snapshot(db);
+    topo.allocation = knobs.get("allocation").filter(|a| !a.is_empty()).cloned();
     let sim_home = inst.meta()?.sim_home()?.to_owned();
     let sched = Scheduler::for_machine(machine);
 
@@ -325,16 +330,15 @@ fn submit_impl(
         if r.meta.foreground && r.meta.scheduler_job(&sched).is_none() {
             match LinkLock::is_held_live(&r.running_lock_path())? {
                 true => bail!(
-                    "restart {} of simulation \"{}\" runs in the foreground (pid {}), which the scheduler \
-                     knows nothing of and cannot chain a job behind: wait for it to end, or interrupt it \
-                     where it runs (Ctrl-C), then submit",
+                    "Restart {} of simulation \"{}\" runs in the foreground (pid {}) and cannot be \
+                     chained behind; wait for it to end or interrupt it (Ctrl-C), then submit",
                     restart::dir_name(active),
                     sim.name,
                     r.meta.job_id
                 ),
                 false => bail!(
-                    "restart {} of simulation \"{}\" ran in the foreground and is still active, though \
-                     nothing of it holds its lock: `cactup sim clean {}`, then submit",
+                    "Restart {} of simulation \"{}\" ran in the foreground and is still active, but \
+                     no run holds its lock; run `cactup sim clean {}`, then submit",
                     restart::dir_name(active),
                     sim.name,
                     sim.name
@@ -343,7 +347,7 @@ fn submit_impl(
         }
         if r.meta.job_id == NO_JOB_ID {
             bail!(
-                "restart {} is active but has no job and is not reapable yet; \
+                "Restart {} is active but has no job and is not reapable yet; \
                  try again shortly or `cactup sim stop {}`",
                 restart::dir_name(active),
                 sim.name
@@ -379,8 +383,8 @@ fn submit_impl(
                 match answer {
                     Some(AfterEnd::Listed(status)) => {
                         println!(
-                            "Restart {dir}'s job {job_id} is still listed by the scheduler after the \
-                             restart ended ({}); chaining the new submission behind it",
+                            "Restart {dir} has ended but the scheduler still lists its job {job_id} ({}); \
+                             chaining the new submission behind it",
                             crate::scheduler::listed_state_words(status)
                         );
                         true
@@ -388,14 +392,13 @@ fn submit_impl(
                     // Stopped by `-f`, but its run still ending: no chaining
                     // behind a job the scheduler may have forgotten.
                     Some(AfterEnd::Unanswered(_)) if LinkLock::is_held_live(&r.running_lock_path())? => bail!(
-                        "restart {dir} of simulation \"{}\" has recorded its end, but its run still holds \
-                         its lock (it is ending): wait for it, then submit",
+                        "Restart {dir} of simulation \"{}\" is still shutting down; wait for it, then submit",
                         sim.name
                     ),
                     _ if LinkLock::is_held_live(&r.running_lock_path())? => {
                         println!(
-                            "Restart {dir} has recorded its end, but its run still holds its lock (it is \
-                             ending); chaining the new submission behind its job {job_id}"
+                            "Restart {dir} is still shutting down; chaining the new submission behind its \
+                             job {job_id}"
                         );
                         true
                     }
@@ -404,14 +407,13 @@ fn submit_impl(
                         crate::sim::manage::clean_active(sim)?;
                         match answer {
                             Some(AfterEnd::Over(crate::scheduler::JobStatus::Unknown)) => println!(
-                                "Restart {dir} had ended and the scheduler does not know its job {job_id}: \
-                                 cleaned it"
+                                "Restart {dir} has ended and the scheduler no longer knows its job \
+                                 {job_id}; cleaned it"
                             ),
-                            Some(AfterEnd::Over(_)) => println!(
-                                "Restart {dir} had ended and the scheduler lists its job {job_id} as over: \
-                                 cleaned it"
-                            ),
-                            _ => println!("Restart {dir} had recorded its end: cleaned it"),
+                            Some(AfterEnd::Over(_)) => {
+                                println!("Restart {dir} and its job {job_id} have ended; cleaned it")
+                            }
+                            _ => println!("Restart {dir} has ended; cleaned it"),
                         }
                         false
                     }
@@ -434,8 +436,8 @@ fn submit_impl(
         match answer {
             Some(AfterEnd::Listed(status)) => {
                 println!(
-                    "Restart {dir}'s job {job_id} is still listed by the scheduler after the restart ended \
-                     ({}); chaining the new submission behind it",
+                    "Restart {dir} has ended but the scheduler still lists its job {job_id} ({}); \
+                     chaining the new submission behind it",
                     crate::scheduler::listed_state_words(status)
                 );
                 prev_job = Some(ended.meta.job_id.clone());
@@ -458,6 +460,9 @@ fn submit_impl(
     let (run_script_name, run_entry) = run_scripts.route(&topo.queue, cfg_universe, false)?;
     // Script default tasks (§4.2): submitscript first for a submit.
     vars::apply_tasks_default(&mut topo, &args.topology, sub_entry.tasks.or(run_entry.tasks), None);
+    if let Some(note) = topo.nodes_note() {
+        println!("{note}");
+    }
     let submit_uni = resolve_submit_universe(
         machine,
         sub_entry.universe.as_deref(),
@@ -476,11 +481,12 @@ fn submit_impl(
     // Automatic walltime chaining (§8.8).
     let ceiling = machine.meta.effective_max_walltime(&topo.queue)?;
     let (segments, job_wall) = vars::chain_segments(topo.total_wall, ceiling);
-    let buffer = args.checkpt_buffer.unwrap_or_else(|| vars::default_checkpt_buffer(job_wall));
+    let buffer =
+        args.start_flags.checkpt_buffer.unwrap_or_else(|| vars::default_checkpt_buffer(job_wall));
     if segments > 1 {
         // §8.8
         println!(
-            "Total walltime {} exceeds the {} ceiling of queue \"{}\": pre-submitting {} chained jobs",
+            "Total walltime {} exceeds the {} limit of queue \"{}\"; submitting {} chained jobs",
             topo.total_wall.canonical(),
             ceiling.canonical(),
             topo.queue,
@@ -515,33 +521,32 @@ fn submit_impl(
             debug: false,
             scratch_home: &scratch_home,
         })?;
-        // The effective knobs, `-K` overlay included, frozen with the vars so the
-        // compute node resolves @KNOB(…)@ without the DB (§5, D11).
-        vset.set_knobs(db.knob_snapshot());
+        vset.set_knobs(knobs.clone());
         // Before the restart dir exists: a parfile that cannot substitute
-        // (a required knob unset, a typo'd token) fails the submit here,
-        // leaving nothing behind, not the queued job hours from now.
+        // (a required knob unset, a typo'd token) or a script that refuses
+        // (a required allocation unset) fails the submit here, leaving
+        // nothing behind, not the queued job hours from now — nor an empty
+        // restart dir that would take this id.
         check_parfile(sim, &vset)?;
-        fs::create_dir_all(rdir.join(".cactup"))
-            .with_context(|| format!("Failed to create {}", rdir.display()))?;
 
         // Submit-phase artifact: same vars, submit-phase ENV_SETUP under the
         // submit universe (§6.1).
         let mut submit_vars = vset.clone();
         submit_vars.set("ENV_SETUP", machine.meta.phase_env(submit_uni_name, Phase::Submit));
         let submit_script = generate_script(machine, ScriptKind::Submit, &sub_script_name, &submit_vars, Phase::Submit, submit_uni_name)?;
-        write_executable(&rdir.join(".cactup").join("submit-script"), &submit_script)?;
-
         // Run-phase artifact, frozen now so the compute node never touches
         // the MDB (§8.3.1).
         let run_script = generate_script(machine, ScriptKind::Run, &run_script_name, &vset, Phase::Run, run_uni_name)?;
+
+        fs::create_dir_all(rdir.join(".cactup"))
+            .with_context(|| format!("Failed to create '{}'", rdir.display()))?;
+        write_executable(&rdir.join(".cactup").join("submit-script"), &submit_script)?;
         write_executable(&rdir.join(".cactup").join("run-script"), &run_script)?;
 
         let mut r = Restart {
             id,
             dir: rdir.clone(),
             meta: RestartMeta {
-                schema: SCHEMA,
                 created: Utc::now(),
                 started: None,
                 finished: None,
@@ -577,7 +582,7 @@ fn submit_impl(
 
         let submitted = sched
             .submit(&submit_vars, submit_uni.as_ref().map(|(n, u)| (n.as_str(), *u)))
-            .with_context(|| format!("submitting restart {}", restart::dir_name(id)))?;
+            .with_context(|| format!("Submitting restart {}", restart::dir_name(id)))?;
         r.meta.set_job(&submitted);
         let job_id = submitted.id;
         r.meta.status = None;
@@ -632,7 +637,7 @@ fn refuse_beside_listed(sim: &Simulation, sched: &Scheduler, force: bool) -> Res
     let (dir, job_id, name) = (restart::dir_name(ended.id), &ended.meta.job_id, &sim.name);
     match answer {
         Some(AfterEnd::Listed(status)) => bail!(
-            "restart {dir} of simulation \"{name}\" ended, but the scheduler still lists its job {job_id} {}",
+            "Restart {dir} of simulation \"{name}\" ended, but the scheduler still lists its job {job_id} {}",
             crate::scheduler::listed_after_end(status, &format!("cactup sim stop {name}"))
         ),
         Some(AfterEnd::Unanswered(failed)) if !force => {
@@ -690,11 +695,16 @@ fn run_interactive(
     let cactus_root = inst.cactus_root();
     let cfg = ConfigMeta::load(&cactus_root, &sim.meta.configuration)?
         .ok_or_else(|| config_missing_error(&cactus_root, machine, &sim.meta.configuration))?;
-    check_sim_machine(machine, sim, &cfg, args.start.ignore_machine || args.start.force)?;
+    check_sim_machine(machine, sim, &cfg, args.start.start_flags.ignore_machine || args.start.force)?;
     crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.start.silent)?;
-    let force_queue = args.start.force_queue || args.start.force;
+    let force_queue = args.start.start_flags.force_queue || args.start.force;
     let fit = vars::BinaryFit::for_config(machine, &cfg)?;
-    let mut topo = vars::resolve_topology(&args.start.topology, machine, db, Some(&fit), force_queue)?;
+    let placement = vars::Placement::foreground(machine);
+    let mut topo =
+        vars::resolve_topology(&args.start.topology, machine, db, Some(&fit), force_queue, placement)?;
+    // As in submit: the effective knobs, @ALLOCATION@ their allocation.
+    let knobs = sim.knob_snapshot(db);
+    topo.allocation = knobs.get("allocation").filter(|a| !a.is_empty()).cloned();
     let sim_home = inst.meta()?.sim_home()?.to_owned();
     let sched = Scheduler::for_machine(machine);
 
@@ -713,7 +723,7 @@ fn run_interactive(
     }
     if let Some(active) = active {
         bail!(
-            "simulation \"{}\" already has an active restart ({}); wait for it, or \
+            "Simulation \"{}\" already has an active restart ({}); wait for it, or \
              `cactup sim stop {}` first",
             sim.name,
             restart::dir_name(active),
@@ -727,6 +737,9 @@ fn run_interactive(
     let (run_script_name, run_entry) = run_scripts.route(&topo.queue, cfg_universe, false)?;
     // Script default tasks (§4.2).
     vars::apply_tasks_default(&mut topo, &args.start.topology, run_entry.tasks, None);
+    if let Some(note) = topo.nodes_note() {
+        println!("{note}");
+    }
     let run_uni = resolve_run_universe(
         machine,
         &cfg,
@@ -740,6 +753,7 @@ fn run_interactive(
     let job_wall = topo.total_wall.min(machine.meta.effective_max_walltime(&topo.queue)?);
     let buffer = args
         .start
+        .start_flags
         .checkpt_buffer
         .unwrap_or_else(|| vars::default_checkpt_buffer(job_wall));
 
@@ -766,21 +780,19 @@ fn run_interactive(
         debug: args.debug,
         scratch_home: &scratch_home,
     })?;
-    vset.set_knobs(db.knob_snapshot());
-    // As in submit: a parfile that cannot substitute fails before any
-    // restart directory exists.
+    vset.set_knobs(knobs);
+    // As in submit: a parfile that cannot substitute, or a run script that
+    // refuses, fails before any restart directory exists.
     check_parfile(sim, &vset)?;
-    fs::create_dir_all(rdir.join(".cactup"))
-        .with_context(|| format!("Failed to create {}", rdir.display()))?;
-
     let run_script = generate_script(machine, ScriptKind::Run, run_script_name, &vset, Phase::Run, run_uni_name)?;
+    fs::create_dir_all(rdir.join(".cactup"))
+        .with_context(|| format!("Failed to create '{}'", rdir.display()))?;
     write_executable(&rdir.join(".cactup").join("run-script"), &run_script)?;
 
     let mut r = Restart {
         id,
         dir: rdir.clone(),
         meta: RestartMeta {
-            schema: SCHEMA,
             created: Utc::now(),
             started: None,
             finished: None,
@@ -936,7 +948,7 @@ fn execute_restart(sim: &Simulation, r: &mut Restart, tee: bool) -> Res<()> {
 
     let parfile = resolve_parfile(sim, &r.dir, &vset)?;
     let workdir = restart::workdir(sim, r.id);
-    fs::create_dir_all(&workdir).with_context(|| format!("Failed to create {}", workdir.display()))?;
+    fs::create_dir_all(&workdir).with_context(|| format!("Failed to create '{}'", workdir.display()))?;
     // TERMINATE is deliberately NOT created here. It is the running Cactus
     // job's file (TerminationTrigger's create_termination_file), and `sim stop`
     // treats its existence as the evidence that this run is actually watching
@@ -951,14 +963,15 @@ fn execute_restart(sim: &Simulation, r: &mut Restart, tee: bool) -> Res<()> {
     // Liveness (§2.3/§9.3): running.lock with heartbeat + the heartbeat file.
     let running = LinkLock::acquire(&r.running_lock_path())?.with_heartbeat();
     r.touch_heartbeat();
-    r.meta.started = Some(Utc::now());
-    r.meta.status = Some("R".to_owned());
-    // Running, so not ended: a job the scheduler requeued after its run
-    // recorded its end (preemption, `scontrol requeue`) runs again here,
-    // and records its end again when it is over (§8.6).
-    r.meta.terminated = false;
-    r.meta.finished = None;
-    r.store()?;
+    update_restart(sim, r, |meta| {
+        meta.started = Some(Utc::now());
+        meta.status = Some("R".to_owned());
+        // Running, so not ended: a job the scheduler requeued after its run
+        // recorded its end (preemption, `scontrol requeue`) runs again here,
+        // and records its end again when it is over (§8.6).
+        meta.terminated = false;
+        meta.finished = None;
+    })?;
 
     let tee_files = tee.then(|| {
         (r.dir.join(format!("{}.out", sim.name)), r.dir.join(format!("{}.err", sim.name)))
@@ -968,10 +981,11 @@ fn execute_restart(sim: &Simulation, r: &mut Restart, tee: bool) -> Res<()> {
 
     // Record completion whatever happened; the parfile decides its own
     // checkpoint/termination behavior — cactup only bookkeeps (§8.8).
-    r.meta.finished = Some(Utc::now());
-    r.meta.terminated = true;
-    r.meta.status = Some("U".to_owned());
-    r.store()?;
+    update_restart(sim, r, |meta| {
+        meta.finished = Some(Utc::now());
+        meta.terminated = true;
+        meta.status = Some("U".to_owned());
+    })?;
     let _ = parfile; // the ready-to-run parfile stays in the restart (§9.1)
 
     match status {
@@ -982,13 +996,45 @@ fn execute_restart(sim: &Simulation, r: &mut Restart, tee: bool) -> Res<()> {
         }
         Ok(st) => {
             sim.log("run", &format!("{} failed ({st})", restart::dir_name(r.id)));
-            bail!("the run-script exited unsuccessfully ({st})");
+            bail!("The run-script exited unsuccessfully ({st})");
         }
         Err(e) => {
             sim.log("run", &format!("{} failed to start: {e:#}", restart::dir_name(r.id)));
             Err(e)
         }
     }
+}
+
+/// Change restart `r` on disk by `edit` and nothing else: read afresh,
+/// edited, stored, and `r` left holding what was stored. A run keeps its
+/// restart for days, and meanwhile login-side commands write to the same
+/// file (`sim stop`, the `job-stopped` record, the reaper); storing the copy
+/// read at the start would silently undo them. The per-simulation lock is
+/// taken when it is free, but never waited for: `sim stop` holds it while it
+/// waits for this very run to end, so waiting would stall the stop (and the
+/// end of a job near its walltime). Without it the file is still read
+/// afresh, so only a write landing in the same instant could be lost. A file
+/// that cannot be read at all gets the run's own copy, with a warning.
+fn update_restart(sim: &Simulation, r: &mut Restart, edit: impl FnOnce(&mut restart::RestartMeta)) -> Res<()> {
+    let _lock = match sim.try_lock() {
+        Ok(lock) => lock,
+        Err(e) => {
+            eprintln!("{}", format!("Could not take the simulation's lock ({e:#}); recording without it").yellow());
+            None
+        }
+    };
+    match Restart::load(&sim.dir, r.id) {
+        Ok(fresh) => r.meta = fresh.meta,
+        // Unreadable now: the run's own copy is recorded rather than nothing,
+        // and said so, since whatever was written meanwhile is lost.
+        Err(e) => eprintln!(
+            "{}",
+            format!("Could not re-read restart {} ({e:#}); recording the run's own copy", restart::dir_name(r.id))
+                .yellow()
+        ),
+    }
+    edit(&mut r.meta);
+    r.store()
 }
 
 /// Spawn the run and wait for it, touching the heartbeat file every
@@ -1072,8 +1118,8 @@ pub(crate) fn spawn_and_wait(
     crate::par::join_with_deadline(
         copiers,
         std::time::Duration::from_secs(2),
-        "note: a background process from the run-script still holds the output pipe; \
-         not waiting for it (its further output is not captured)",
+        "note: a background process of the run-script still holds the output pipe; \
+         its further output is not captured",
     );
     Ok(status)
 }
@@ -1207,6 +1253,7 @@ mod tests {
                 installation: Some("et".to_owned()),
                 hostname: Some("testhost".to_owned()),
                 knob: Vec::new(),
+                risky_allow_untrusted_artifacts: false,
             },
             db: crate::database::Db::in_dir(dir),
         }
@@ -1220,8 +1267,7 @@ mod tests {
             config: None,
             force: false,
             overwrite: false,
-            force_queue: false,
-            ignore_machine: false,
+            start_flags: crate::args::StartFlags::default(),
             universe: UniverseFlags { universe: None, no_universe: false },
             topology: TopologyFlags {
                 allocation: None,
@@ -1239,10 +1285,56 @@ mod tests {
                 out: None,
                 err: None,
             },
-            checkpt_buffer: None,
         }
     }
 
+
+    /// A run's start and finish writes change only their own fields: what a
+    /// login-side command wrote meanwhile (`sim stop`'s job-stopped record)
+    /// survives the finish, though the run's copy was read before it.
+    #[test]
+    fn a_runs_writes_keep_what_was_recorded_during_the_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("bbh");
+        let meta = crate::sim::SimulationMeta { parfile: "bbh.par".to_owned(), ..Default::default() };
+        let record = dir.join(".cactup").join("simulation.toml");
+        crate::format::write(&record, &meta, &crate::sim::SIMULATION).unwrap();
+        let rdir = restart::restart_dir(&dir, 0);
+        fs::create_dir_all(rdir.join(".cactup")).unwrap();
+        fs::write(
+            rdir.join(".cactup").join("restart.toml"),
+            "created = \"2024-01-01T00:00:00Z\"\nnodes = 1\ntasks = 1\ntpn = 1\ncpus = 1\nqueue = \"debug\"\n\
+             walltime = \"24:00:00\"\ncheckpt-buffer = \"00:10:00\"\njob-id = \"42\"\n",
+        )
+        .unwrap();
+        let sim = Simulation::open("bbh", &dir).unwrap();
+        let mut run_copy = Restart::load(&dir, 0).unwrap();
+        update_restart(&sim, &mut run_copy, |m| m.status = Some("R".to_owned())).unwrap();
+
+        // A login-side command writes during the run.
+        let mut login = Restart::load(&dir, 0).unwrap();
+        let stopped = Utc::now();
+        login.meta.job_stopped = Some(stopped);
+        login.store().unwrap();
+
+        update_restart(&sim, &mut run_copy, |m| {
+            m.terminated = true;
+            m.status = Some("U".to_owned());
+        })
+        .unwrap();
+        // `sim stop` holds the lock while it waits for the run to end: the
+        // run's write must not wait for it (that stalled every graceful stop).
+        let held = sim.lock().unwrap();
+        let started = std::time::Instant::now();
+        update_restart(&sim, &mut run_copy, |m| m.terminated = true).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "the finish did not wait for the lock");
+        drop(held);
+        let on_disk = Restart::load(&dir, 0).unwrap();
+        assert_eq!(on_disk.meta.job_stopped, Some(stopped), "the login-side record survives the finish");
+        assert!(on_disk.meta.terminated);
+        assert_eq!(on_disk.meta.status.as_deref(), Some("U"));
+        assert_eq!(run_copy.meta.job_stopped, Some(stopped), "the run's copy is what was stored");
+    }
     #[test]
     fn submit_chains_and_compute_run_executes() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1297,8 +1389,22 @@ mod tests {
             assert!(cfg.join(f).is_file(), "{f} should be snapshotted into the sim");
         }
 
-        // 50 h on a 24 h ceiling → 3 chained segments (§8.8).
+        // A submit script that refuses (a machine requiring an allocation,
+        // none set) also leaves no restart directory behind: no husk to
+        // take id 0, which the good submit below must still get.
+        let scripts = machine.dir.join("submitscripts");
+        fs::rename(scripts.join("default.sh"), scripts.join("default.sh.off")).unwrap();
+        fs::write(scripts.join("default.py"), "print(ALLOCATION or knob(\"allocation\"))\n").unwrap();
         let db = ctx.db.read().unwrap();
+        let err = submit_impl(&inst, &machine, &db, &sim, &start_args("bbh", "50:00:00"), false, Some("testhost"))
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("knob allocation is unset"), "{err:#}");
+        assert!(restart::list_ids(&sim.dir).unwrap().is_empty(), "no restart dir left behind");
+        assert!(!restart::restart_dir(&sim.dir, 0).exists(), "not even an empty one");
+        fs::remove_file(scripts.join("default.py")).unwrap();
+        fs::rename(scripts.join("default.sh.off"), scripts.join("default.sh")).unwrap();
+
+        // 50 h on a 24 h ceiling → 3 chained segments (§8.8).
         submit_impl(&inst, &machine, &db, &sim, &start_args("bbh", "50:00:00"), false, Some("testhost"))
             .unwrap();
 
@@ -1409,7 +1515,6 @@ mod tests {
         let attempt = crate::build::attempt::BuildAttempt::create(
             crate::build::attempt::BuildAttempt::attempt_dir(&config_dir, 0),
             crate::build::attempt::BuildMeta {
-                schema: crate::database::SCHEMA,
                 attempt_id: 0,
                 config: "sim".to_owned(),
                 optionlist_source: OptionlistSource::Flavor("default".to_owned()),
@@ -1535,7 +1640,7 @@ mod tests {
         req.ignore_machine = true;
         crate::sim::create(&ctx, &machine, &inst, &req).unwrap();
         let mut args = start_args("bbh", "1:00:00");
-        args.ignore_machine = true;
+        args.start_flags.ignore_machine = true;
         submit_impl(&inst, &machine, &db, &sim, &args, false, Some("testhost")).unwrap();
 
         // A simulation created elsewhere is refused on its own account, and
@@ -1718,5 +1823,597 @@ mod tests {
         let out = script_command(&script, None, &VarSet::default(), tmp.path()).unwrap().output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         assert_eq!(String::from_utf8_lossy(&out.stdout), format!("ran {}\n", script.display()));
+    }
+
+    /// §8.2 step 6: `sim create` freezes the config record — the commit set
+    /// the binary was built from, its flags and flavor — so a later rebuild
+    /// of the config, which overwrites that record, cannot take it away.
+    #[test]
+    fn create_freezes_the_config_record_against_rebuilds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        let cfg_path = inst.cactus_root().join("configs/sim/cactup-config.toml");
+        let with_sources = |build_id: &str, head: &str| {
+            format!(
+                "schema = 2\nname = \"sim\"\nflavor = \"default\"\nthornlist = \"installation-default.th\"\n\
+                 machine = \"fake\"\nconfig-id = \"config-sim-1\"\nbuild-id = \"{build_id}\"\n\
+                 [flags]\ndebug = true\n[sources]\ncarpetx = \"{head}\"\n"
+            )
+        };
+        fs::write(&cfg_path, with_sources("build-sim-1", "3f2c")).unwrap();
+        let parfile = tmp.path().join("bbh.par");
+        fs::write(&parfile, "ActiveThorns = \"IOUtil\"\n").unwrap();
+        let sim = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
+
+        // The config is rebuilt from moved sources.
+        fs::write(&cfg_path, with_sources("build-sim-2", "9a9a")).unwrap();
+
+        let frozen = sim.frozen_config().unwrap().expect("create froze the record");
+        assert_eq!(frozen.build_id, sim.meta.build_id);
+        assert_eq!(frozen.build_id, "build-sim-1");
+        assert!(frozen.flags.debug);
+        assert_eq!(frozen.sources.unwrap().get("carpetx").map(String::as_str), Some("3f2c"));
+
+        // A simulation from before the record was frozen reads as "none".
+        fs::remove_file(sim.dir.join(".cactup/cfg/cactup-config.toml")).unwrap();
+        assert!(sim.frozen_config().unwrap().is_none());
+    }
+
+    fn export_args(sim: &str, file: &Path) -> crate::args::SimExportArgs {
+        crate::args::SimExportArgs {
+            sim: sim.to_owned(),
+            file: Some(file.to_owned()),
+            describe: crate::args::SimDescribeArgs {
+                force: true,
+                yes: true,
+                authors: vec!["A. Author".to_owned()],
+                license: Some("CC-BY-4.0".to_owned()),
+                ..Default::default()
+            },
+            allow_dirty: false,
+            allow_unpushed: false,
+            trim: false,
+        }
+    }
+
+    /// `sim export` (§8.9) end to end: the pins come from the build the
+    /// simulation froze, the parfile's required custom knob becomes an
+    /// input, its leading comment the summary and description; and sources
+    /// that were dirty, or whose commit no remote has, are refused unless
+    /// explicitly allowed.
+    #[test]
+    fn export_writes_a_sim_file_from_what_the_simulation_froze() {
+        use cactup_ecosystem_common::sim::SimFile;
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+
+        // A real repo behind the install, cloned from an upstream, as a fetch leaves it.
+        let upstream = tmp.path().join("upstream/carpetx");
+        crate::fetch::git::testrepo::init(&upstream);
+        let built = crate::fetch::git::testrepo::commit_tree(&upstream, &[("Makefile", "all:\n", false)]);
+        let (branch, _) = crate::fetch::git::head_of(&upstream).unwrap();
+        let url = upstream.to_string_lossy().into_owned();
+        let repo_dir = inst.cactus_root().join("repos/carpetx");
+        let mut progress = prodash::tree::Root::new().add_child("test clone");
+        crate::fetch::git::clone(&url, Some(&branch), &repo_dir, &mut progress).unwrap();
+
+        let cfg_dir = inst.cactus_root().join("configs/sim");
+        let list = format!(
+            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!TARGET = $ROOT/arrangements\n!TYPE = git\n\
+             !URL = {url}\n!REPO_BRANCH = {branch}\n!REPO_PATH = $2\n!CHECKOUT = CarpetX/Loop\n"
+        );
+        fs::write(cfg_dir.join("cactup-thornlist.src.th"), &list).unwrap();
+        fs::write(cfg_dir.join("cactup-thornlist.th"), format!("{list}#DISABLED Machine/Off\n")).unwrap();
+        let record = |state: &str| {
+            format!(
+                "schema = 2\nname = \"sim\"\nflavor = \"default\"\nthornlist = \"/x/bhns.th\"\n\
+                 machine = \"fake\"\nconfig-id = \"config-sim-1\"\nbuild-id = \"build-sim-1\"\n\
+                 [sources]\ncarpetx = \"{state}\"\n"
+            )
+        };
+        let cfg_path = cfg_dir.join("cactup-config.toml");
+        let parfile = tmp.path().join("bhns.par");
+        fs::write(
+            &parfile,
+            "\n# BHNS merger, GW230529-like\n# dense output\nActiveThorns = \"IOUtil\"\n\
+             K::f = \"@KNOB(kadath-initial-data)@\"\nA::b = \"@KNOB-OPTIONAL(mail, none)@ @WALLTIME_HOURS@\"\n",
+        )
+        .unwrap();
+        let out = tmp.path().join("out.sim");
+        let export = |sim: &str, args: crate::args::SimExportArgs| {
+            crate::sim::export::export_from(&ctx, &inst, crate::args::SimExportArgs { sim: sim.to_owned(), ..args })
+        };
+        let create = |name: &'static str| {
+            let req = crate::sim::CreateRequest { name, ..create_req(&parfile) };
+            crate::sim::create(&ctx, &machine, &inst, &req).unwrap();
+        };
+
+        // Clean, published: exported, fully specified.
+        fs::write(&cfg_path, record(&built.to_string())).unwrap();
+        create("bhns");
+        export("bhns", export_args("bhns", &out)).unwrap();
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(file.is_fully_specified(), "{:?}", file.unspecified());
+        assert_eq!(file.sim.root, "Cactus");
+        assert_eq!(file.sim.summary.as_deref(), Some("BHNS merger, GW230529-like"));
+        assert_eq!(file.sim.description.as_deref(), Some("BHNS merger, GW230529-like\ndense output"));
+        assert_eq!(file.thornlist.filename, "bhns.th");
+        assert_eq!(file.thornlist.text, list, "the thornlist goes in verbatim");
+        assert_eq!(file.repos.len(), 1);
+        assert_eq!(file.repos[0].commit.as_deref(), Some(built.to_string().as_str()));
+        assert_eq!(file.repos[0].git_ref.as_deref(), Some(branch.as_str()));
+        let inputs: Vec<&str> = file.inputs.iter().map(|i| i.knob.as_str()).collect();
+        assert_eq!(inputs, ["kadath-initial-data"], "optional and standard knobs are not inputs");
+        assert_eq!(file.parfile.vars, ["WALLTIME_HOURS"]);
+        let provenance = file.provenance.unwrap();
+        assert_eq!(provenance.machine.as_deref(), Some("fake"));
+        assert_eq!(provenance.flavor.as_deref(), Some("default"));
+        assert_eq!(provenance.machine_disabled, ["Machine/Off"]);
+
+        // Built from edited sources: refused, or marked dirty when allowed.
+        fs::write(&cfg_path, record(&format!("{built}+1mod@1700"))).unwrap();
+        create("dirty");
+        let err = format!("{:#}", export("dirty", export_args("dirty", &out)).unwrap_err());
+        assert!(err.contains("--allow-dirty") && err.contains("carpetx"), "{err}");
+        export("dirty", crate::args::SimExportArgs { allow_dirty: true, ..export_args("dirty", &out) }).unwrap();
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(file.repos[0].dirty && !file.is_fully_specified());
+
+        // Built from a commit no remote has: refused unless allowed.
+        let local = crate::fetch::git::testrepo::commit(&repo_dir, "local only");
+        fs::write(&cfg_path, record(&local.to_string())).unwrap();
+        create("unpushed");
+        let err = format!("{:#}", export("unpushed", export_args("unpushed", &out)).unwrap_err());
+        assert!(err.contains("--allow-unpushed"), "{err}");
+        export("unpushed", crate::args::SimExportArgs { allow_unpushed: true, ..export_args("unpushed", &out) })
+            .unwrap();
+
+        // Unpack: the thornlist comes back with its pin, the parfile verbatim.
+        export("bhns", export_args("bhns", &out)).unwrap();
+        let unpacked = tmp.path().join("unpacked");
+        crate::sim::export::unpack(&out, &unpacked, false).unwrap();
+        let list = crate::thornlist::parse(&fs::read_to_string(unpacked.join("bhns.th")).unwrap()).unwrap();
+        assert_eq!(list.components()[0].commit.as_deref(), Some(built.to_string().as_str()));
+        assert_eq!(fs::read_to_string(unpacked.join("bhns.par")).unwrap(), fs::read_to_string(&parfile).unwrap());
+        assert!(crate::sim::export::unpack(&out, &unpacked, false).is_err(), "no silent overwrite");
+    }
+
+
+    /// `sim pack` (§8.9) without an installation: each repo pinned to the
+    /// commit its branch names on the remote now, a repo the list already
+    /// pins kept at its pin, and a remote that does not have the branch
+    /// failing the whole pack.
+    #[test]
+    fn pack_pins_a_loose_thornlist_to_todays_tips() {
+        use cactup_ecosystem_common::sim::SimFile;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = fake_ctx(&tmp.path().join("db"));
+        ctx.globals.installation = None;
+        let upstream = tmp.path().join("upstream/carpetx");
+        crate::fetch::git::testrepo::init(&upstream);
+        let old = crate::fetch::git::testrepo::commit_tree(&upstream, &[("v", "1\n", false)]);
+        let tip = crate::fetch::git::testrepo::commit_tree(&upstream, &[("v", "2\n", false)]);
+        let (branch, _) = crate::fetch::git::head_of(&upstream).unwrap();
+        let url = upstream.to_string_lossy().into_owned();
+        let other = tmp.path().join("upstream/other");
+        crate::fetch::git::testrepo::init(&other);
+        crate::fetch::git::testrepo::commit_tree(&other, &[("w", "1\n", false)]);
+        let other_url = other.to_string_lossy().into_owned();
+
+        let th = tmp.path().join("bhns.th");
+        let par = tmp.path().join("bhns.par");
+        let section = |url: &str, branch: &str, pin: &str, checkout: &str| {
+            format!("!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = {url}\n!REPO_BRANCH = {branch}\n{pin}!CHECKOUT = {checkout}\n")
+        };
+        fs::write(
+            &th,
+            format!(
+                "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{}{}",
+                section(&url, &branch, "", "CarpetX/Loop"),
+                section(&other_url, &branch, &format!("!REPO_COMMIT = {old}\n"), "Other/Thorn"),
+            ),
+        )
+        .unwrap();
+        fs::write(&par, "# A test run\nActiveThorns = \"Loop\"\n").unwrap();
+        let out = tmp.path().join("out.sim");
+        let args = |th: &Path| crate::args::SimPackArgs {
+            thornlist: th.to_owned(),
+            parfile: par.clone(),
+            file: Some(out.clone()),
+            describe: crate::args::SimDescribeArgs { force: true, yes: true, ..Default::default() },
+            allow_dirty: false,
+            allow_unpushed: false,
+            trim: false,
+        };
+        crate::sim::export::pack(&ctx, args(&th)).unwrap();
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(file.is_fully_specified(), "{:?}", file.unspecified());
+        assert_eq!(file.sim.name, "bhns");
+        assert_eq!(file.sim.summary.as_deref(), Some("A test run"));
+        let commit = |repo: &str| file.repos.iter().find(|r| r.name == repo).unwrap().commit.clone().unwrap();
+        assert_eq!(commit("carpetx"), tip.to_string(), "pinned to the branch's tip today");
+        assert_eq!(commit("other"), old.to_string(), "a pin the list sets is kept");
+        assert!(file.run.is_none());
+
+        // An !INCLUDE is spliced in: the .sim carries the whole list.
+        let part = tmp.path().join("other.part");
+        fs::write(&part, section(&other_url, &branch, &format!("!REPO_COMMIT = {old}\n"), "Other/Thorn")).unwrap();
+        let including = tmp.path().join("including.th");
+        fs::write(
+            &including,
+            format!("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{}!INCLUDE = other.part\n", section(&url, &branch, "", "CarpetX/Loop")),
+        )
+        .unwrap();
+        crate::sim::export::pack(&ctx, args(&including)).unwrap();
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(!file.thornlist.text.contains("!INCLUDE"), "{}", file.thornlist.text);
+        assert!(file.thornlist.text.contains("Other/Thorn"));
+        assert!(file.is_fully_specified(), "{:?}", file.unspecified());
+
+        // A branch the remote does not have fails the pack.
+        let bad = tmp.path().join("bad.th");
+        fs::write(&bad, format!("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{}", section(&url, "no-such-branch", "", "CarpetX/Loop"))).unwrap();
+        let err = format!("{:#}", crate::sim::export::pack(&ctx, args(&bad)).unwrap_err());
+        assert!(err.contains("carpetx") && err.contains("no-such-branch"), "{err}");
+    }
+
+
+    /// §5.1: a simulation's own knob values outrank the global ones in what
+    /// its restarts freeze — the parfile's input is the simulation's, set by
+    /// `cactup import` — while the global knob itself is left alone.
+    #[test]
+    fn a_simulations_own_knobs_outrank_the_global_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        let parfile = tmp.path().join("bbh.par");
+        fs::write(&parfile, "K::f = \"@KNOB(kadath-initial-data)@\"\n").unwrap();
+        let mut sim = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
+        ctx.db
+            .update(|db| {
+                db.set_knob("kadath-initial-data", "/global/id.info".to_owned());
+                Ok(())
+            })
+            .unwrap();
+        sim.set_knobs([("kadath-initial-data".to_owned(), "/sim/id.info".to_owned())].into_iter().collect()).unwrap();
+        let sim = crate::sim::Simulation::open("bbh", &sim.dir).unwrap();
+        assert_eq!(sim.meta.knobs["kadath-initial-data"], "/sim/id.info", "stored with the simulation");
+
+        let db = ctx.db.read().unwrap();
+        submit_impl(&inst, &machine, &db, &sim, &start_args("bbh", "1:00:00"), false, Some("testhost")).unwrap();
+        let id = *restart::list_ids(&sim.dir).unwrap().last().unwrap();
+        let r = Restart::load(&sim.dir, id).unwrap();
+        assert_eq!(r.meta.knobs["kadath-initial-data"], "/sim/id.info");
+        assert_eq!(ctx.db.read().unwrap().knob("kadath-initial-data"), Some("/global/id.info"), "the global knob is untouched");
+    }
+
+    /// The allocation a restart freezes, as `@KNOB(allocation)@` and as
+    /// `@ALLOCATION@` alike (§5.1): the command line (`-a`, shorthand for
+    /// `-K allocation=`) over the simulation's own knob over the global one.
+    #[test]
+    fn the_allocation_is_the_command_line_then_the_sim_then_the_global_knob() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        let parfile = tmp.path().join("bbh.par");
+        fs::write(&parfile, "A::b = 1\n").unwrap();
+        let mut sim = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
+        ctx.db
+            .update(|db| {
+                db.set_knob("allocation", "global_acct".to_owned());
+                Ok(())
+            })
+            .unwrap();
+        let frozen = |argv: &[&str], sim: &crate::sim::Simulation| {
+            let mut db = ctx.db.read().unwrap();
+            db.apply_overlay(&<crate::args::Args as clap::Parser>::try_parse_from(argv).unwrap().knob_overlay().unwrap());
+            submit_impl(&inst, &machine, &db, sim, &start_args("bbh", "1:00:00"), false, Some("testhost")).unwrap();
+            let id = *restart::list_ids(&sim.dir).unwrap().last().unwrap();
+            let meta = Restart::load(&sim.dir, id).unwrap().meta;
+            let var = meta.vars.get("ALLOCATION").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+            (meta.knobs.get("allocation").cloned().unwrap_or_default(), var, meta.allocation.unwrap_or_default())
+        };
+        let plain = ["cactup", "sim", "submit", "bbh"];
+        let with_a = ["cactup", "sim", "submit", "bbh", "-a", "cli_acct"];
+        let with_k = ["cactup", "-K", "allocation=cli_acct", "sim", "submit", "bbh"];
+        let all = |a: &str| (a.to_owned(), a.to_owned(), a.to_owned());
+
+        assert_eq!(frozen(&plain, &sim), all("global_acct"), "the global knob alone");
+        assert_eq!(frozen(&with_a, &sim), all("cli_acct"), "-a over the global knob");
+        sim.set_knobs([("allocation".to_owned(), "sim_acct".to_owned())].into_iter().collect()).unwrap();
+        let sim = crate::sim::Simulation::open("bbh", &sim.dir).unwrap();
+        assert_eq!(frozen(&plain, &sim), all("sim_acct"), "the simulation's own over the global knob");
+        assert_eq!(frozen(&with_a, &sim), all("cli_acct"), "-a over the simulation's own");
+        assert_eq!(frozen(&with_k, &sim), all("cli_acct"), "-K allocation= the same");
+    }
+
+    /// `cactup import x.sim --submit --allocation acct` on a machine that
+    /// requires an account: import's --allocation joins the knob overlay as
+    /// main installs it (`Args::knob_overlay`, through `Commands::topology`),
+    /// and the `sim submit` import starts renders it into the account line.
+    /// Without it the same submit refuses.
+    #[test]
+    fn imports_allocation_reaches_the_account_line() {
+        use crate::args::{Args, Commands, SimCommand};
+        use cactup_ecosystem_common::sim::{Parfile, ParfileKind, SimFile, SimMeta, ThornlistText};
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        fs::write(
+            machine.dir.join("submitscripts/default.sh"),
+            "#!/bin/sh\n#PBS -A @KNOB(allocation)@\nexec @CACTUP@ sim run @SIMULATION_NAME@ --installation=@ALIAS@ \
+             --sim-dir=@SIMULATION_DIR@ --machine=@MACHINE@ --restart-id=@RESTART_ID@\n",
+        )
+        .unwrap();
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        let parfile = tmp.path().join("bbh.par");
+        fs::write(&parfile, "A::b = 1\n").unwrap();
+        let sim = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
+        let sim_file = SimFile {
+            format: cactup_ecosystem_common::SIM_FORMAT,
+            sim: SimMeta {
+                name: "bbh".into(),
+                summary: None,
+                description: None,
+                authors: vec![],
+                license: None,
+                contact: None,
+                cactarium: None,
+                root: "Cactus".into(),
+            },
+            thornlist: ThornlistText { filename: "bbh.th".into(), text: String::new(), untracked: vec![] },
+            parfile: Parfile { filename: "bbh.par".into(), kind: ParfileKind::Par, vars: vec![], text: String::new() },
+            inputs: vec![],
+            repos: vec![],
+            run: None,
+            provenance: None,
+        };
+        // What main does with the command line, then what import does.
+        let import = |argv: &[&str]| {
+            let args = <Args as clap::Parser>::try_parse_from(argv).unwrap();
+            let mut db = ctx.db.read().unwrap();
+            db.apply_overlay(&args.knob_overlay().unwrap());
+            let Commands::Import(import) = args.command else { panic!("not an import") };
+            let Commands::Sim(SimCommand::Submit(start)) =
+                crate::commands::import::started_command(&sim_file, &import, "bbh").unwrap()
+            else {
+                panic!("not a sim submit")
+            };
+            submit_impl(&inst, &machine, &db, &sim, &start, false, Some("testhost"))
+        };
+
+        let err = import(&["cactup", "import", "bbh.sim", "--submit"]).unwrap_err();
+        assert!(format!("{err:#}").contains("pass -a VALUE or -K allocation=VALUE"), "{err:#}");
+        assert!(restart::list_ids(&sim.dir).unwrap().is_empty(), "the refusal left nothing");
+
+        import(&["cactup", "import", "bbh.sim", "--submit", "--allocation", "acct"]).unwrap();
+        let id = *restart::list_ids(&sim.dir).unwrap().last().unwrap();
+        let script = fs::read_to_string(restart::restart_dir(&sim.dir, id).join(".cactup/submit-script")).unwrap();
+        assert!(script.lines().any(|l| l == "#PBS -A acct"), "{script}");
+    }
+
+    /// The overlay is the one way `-a` reaches a command: a flag it never
+    /// saw is refused rather than silently dropped.
+    #[test]
+    fn an_allocation_flag_the_overlay_never_saw_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        let parfile = tmp.path().join("bbh.par");
+        fs::write(&parfile, "A::b = 1\n").unwrap();
+        let sim = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
+        let mut args = start_args("bbh", "1:00:00");
+        args.topology.allocation = Some("acct".to_owned());
+        let db = ctx.db.read().unwrap();
+        let err = submit_impl(&inst, &machine, &db, &sim, &args, false, Some("testhost")).unwrap_err();
+        assert!(format!("{err:#}").contains("--allocation acct did not reach the allocation knob"), "{err:#}");
+        assert!(restart::list_ids(&sim.dir).unwrap().is_empty());
+    }
+
+    /// The account directive of a scheduler header line (`#SBATCH -A x`,
+    /// `#SBATCH --account=x`, `#PBS -A x`), as its value — `Some("")` when
+    /// the directive is there with nothing after it.
+    fn account_directive(line: &str) -> Option<String> {
+        let line = line.trim();
+        if !line.starts_with("#SBATCH") && !line.starts_with("#PBS") {
+            return None;
+        }
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        tokens.iter().enumerate().find_map(|(i, t)| match *t {
+            "-A" | "--account" => Some(tokens.get(i + 1).copied().unwrap_or("").to_owned()),
+            _ => t.strip_prefix("--account=").map(str::to_owned),
+        })
+    }
+
+    /// A variable set broad enough for every in-repo submit and build-submit
+    /// script, and the runscripts that pass an allocation to `srun`, on
+    /// `queue`, with `db`'s knobs: `@ALLOCATION@` and the snapshot, as the
+    /// submit paths bind them.
+    fn sweep_vars(machine: &Machine, queue: &str, db: &Database) -> VarSet {
+        let mut v = VarSet::new();
+        vars::set_machine_vars(&mut v, machine, queue, None).unwrap();
+        for (var, n) in [
+            ("NODES", 1u64), ("TASKS", 1), ("TASKS_PER_NODE", 1), ("CPUS_PER_TASK", 1),
+            ("GPUS_PER_TASK", 1), ("RESTART_ID", 0), ("RESULTS_ID", 0), ("ATTEMPT_ID", 0), ("MAKEJOBS", 1),
+        ] {
+            v.set(var, n);
+        }
+        v.set("GPU", true);
+        v.set("QUEUE", machine.meta.scheduler_queue_name(queue).unwrap());
+        v.set("ALLOCATION", db.knob("allocation").unwrap_or_default());
+        for var in ["EMAIL", "MAIL", "CHAINED_JOB_ID", "JOB_ID"] {
+            v.set(var, "");
+        }
+        for var in [
+            "STDOUT_FILE", "STDERR_FILE", "CACTUP", "SIMULATION_NAME", "SHORT_SIMULATION_NAME", "SIMULATION_DIR",
+            "SOURCEDIR", "ALIAS", "TEST_NAME", "TEST_DIR", "RUNDIR", "CONFIGURATION", "CONFIG_DIR",
+            "JOB_NAME", "MAIL_TYPE", "USER", "HOSTNAME", "SCRIPTFILE", "SCRATCH_HOME", "EXECUTABLE", "PARFILE",
+            "SIMULATION_ID", "TESTSUITE_RESULTS_DIR", "TESTSUITE_SELECT",
+        ] {
+            v.set(var, format!("<{}>", var.to_lowercase()));
+        }
+        v.set("MACHINE", machine.name.as_str());
+        vars::set_walltime_vars(&mut v, Walltime::parse("1:00:00").unwrap(), Walltime::parse("0:05:00").unwrap());
+        v.set_knobs(db.knob_snapshot());
+        v
+    }
+
+    /// The knobs of a command: none set; `-a acct_x` on the command line,
+    /// through the real overlay; or the stored knob.
+    fn sweep_dbs() -> [(&'static str, Database); 3] {
+        let mut by_flag = Database::new();
+        let argv = ["cactup", "sim", "submit", "s", "-a", "acct_x"];
+        by_flag.apply_overlay(&<crate::args::Args as clap::Parser>::try_parse_from(argv).unwrap().knob_overlay().unwrap());
+        let mut by_knob = Database::new();
+        by_knob.set_knob("allocation", "acct_x".to_owned());
+        [("no allocation", Database::new()), ("-a alone", by_flag), ("the knob alone", by_knob)]
+    }
+
+    /// The queue a script's route serves first, else the machine's default.
+    fn sweep_queue(machine: &Machine, route: &crate::mdb::meta::Route) -> String {
+        route
+            .queues
+            .first()
+            .cloned()
+            .or_else(|| machine.meta.default_queue(None).map(str::to_owned))
+            .or_else(|| machine.meta.queues.keys().next().cloned())
+            .unwrap()
+    }
+
+    fn sweep_mdb() -> crate::mdb::Mdb {
+        crate::mdb::Mdb::with_roots(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"),
+            PathBuf::from("/nonexistent-user-mdb"),
+        )
+    }
+
+    /// The bug a real QB4 test hit: with no allocation, a script wrote
+    /// `#SBATCH -A ` and sbatch read the next directive as the account. Every
+    /// in-repo submit and build-submit script, rendered with no allocation,
+    /// must leave the directive out (a machine where it is optional) or
+    /// refuse naming `-a` (one where it is required). Given one, by `-a`
+    /// alone or by the knob alone — the same knob now, so the two agree
+    /// trivially — every account line it writes carries it.
+    #[test]
+    fn no_mdb_script_writes_an_empty_account_directive() {
+        let mdb = sweep_mdb();
+        let mut directives = 0;
+        for name in mdb.machines().unwrap().into_keys() {
+            let machine = mdb.load(&name).unwrap();
+            for kind in [ScriptKind::Submit, ScriptKind::BuildSubmit] {
+                for (script, route) in &machine.meta.scripts(kind).routes {
+                    let queue = sweep_queue(&machine, route);
+                    let [(_, none), (_, by_flag), (_, by_knob)] = sweep_dbs();
+                    let render = |db: &Database| {
+                        generate_script(&machine, kind, script, &sweep_vars(&machine, &queue, db), Phase::Submit, None)
+                    };
+                    let what = format!("{name} {} script {script}", kind.dir_name());
+                    match render(&none) {
+                        Ok(text) => {
+                            if let Some(line) = text.lines().find(|l| account_directive(l).is_some()) {
+                                panic!("{what}: no allocation, yet it writes `{line}`");
+                            }
+                        }
+                        Err(e) => {
+                            // A .py script's own refusal, or @KNOB(allocation)@'s.
+                            let e = format!("{e:#}");
+                            assert!(
+                                e.contains(&format!("{name} needs an allocation: pass -a ACCOUNT, or set it once with"))
+                                    || e.contains("knob allocation is unset or empty; set it with `cactup knob \
+                                                   allocation VALUE` or pass -a VALUE"),
+                                "{what}: {e}"
+                            );
+                        }
+                    }
+                    let lines = |db: &Database| -> Vec<String> {
+                        let text = render(db).unwrap_or_else(|e| panic!("{what}: {e:#}"));
+                        text.lines().filter(|l| account_directive(l).is_some()).map(str::to_owned).collect()
+                    };
+                    let given = lines(&by_flag);
+                    for line in &given {
+                        let value = account_directive(line).unwrap();
+                        assert!(value.contains("acct_x"), "{what}: account directive `{line}`");
+                    }
+                    // A script that reads the allocation at all (a knob
+                    // token, `knob(…)`, or the legacy alias) must write it.
+                    let template = fs::read_to_string(machine.script_path(kind, script).unwrap().path).unwrap();
+                    if ["(allocation)", "knob(\"allocation\"", "ALLOCATION"].iter().any(|r| template.contains(r)) {
+                        assert!(!given.is_empty(), "{what}: reads the allocation but writes no account line");
+                    }
+                    assert_eq!(lines(&by_knob), given, "{what}: -a alone and the knob alone");
+                    directives += given.len();
+                }
+            }
+        }
+        // The sweep saw the scripts it is about.
+        assert!(directives > 25, "only {directives} account directives rendered");
+    }
+
+    /// A runscript that hands the allocation to `srun -A` (qbc, db1) runs
+    /// inside the job, which already has an account: with none set the `-A`
+    /// must vanish, not leave `srun -A -p …` taking `-p` as the account. The
+    /// `-A` sits mid-line, so a drop-line token cannot do it: each such
+    /// runscript binds `alloc='@KNOB-OPTIONAL(allocation)@'` and passes
+    /// `${alloc:+-A …}`; the shell's own expansion is checked here.
+    #[test]
+    fn runscripts_pass_srun_a_only_with_an_allocation() {
+        let mdb = sweep_mdb();
+        let mut checked = Vec::new();
+        for name in mdb.machines().unwrap().into_keys() {
+            let machine = mdb.load(&name).unwrap();
+            for (script, route) in &machine.meta.scripts(ScriptKind::Run).routes {
+                let file = machine.script_path(ScriptKind::Run, script).unwrap();
+                let template = fs::read_to_string(&file.path).unwrap();
+                if !template.contains("ALLOCATION") && !template.contains("(allocation") {
+                    continue;
+                }
+                let what = format!("{name} runscript {script}");
+                let queue = sweep_queue(&machine, route);
+                for (label, db) in sweep_dbs() {
+                    let flag = if label == "no allocation" { "" } else { "acct_x" };
+                    let v = sweep_vars(&machine, &queue, &db);
+                    let text = generate_script(&machine, ScriptKind::Run, script, &v, Phase::Run, None)
+                        .unwrap_or_else(|e| panic!("{what}: {e:#}"));
+                    // No `-A` token followed by another flag or by nothing.
+                    for line in text.lines().filter(|l| l.contains("srun")) {
+                        let tokens: Vec<&str> = line.split_whitespace().collect();
+                        for (i, t) in tokens.iter().enumerate() {
+                            if *t == "-A" {
+                                let next = tokens.get(i + 1).copied().unwrap_or("");
+                                assert!(!next.is_empty() && !next.starts_with('-') && next != "\\", "{what}: `{line}`");
+                            }
+                        }
+                    }
+                    let alloc = text.lines().find(|l| l.starts_with("alloc=")).unwrap_or_else(|| panic!("{what}: no alloc= line"));
+                    let out = Command::new("bash")
+                        .arg("-c")
+                        .arg(format!("{alloc}\nset -- ${{alloc:+-A \"$alloc\"}}; echo \"$#:$*\""))
+                        .output()
+                        .unwrap();
+                    let expect = if flag.is_empty() { "0:\n".to_owned() } else { format!("2:-A {flag}\n") };
+                    assert_eq!(String::from_utf8_lossy(&out.stdout), expect, "{what} with {label}");
+                    // Each `-A` use goes through the guard, never the bare value.
+                    assert!(!text.contains("-A acct_x") && !text.contains("-A  "), "{what}: an unguarded -A");
+                    let code = text.lines().filter(|l| !l.trim_start().starts_with('#'));
+                    for line in code.filter(|l| l.contains("srun") && l.contains("-A")) {
+                        assert!(line.contains("${alloc:+-A "), "{what}: `{line}`");
+                    }
+                }
+                checked.push(what);
+            }
+        }
+        for want in [
+            "qbc.loni.org runscript default", "qbc.loni.org runscript test",
+            "db1.hpc.lsu.edu runscript sing", "db1.hpc.lsu.edu runscript sing-test",
+        ] {
+            assert!(checked.iter().any(|c| c == want), "{want} not swept: {checked:?}");
+        }
     }
 }

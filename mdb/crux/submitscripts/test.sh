@@ -12,7 +12,9 @@
 #PBS -q "@QUEUE@"
 #PBS -r n
 #PBS -l walltime=@WALLTIME@
-#PBS -A @ALLOCATION@
+# Account required: ALCF rejects a job without a project. The allocation knob,
+# which -a sets for one command; with none, cactup refuses before submitting.
+#PBS -A @KNOB(allocation)@
 #PBS -l select=@NODES@:system=crux
 #PBS -l place=scatter
 #PBS -V

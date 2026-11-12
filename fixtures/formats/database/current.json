@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "cactup-version": "0.1.0",
+  "installations": {
+    "et": {
+      "alias": "et",
+      "release": "ET_2026_05",
+      "path": "/home/user/.cactup/cacti/et",
+      "thornlist": "/home/user/lists/mine.th",
+      "simfile": "/home/user/sims/bbh.sim",
+      "stack": "et/et-stack@2026.5.0",
+      "stack-contact": "https://github.com/EinsteinToolkit/manifest/issues",
+      "current-release": "master",
+      "current-thornlist": "/home/user/.cactup/cacti/et/Cactus/thornlists/mine.th",
+      "unfetched-repos": {
+        "CarpetX0": {
+          "reason": "skipped",
+          "thorns": [
+            "CarpetX/Algo",
+            "CarpetX/Loop"
+          ],
+          "detail": "local modifications (Loop/src/loop.cxx)"
+        },
+        "CarpetX1": {
+          "reason": "failed",
+          "thorns": [
+            "CarpetX/Algo",
+            "CarpetX/Loop"
+          ],
+          "detail": "local modifications (Loop/src/loop.cxx)"
+        }
+      }
+    }
+  },
+  "active-installation": "et",
+  "knobs": {
+    "queue": "workq"
+  },
+  "detected": {
+    "name": "workstation",
+    "hostname": "workstation",
+    "session": "4242:1234567"
+  }
+}

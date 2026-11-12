@@ -47,8 +47,8 @@ fn freeze(exe: &Path, stamp: Option<Stamp>, open: impl FnOnce(&Path) -> Res<File
                 eprintln!(
                     "{}",
                     format!(
-                        "Warning: could not keep a versioned copy of cactup next to {}: {e:#}. \
-                         Jobs submitted now run that file, which a later update may replace.",
+                        "Warning: could not make a versioned copy of '{}': {e:#}. Jobs \
+                         submitted now run that file, which an update may replace.",
                         exe.display()
                     )
                     .yellow()
@@ -69,7 +69,7 @@ fn freeze(exe: &Path, stamp: Option<Stamp>, open: impl FnOnce(&Path) -> Res<File
 /// opening `exe`: without /proc no copy is made (and [`freeze`] warns),
 /// rather than a copy that might be of another build.
 fn open_running(_exe: &Path) -> Res<File> {
-    File::open("/proc/self/exe").context("Failed to open /proc/self/exe, the running cactup")
+    File::open("/proc/self/exe").context("Failed to open /proc/self/exe")
 }
 
 /// `exe` itself when it is already `cactup-<id>`; else `cactup-<id>` in the
@@ -82,7 +82,7 @@ fn versioned_copy(exe: &Path, id: &str, open: impl FnOnce(&Path) -> Res<File>) -
     }
     let dir = exe
         .parent()
-        .with_context(|| format!("{} has no parent directory", exe.display()))?;
+        .with_context(|| format!("'{}' has no parent directory", exe.display()))?;
     let versioned = dir.join(&name);
     if versioned.is_file() {
         return Ok(versioned);
@@ -91,23 +91,23 @@ fn versioned_copy(exe: &Path, id: &str, open: impl FnOnce(&Path) -> Res<File>) -
     let mut temp = tempfile::Builder::new()
         .prefix(".cactup-freeze.")
         .tempfile_in(dir)
-        .with_context(|| format!("Failed to create a temp file in {}", dir.display()))?;
+        .with_context(|| format!("Failed to create a temp file in '{}'", dir.display()))?;
     let mut source = open(exe)?;
     std::io::copy(&mut source, &mut temp)
-        .with_context(|| format!("Failed to copy {}", exe.display()))?;
+        .with_context(|| format!("Failed to copy '{}'", exe.display()))?;
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755))
-            .with_context(|| format!("Failed to make {} executable", temp.path().display()))?;
+            .with_context(|| format!("Failed to make '{}' executable", temp.path().display()))?;
     }
     // The copy is the long part; an interrupt drops the temp file here.
     if gix::interrupt::is_triggered() {
-        bail!("interrupted");
+        bail!("Interrupted");
     }
     // A racing process may have put the same bytes there meanwhile; the
     // rename replaces them atomically, which is harmless.
     temp.persist(&versioned)
-        .with_context(|| format!("Failed to move the copy into place at {}", versioned.display()))?;
+        .with_context(|| format!("Failed to move the copy into place at '{}'", versioned.display()))?;
     Ok(versioned)
 }
 

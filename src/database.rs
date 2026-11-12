@@ -17,22 +17,39 @@ use anyhow::{bail, Context};
 use indexmap::IndexMap;
 use serde_derive::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 
+use crate::format::{self, Format, Json};
 use crate::lock::LinkLock;
 use crate::Res;
 
-/// On-disk schema version (§2.1), carried by the DB and every cactup TOML.
-/// Bumped ONLY on a breaking on-disk change; a newer binary must read every
-/// older schema it ever shipped, and refuses only a *newer* one.
-pub const SCHEMA: u32 = 1;
+/// `database.json`'s format: version 1, no migrations. Only login binaries
+/// write it (D11), so it is not `frozen_read`. An older login binary sharing
+/// `~/.cactup` keeps this one's additions when it writes, once it has this
+/// module too: binaries from before it drop keys they do not know.
+pub static DATABASE: Format<Json> = Format {
+    name: "database",
+    key: "schema",
+    current: 1,
+    upgrades: &[],
+    downgrades: &[],
+    down_floor: 1,
+    frozen_read: false,
+    legacy: Some(drop_detected_machine),
+    // Replaced whole by their writers: a newly detected machine
+    // (`commands::machine::remember`), a repo's unfetched record
+    // (`refetch`).
+    replace_whole: &["detected", "installations.*.unfetched-repos.*"],
+};
 
-/// Files written before the schema field existed are schema 1.
-fn default_schema() -> u32 {
-    SCHEMA
+/// The bare `detected-machine` string (before the stamped `detected` record)
+/// was dropped by every write once cactup stopped modeling it; put-back
+/// would otherwise keep it forever. Discovery simply runs again.
+fn drop_detected_machine(doc: &mut Json) -> Res<()> {
+    doc.shift_remove("detected-machine");
+    Ok(())
 }
 
 /// A knob cactup recognizes (§5): its name plus how to check a value on
@@ -91,6 +108,7 @@ pub const KNOWN_KNOBS: &[KnobSpec] = &[
     KnobSpec::maintenance("autoupdate", crate::update::validate_autoupdate),
     KnobSpec::maintenance("update-url", crate::update::validate_update_url),
     KnobSpec::maintenance("mdb-url", crate::update::validate_mdb_url),
+    KnobSpec::maintenance(crate::cactarium::URL_KNOB, crate::cactarium::validate_url),
     KnobSpec::maintenance("build-cache", crate::objcache::validate_mode),
     KnobSpec::maintenance("build-cache-relocate", crate::objcache::validate_relocate),
     KnobSpec::maintenance("build-cache-preserve-exact-warnings", crate::objcache::validate_exact_warnings),
@@ -102,6 +120,7 @@ pub const KNOWN_KNOBS: &[KnobSpec] = &[
     KnobSpec::maintenance("test-home", |v| crate::mdb::meta::validate_path_knob("test-home", v)),
     KnobSpec::maintenance("scratch-home", |v| crate::mdb::meta::validate_path_knob("scratch-home", v)),
     KnobSpec::maintenance("build-cache-home", |v| crate::mdb::meta::validate_path_knob("build-cache-home", v)),
+    KnobSpec::maintenance("inputs-home", |v| crate::mdb::meta::validate_path_knob("inputs-home", v)),
 ];
 
 /// The spec for a knob name, if cactup recognizes it.
@@ -186,6 +205,21 @@ pub struct CactusInstallation {
     /// recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thornlist: Option<String>,
+    /// For an installation made from a `.sim` file (`install --simfile`,
+    /// §8.9): the file it was made from — the third kind of install-time
+    /// provenance, beside a release and a custom thornlist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simfile: Option<String>,
+    /// For an installation made from a Cactarium stack release (`install
+    /// owner/stack@version`, §8.10): the exact release, as `owner/stack@v`
+    /// (or `@head`/`@master` for the unpinned forms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<String>,
+    /// Where to report problems with the stack release the tree is on now
+    /// (installed, or refetched to), as the Cactarium gave it: the stack's
+    /// declared contact, else its repo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack_contact: Option<String>,
     /// What the tree is on *now*, when an `installation refetch` with an
     /// explicit source moved it away from its install-time provenance
     /// (§2.1). `release`/`thornlist` above are never rewritten — they record
@@ -261,8 +295,6 @@ impl CactusInstallation {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Database {
-    #[serde(default = "default_schema")]
-    pub schema: u32,
     pub cactup_version: String,
     /// alias → installation.
     #[serde(default)]
@@ -278,6 +310,10 @@ pub struct Database {
     /// (§4.3). Absent until discovery first succeeds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detected: Option<DetectedMachine>,
+    /// The knobs this snapshot's command line laid over the stored ones
+    /// (`-K`, and `-a` as `-K allocation=`, §5.1); never stored.
+    #[serde(skip)]
+    overlaid: Vec<String>,
 }
 
 /// The discovery cache (§4.3): which machine this `~/.cactup` resolved to,
@@ -311,12 +347,12 @@ impl DetectedMachine {
 impl Database {
     pub fn new() -> Self {
         Self {
-            schema: SCHEMA,
             cactup_version: crate::VERSION.to_owned(),
             installations: IndexMap::new(),
             active_installation: None,
             knobs: IndexMap::new(),
             detected: None,
+            overlaid: Vec::new(),
         }
     }
 
@@ -340,6 +376,7 @@ impl Database {
             "autoupdate" => Some(crate::update::AutoUpdate::Auto.name().to_owned()),
             "update-url" => Some(crate::update::DEFAULT_UPDATE_URL.to_owned()),
             "mdb-url" => Some(crate::update::DEFAULT_MDB_URL.to_owned()),
+            crate::cactarium::URL_KNOB => Some(crate::cactarium::DEFAULT_URL.to_owned()),
             "build-cache" => Some(crate::objcache::Mode::Serve.name().to_owned()),
             "build-cache-relocate" => Some("yes".to_owned()),
             "build-cache-preserve-exact-warnings" => Some("false".to_owned()),
@@ -364,9 +401,22 @@ impl Database {
     /// snapshots only — a `Db::update` closure sees the disk state, so an
     /// override is never written back.
     fn apply_knob_overrides(&mut self) {
-        for (name, value) in knob_overrides() {
+        self.apply_overlay(knob_overrides());
+    }
+
+    /// Lay a command-line knob overlay over this snapshot, remembering
+    /// which knobs it names ([`Self::is_overlaid`]).
+    pub fn apply_overlay(&mut self, overlay: &IndexMap<String, String>) {
+        for (name, value) in overlay {
             self.knobs.insert(name.clone(), value.clone());
+            self.overlaid.push(name.clone());
         }
+    }
+
+    /// Whether this command's overlay set knob `name`: the command line
+    /// outranks a simulation's own value of it (§5.1).
+    pub fn is_overlaid(&self, name: &str) -> bool {
+        self.overlaid.iter().any(|n| n == name)
     }
 
     /// The effective knob values as `@KNOB(name)@` sees them (§6.1): every
@@ -387,61 +437,46 @@ impl Database {
         out
     }
 
-    /// Deserialize from `path`, or build a fresh one if the file doesn't
-    /// exist. Enforces the §2.1 schema guard.
+    /// Read `path` through [`DATABASE`] (a newer file is refused before the
+    /// typed parse), or build a fresh one if the file doesn't exist.
     fn read_from(path: &Path) -> Res<Self> {
-        if !path.exists() {
-            return Ok(Self::new());
-        }
-
-        let contents = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read database from {}", path.display()))?;
-        let db: Database = serde_json::from_str(&contents)
-            .with_context(|| format!("Failed to parse database at {}", path.display()))?;
-        db.check_schema(path)?;
-        Ok(db)
-    }
-
-    /// The §2.1 schema guard: refuse a database written by a newer cactup.
-    fn check_schema(&self, path: &Path) -> Res<()> {
-        if self.schema > SCHEMA {
-            bail!(
-                "{} has schema {} but this cactup ({}) understands at most schema {SCHEMA}. \
-                 It was written by a newer cactup; please upgrade.",
-                path.display(),
-                self.schema,
-                crate::VERSION
-            );
-        }
-        Ok(())
-    }
-
-    /// Write to `path` as pretty JSON, atomically (temp file + rename), so a
-    /// kill mid-write can never leave a torn database.
-    fn persist(&self, path: &Path) -> Res<()> {
-        let contents =
-            serde_json::to_string_pretty(self).with_context(|| "Failed to serialize database")?;
-        let dir = path.parent().expect("database path has a parent");
-        let mut temp = tempfile::NamedTempFile::new_in(dir)
-            .with_context(|| format!("Failed to create temp file in {}", dir.display()))?;
-        temp.write_all(contents.as_bytes())
-            .and_then(|()| temp.as_file().sync_all())
-            .with_context(|| "Failed to write database temp file")?;
-        temp.persist(path)
-            .with_context(|| format!("Failed to move database into place at {}", path.display()))?;
-        Ok(())
+        Ok(format::read(path, &DATABASE)?.unwrap_or_else(Self::new))
     }
 }
 
 /// Lock-free reads of the database retry this many times on a stale NFS
-/// file handle (the file was renamed over mid-read) or an unparsable file before falling back to the locked read.
+/// file handle (the file was renamed over mid-read) or a file whose JSON does
+/// not parse before falling back to the locked read.
 const UNLOCKED_READ_ATTEMPTS: u32 = 3;
 
 /// Handle to the on-disk global DB. Cheap to construct; owns no lock. All
 /// access goes through [`Db::read`] / [`Db::update`].
+#[derive(Clone)]
 pub struct Db {
     path: PathBuf,
     lock_path: PathBuf,
+}
+
+impl Db {
+    /// Only the knobs of a database this cactup cannot read as a whole
+    /// (written by a newer one): taken from the raw JSON, whatever else it
+    /// holds, for updating, which is the way out of that refusal and must
+    /// still honor the user's update settings (`autoupdate`, `update-url`,
+    /// `mdb-url`). Knobs that are not strings are skipped.
+    pub fn knobs_only(&self) -> Res<Database> {
+        let text = fs::read_to_string(&self.path).with_context(|| format!("Failed to read '{}'", self.path.display()))?;
+        let raw: serde_json::Value =
+            serde_json::from_str(&text).with_context(|| format!("Failed to parse '{}'", self.path.display()))?;
+        let mut db = Database::new();
+        if let Some(knobs) = raw.get("knobs").and_then(|k| k.as_object()) {
+            for (name, value) in knobs {
+                if let Some(value) = value.as_str() {
+                    db.knobs.insert(name.clone(), value.to_owned());
+                }
+            }
+        }
+        Ok(db)
+    }
 }
 
 impl Db {
@@ -484,16 +519,17 @@ impl Db {
     /// missing file goes there at once (no write has happened yet — or this
     /// host still caches a negative lookup from before another host's first
     /// write, which the lock's directory updates normally revalidate). A stale NFS file
-    /// handle (the file was renamed over while we read it) or a file that does
-    /// not parse is retried briefly first. The schema guard's verdict is final.
+    /// handle (the file was renamed over while we read it) or JSON that does
+    /// not parse is retried briefly first. Every other verdict is final — a
+    /// newer file's upgrade error above all: the locked read could only
+    /// repeat it.
     fn read_unlocked(&self) -> Option<Res<Database>> {
         for attempt in 1..=UNLOCKED_READ_ATTEMPTS {
             match fs::read_to_string(&self.path) {
-                Ok(contents) => {
-                    if let Ok(db) = serde_json::from_str::<Database>(&contents) {
-                        return Some(db.check_schema(&self.path).map(|()| db));
-                    }
-                }
+                Ok(contents) => match format::parse(&contents, &self.path, &DATABASE) {
+                    Err(e) if format::is_unparsable(&e) => {}
+                    result => return Some(result),
+                },
                 Err(e) if e.kind() == std::io::ErrorKind::StaleNetworkFileHandle => {}
                 Err(_) => return None,
             }
@@ -515,22 +551,26 @@ impl Db {
     /// on-disk DB, apply `mutate` (touching only the keys the caller owns),
     /// persist, release. Callers must keep the closure brief — long-running
     /// work happens strictly outside.
+    ///
+    /// The file is read once: the write puts back the keys this binary does
+    /// not model from that same read, and replaces the file atomically (temp
+    /// file + fsync + rename), so a kill mid-write never leaves a torn DB.
     pub fn update<T>(&self, mutate: impl FnOnce(&mut Database) -> Res<T>) -> Res<T> {
         let _span = crate::timing::span("Db::update");
         self.ensure_dir()?;
         let _lock = LinkLock::acquire(&self.lock_path)?;
-        let mut db = Database::read_from(&self.path)?;
+        let (db, on_disk) = format::read_for_write(&self.path, &DATABASE)?;
+        let mut db = db.unwrap_or_else(Database::new);
         let result = mutate(&mut db)?;
-        db.schema = SCHEMA;
         db.cactup_version = crate::VERSION.to_owned();
-        db.persist(&self.path)?;
+        format::write_over(&self.path, &db, &DATABASE, &on_disk)?;
         Ok(result)
     }
 
     fn ensure_dir(&self) -> Res<()> {
         let dir = self.path.parent().expect("database path has a parent");
         fs::create_dir_all(dir)
-            .with_context(|| format!("Failed to create cactup directory {}", dir.display()))
+            .with_context(|| format!("Failed to create cactup directory '{}'", dir.display()))
     }
 }
 
@@ -570,7 +610,9 @@ mod tests {
         let snapshot = db.read().unwrap();
         assert_eq!(snapshot.active_installation.as_deref(), Some("et"));
         assert_eq!(snapshot.knob("queue"), Some("local"));
-        assert_eq!(snapshot.schema, SCHEMA);
+        // The version belongs to the file, first.
+        let raw = fs::read_to_string(dir.path().join("database.json")).unwrap();
+        assert!(raw.starts_with("{\n  \"schema\": 1,\n  \"cactup-version\""), "{raw}");
         // No lock is left behind by read/update.
         assert!(!dir.path().join("database.lock").exists());
     }
@@ -610,33 +652,223 @@ mod tests {
         assert!(!unknown.is_current("mike1.hpc.lsu.edu", None));
     }
 
-    #[test]
-    fn schema_guard_refuses_newer_reads_older() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = Db::in_dir(dir.path());
+    /// Every field set, every collection non-empty, and no `..`: a new field
+    /// fails to compile here, and the shape pin then says what to do.
+    /// Every value of every enum the database holds, in a match with no
+    /// wildcard: a new value fails to compile here until it is in the sample
+    /// (an older binary meeting it would fail to read the whole database).
+    fn every_unfetched_reason() -> [UnfetchedReason; 2] {
+        // Each value's place in `all`: a new value fails to compile here until
+        // it is given the next place — and then goes into `all` too, which
+        // must hold every place exactly once (checked below; Rust cannot list
+        // an enum's values, so the place given is what this relies on).
+        let place = |reason: &UnfetchedReason| match reason {
+            UnfetchedReason::Skipped => 0,
+            UnfetchedReason::Failed => 1,
+        };
+        let all = [UnfetchedReason::Skipped, UnfetchedReason::Failed];
+        let mut places: Vec<usize> = all.iter().map(place).collect();
+        places.sort();
+        assert_eq!(places, (0..all.len()).collect::<Vec<_>>(), "every UnfetchedReason, once");
+        all
+    }
 
-        let newer = format!(
-            r#"{{ "schema": {}, "cactup-version": "99.0.0", "installations": {{}} }}"#,
-            SCHEMA + 1
+    fn exhaustive_sample() -> Database {
+        let mut unfetched_repos = IndexMap::new();
+        for (i, reason) in every_unfetched_reason().into_iter().enumerate() {
+            unfetched_repos.insert(
+                format!("CarpetX{i}"),
+                UnfetchedRepo {
+                    reason,
+                    thorns: vec!["CarpetX/Algo".to_owned(), "CarpetX/Loop".to_owned()],
+                    detail: Some("local modifications (Loop/src/loop.cxx)".to_owned()),
+                },
+            );
+        }
+        let mut installations = IndexMap::new();
+        installations.insert(
+            "et".to_owned(),
+            CactusInstallation {
+                alias: "et".to_owned(),
+                release: Some("ET_2026_05".to_owned()),
+                path: "/home/user/.cactup/cacti/et".to_owned(),
+                thornlist: Some("/home/user/lists/mine.th".to_owned()),
+                current_release: Some("master".to_owned()),
+                current_thornlist: Some(
+                    "/home/user/.cactup/cacti/et/Cactus/thornlists/mine.th".to_owned(),
+                ),
+                simfile: Some("/home/user/sims/bbh.sim".to_owned()),
+                stack: Some("et/et-stack@2026.5.0".to_owned()),
+                stack_contact: Some("https://github.com/EinsteinToolkit/manifest/issues".to_owned()),
+                unfetched_repos,
+            },
         );
-        fs::write(dir.path().join("database.json"), newer).unwrap();
-        let err = format!("{:#}", db.read().unwrap_err());
-        assert!(err.contains("upgrade"), "unexpected error: {err}");
+        let mut knobs = IndexMap::new();
+        knobs.insert("queue".to_owned(), "workq".to_owned());
+        Database {
+            cactup_version: "0.1.0".to_owned(),
+            installations,
+            active_installation: Some("et".to_owned()),
+            knobs,
+            detected: Some(DetectedMachine {
+                name: "workstation".to_owned(),
+                hostname: "workstation".to_owned(),
+                session: Some("4242:1234567".to_owned()),
+            }),
+        }
+    }
 
-        // A pre-schema file (like today's) reads fine and defaults to SCHEMA.
-        let legacy = r#"{
-            "cactup-version": "0.1.0",
-            "installations": { "et": { "alias": "et", "release": null, "path": "/x" } },
-            "active-installation": "et"
-        }"#;
-        fs::write(dir.path().join("database.json"), legacy).unwrap();
-        let snapshot = db.read().unwrap();
-        assert_eq!(snapshot.schema, SCHEMA);
-        assert_eq!(snapshot.installations["et"].path, "/x");
-        assert!(snapshot.knobs.is_empty());
+    #[test]
+    fn database_format_generic_tests() {
+        use crate::format::testing::*;
+        let fixtures = fixture_dir("database");
+        descriptor_is_consistent(&DATABASE);
+        shape_is_pinned(&DATABASE, &fixtures, &exhaustive_sample());
+        every_fixture_loads::<Database, _>(&DATABASE, &fixtures);
+        let invalid = r#"{"installations": 7}"#;
+        newer_is_refused::<Database, _>(&DATABASE, "database.json", invalid, &exhaustive_sample());
+        unknown_keys_survive(
+            &DATABASE,
+            "database.json",
+            &exhaustive_sample(),
+            &["installations", "et"],
+            |d: &mut Database| d.detected = None,
+            &["detected"],
+        );
+    }
+
+    /// The shipped shapes read as what they recorded: a file from before the
+    /// `schema` key, and one from before the stamped `detected` record.
+    #[test]
+    fn old_database_shapes_read() {
+        let dir = database_fixtures();
+        let noschema = Database::read_from(&dir.join("v1-noschema.json")).unwrap();
+        assert_eq!(noschema.installations["ET_2026_05"].release.as_deref(), Some("ET_2026_05"));
+        assert_eq!(noschema.active_installation.as_deref(), Some("ET_2026_05"));
+        assert!(noschema.knobs.is_empty() && noschema.detected.is_none());
+        let detected_machine = Database::read_from(&dir.join("v1-detected-machine.json")).unwrap();
+        assert_eq!(detected_machine.detected, None);
         // A custom installation registered before cactup recorded the thornlist
         // it came from still reads; `show`/`list` just cannot name the source.
-        assert_eq!(snapshot.installations["et"].thornlist, None);
+        assert_eq!(detected_machine.installations["ET_2026_05"].thornlist, None);
+        assert_eq!(detected_machine.installations["custom"].failed_repo_count(), 1);
+        assert_eq!(detected_machine.knob("queue"), Some("workq"));
+    }
+
+    fn database_fixtures() -> PathBuf {
+        crate::format::testing::fixture_dir("database")
+    }
+
+    /// A newer database is refused by the lock-free read itself, without
+    /// falling back to the locked read (a held lock would fail that one with
+    /// "locked by …"); every path leaves the file untouched.
+    #[test]
+    fn newer_database_is_refused_without_the_locked_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::in_dir(dir.path());
+        let path = dir.path().join("database.json");
+        let newer = r#"{ "schema": 2, "cactup-version": "99.0.0", "installations": 7 }"#;
+        fs::write(&path, newer).unwrap();
+        let held = LinkLock::acquire(&dir.path().join("database.lock")).unwrap();
+        let err = format!("{:#}", db.read().unwrap_err());
+        assert!(err.contains(&format!("'{}' was written by a newer cactup", path.display())), "{err}");
+        assert!(err.contains("database schema 2") && err.contains("reads up to 1"), "{err}");
+        drop(held);
+        let err = format!("{:#}", db.update(|_| Ok(())).unwrap_err());
+        assert!(err.contains("upgrade cactup"), "{err}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), newer);
+    }
+
+    /// JSON that does not parse is still retried and then handed to the
+    /// locked read (here it meets the held lock); the lock-free read itself
+    /// answers "fall back".
+    #[test]
+    fn unparsable_database_falls_back_to_the_locked_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::in_dir(dir.path());
+        fs::write(dir.path().join("database.json"), "{ \"schema\": 1, ").unwrap();
+        assert!(db.read_unlocked().is_none());
+        let held = LinkLock::acquire(&dir.path().join("database.lock")).unwrap();
+        let err = format!("{:#}", db.read().unwrap_err());
+        assert!(err.contains("is locked by"), "{err}");
+        drop(held);
+    }
+
+    /// `Db::update` keeps what this binary does not model — at the top level
+    /// and inside an installation — in place, and the file's key order.
+    #[test]
+    fn update_keeps_unknown_keys_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::in_dir(dir.path());
+        let path = dir.path().join("database.json");
+        fs::write(
+            &path,
+            r#"{
+  "schema": 1,
+  "cactup-version": "0.0.1",
+  "future": {"x": 1},
+  "installations": {
+    "et": {"alias": "et", "release": "ET_2026_05", "future-field": 2, "path": "/x"},
+    "gone": {"alias": "gone", "release": null, "path": "/y", "future-field": 3}
+  },
+  "active-installation": "gone",
+  "knobs": {}
+}"#,
+        )
+        .unwrap();
+        db.update(|d| {
+            d.installations.shift_remove("gone");
+            d.active_installation = None;
+            d.set_knob("queue", "workq".to_owned());
+            Ok(())
+        })
+        .unwrap();
+        let doc: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let keys: Vec<_> = doc.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["schema", "cactup-version", "future", "installations", "active-installation", "knobs"]
+        );
+        assert_eq!(doc["future"], serde_json::json!({"x": 1}));
+        let et: Vec<_> = doc["installations"]["et"].as_object().unwrap().keys().collect();
+        assert_eq!(et, ["alias", "release", "future-field", "path"]);
+        // What the writer removed stays removed, unknown keys and all.
+        assert!(doc["installations"].get("gone").is_none());
+        assert_eq!(doc["active-installation"], serde_json::Value::Null);
+        assert_eq!(doc["cactup-version"], crate::VERSION);
+    }
+
+    /// A sub-record its writer replaces whole (a newly detected machine, a
+    /// repo's unfetched record) does not inherit the old one's unknown keys.
+    #[test]
+    fn records_replaced_whole_keep_no_stale_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::in_dir(dir.path());
+        let path = dir.path().join("database.json");
+        fs::write(
+            &path,
+            r#"{"schema": 1, "cactup-version": "0.0.1",
+  "installations": {"et": {"alias": "et", "release": null, "path": "/x", "future-field": 2,
+    "unfetched-repos": {"CarpetX": {"reason": "skipped", "thorns": [], "verified-by": "old"}}}},
+  "knobs": {},
+  "detected": {"name": "mike", "hostname": "mike1", "verified-by": "old"}}"#,
+        )
+        .unwrap();
+        db.update(|d| {
+            d.detected = Some(DetectedMachine { name: "qbd".into(), hostname: "qbd2".into(), session: None });
+            let et = d.installations.get_mut("et").unwrap();
+            et.unfetched_repos.insert(
+                "CarpetX".into(),
+                UnfetchedRepo { reason: UnfetchedReason::Failed, thorns: vec![], detail: None },
+            );
+            Ok(())
+        })
+        .unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(doc["detected"].get("verified-by").is_none(), "{doc}");
+        assert!(doc["installations"]["et"]["unfetched-repos"]["CarpetX"].get("verified-by").is_none(), "{doc}");
+        assert_eq!(doc["installations"]["et"]["future-field"], 2, "an edited record keeps its keys");
     }
 
     /// Reads take no lock: a read succeeds while another process holds the
@@ -720,8 +952,11 @@ mod tests {
                     release: None,
                     path: "/x".to_owned(),
                     thornlist: Some("/home/u/lists/mine.th".to_owned()),
+                    simfile: None,
+                    stack: None,
                     current_release: None,
                     current_thornlist: None,
+                    stack_contact: None,
                     unfetched_repos: IndexMap::new(),
                 },
             );
@@ -773,8 +1008,11 @@ mod tests {
                     release: Some("ET_2026_05".to_owned()),
                     path: "/x".to_owned(),
                     thornlist: None,
+                    simfile: None,
+                    stack: None,
                     current_release: None,
                     current_thornlist: None,
+                    stack_contact: None,
                     unfetched_repos: unfetched,
                 },
             );
@@ -810,8 +1048,11 @@ mod tests {
                     release: Some("ET_2026_05".to_owned()),
                     path: "/y".to_owned(),
                     thornlist: None,
+                    simfile: None,
+                    stack: None,
                     current_release: None,
                     current_thornlist: None,
+                    stack_contact: None,
                     unfetched_repos: IndexMap::new(),
                 },
             );

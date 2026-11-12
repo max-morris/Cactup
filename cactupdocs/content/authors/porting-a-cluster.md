@@ -98,6 +98,14 @@ Check your cluster's specs:
 sinfo -o "%n %c %m" | head -1  # CPUs and memory per node
 ```
 
+To get node counts derived (`sim submit -T 256` asking for as many nodes as
+256 tasks need), declare `max-cpus-per-node` per queue, under
+`[queues.<name>]`. A machine you create is an overlay, and its top-level
+`[hardware]` value counts as detected: `machine create` may have copied it
+from the host it ran on, which on a cluster is a login node. A detected
+value still sizes the default layout, but cactup derives no node count from
+it: `sim submit -T 256` stays on one node unless you give `-n` or `-t`.
+
 ### Build section
 
 Set the default parallel make jobs:
