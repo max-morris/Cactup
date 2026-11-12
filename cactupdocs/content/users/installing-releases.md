@@ -188,7 +188,11 @@ default (from `master` to `main`, say), the next refetch moves the repo with
 it. Dropping `!REPO_BRANCH` from an entry, or a `!REPO_COMMIT` pin from an
 entry that names no branch, likewise puts the repo on the default branch. A
 branch you checked out yourself is left alone, like any other local state
-(see the skip contract below).
+(see the skip contract below). Older versions of cactup did not record
+whether a branch was yours or the thornlist's, so after an upgrade such a
+repo sitting on a branch other than the default is skipped as a switched
+branch until you say otherwise: `cactup inst refetch --overwrite <repo>`
+moves it to the default branch.
 
 ### Switching release or thornlist
 
