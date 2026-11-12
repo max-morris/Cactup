@@ -206,19 +206,20 @@ pub struct Hardware {
     // §4.6
     #[serde(default)]
     pub autodetect: bool,
-    // §8.5
+    // §8.5 (the GPU bound on a derived TASKS_PER_NODE is detailed there)
     /// CPUs/cores available per node — the availability fact the fill-the-node
     /// rule divides by `CPUS_PER_TASK` to get `TASKS_PER_NODE` (on a GPU run a
-    /// derived one is also bounded by `max-gpus-per-node`, as §8.5 details, so a
-    /// machine may declare a `default-cpus-per-task` that deliberately leaves
-    /// CPUs idle), and that a missing `--nodes` is derived from — when it is
-    /// declared (`max_cpus_per_node_detected` below).
+    /// derived one is also bounded by `max-gpus-per-node`, so a machine may
+    /// declare a `default-cpus-per-task` that deliberately leaves CPUs idle),
+    /// and that a missing `--nodes` is derived from — when it is declared
+    /// (`max_cpus_per_node_detected` below).
     pub max_cpus_per_node: Option<u32>,
+    // §4.6 (filled at load), §8.5 (nothing derived from a detected value)
     /// Whether `max_cpus_per_node` counts as detected rather than declared:
-    /// filled from this host at load (§4.6), or the top-level value of a
-    /// user-layer overlay, where `machine create` writes this host's cores. A
-    /// login node's cores say nothing about a compute node's, so no node count
-    /// is derived, and no layout refused, on a detected value (§8.5).
+    /// filled from this host at load, or the top-level value of a user-layer
+    /// overlay, where `machine create` writes this host's cores. A login
+    /// node's cores say nothing about a compute node's, so no node count is
+    /// derived, and no layout refused, on a detected value.
     #[serde(skip)]
     pub max_cpus_per_node_detected: bool,
     /// Request-side default for `CPUS_PER_TASK` when `--cpus` is omitted.

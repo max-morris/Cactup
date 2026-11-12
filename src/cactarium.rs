@@ -8,6 +8,7 @@
 //! submitted; nothing on a compute node's path calls it (D11).
 
 use crate::database::Database;
+use crate::format::{self, Format, Toml};
 use crate::Res;
 use anyhow::{anyhow, bail, Context};
 use colored::Colorize;
@@ -17,6 +18,7 @@ use cactup_ecosystem_common::api::{
     CONTACT_HEADER, SHA256_HEADER, UNPINNED_HEADER, UNTRUSTED_HEADER,
 };
 use cactup_ecosystem_common::stack::FrozenStack;
+use cactup_ecosystem_common::STACK_FORMAT;
 use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
 
@@ -25,6 +27,25 @@ pub const DEFAULT_URL: &str = "https://cactarium.cct.lsu.edu";
 
 /// The knob naming another registry (a test instance, a mirror).
 pub const URL_KNOB: &str = "cactarium-url";
+
+/// Check a `cactarium-url` value: an `http(s)://host[:port][/path]` URL with
+/// no query or fragment, stored without a trailing slash. Plain http is
+/// accepted for a test instance on a private network.
+pub fn validate_url(value: &str) -> Res<String> {
+    let url = value.trim().trim_end_matches('/');
+    let parsed = (!url.contains(char::is_whitespace)).then(|| reqwest::Url::parse(url).ok()).flatten();
+    match parsed {
+        Some(p)
+            if matches!(p.scheme(), "http" | "https")
+                && p.host_str().is_some_and(|h| !h.is_empty())
+                && p.query().is_none()
+                && p.fragment().is_none() =>
+        {
+            Ok(url.to_owned())
+        }
+        _ => bail!("Invalid {URL_KNOB} \"{value}\": give the registry's address, like {DEFAULT_URL}"),
+    }
+}
 
 /// A connection to one registry: its base URL and, for writes, the token.
 pub struct Client {
@@ -87,7 +108,7 @@ impl Client {
             .and_then(|v| v.to_str().ok())
             .filter(|c| !c.is_empty())
             .map(str::to_owned);
-        Ok(StackResponse { stack: json(response)?, unpinned, untrusted, contact })
+        Ok(StackResponse { stack: stack_json(response)?, unpinned, untrusted, contact })
     }
 
     pub fn package_versions(&self, owner: &str, name: &str) -> Res<PackageVersions> {
@@ -95,11 +116,12 @@ impl Client {
         json(self.send(crate::fetch::download::client().get(&url))?)
     }
 
-    /// A package's branch tip (`head` or `master`: both its default branch),
-    /// its thorns at the tip's commit, and whether the Cactarium does not
-    /// trust it (then nobody has reviewed that code).
-    pub fn package_tip(&self, owner: &str, name: &str, tip: &str) -> Res<(cactup_ecosystem_common::api::PackageVersion, bool)> {
-        let url = self.url(&format!("/packages/{owner}/{name}/versions/{tip}"));
+    /// A package read at something no published version names: a branch
+    /// tip (`head` or `master`: both its default branch) or a full commit
+    /// id. Its thorns there, and whether the Cactarium does not trust it
+    /// (then nobody has reviewed that code).
+    pub fn package_at(&self, owner: &str, name: &str, at: &str) -> Res<(cactup_ecosystem_common::api::PackageVersion, bool)> {
+        let url = self.url(&format!("/packages/{owner}/{name}/versions/{at}"));
         let response = self.send(crate::fetch::download::client().get(&url))?;
         // Missing: untrusted, as for a stack tip.
         let untrusted = response.headers().get(UNTRUSTED_HEADER).is_none_or(|v| v.as_bytes() == b"true");
@@ -315,7 +337,7 @@ pub fn stack_release_text(db: &Database, req: &str, allow_untrusted: bool) -> Re
     let StackResponse { stack, unpinned, untrusted, contact } =
         client.stack_release(slug.owner.as_str(), slug.name.as_str(), &version)?;
     if untrusted {
-        confirm_untrusted(&stack.stack.to_string(), "stack", allow_untrusted)?;
+        confirm_untrusted(&stack.stack.to_string(), "stack", Unreviewed::Tip, allow_untrusted)?;
     }
     let pin_failed = || format!("Failed to pin stack {}", stack.stack);
     let (pins, unchecked) = crate::thornlist::recorded_pins(&stack.thornlist.text, &stack.repos).with_context(pin_failed)?;
@@ -333,34 +355,58 @@ pub fn stack_release_text(db: &Database, req: &str, allow_untrusted: bool) -> Re
     Ok(StackRelease { slug: stack.stack.to_string(), text, unpinned, contact })
 }
 
-/// The warning for an untrusted stack's branch tip, then the yes it needs:
-/// typed at a terminal, or given up front by the flag. Without either there
-/// is nobody to ask, so it is refused.
-pub(crate) fn confirm_untrusted(slug: &str, kind: &str, allow: bool) -> Res<()> {
+/// What an untrusted, unreviewed source is: a branch tip, or a commit no
+/// published version names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unreviewed {
+    Tip,
+    Commit,
+}
+
+impl Unreviewed {
+    fn noun(self) -> &'static str {
+        match self {
+            Unreviewed::Tip => "branch tip",
+            Unreviewed::Commit => "commit",
+        }
+    }
+}
+
+/// Whether there is a terminal to ask a question on.
+pub(crate) fn interactive() -> bool {
     use std::io::IsTerminal;
-    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-    confirm_untrusted_on(slug, kind, allow, interactive)
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// The warning for an untrusted stack's or package's unreviewed source,
+/// then the yes it needs: typed at a terminal, or given up front by the
+/// flag. Without either there is nobody to ask, so it is refused.
+pub(crate) fn confirm_untrusted(slug: &str, kind: &str, what: Unreviewed, allow: bool) -> Res<()> {
+    confirm_untrusted_on(slug, kind, what, allow, interactive())
 }
 
 /// [`confirm_untrusted`], told whether there is a terminal to ask on.
-fn confirm_untrusted_on(slug: &str, kind: &str, allow: bool, interactive: bool) -> Res<()> {
-    eprintln!(
-        "{}",
-        format!(
-            "WARNING: {slug} is a branch tip of a {kind} the Cactarium does not trust. Branch tips of untrusted \
-             {kind}s are never reviewed: installing it may fetch and build arbitrary code."
-        )
-        .red()
-        .bold()
-    );
+pub(crate) fn confirm_untrusted_on(slug: &str, kind: &str, what: Unreviewed, allow: bool, interactive: bool) -> Res<()> {
+    let why = match what {
+        Unreviewed::Tip => format!(
+            "{slug} is a branch tip of a {kind} the Cactarium does not trust. Branch tips of untrusted {kind}s \
+             are never reviewed"
+        ),
+        Unreviewed::Commit => format!(
+            "{slug} is a commit of a {kind} the Cactarium does not trust, and no published version names it, \
+             so nobody has reviewed it"
+        ),
+    };
+    eprintln!("{}", format!("WARNING: {why}: installing it may fetch and build arbitrary code.").red().bold());
     if allow {
         eprintln!("{}", "Going on anyway, as --risky-allow-untrusted-artifacts says.".yellow());
         return Ok(());
     }
     if !interactive {
         bail!(
-            "Refusing the untrusted branch tip {slug} without a terminal to confirm it on; use a release \
-             (owner/name@X.Y.Z or a range), or pass --risky-allow-untrusted-artifacts"
+            "Refusing the untrusted {} {slug} without a terminal to confirm it on; use a release \
+             (owner/name@X.Y.Z or a range), or pass --risky-allow-untrusted-artifacts",
+            what.noun()
         );
     }
     use std::io::Write;
@@ -377,6 +423,27 @@ fn json<T: DeserializeOwned>(response: reqwest::blocking::Response) -> Res<T> {
     let url = response.url().to_string();
     let text = response.text().with_context(|| format!("Failed to read the answer from {url}"))?;
     serde_json::from_str(&text).with_context(|| format!("The Cactarium's answer from {url} is not what cactup expects"))
+}
+
+/// A stack release's JSON, its `format` checked before the typed parse
+/// (`FrozenStack` refuses keys it does not know, so a release from a newer
+/// server would fail on whichever of them came first, with a message that
+/// never says to upgrade).
+fn stack_json(response: reqwest::blocking::Response) -> Res<FrozenStack> {
+    let url = response.url().to_string();
+    let text = response.text().with_context(|| format!("Failed to read the answer from {url}"))?;
+    let unexpected = || format!("The Cactarium's answer from {url} is not what cactup expects");
+    let value: serde_json::Value = serde_json::from_str(&text).with_context(unexpected)?;
+    if let Some(found) = value.get("format").and_then(serde_json::Value::as_u64)
+        && found > u64::from(STACK_FORMAT)
+    {
+        bail!(
+            "The Cactarium's stack release from {url} is format {found}, but this cactup, {}, reads up to format \
+             {STACK_FORMAT}; upgrade cactup (`cactup update`)",
+            crate::build_info::LONG_VERSION
+        );
+    }
+    serde_json::from_value(value).with_context(unexpected)
 }
 
 /// `req` as a query-string value: everything outside the unreserved set
@@ -409,11 +476,35 @@ struct Credentials {
     tokens: std::collections::BTreeMap<String, String>,
 }
 
+/// The credentials file's format. Login binaries only. Keys this binary does
+/// not know (a newer one's) are put back on write, like any record's; the
+/// token table is a map, so a token another binary stored for a registry this
+/// one never heard of stays.
+pub static CREDENTIALS: Format<Toml> = Format {
+    name: "credentials",
+    key: "schema",
+    current: 1,
+    upgrades: &[],
+    downgrades: &[],
+    down_floor: 1,
+    frozen_read: false,
+    legacy: None,
+    replace_whole: &[],
+};
+
+/// The file's contents, empty when there is no file. A file that will not
+/// parse is reported without the parser's detail: it quotes the offending
+/// line, and the line may be a token, which must never reach a message.
 fn read_credentials(path: &Path) -> Res<Credentials> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => toml::from_str(&text).with_context(|| format!("Failed to parse '{}'", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Credentials::default()),
-        Err(e) => Err(e).with_context(|| format!("Failed to read '{}'", path.display())),
+    match format::read(path, &CREDENTIALS) {
+        Ok(found) => Ok(found.unwrap_or_default()),
+        Err(e) if e.downcast_ref::<format::Newer>().is_some() => Err(e),
+        // The file could not be read at all: the error says why and holds no content.
+        Err(e) if e.root_cause().is::<std::io::Error>() => Err(e),
+        Err(_) => Err(anyhow!(
+            "Failed to parse '{}': it is not a valid credentials file (its contents are not shown: they hold tokens)",
+            path.display()
+        )),
     }
 }
 
@@ -431,18 +522,13 @@ pub fn token_for(base: &str) -> Res<String> {
 }
 
 /// Store `token` for `base` in `path`, written whole under a temporary name
-/// created owner-only, then renamed into place.
+/// created owner-only, then renamed into place: [`format::write_private`]
+/// keeps the file 0600 whatever its umask or earlier mode, and puts back what
+/// a newer cactup stored in it.
 pub fn store_token(path: &Path, base: &str, token: &str) -> Res<()> {
     let mut credentials = read_credentials(path)?;
     credentials.tokens.insert(base.to_owned(), token.to_owned());
-    let dir = path.parent().expect("the credentials file has a directory");
-    std::fs::create_dir_all(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
-    // tempfile creates its files 0600.
-    let temp = tempfile::NamedTempFile::new_in(dir).context("Failed to create a temporary credentials file")?;
-    std::fs::write(temp.path(), toml::to_string(&credentials)?)
-        .with_context(|| format!("Failed to write '{}'", temp.path().display()))?;
-    temp.persist(path).with_context(|| format!("Failed to save '{}'", path.display()))?;
-    Ok(())
+    format::write_private(path, &credentials, &CREDENTIALS)
 }
 
 #[cfg(test)]
@@ -473,6 +559,16 @@ mod tests {
         let (base, _) = serve_with(1, |_| ("200 OK", "api-generation: 99\r\n".into(), b"{}".to_vec()));
         let err = format!("{:#}", Client::at(&base).resolve("a/b").unwrap_err());
         assert!(err.contains("generation 99") && err.contains("cactup update"), "{err}");
+    }
+
+    #[test]
+    fn the_url_knob_takes_a_registry_address() {
+        assert_eq!(validate_url("https://cactarium.example.org/").unwrap(), "https://cactarium.example.org");
+        assert_eq!(validate_url(" http://localhost:8000 ").unwrap(), "http://localhost:8000");
+        for bad in ["cactarium.example.org", "ftp://x.org", "https://x.org/?a=1", "https://x.org/#f", "https:// x.org", ""] {
+            assert!(validate_url(bad).is_err(), "{bad}");
+        }
+        assert!(crate::database::knob_spec(URL_KNOB).is_some(), "a built-in knob");
     }
 
     #[test]
@@ -511,6 +607,27 @@ mod tests {
         assert!(Client::at(&base).stack_release("et", "et-stack", "head").unwrap().untrusted);
     }
 
+    /// A stack release from a newer format says to upgrade, before a key
+    /// the typed struct does not know could make it fail some other way.
+    #[test]
+    fn a_newer_stack_format_says_to_upgrade() {
+        let body = |format: u32| {
+            format!(
+                r#"{{"format":{format},"stack":"et/et-stack@1.0.0","root":"Cactus","repo":[],"future-key":true,
+                "thornlist":{{"filename":"et.th","text":"!CRL_VERSION = 1.0\n"}}}}"#
+            )
+        };
+        let (base, _) = serve_with(1, move |_| ("200 OK", String::new(), body(STACK_FORMAT + 1).into_bytes()));
+        let Err(err) = Client::at(&base).stack_release("et", "et-stack", "1.0.0") else { panic!("a newer format was read") };
+        let err = format!("{err:#}");
+        assert!(err.contains("format 2") && err.contains("upgrade cactup") && !err.contains("future-key"), "{err}");
+
+        // The format a client reads is read, and a broken body is still not what it expects.
+        let (base, _) = serve_with(1, move |_| ("200 OK", String::new(), body(STACK_FORMAT).into_bytes()));
+        let err = format!("{:#}", Client::at(&base).stack_release("et", "et-stack", "1.0.0").err().unwrap());
+        assert!(err.contains("not what cactup expects"), "the unknown key is still refused: {err}");
+    }
+
     /// A tip response says whether its stack is trusted; an untrusted one is
     /// taken with the flag, and refused with nobody at a terminal to ask.
     #[test]
@@ -527,8 +644,8 @@ mod tests {
         assert!(tip.unpinned && tip.untrusted);
         assert!(!response("max").untrusted);
 
-        confirm_untrusted_on("et/et-stack@head", "stack", true, false).unwrap();
-        let err = format!("{:#}", confirm_untrusted_on("et/et-stack@head", "stack", false, false).unwrap_err());
+        confirm_untrusted_on("et/et-stack@head", "stack", Unreviewed::Tip, true, false).unwrap();
+        let err = format!("{:#}", confirm_untrusted_on("et/et-stack@head", "stack", Unreviewed::Tip, false, false).unwrap_err());
         assert!(err.contains("without a terminal") && err.contains("--risky-allow-untrusted-artifacts"), "{err}");
     }
 
@@ -574,5 +691,81 @@ mod tests {
         assert_eq!(credentials.tokens["https://a"], "cactarium_one");
         assert_eq!(credentials.tokens["https://b"], "cactarium_two");
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    fn exhaustive_credentials() -> Credentials {
+        let mut tokens = std::collections::BTreeMap::new();
+        tokens.insert("https://cactarium.example.org".to_owned(), "dummy-token-one".to_owned());
+        tokens.insert("https://mirror.example.org".to_owned(), "dummy-token-two".to_owned());
+        Credentials { tokens }
+    }
+
+    #[test]
+    fn credentials_format_generic_tests() {
+        use crate::format::testing::*;
+        let sample = exhaustive_credentials();
+        descriptor_is_consistent(&CREDENTIALS);
+        let fixtures = fixture_dir("credentials");
+        shape_is_pinned(&CREDENTIALS, &fixtures, &sample);
+        every_fixture_loads::<Credentials, _>(&CREDENTIALS, &fixtures);
+        newer_is_refused::<Credentials, _>(&CREDENTIALS, "credentials", "tokens = 7\n", &sample);
+        unknown_keys_survive(
+            &CREDENTIALS,
+            "credentials",
+            &sample,
+            // `tokens` maps to strings, so a nested unknown key has no shape of its own.
+            &[],
+            |c: &mut Credentials| drop(c.tokens.remove("https://mirror.example.org")),
+            &["tokens", "https://mirror.example.org"],
+        );
+    }
+
+    /// The file stays owner-only through every write, including over a file
+    /// that was wider, and what a newer cactup put in it (and the schema key)
+    /// is there afterward.
+    #[test]
+    fn credentials_stay_owner_only_and_keep_unknown_keys() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("credentials");
+        // One that predates the schema key, readable by everyone.
+        std::fs::write(
+            &path,
+            "future = 1\n\n[tokens]\n\"https://a\" = \"cactarium_one\"\n\n[tokens-future]\nx = 2\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        store_token(&path, "https://b", "cactarium_two").unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("schema = 1\n"), "{text}");
+        let doc: toml::Table = toml::from_str(&text).unwrap();
+        assert_eq!(doc["future"].as_integer(), Some(1), "{text}");
+        assert_eq!(doc["tokens-future"]["x"].as_integer(), Some(2), "{text}");
+        assert_eq!(doc["tokens"]["https://a"].as_str(), Some("cactarium_one"));
+        assert_eq!(doc["tokens"]["https://b"].as_str(), Some("cactarium_two"));
+        let left: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
+        assert_eq!(left.len(), 1, "no temp file is left behind");
+    }
+
+    /// A broken or newer file's error never carries a token.
+    #[test]
+    fn credentials_errors_do_not_show_tokens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("credentials");
+        // Not a table of tokens: the parser's message would quote the value.
+        std::fs::write(&path, "tokens = \"cactarium_secret\"\n").unwrap();
+        let err = format!("{:#}", store_token(&path, "https://a", "cactarium_new").unwrap_err());
+        assert!(err.contains("credentials") && !err.contains("cactarium_"), "{err}");
+        std::fs::write(&path, "tokens = [ \"cactarium_secret\"\n").unwrap();
+        let err = format!("{:#}", read_credentials(&path).unwrap_err());
+        assert!(err.contains("credentials") && !err.contains("cactarium_"), "{err}");
+
+        let newer = "schema = 2\n[tokens]\n\"https://a\" = \"cactarium_secret\"\n";
+        std::fs::write(&path, newer).unwrap();
+        let err = format!("{:#}", store_token(&path, "https://a", "cactarium_new").unwrap_err());
+        assert!(err.contains("upgrade cactup") && !err.contains("cactarium_"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
     }
 }

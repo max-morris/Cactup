@@ -103,8 +103,8 @@ fn added_package_hint(installation: &Installation, name: Option<&str>) {
         println!(
             "{}",
             format!(
-                "{checkout} comes from {}@{} (added with cactup add); problems with it? {contact}",
-                package.package, package.version
+                "{checkout} comes from {} (added with cactup add); problems with it? {contact}",
+                crate::commands::add::describe(&package.package, &package.version)
             )
             .yellow()
         );
@@ -2621,7 +2621,6 @@ mod tests {
         outcome: Option<BuildOutcomeRecord>,
     ) -> BuildMeta {
         BuildMeta {
-            schema: crate::database::SCHEMA,
             attempt_id: id,
             config: config.to_owned(),
             optionlist_source: OptionlistSource::Flavor("default".to_owned()),

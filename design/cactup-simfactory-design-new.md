@@ -144,21 +144,11 @@ and is concerned **exclusively** with global cactup state:
   one cluster's machine onto another unnoticed, because the stamp is what
   decides whether the name is trusted or re-verified.
 
-**Version guard & on-disk schema policy (backward compatibility
-required).** On-disk state is versioned by an integer **`schema`** (the DB and
-every cactup TOML carry one; §9.3), *separate* from the human `cactup-version`
-string. The binding rule is: **a newer cactup binary MUST be able to read any
-older `schema` it ever shipped** — reads are backward-compatible by contract, so
-a cactup upgrade never orphans existing installations, configs, or in-flight
-simulations/chains (this is what makes the compute-node `sim run --restart-id`
-safe across an upgrade). cactup refuses only when the on-disk `schema` is
-**newer** than the running binary understands (a genuinely forward-incompatible
-read), with guidance to upgrade. The `schema` integer is bumped **only** on a
-breaking on-disk change; during active prototyping it stays fixed, so iterating
-on the code needs no migration and no data churn. In-place *up-migration* of old
-schemas to the newest is still out of scope for v1 (the requirement is that new
-binaries *read* old schemas, not that they rewrite them); when a breaking bump
-finally happens, a migration story is designed then.
+**Version guard & on-disk schema policy.** On-disk state is versioned by an
+integer **`schema`**, separate from the human `cactup-version` string. A newer
+cactup reads every older `schema` it ever shipped and refuses a newer one with
+"upgrade cactup"; the full rules (upgrade chains, sticky versions on write,
+unknown keys put back, `frozen_read` records, fixtures) are §2.5.
 
 The database does **NOT** store config metadata or simulation state. Those live
 on disk next to the things they describe (D4, D6). Rationale: a simulation
@@ -398,6 +388,213 @@ its contract here. But they are internal navigation, never user-facing: no
 string instead — trailing on the line, or just above the statement. Test
 assertion messages, `#[cfg(test)]` fixtures, and comments in `mdb/` source
 files are internal and may carry §-refs freely.
+
+### 2.5 On-disk formats and versioning
+
+This is the one place that states how cactup's files are versioned, read and
+written; §7.4, §9.3 and the CLAUDE.md rule point here. The mechanism is
+`src/format.rs`; the plan it came from is `design/format-versioning-plan.md`.
+
+**Principles.**
+
+1. **One version per format.** Every local record cactup writes and reads
+   back has a `static` `Format` descriptor in the module that owns the record
+   (the table below); `.sim`, `latest.json` and the caches have none. A local
+   record carries an integer **`schema`** as its first key; a missing key
+   reads as 1, and its struct holds no version field: `format::read` strips
+   the key before the typed parse and `format::write` puts it back, first.
+   The shared crate's interchange formats (`.sim`, `cactarium.toml`, the stack
+   release) carry **`format`** as a required field of their own struct,
+   checked by the crate's `generation::check` before the typed parse (a
+   missing `format` is an error). Both are separate from the human
+   `cactup-version` string.
+2. **Read: version first.** The raw document is parsed, its version read, and
+   a version newer than `Format::current` is refused with one message naming
+   the file (`'<path>' was written by a newer cactup (<name> schema N; this
+   cactup, <VERSION>, reads up to M); upgrade cactup`) before any typed parse.
+   The verdict is final, including in the database's lock-free read; only a
+   raw document that does not parse, or a stale NFS file handle, is retried
+   (a torn or half-visible read). The
+   closed `legacy` normalization (below) runs on every read, then an older
+   file runs the upgrade chain `vN → vN+1` over the raw document, and the
+   result is parsed. **Upgrades are
+   kept forever. A read never rewrites the file** (rewriting on read races a
+   concurrent writer): an old file reaches the current version the next time
+   it is saved.
+3. **Write: atomic, never over a newer file, sticky, keeping what it does
+   not know.** Every write is a temp file in the same directory, fsync, and
+   rename, so a reader sees the old file or the new one. `write` re-reads
+   the target first: a newer version is refused, so a newer cactup's file is
+   never overwritten; one that does not parse is overwritten with nothing put
+   back. A writer serialized by a lock may instead read once with
+   `read_for_write` and write with `write_over` (`Db::update`,
+   `BuildAttempt::store_meta_keeping_job`): the refusal and the put-back come
+   from that one read, and a file that does not parse fails the read instead
+   of being overwritten. Use the pair only under the lock. The version written is the **oldest version, no older than the file
+   on disk, that the format's down-chain reaches** while the content fits it
+   (a down-step answers `CannotExpress` when the document uses something the
+   older version cannot hold); a new file is written at the oldest version
+   that holds its content. A format with no down-steps writes `current`.
+4. **Unknown keys are put back, decided from disk.** Records are not
+   `deny_unknown_fields` (the config record's `[runs-on]` reuses the MDB's
+   strict `RunsOn` but is read through `tolerant_runs_on`, which drops unknown
+   keys, so the rule holds). At write time the helper takes the disk document
+   (after `legacy` and the upgrades), types and re-serializes it, and treats
+   every key that does not survive the round trip as one this binary does not
+   model. Those are copied into the new document only where the key is absent
+   there, recursing into **maps only** (never into array elements: a
+   reordered array would graft a key onto the wrong element), keeping the
+   file's key order. So an older binary's rewrite keeps a newer one's
+   additions (cactup releases from before November 2026 do not), and a key the writer cleared stays cleared. Two invariants
+   follow: `skip_serializing_if` may only skip the field's deserialize
+   default, and the version key never takes part in the comparison. A flattened
+   `extra` table and `serde_ignored` were rejected: flatten buffers through
+   serde's `Content` and keeps keys as they were when loaded (a compute-node
+   write two days later would restore stale values), and `serde_ignored`
+   reports nothing under `flatten`.
+5. **`write`, `replace`, `write_replacing`, `write_private`.** `write` edits
+   the record on disk (put-back as above). `replace` writes a record made
+   anew (a build finishing, `BuildAttempt::create`, a test re-run in the same
+   directory, the frozen config copy of `sim create`; the submit binary's
+   build-finish config write is one): the same refusal of a newer file and the same
+   sticky version, but **nothing is put back**, since a key a newer binary
+   added to the old record says nothing about the new one.
+   `Format::replace_whole` names sub-records a writer always rebuilds whole
+   (dotted paths, `*` for any one key, for example
+   `installations.*.unfetched-repos.*`); put-back never enters them, and
+   `write_replacing` adds more for one write. `write_private` is `write` for a
+   file that holds a secret (`~/.cactup/credentials`): the file is created
+   owner-only (0600) and never has a wider mode, not even between the write
+   and a later chmod.
+6. **Modes.** A new file gets the mode a plain write would give it (0666 less
+   the umask), not the temp file's owner-only 0600, because records in a
+   group-shared Cactus tree must stay readable by the group. An existing file
+   keeps its mode. Credentials are always 0600. (The umask is read from
+   `/proc`; the binary links no C library, D13.)
+7. **When a change needs a bump.**
+
+   | Change | Bump? | Mechanism |
+   |---|---|---|
+   | New optional key whose absence means the old behavior and that an older binary can safely ignore | No | Older readers ignore it; older writers put it back (4), except inside array elements (`installation.toml`'s `[[added]]`, `[[added.thorns]]`), where an older writer drops it: accept that loss or bump. |
+   | New key an older binary would get *wrong* by ignoring it | Yes | The down-step answers `CannotExpress` only when the key is used, so only files using the feature get the new version (the `.sim` `unpack` pattern). |
+   | Rename, retype, removal, new meaning, stricter validation, new required key | Yes | The `vN → vN+1` upgrade, a new fixture, and, for a `frozen_read` record, the `vN+1 → vN` down-step. |
+   | A change inside a cache | n/a | A fresh namespace (store `FORMAT`/`KEY_LABEL`, §18). |
+
+8. **`legacy` is a closed list.** `Format::legacy` runs on every read, before
+   the upgrades, on the raw document and holds same-version normalizations that shipped before
+   versioning existed: the database's bare `detected-machine` string, and
+   `build.toml`'s `variant` → `flavor` rename (which also brings the embedded
+   config record to the current schema, so put-back compares it in the shape
+   its writer writes). New changes bump; they do not join the list, and no entry is ever
+   removed (a queued build may carry any of them).
+9. **Embedded records.** The config record inside `build.toml` keeps its own
+   `schema` through `parse_embedded` / `upgrade_embedded`: the same chain, a
+   newer embedded record refusing the outer file on every path, read and
+   write. The embedded copy is always *written* at `CONFIG.current`
+   (`ConfigMeta::serialize_versioned`), and `BUILD`'s `legacy` lifts it to
+   current. So the next bump of `CONFIG` must first make the embedded copy
+   sticky; otherwise a newer binary's stop rewrites a queued build's record
+   into one its older binary refuses, losing the build's outcome.
+
+**Fixtures and the shape pin.** `fixtures/formats/<format>/` holds one file per
+shipped shape (`v1.toml`, a `-noschema` variant where a format once had no
+key, the `legacy` shapes) plus `current.{toml,json}`. A committed fixture is
+never edited or deleted, with the one exception of `current.*`; the early
+ones come from real files written by the code before the change, not by the
+new serializer. Generic tests in `format::testing` run on every descriptor:
+(1) every fixture loads, and writing it back and reading it again gives the
+same value at the expected version; (2) the **shape pin**: each format builds
+an `exhaustive_sample()` (a struct literal without `..`, so a new field fails
+to compile; every `Option` is `Some`, every collection non-empty), and its
+serialized form, compared as a parsed table, must equal `current.*`. When it
+fails, an additive change copies the old `current` to a numbered fixture and
+re-pins; anything else bumps. (3) A newer file is refused before the typed
+parse, naming the file, and is left unchanged. (4) Unknown top-level and
+nested keys survive a write, and a key the writer cleared stays cleared.
+(5) A `frozen_read` format has every down-step: `downgrades.len() == current -
+down_floor`. `tests/formats.rs` runs the compute path (`sim run --sim-dir`) on
+a hand-built sim directory to check the same against the real binary.
+
+**Who can be older than whom.** An older reader of a file comes from three
+sources: (a) a queued job's **frozen binary** (`@CACTUP@`, §17.2), which runs
+for months against files a newer login binary also rewrites; (b) **another
+login binary** sharing `~/.cactup` (autoupdate off, an explicit
+`bin/cactup-<old>`, a home shared between clusters); (c) **deployed clients**
+of a server or update site.
+
+| Format | Writers | Older readers | Newer → older | Older → newer |
+|---|---|---|---|---|
+| `database.json`, `installation.toml`, `simulations.toml`, `tests.toml`, `fetch-state.toml`, `credentials` | login binaries only (D11) | (b) | Same version: older binaries ignore new keys and put them back on write. A bump: older binaries refuse with "upgrade", which `cactup update` fixes, so avoid bumping. | Upgrade chain. |
+| `simulation.toml` | `sim create`, `set_knobs` (login) | (a) every queued restart's compute binary | Sticky version and put-back: a newer binary writes nothing that must be understood into an existing file. | Chain. |
+| `restart.toml` | the submitting binary S (submit, compute start/finish) and a newer login binary L (stop, clean, reaper, `job-stopped`) | (a) S | Sticky and put-back. | Chain. |
+| `build.toml` (with the embedded config record) | S (submit, compute), L (stop) | (a) S | Sticky and put-back; the embedded record is written at `CONFIG.current`, so it must be made sticky before `CONFIG` next bumps (principle 9). | Chain, plus `legacy`. |
+| `test.toml` | S, L | (a) S | Sticky and put-back. | Chain. |
+| `cactup-config.toml` | S at build finish; L on build, the up-to-date refresh and the thornlist retarget | (a) S at `execute` start | Sticky and put-back. The 1 → 2 bump predates down-steps and is grandfathered (`down_floor` 2): §7.4's accepted narrow window. | Chain `[1 → 2]`. |
+| `<sim>/.cactup/cfg/cactup-config.toml` | `sim create`, once, by `replace` | login readers (`sim export`) | Written once, at the oldest version that holds it. | The config chain. |
+| `.sim` | `cactup export` | (c) every cactup import, the server | Written at the oldest generation that holds the content (`SimFile::required_format`), so a file needing nothing new stays readable by older cactups. | Reads generations 1 to `SIM_FORMAT`; a newer one is refused with an upgrade message, and a file claiming a generation older than its content needs is refused as invalid. |
+| `cactarium.toml`, `cactarium-stack.toml` | authors | the server | Read 1..=`MANIFEST_FORMAT` forever: tags are immutable. | n/a |
+| Stack release (API JSON, `FrozenStack`) | the server | (c) all clients | Gated by the `api-generation` header, and cactup checks the release's `format` against the shared crate's `STACK_FORMAT` before the typed parse, so a newer one says to upgrade rather than failing on an unknown key. The server should keep answering older-generation clients in their generation beside the new one until a deliberate cutoff (a rule for the Cactarium repository). | n/a |
+| `latest.json` | CI (`ci/assemble-site.sh`) | (c) every deployed binary and the installer | **Never versioned and never broken**: a refusal would leave old binaries unable to update themselves. It carries no version key; **the path is the version**. Keys may only be added (it is read leniently), and a change that cannot be additive is published at a new path beside the old one. | n/a |
+
+**The hard case.** A newer L rewriting `restart.toml` at a bumped version
+would make the older frozen S of a queued job refuse its own record. Three
+rules prevent it: (1) a rewrite never raises a file's version unless its
+content needs it; (2) a breaking bump of a `frozen_read` record ships its
+down-step (test 5 enforces it), so L writes an old file back at its old
+version; (3) L never writes something that must be understood into an
+**existing** `frozen_read` record (a new restart created by L is run by L, so
+it may carry the new version). If the rules are broken anyway, S fails
+cleanly: at load, before it runs anything, with the upgrade message; or, mid
+run, at its finish write, which refuses to overwrite the newer file (the
+outcome is not recorded, but the file is never corrupted).
+
+**Every format.** `frozen_read` marks records a queued job's frozen binary
+reads; `down_floor` is the oldest version the down-chain reaches (nothing is
+written older).
+
+| File | Descriptor | Key | Current | `frozen_read` |
+|---|---|---|---|---|
+| `~/.cactup/database.json` | `database::DATABASE` (JSON; `legacy`: bare `detected-machine`) | `schema` | 1 | no |
+| `<inst>/.cactup/installation.toml` | `installation::INSTALLATION` | `schema` | 1 | no |
+| `simulations.toml` | `installation::SIM_REGISTRY` | `schema` | 1 | no |
+| `tests.toml` | `installation::TEST_REGISTRY` | `schema` | 1 | no |
+| `<inst>/.cactup/fetch-state.toml` | `fetch::FETCH_STATE` | `schema` | 1 | no |
+| `~/.cactup/credentials` | `cactarium::CREDENTIALS` (written by `write_private`) | `schema` | 1 | no |
+| `<sim>/.cactup/simulation.toml` | `sim::SIMULATION` | `schema` | 1 | yes |
+| `output-NNNN/.cactup/restart.toml` | `sim::restart::RESTART` | `schema` | 1 | yes |
+| `<test>/.cactup/test.toml` | `testsuite::TEST` | `schema` | 1 | yes |
+| `.cactup-builds/NNNN/build.toml` | `build::attempt::BUILD` (`legacy`: `variant` → `flavor`) | `schema` | 1 | yes |
+| `configs/<c>/cactup-config.toml` (and the sim's frozen copy) | `build::CONFIG` (chain `[1 → 2]`, `down_floor` 2) | `schema` | 2 | yes |
+| `.sim` | shared crate, `SimFile` (`SIM_FORMAT`) | `format` | 3 | n/a |
+| `cactarium.toml`, `cactarium-stack.toml` | shared crate (`MANIFEST_FORMAT`) | `format` | 1 | n/a |
+| Stack release JSON | shared crate (`STACK_FORMAT`) | `format` | 1 | n/a |
+| `latest.json` | none: the path is the version | n/a | n/a | n/a |
+
+`replace_whole` per descriptor: `DATABASE` (`detected`,
+`installations.*.unfetched-repos.*`); `SIMULATION` (`knobs`); `RESTART`
+(`vars`, `knobs`); `BUILD` (`vars`, `knobs`, `outcome`); `TEST` (`vars`,
+`knobs`, `results`); `CONFIG` (`sources`, `downloads`, `thorn-providers`,
+`thorn-shapes`, `thorn-stamps`); the rest none.
+
+**Deliberately unversioned.** *Caches*: the build cache's store (a
+`v<FORMAT>/` namespace, each entry's format and label checked on read: a bump
+is a fresh namespace, §18), compiler memos, `cc/events.jsonl` (kept per
+build; the reader counts lines it cannot parse, §18.6), the inputs store
+(content-addressed; its tree key carries its own label). *`cc/config.toml`*
+in a build attempt: it names the exact binary that reads it
+(`BuildConf.cactup`), a stronger stamp than an integer. *Lock stamps*: only
+ever append lines; the parser ignores extras. *`log.txt`* is simfactory's
+format; *CRL thornlists* are an external format. *`update-check` and
+`*.retired`* are markers whose mtime is the content. The MDB sync stamp
+(`.synced-<N>`) is best effort: a stamp that does not read is a missing one. The **MDB** is out of
+scope: its generation mechanism (D14, §17) is its only one.
+
+**The next change.** The shape is a read-side upgrade in one place, the
+record's own `schema` bumped, never a rewrite on read. `build::CONFIG`'s 1 → 2
+bump is the model for the upgrade only: it shipped no down-step and is
+grandfathered (`down_floor` 2), so a `frozen_read` bump must also ship its
+down-step, and `CONFIG`'s next bump needs the embedded copy made sticky first
+(principle 9).
 
 ---
 
@@ -1991,14 +2188,17 @@ ordinal `0`–`4`, and is always rendered as the name (`cactup knob` shows
 `normal`, `database.json` holds `"2"`). `wisdom-kind` accepts and stores
 `relevant|all`.
 
-Additionally three **maintenance** knobs for distribution (D14, §17):
+Additionally four **maintenance** knobs for distribution and the registry (D14, §17, §8.10):
 `autoupdate` (`auto`, the default, `|notify|off`; read leniently — garbage
 means `auto`), `update-url` (https base of the site serving `latest.json` —
 plain `http://` only for a loopback host, `127.0.0.1`/`localhost`/`[::1]`,
 since what it serves is installed unasked; trailing `/` stripped; default
 `https://max-morris.github.io/Cactup`) and
 `mdb-url` (git URL whose `mdb` branch is synced; default
-`https://github.com/max-morris/Cactup.git`). Their `KnobSpec` has
+`https://github.com/max-morris/Cactup.git`) and `cactarium-url` (the
+registry's base URL, `http(s)://`, no query or fragment, trailing `/`
+stripped; default `https://cactarium.cct.lsu.edu`; `CACTARIUM_URL`
+outranks it, §8.10). Their `KnobSpec` has
 `snapshot = false`: they configure the cactup installation, not a job, so
 `knob_snapshot()` never freezes them into restart/build/test metadata.
 
@@ -2640,25 +2840,17 @@ never the queue a build of it is submitted to (§7.9).
 **Schema 2, and the first read-side upgrade.** Schema 2 renamed `variant` to
 `flavor` and grouped the flat `gpu`/`compatible-queues` keys as `[runs-on]`
 (`queues`/`gpu`). A schema-1 record — or one predating the `schema` key — is
-upgraded **in memory on every read**, in one place (`ConfigMeta::from_table`),
-and that covers both copies on disk: `cactup-config.toml` and the record
-embedded in each build attempt's `build.toml` (whose own top-level `variant`
-key is renamed the same way when the attempt is opened). A read never rewrites
-the file — rewriting on read could race a concurrent build storing a newer
-record — so a file reaches schema 2 the next time it is stored. The upgrade is
-kept indefinitely: a build queued by an older cactup runs that older binary on
-the compute node (`@CACTUP@`, §17.2) and writes a schema-1 record when it
-finishes. An older binary cannot read a schema-2 record, and one path reaches
-that without anyone running mixed versions on purpose: a build queued by an
-older cactup reads the config's record when its compute-node `execute`
-starts, so if the newer cactup stored that record in the meantime, the queued
-build fails to parse it. The newer binary stores a record only when it builds
-the config — which `build` refuses while an attempt of it is queued or
-running, unless forced with `-f` — or in the one-time legacy thornlist
-retarget, so the window is narrow and accepted. This is the
-"migration story designed when a breaking bump happens" that §2.1 defers to,
-and the pattern for the next one: a read-side upgrade in one place, the
-record's own `schema` bumped, never a rewrite on read. The machine the
+upgraded in memory on every read, in one place (`build::CONFIG`'s chain), for
+every copy on disk (`cactup-config.toml`, the record embedded in each
+build attempt's `build.toml`, and the sim's frozen `cfg/cactup-config.toml`). The upgrade is kept indefinitely, since a build
+queued by an older cactup writes a schema-1 record when it finishes. This
+bump predates down-steps (`down_floor` 2), so an older binary cannot read a
+schema-2 record: a build queued by an older cactup that finds the config
+record stored by a newer one fails to parse it at `execute`. The newer binary
+stores a record only when it builds the config (which `build` refuses while an
+attempt of it is queued or running, unless forced with `-f`) or in the
+one-time legacy thornlist retarget, so the window is narrow and accepted. The
+general rules are §2.5. The machine the
 config was built on is recorded too (`machine = "<name>"`; a build is not
 portable across machines) and **enforced**: `build` of an existing config,
 `sim create`/`submit`/`run` and `test run`/`submit` refuse a config whose
@@ -4423,7 +4615,8 @@ kind of install-time provenance, `simfile`, beside `release` and `thornlist`;
 `cactup import <file.sim>` reproduces a `.sim` in one step: `install
 --simfile` under the file's name (or `--alias`), `cactup build` of a config of
 that name — in the foreground, or, on a machine that queues builds, submitted
-and blocked on (§7.9) — then `sim create` from the file's parfile, and with
+and blocked on (§7.9), with `--flavor` and `-j`/`--make-jobs` passed to it —
+then `sim create` from the file's parfile, and with
 `--submit`/`--run` the simulation started. `import` takes every flag of the
 groups `sim submit` and `sim run` start with — the TOPOLOGY flags (§8.5), the
 universe flags (§4.8) and the start flags `--force-queue`, `--ignore-machine`,
@@ -4604,6 +4797,22 @@ of one package are refused. A later add of the same package updates it,
 adding named thorns to those already enabled. All the packages are fetched in
 one pass and recorded together.
 
+**At a commit.** `owner/name[/Thorn]#<sha>` names only a commit: a full id or
+an abbreviation of at least 7 lowercase hex digits, which the registry
+resolves against the repository's history (an ambiguous or unknown prefix is
+its error). `owner/name@<x>` is read as a version, range or track first, and
+as a commit only when it names none of those. When a published version was
+frozen at that commit, the registry answers with that version
+(`owner/name@X.Y.Z`) and the add is an ordinary one. Otherwise it answers
+with the package read at that commit, `owner/name#<full id>`: no tag, and the
+registry's trust verdict, which cactup applies as for a branch tip (an
+untrusted package is refused or asked about,
+`--risky-allow-untrusted-artifacts`). cactup records it at the full id,
+pinned by `!REPO_COMMIT` with no `!REPO_BRANCH`; `inst show` and `add` name
+it `owner/name at commit <first 12 digits>`, and the yank check skips it (no
+version to yank). An answer whose commit does not start with what was asked
+for is refused.
+
 **The model.** `installation.toml` records each added package under
 `[[added]]` (package, exact version, tag, commit, URL, repo name, the
 checkouts with their directories in the repo, and the base repos it
@@ -4745,21 +4954,11 @@ user mid-migrating from simfactory manages old sims with old simfactory and new
 sims with cactup; there is no interop. If that proves painful, a one-shot
 `cactup sim import` could be added later, but it is explicitly out of scope.)
 
-**Schema versioning (backward-compatible reads).** Every cactup TOML
-file (`simulation.toml`, `restart.toml`, `cactup-config.toml`,
-`installation.toml`, `simulations.toml`) — and the global `database.json` — carries
-a top-level integer **`schema`** as its first key. The policy matches §2.1: **a
-newer cactup binary MUST read any older `schema` it ever shipped** (reads are
-backward-compatible by contract), so upgrading cactup never orphans an existing
-installation, config, or in-flight simulation/chain — this is what lets the
-compute-node `sim run --restart-id` (§8.3.1) safely read metadata written by a
-possibly-older login-node binary across an upgrade. cactup refuses only a `schema`
-**newer** than it understands, with guidance to upgrade. The `schema` integer is
-bumped **only** on a breaking on-disk change; during active prototyping it stays
-fixed so iterating on the code needs no data migration. In-place *up-migration* of
-old files is still out of scope for v1 (the contract is that new binaries *read*
-old schemas, not that they rewrite them); a migration story is designed if and
-when a breaking bump happens.
+**Schema versioning.** Every cactup TOML file (`simulation.toml`,
+`restart.toml`, `cactup-config.toml`, `installation.toml`, `simulations.toml`)
+and the global `database.json` carries a top-level integer **`schema`** as its
+first key (every local record; the table in §2.5); the rules for reading,
+upgrading and writing it, and which formats a compute node reads, are §2.5.
 
 `simulation.toml` (sim level) carries `schema`, the keys simfactory wrote at
 create (`simfactory-docs.txt` §15) — `machine`, `simulation-id`, `sourcedir`,
@@ -5688,10 +5887,9 @@ Each is marked **ASSUMPTION** inline above; collected here:
         symlink — the exact hook depends on the target Cactus flesh version
         (§11.6). None of these change the two hard requirements (separate command
         tree, separate configurable output root).
-12. Schema/version handling: newer binaries **must read older `schema`**
-    (backward-compatible reads), refusing only a `schema` newer than understood;
-    the `schema` integer is bumped only on a breaking change and in-place
-    up-migration is deferred (§2.1, §9.3).
+12. Schema/version handling: versioned formats read old, refuse newer, keep
+    unknown keys, and are upgraded in memory on read (never rewritten on read)
+    (§2.5).
 13. Universes (§4.8): generic command-wrapper (`wrapper-argv` prefix form default,
     `wrapper`/`@COMMAND@` template power-form), wired for all three seams —
     `cactup build`, `sim run`, and `sim submit` — via one `[universes.*]` registry
@@ -6851,8 +7049,8 @@ of the installation's paths; why the other compiles were not keyed; how
 many keys no longer held after the compile; and what keying and checking
 again cost against the compiles themselves.
 
-The log's format is not kept between versions of cactup (§2.4: no backward
-compatibility). Lines the reader cannot parse are counted and the count is
+The log is deliberately unversioned (§2.5): it is kept per build, not across
+versions of cactup. Lines the reader cannot parse are counted and the count is
 printed; a log with nothing else is an error that says to build again.
 
 With any of the `--against` flags it compares with another recording build
@@ -6877,7 +7075,7 @@ write is a new file under a name of its own, and the one shared step is
 `link(2)`, atomic on all three (`objcache::store`). (The one index, of
 the entries each object has, is made of such files too: below.)
 
-**Where.** `<root>/v2/<machine>/<first two hex digits of the key>/<key>`.
+**Where.** `<root>/v4/<machine>/<first two hex digits of the key>/<key>`.
 The root is the user's knob `build-cache-home` (an absolute path), else the
 machine's `[paths] build-cache-home` (§4.2), else `.cactup-build-cache` in the
 install home (the `install-home` knob, else the machine's, else
@@ -6886,9 +7084,9 @@ I/O there. A machine's place that cannot be resolved here is passed over for
 the next with a warning (`objcache::store_root`). It is resolved by `prepare`
 and frozen into
 `<attempt>/cc/config.toml` (§18.2): the wrapper on a compute node reads it
-from there (§18.1 rule 6). `v2` is the entry format. A cactup with another
-format writes beside it and never reads it — no backward compatibility
-(§2.4); the old tree is left as it is (`cache stats` names it, and says to
+from there (§18.1 rule 6). `v4` is the entry format (`store::FORMAT`). A cactup with another
+format writes beside it and never reads it (a cache is a fresh namespace,
+§2.5); the old tree is left as it is (`cache stats` names it, and says to
 remove it by hand once no older cactup builds with the store). `<machine>` is the cactup
 machine the build was prepared for, which the key also covers: the
 directory keeps machines apart for `cache stats` and `cache gc`, not for
@@ -7221,7 +7419,7 @@ by default) is frozen with the rest (§18.2). At the end of a serving or
 auditing build, if it is set and the store is larger, the build says so in
 one line and names `cactup cache gc`. A build never walks the store: the
 size of the whole store (every machine's entries of this format) is kept
-in `<root>/v2/size`, measured by `cache stats` and `cache gc`, and each
+in `<root>/v4/size`, measured by `cache stats` and `cache gc`, and each
 serving build adds the bytes it published and keeps the sum. Builds that
 add at the same moment can lose each other's additions, so between
 measurements it is an estimate, low if anything. Before the first

@@ -1,0 +1,19 @@
+schema = 1
+active-config = "sim"
+sim-home = "/scratch/sims/et"
+test-home = "/scratch/tests/et"
+root-dir = "Cactus"
+
+[[added]]
+package = "owner/pkg"
+version = "1.2.3"
+tag = "v1.2.3"
+commit = "0123456789abcdef0123456789abcdef01234567"
+url = "https://github.com/owner/pkg"
+repo = "pkg"
+replaces = ["OldRepo"]
+contact = "https://github.com/owner/pkg/issues"
+
+[[added.thorns]]
+checkout = "Arr/Thorn"
+repo-path = "Arr/Thorn"

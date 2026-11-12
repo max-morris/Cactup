@@ -84,11 +84,9 @@ pub fn dispatch(ctx: &Ctx, args: ImportArgs) -> Res<()> {
     };
 
     // 3. The build: in the foreground, or queued and waited for.
-    let mut build = vec!["build".to_owned(), config.clone()];
-    if let Some(flavor) = &args.flavor {
-        build.extend(["--flavor".to_owned(), flavor.clone()]);
-    }
-    let Commands::Build { start, .. } = parse(&build)? else { unreachable!("parsed as build") };
+    let Commands::Build { start, .. } = parse(&build_command(&args, &config))? else {
+        unreachable!("parsed as build")
+    };
     super::build::build_to_completion(&ctx, *start)?;
 
     // 4. The simulation, from the file's parfile, with its knob inputs.
@@ -333,7 +331,7 @@ pub fn login(ctx: &Ctx, token: Option<String>) -> Res<()> {
 pub fn publish(ctx: &Ctx, file: &std::path::Path, target: &str, version: Option<&str>) -> Res<()> {
     use cactup_ecosystem_common::slug::Slug;
     let slug: Slug = target.parse().map_err(|e| anyhow!("\"{target}\" is not owner/name: {e}"))?;
-    if slug.at.is_some() || slug.thorn.is_some() {
+    if slug.at.is_some() || slug.sha.is_some() || slug.thorn.is_some() {
         bail!("Publish to owner/name, with --version X.Y.Z to choose the version");
     }
     let text = std::fs::read_to_string(file).with_context(|| format!("Failed to read '{}'", file.display()))?;
@@ -365,7 +363,7 @@ pub fn publish_stack(
 ) -> Res<()> {
     use cactup_ecosystem_common::slug::Slug;
     let slug: Slug = target.parse().map_err(|e| anyhow!("\"{target}\" is not owner/name: {e}"))?;
-    if slug.at.is_some() || slug.thorn.is_some() {
+    if slug.at.is_some() || slug.sha.is_some() || slug.thorn.is_some() {
         bail!("Name the stack as owner/name, and its version with --version");
     }
     let read = |path: &std::path::Path| {
@@ -391,7 +389,7 @@ pub fn publish_stack(
 pub fn refresh(ctx: &Ctx, target: &str) -> Res<()> {
     use cactup_ecosystem_common::slug::Slug;
     let slug: Slug = target.parse().map_err(|e| anyhow!("\"{target}\" is not owner/name: {e}"))?;
-    if slug.at.is_some() || slug.thorn.is_some() {
+    if slug.at.is_some() || slug.sha.is_some() || slug.thorn.is_some() {
         bail!("Name the package or stack as owner/name");
     }
     let client = crate::cactarium::Client::new(&ctx.db.read()?);
@@ -509,6 +507,19 @@ fn settle_inputs(
         bail!("The parfile needs values for: {}. Pass each as --input KNOB=VALUE", missing.join(", "));
     }
     Ok(knobs)
+}
+
+/// The `cactup build` command line the import runs: its config, with the
+/// flavor and make jobs given to import.
+fn build_command(args: &ImportArgs, config: &str) -> Vec<String> {
+    let mut build = vec!["build".to_owned(), config.to_owned()];
+    if let Some(flavor) = &args.flavor {
+        build.extend(["--flavor".to_owned(), flavor.clone()]);
+    }
+    if let Some(jobs) = args.make_jobs {
+        build.extend(["--make-jobs".to_owned(), jobs.to_string()]);
+    }
+    build
 }
 
 /// The flags for `sim submit`/`run`: every start, universe and TOPOLOGY flag
@@ -883,6 +894,25 @@ mod tests {
         };
         assert_eq!(short(import), None);
         assert_eq!(short(sim.find_subcommand("submit").unwrap()), Some('a'));
+    }
+
+    /// `-j` reaches import's build, with or without --submit/--run, and is
+    /// not the TOPOLOGY's `-J` (job name).
+    #[test]
+    fn import_make_jobs_reaches_the_build() {
+        use crate::args::MakeJobs;
+        let jobs_of = |words: &[&str]| {
+            let args = ImportArgs::try_parse_from_args(words);
+            match parse(&build_command(&args, "c")).unwrap() {
+                Commands::Build { start, .. } => (start.opts.make_jobs, args.topology.job_name),
+                _ => unreachable!(),
+            }
+        };
+        assert_eq!(jobs_of(&["s.sim", "--submit", "-j", "8"]), (Some(MakeJobs::Count(8)), None));
+        assert_eq!(jobs_of(&["s.sim", "--run", "--make-jobs", "max"]), (Some(MakeJobs::Max), None));
+        assert_eq!(jobs_of(&["s.sim", "-j", "2"]), (Some(MakeJobs::Count(2)), None));
+        assert_eq!(jobs_of(&["s.sim", "--submit", "-J", "x"]), (None, Some("x".to_owned())));
+        assert_eq!(jobs_of(&["s.sim"]), (None, None));
     }
 
     impl ImportArgs {
