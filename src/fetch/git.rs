@@ -1610,6 +1610,14 @@ pub fn head_of(repo_dir: &Path) -> Res<(String, ObjectId)> {
     Ok((branch, id))
 }
 
+/// Whether the repo has `origin`'s `branch` locally
+/// (`refs/remotes/origin/<branch>`): false for a branch created locally, or
+/// a repo that cannot be opened.
+pub fn tracks_origin(repo_dir: &Path, branch: &str) -> bool {
+    let tracking = format!("refs/remotes/origin/{branch}");
+    gix::open(repo_dir).is_ok_and(|repo| repo.find_reference(&tracking).is_ok())
+}
+
 /// A cheap early-out for the planner: is the repo already exactly at
 /// origin/<branch> according to local refs alone (no network)?
 pub fn at_local_origin_tip(repo_dir: &Path, branch: &str) -> bool {

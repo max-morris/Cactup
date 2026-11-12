@@ -111,6 +111,9 @@ pub struct SkippedRepo {
     pub url: String,
     pub branch: Option<String>,
     /// As [`GitRepoPlan::follows_default`], for when the repo is forced.
+    /// With `branch: None` and no pin, forcing the repo sends it to the
+    /// remote's default branch: the plan found it on a branch cactup put it
+    /// on, or could not learn the default (see [`Plan::force_where`]).
     pub follows_default: bool,
     /// As [`GitRepoPlan::named_branch`], for when the repo is forced.
     pub named_branch: bool,
@@ -161,21 +164,30 @@ impl Plan {
                 }
             };
             // A skipped repo with no !REPO_BRANCH has `branch: None`; unlike
-            // `plan()`'s clean-repo path, nothing has resolved it yet. On a
-            // branch, it stays there (the next plan asks for the default).
-            // Detached — a branchless pin the list dropped, say — it has no
-            // branch to stay on: `branch` stays `None`, and `execute` asks
-            // the remote for its default branch and switches to that. A HEAD
-            // that cannot be read (not a repo, an unborn branch: a probe that
-            // failed) is neither: forcing it onto the default would be a
-            // guess about a repo nothing could inspect, so it goes with no
-            // branch and no default, and `execute` fails it, naming why.
-            // A pinned repo needs no branch: it is checked out by commit.
+            // `plan()`'s clean-repo path, nothing has resolved it yet. The
+            // plan marks one `follows_default` when it sits on a branch
+            // cactup put it on, or when the remote would not name its
+            // default: forced, it goes to the remote's default (`execute`
+            // asks), as an unforced fetch of the clean repo would — staying
+            // put would record a branch no later plan could vouch for, and
+            // skip it again. On any other branch, the user's, it stays there
+            // (the next plan asks for the default), unless origin has no
+            // such branch (one made locally): aligning to it would fail
+            // every time, so it goes to the default too. Detached — a
+            // branchless pin the list dropped, say — it has no branch to
+            // stay on, and goes to the default. A HEAD that cannot be read
+            // (not a repo, an unborn branch: a probe that failed) is
+            // neither: forcing it onto the default would be a guess about a
+            // repo nothing could inspect, so it goes with no branch and no
+            // default, and `execute` fails it, naming why. A pinned repo
+            // needs no branch: it is checked out by commit.
             let (branch, follows_default, named_branch) = match (s.commit, s.branch) {
                 (Some(_), branch) => (branch, false, s.named_branch),
                 (None, Some(branch)) => (Some(branch), s.follows_default, s.named_branch),
+                (None, None) if s.follows_default => (None, true, false),
                 (None, None) => match git::head_of(&s.dir) {
                     Ok((head, _)) if head == git::DETACHED => (None, true, false),
+                    Ok((head, _)) if !git::tracks_origin(&s.dir, &head) => (None, true, false),
                     Ok((head, _)) => (Some(head), false, false),
                     Err(_) => (None, false, false),
                 },
@@ -1470,18 +1482,23 @@ pub fn plan(
             RepoState::Dirty(reason) => {
                 // BranchSwitched against "" happens only when no !REPO_BRANCH
                 // is set; that cannot occur (probe compares against the head
-                // branch then), but guard the invariant anyway. A forced
-                // refetch of a repo with no !REPO_BRANCH stays on its current
-                // branch, goes to the remote's default from a detached HEAD,
-                // and fails when its HEAD cannot be read (see `force_where`);
-                // the next plan asks for the default.
+                // branch then), but guard the invariant anyway. With no
+                // !REPO_BRANCH and no pin, a repo on a branch cactup put it
+                // on (local edits, say, or a re-pointed `origin`) is still
+                // cactup's: forcing it goes to the remote's default, as the
+                // list asks. Any other branch is the user's: forced, it stays
+                // there, unless origin lacks it; detached, it goes to the
+                // default; a HEAD that cannot be read fails (see
+                // `force_where`). The next plan asks for the default.
+                let vouched = |r: &RepoRecord| git::head_of(&dir).is_ok_and(|(head, _)| r.put_there(&head));
+                let ours = group.branch.is_none() && commit.is_none() && record.is_some_and(vouched);
                 plan.skipped.push(SkippedRepo {
                     repo,
                     dir,
                     url: group.url,
                     named_branch: group.branch.is_some(),
                     branch: group.branch,
-                    follows_default: false,
+                    follows_default: ours,
                     commit,
                     reason,
                     untracked: probe.untracked,
@@ -1660,6 +1677,14 @@ pub(crate) mod tests {
         git::testrepo::commit(&a_dir, "initial");
         git::testrepo::init(&b_dir);
         git::testrepo::commit(&b_dir, "initial");
+        // A clone has origin's branch: plant it in A, whose branch a forced
+        // refetch then keeps (one origin lacks goes to the default instead).
+        let (a_branch, a_head) = git::head_of(&a_dir).unwrap();
+        let a_tracking = format!("refs/remotes/origin/{a_branch}");
+        gix::open(&a_dir)
+            .unwrap()
+            .reference(a_tracking.as_str(), a_head, gix::refs::transaction::PreviousValue::Any, "test")
+            .unwrap();
 
         let mut plan = Plan {
             git: Vec::new(),
@@ -2265,6 +2290,141 @@ pub(crate) mod tests {
         assert!(error.contains(&*upstream.to_string_lossy()), "{error}");
         let dir = root.join("Cactus/repos/R");
         assert_eq!(git::head_of(&dir).unwrap(), (git::DETACHED.to_owned(), pin));
+    }
+
+    /// An upstream at `<tmp>/upstream` like [`upstream_with_a_release_branch`]
+    /// whose commits hold a tracked `Makefile`, so a clone can carry local
+    /// edits. Returns the upstream, `rel`'s commit, the default branch and
+    /// its tip.
+    fn upstream_with_a_tracked_file(tmp: &Path) -> (PathBuf, gix::ObjectId, String, gix::ObjectId) {
+        let upstream = tmp.join("upstream");
+        git::testrepo::init(&upstream);
+        let release = git::testrepo::commit_file(&upstream, "Makefile", "release\n");
+        gix::open(&upstream)
+            .unwrap()
+            .reference("refs/heads/rel", release, gix::refs::transaction::PreviousValue::Any, "test")
+            .unwrap();
+        let tip = git::testrepo::commit_file(&upstream, "Makefile", "after the release\n");
+        let (default, _) = git::head_of(&upstream).unwrap();
+        assert_ne!(default, "rel");
+        (upstream, release, default, tip)
+    }
+
+    /// A list names `rel`, then drops `!REPO_BRANCH` while the repo has
+    /// local edits: skipped for them, and still cactup's branch. Forced, it
+    /// goes to the remote's default in that one refetch — not left on `rel`
+    /// under a record no later plan could vouch for, to be skipped again.
+    #[test]
+    fn a_dirty_repo_cactup_put_on_a_branch_is_forced_to_the_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (upstream, _, default, tip) = upstream_with_a_tracked_file(tmp.path());
+        let root = tmp.path().join("install");
+        let dir = root.join("Cactus/repos/R");
+        refetch_once(&list_naming(&upstream, Some("rel"), None), &root);
+        std::fs::write(dir.join("Makefile"), "edited\n").unwrap();
+
+        let list = list_without_a_branch(&upstream);
+        let mut plan = plan_for(&list, &root);
+        assert!(matches!(plan.skipped[0].reason, DirtyReason::WorktreeModified(_)));
+        assert!(plan.skipped[0].follows_default);
+        plan.force_where(|s| s.repo == "R");
+        assert!(matches!(plan.git[0].action, GitAction::Align));
+        assert_eq!(plan.git[0].branch, None);
+        assert!(plan.git[0].follows_default);
+        let report = execute(&plan, &root).unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        FetchState::record(&root, &report.records()).unwrap();
+        assert_eq!(git::head_of(&dir).unwrap(), (default.clone(), tip));
+        let record = &FetchState::read(&root).unwrap().unwrap().repos["R"];
+        assert_eq!((record.branch.as_deref(), record.follows_default), (Some(default.as_str()), true));
+
+        let (plan, _) = refetch_once(&list, &root);
+        assert!(matches!(plan.git[0].action, GitAction::Update));
+    }
+
+    /// The same edits on a branch the user checked out (the record names
+    /// another): forced, the repo stays on the user's branch, and its record
+    /// does not claim the branch for cactup.
+    #[test]
+    fn a_dirty_repo_on_the_users_branch_is_forced_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (upstream, release, default, _) = upstream_with_a_tracked_file(tmp.path());
+        let root = tmp.path().join("install");
+        let dir = root.join("Cactus/repos/R");
+        let mut progress = prodash::tree::Root::new().add_child("test clone");
+        git::clone(&upstream.to_string_lossy(), Some("rel"), &dir, &mut progress).unwrap();
+        record_fetch(&root, &upstream, &default, true, false);
+        std::fs::write(dir.join("Makefile"), "edited\n").unwrap();
+
+        let mut plan = plan_for(&list_without_a_branch(&upstream), &root);
+        assert!(matches!(plan.skipped[0].reason, DirtyReason::WorktreeModified(_)));
+        assert!(!plan.skipped[0].follows_default);
+        plan.force_where(|s| s.repo == "R");
+        assert_eq!(plan.git[0].branch.as_deref(), Some("rel"));
+        assert_eq!((plan.git[0].follows_default, plan.git[0].named_branch), (false, false));
+        let report = execute(&plan, &root).unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(git::head_of(&dir).unwrap(), ("rel".to_owned(), release));
+        let record = &report.records().repos[0].1;
+        assert_eq!((record.follows_default, record.named_branch), (false, false));
+    }
+
+    /// A list names `rel`, then drops `!REPO_BRANCH` and is pointed at
+    /// another repository: skipped for the new URL, and still cactup's
+    /// branch. Forced, `origin` is re-pointed and the repo goes to the new
+    /// remote's default, following it.
+    #[test]
+    fn a_retargeted_repo_cactup_put_on_a_branch_is_forced_to_the_new_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (upstream, _, default, _) = upstream_with_a_release_branch(tmp.path());
+        let root = tmp.path().join("install");
+        let dir = root.join("Cactus/repos/R");
+        refetch_once(&list_naming(&upstream, Some("rel"), None), &root);
+        let fork = tmp.path().join("fork");
+        git::testrepo::init(&fork);
+        let fork_tip = git::testrepo::commit(&fork, "fork");
+        assert_eq!(git::head_of(&fork).unwrap().0, default);
+
+        let mut plan = plan_for(&list_without_a_branch(&fork), &root);
+        assert!(matches!(plan.skipped[0].reason, DirtyReason::RemoteUrlChanged { .. }));
+        assert!(plan.skipped[0].follows_default);
+        plan.force_where(|s| s.repo == "R");
+        assert!(plan.git[0].retarget.is_some());
+        assert_eq!(plan.git[0].branch, None);
+        assert!(plan.git[0].follows_default);
+        let report = execute(&plan, &root).unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(git::head_of(&dir).unwrap(), (default.clone(), fork_tip));
+        let record = &report.records().repos[0].1;
+        assert_eq!((record.branch.as_deref(), record.follows_default), (Some(default.as_str()), true));
+    }
+
+    /// A branch made locally, with no counterpart on origin, in a repo whose
+    /// list names no branch: the probe cannot inspect it against origin, and
+    /// forced, it goes to the remote's default (aligning to a branch origin
+    /// does not have would fail every time). The local branch itself stays.
+    #[test]
+    fn a_forced_local_only_branch_goes_to_the_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (upstream, _, default, tip) = upstream_with_a_release_branch(tmp.path());
+        let root = tmp.path().join("install");
+        let dir = root.join("Cactus/repos/R");
+        let list = list_without_a_branch(&upstream);
+        refetch_once(&list, &root);
+        // `git checkout -b topic`.
+        use gix::refs::transaction::PreviousValue::Any;
+        gix::open(&dir).unwrap().reference("refs/heads/topic", tip, Any, "test").unwrap();
+        point_head_at(&dir, "topic");
+
+        let mut plan = plan_for(&list, &root);
+        assert!(matches!(plan.skipped[0].reason, DirtyReason::Unknown(_)), "{:?}", plan.skipped);
+        plan.force_where(|s| s.repo == "R");
+        assert_eq!(plan.git[0].branch, None);
+        assert!(plan.git[0].follows_default);
+        let report = execute(&plan, &root).unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(git::head_of(&dir).unwrap(), (default, tip));
+        assert!(gix::open(&dir).unwrap().find_reference("refs/heads/topic").is_ok());
     }
 
     /// End-to-end: `plan()` classifies a repo whose `origin` has drifted from
