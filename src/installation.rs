@@ -1033,6 +1033,12 @@ mod tests {
         format::write(&path, &plain, &INSTALLATION).unwrap();
         let old: InstallationMeta = format::read(&path, &V1).unwrap().unwrap();
         assert_eq!(old.added, plain.added);
+        // Exactly the shape version 1 shipped with, not merely one it reads.
+        let parse = |path: &Path| -> Toml {
+            toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        };
+        let v1 = crate::format::testing::fixture_dir("installation").join("v1.toml");
+        assert_eq!(parse(&path), parse(&v1));
 
         format::write(&path, &exhaustive_meta(), &INSTALLATION).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -1043,7 +1049,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "the libraries survive");
 
         let fixture = crate::format::testing::fixture_dir("installation").join("v2.toml");
-        assert!(format::read::<InstallationMeta, _>(&fixture, &V1).is_err());
+        let err = format::read::<InstallationMeta, _>(&fixture, &V1).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
     }
 
     #[test]
