@@ -182,7 +182,14 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     };
     let active = database.active_installation.as_deref() == Some(&alias);
     let inst = Installation::new(entry.alias.clone(), &entry.path);
-    let meta = inst.meta().ok();
+    // Lenient: the registry's view above is still worth showing when
+    // installation.toml cannot be read. Except a newer cactup's file: that
+    // is not "no homes, no packages" but "upgrade cactup", so say that.
+    let meta = match inst.meta() {
+        Ok(meta) => Some(meta),
+        Err(e) if e.downcast_ref::<crate::format::Newer>().is_some() => return Err(e),
+        Err(_) => None,
+    };
     // Asked before anything is printed, so its progress never splits the output.
     let yanked = yanked_since(&database, entry, meta.as_ref().map_or(&[][..], |m| &m.added[..]))?;
 
@@ -259,6 +266,10 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
             let what = crate::commands::add::describe(&package.package, &package.version);
             println!("  {label:<13} {what} ({}){replaces}{follows}", thorns.join(", "));
             println!("  {:<13}   problems? {}", "", package.contact.as_deref().unwrap_or(&package.url));
+            for library in &package.libraries {
+                let what = crate::commands::add::describe(&library.package, &library.version);
+                println!("  {:<13}   library {what} at {}/{}", "", library.inside, library.into);
+            }
             if let Some(why) = yanked.get(&format!("{}@{}", package.package, package.version)) {
                 println!("{}", format!("  {:<13}   yanked on the Cactarium{}", "", reason(why)).yellow());
             }
@@ -558,5 +569,89 @@ mod tests {
         };
         let err = show_installation(&ctx, None).unwrap_err().to_string();
         assert!(err.contains("\"nope\""), "{err}");
+    }
+
+    /// An active installation "et" whose installation.toml holds `toml`:
+    /// the scratch directory, the installation home, and a `Ctx` over them.
+    fn with_installation_toml(toml: &str) -> (tempfile::TempDir, std::path::PathBuf, Ctx) {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("inst");
+        std::fs::create_dir_all(home.join(".cactup")).unwrap();
+        std::fs::write(home.join(".cactup/installation.toml"), toml).unwrap();
+        let db = crate::database::Db::in_dir(dir.path());
+        db.update(|d| {
+            let mut et = entry(IndexMap::new());
+            et.path = home.display().to_string();
+            d.installations.insert("et".to_owned(), et);
+            d.active_installation = Some("et".to_owned());
+            Ok(())
+        })
+        .unwrap();
+        let ctx = Ctx {
+            globals: crate::args::GlobalOpts {
+                verbose: false,
+                trace: false,
+                manifest_url: String::new(),
+                mdb_path: None,
+                machine: None,
+                installation: None,
+                hostname: None,
+                knob: Vec::new(),
+                risky_allow_untrusted_artifacts: false,
+            },
+            db,
+        };
+        (dir, home, ctx)
+    }
+
+    /// An installation.toml a newer cactup wrote is refused with the upgrade
+    /// message on every path, not read around: with a custom `!DEFINE ROOT`
+    /// in it, guessing `Cactus` would send the user hunting for a tree that
+    /// was never there, and `show` would print no homes and no packages.
+    #[test]
+    fn a_newer_installation_toml_asks_for_an_upgrade() {
+        let current = crate::installation::INSTALLATION.current;
+        let (_dir, home, ctx) =
+            with_installation_toml(&format!("schema = {}\nroot-dir = \"CactusMin\"\n", current + 1));
+        let newer = |err: anyhow::Error| {
+            assert!(err.downcast_ref::<crate::format::Newer>().is_some(), "{err:#}");
+            assert!(format!("{err:#}").contains("upgrade cactup"), "{err:#}");
+        };
+        let inst = Installation::new("et", &home);
+        newer(inst.cactus_root().unwrap_err());
+        newer(inst.live_thornlist_to_read().unwrap_err());
+        // A failure is not cached as the default root.
+        newer(inst.cactus_root().unwrap_err());
+        // Every command that resolves the installation (build, sim, config,
+        // ...), and `installation show`, which reads it leniently otherwise.
+        newer(Installation::resolve(&ctx).err().unwrap());
+        newer(show_installation(&ctx, None).unwrap_err());
+        newer(show_installation(&ctx, Some("et".to_owned())).unwrap_err());
+    }
+
+    /// Any other unreadable installation.toml (a typo in a hand edit) fails
+    /// only what needs the tree: the installation still resolves, so `sim
+    /// stop`, `sim list`, `test log` and the like keep working; the tree
+    /// accessors report the parse error instead of guessing `Cactus`; and
+    /// `show` prints the registry's view.
+    #[test]
+    fn a_corrupt_installation_toml_fails_only_what_needs_the_tree() {
+        let (_dir, home, ctx) = with_installation_toml("schema = 1\nroot-dir = \"CactusMin\n");
+        std::fs::write(home.join("einsteintoolkit.th"), "A/B\n").unwrap();
+
+        let inst = Installation::resolve(&ctx).unwrap();
+        assert_eq!(inst.alias, "et");
+        // What `sim list`/`sim stop`/`test list` read.
+        assert!(inst.simulations().unwrap().simulations.is_empty());
+        assert!(inst.tests().unwrap().tests.is_empty());
+        // The thornlist-name migration was skipped, not run under a guess.
+        assert!(home.join("einsteintoolkit.th").exists());
+
+        let err = inst.cactus_root().unwrap_err();
+        assert!(err.downcast_ref::<crate::format::Newer>().is_none(), "{err:#}");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("installation.toml") && !msg.contains("upgrade cactup"), "{msg}");
+        show_installation(&ctx, None).unwrap();
+        show_installation(&ctx, Some("et".to_owned())).unwrap();
     }
 }

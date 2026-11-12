@@ -140,8 +140,8 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // the current one: the guard must still see hand edits in a file left
     // under the pre-rename name (§3.2), or an installation the name migration
     // could not reach would have those edits silently overwritten.
-    let live_path = inst.live_thornlist();
-    let live_read = inst.live_thornlist_to_read();
+    let live_path = inst.live_thornlist()?;
+    let live_read = inst.live_thornlist_to_read()?;
     let pristine_path = inst.source_thornlist();
     let pristine_read = inst.source_thornlist_to_read();
     let added = inst.meta()?.added;
@@ -213,7 +213,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // Orphans and config interactions are computed up front too — dry-run
     // prints all of it, and the real run needs them after the fetch anyway.
     let orphans = enumerate_orphans(&inst, &list, &plan)?;
-    let configs = crate::commands::config::list_configs(&inst.cactus_root())?;
+    let configs = crate::commands::config::list_configs(&inst.cactus_root()?)?;
 
     if args.dry_run {
         print_dry_run(&inst, &plan, &orphans, &configs, &divergence, &args, &forced_repo_names);
@@ -225,7 +225,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     if !forced_repo_names.is_empty() {
         let to_force: Vec<&fetch::SkippedRepo> =
             plan.skipped.iter().filter(|s| forced_repo_names.contains(&s.repo)).collect();
-        if let Some(backup_root) = backup_dirty(&inst, &to_force)? {
+        if let Some(backup_root) = backup_dirty(&inst, &to_force, &backups_root())? {
             println!(
                 "Backed up modified files to {}.",
                 format!("'{}'", backup_root.display()).bold()
@@ -253,8 +253,28 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     let had_work = !plan.git.is_empty()
         || !plan.downloads.is_empty()
         || !plan.external.is_empty()
-        || !plan.links.is_empty();
+        || !plan.links.is_empty()
+        || !plan.libraries.is_empty();
+    // After every refusal, just before the fetch: a library placement the
+    // new list drops (the new base carries the library itself, say) loses
+    // its link and exclude line, since the new list's sections would
+    // otherwise be resolved through it. Only what placing made goes;
+    // whatever else is there is left, with a note.
+    let before = fs::read_to_string(&live_read).unwrap_or_default();
+    // Until the new list is adopted (below), any way out of here (an error,
+    // an interrupt, a list not adopted) undoes that.
+    let mut undo = Some(fetch::library::PutBack::drop_placements(&inst.root, &before, &composed)?);
+    let dropping = undo.as_ref().expect("just made").unplacing();
+    for link in dropping.links() {
+        println!("Took away the old library link at {link}.");
+    }
+    for note in &dropping.notes {
+        println!("{note}");
+    }
     let report = fetch::execute(&plan, &inst.root)?;
+    if let Some(undo) = undo.as_mut() {
+        undo.made(&plan, &report);
+    }
 
     // Post-pass bookkeeping: record what we fetched (prune safety + the
     // future rebuild-decision hookup), then report.
@@ -337,15 +357,6 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // genuinely left alone.
     print_skip_status(&plan.skipped, &forced_repo_names, overwrite_modified, &args, SkipPhase::Summary);
 
-    // Orphan handling: always reported; removed only under --prune.
-    report_orphans(&orphans);
-    if args.prune {
-        finish_interrupted_prunes(&inst)?;
-    }
-    if args.prune && !orphans.is_empty() {
-        prune_orphans(&inst, &orphans, &configs, &args)?;
-    }
-
     // Thornlist writes. The pristine as-fetched copy always tracks what was
     // fetched; the live copy is only replaced by an explicit source (and the
     // old live copy is snapshotted first).
@@ -356,6 +367,11 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             snapshot_live(&inst, &live_read)?;
             fs::write(&live_path, &composed)
                 .with_context(|| format!("Failed to write '{}'", live_path.display()))?;
+            // The list is written: the placements it drops stay dropped,
+            // whatever follows.
+            if let Some(undo) = undo.take() {
+                undo.commit();
+            }
             // Writing the current name beside a pre-rename copy would leave two
             // thornlists where reads only ever consult one — exactly the
             // ambiguity the rename removes. The old copy was just snapshotted,
@@ -374,6 +390,10 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             if pristine_read != pristine_path {
                 let _ = fs::remove_file(&pristine_read);
             }
+        }
+        // The list is adopted: the placements it drops stay dropped.
+        if let Some(undo) = undo.take() {
+            undo.commit();
         }
 
         // DB provenance (§2.1): the thornlist is adopted on disk above
@@ -448,6 +468,17 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             };
             print_partial_adoption(&header_line, &unfetched);
         }
+    }
+
+    // Orphan handling: always reported; removed only under --prune, and only
+    // after the list is written, so a prune that fails cannot undo the
+    // placements of a fetch that went through.
+    report_orphans(&orphans);
+    if args.prune {
+        finish_interrupted_prunes(&inst)?;
+    }
+    if args.prune && !orphans.is_empty() {
+        prune_orphans(&inst, &orphans, &configs, &args, &backups_root())?;
     }
 
     // Config interaction (§7.5): a refetch does not, by itself, cause any
@@ -554,7 +585,7 @@ fn resolve_source(ctx: &Ctx, inst: &Installation, args: &RefetchArgs) -> Res<Sou
             fs::read_to_string(&path).with_context(|| format!("Failed to read '{}'", path.display()))?;
         return Ok(Source::File { path, bytes });
     }
-    let live = inst.live_thornlist_to_read();
+    let live = inst.live_thornlist_to_read()?;
     let path = if live.exists() { live } else { inst.source_thornlist_to_read() };
     let bytes =
         fs::read_to_string(&path).with_context(|| format!("Failed to read '{}'", path.display()))?;
@@ -831,7 +862,7 @@ fn enumerate_orphans(inst: &Installation, list: &Thornlist, plan: &fetch::Plan) 
     let mut referenced: BTreeSet<String> = list.components().iter().map(|c| c.repo.clone()).collect();
     // Resolve each #DISABLED thorn's arrangement symlink to the repo backing
     // it, and keep that repo too.
-    let arrangements = inst.cactus_root().join("arrangements");
+    let arrangements = inst.cactus_root()?.join("arrangements");
     for thorn in list.disabled_thorns() {
         let link = arrangements.join(thorn);
         if let Ok(target) = fs::read_link(&link)
@@ -923,11 +954,14 @@ fn report_orphans(orphans: &[Orphan]) {
 
 /// `--prune`: remove prunable orphans and their arrangement symlinks, behind
 /// a single confirmation. Only `-f` bypasses the confirmation (never `-s`).
+/// A dirty repo pruned with `-f` is backed up under `backups` first (see
+/// [`backups_root`]).
 fn prune_orphans(
     inst: &Installation,
     orphans: &[Orphan],
     configs: &[(String, Option<crate::build::ConfigMeta>)],
     args: &RefetchArgs,
+    backups: &Path,
 ) -> Res<()> {
     // §11.5: test runs execute from the live source tree; pruning deletes
     // reference data they need. Follow the config-delete precedent: refuse
@@ -952,7 +986,7 @@ fn prune_orphans(
     // never pruned — that config's build would fail outright.
     let mut in_use: BTreeSet<String> = BTreeSet::new();
     for (name, _) in configs {
-        let processed = inst.cactus_root().join("configs").join(name).join("cactup-thornlist.th");
+        let processed = inst.cactus_root()?.join("configs").join(name).join("cactup-thornlist.th");
         if let Ok(text) = fs::read_to_string(&processed) {
             for orphan in orphans {
                 for link in &orphan.symlinks {
@@ -998,7 +1032,7 @@ fn prune_orphans(
             record.map(|r| r.url.as_str()).unwrap_or(""),
             record.and_then(|r| r.branch.as_deref()).unwrap_or(""),
         );
-        let dirty = !pristine(&probe.state, record) || !probe.untracked.is_empty();
+        let dirty = !pristine(&probe.state, record) || !probe.untracked.is_empty() || hides_user_files(&o.dir);
         if dirty && !args.force {
             println!(
                 "{}",
@@ -1048,9 +1082,9 @@ fn prune_orphans(
             record.map(|r| r.url.as_str()).unwrap_or(""),
             record.and_then(|r| r.branch.as_deref()).unwrap_or(""),
         );
-        let dirty = !pristine(&probe.state, record) || !probe.untracked.is_empty();
+        let dirty = !pristine(&probe.state, record) || !probe.untracked.is_empty() || hides_user_files(&o.dir);
         if dirty {
-            let backup = backup_dir(&inst.alias)?.join(&o.repo);
+            let backup = backup_dir(backups, &inst.alias)?.join(&o.repo);
             copy_tree(&o.dir, &backup)?;
             println!("Backed up {} to '{}'.", o.repo, backup.display());
         }
@@ -1062,6 +1096,14 @@ fn prune_orphans(
         println!("Pruned {}.", o.repo.bold());
     }
     Ok(())
+}
+
+/// Whether an orphan holds files at a path cactup once excluded for a
+/// library (its `.git/info/exclude` pair), which git ignores, so the probe
+/// does not list them as untracked: they are the user's, and count as
+/// untracked for prune (kept, or backed up under -f).
+fn hides_user_files(dir: &Path) -> bool {
+    !fetch::library::hidden_by_library_excludes(dir).is_empty()
 }
 
 /// Whether a probed orphan holds nothing of the user's that pruning could
@@ -1182,7 +1224,11 @@ fn print_dry_run(
 /// `Ok(None)` when none of `skipped` actually has file contents to save (e.g.
 /// a --overwrite selection that only hit local-commit/detached-HEAD repos) —
 /// callers must not report a backup path, or create a backup dir, in that case.
-fn backup_dirty(inst: &Installation, skipped: &[&fetch::SkippedRepo]) -> Res<Option<PathBuf>> {
+fn backup_dirty(
+    inst: &Installation,
+    skipped: &[&fetch::SkippedRepo],
+    backups: &Path,
+) -> Res<Option<PathBuf>> {
     // Local commits / detached HEADs stay recoverable through the repo's own
     // reflog (align force-moves refs with a reflog entry); only
     // WorktreeModified and RemoteUrlChanged have file contents worth copying
@@ -1204,7 +1250,7 @@ fn backup_dirty(inst: &Installation, skipped: &[&fetch::SkippedRepo]) -> Res<Opt
         return Ok(None);
     }
 
-    let root = backup_dir(&inst.alias)?;
+    let root = backup_dir(backups, &inst.alias)?;
     for (s, rel) in files {
         // An unfinished backup must stop the forced fetch that would
         // overwrite what it has not copied yet.
@@ -1288,9 +1334,17 @@ fn remove_tree_until(path: &Path, stop: &AtomicBool) -> Res<()> {
     fs::remove_dir(path).with_context(|| format!("Failed to remove '{}'", path.display()))
 }
 
-fn backup_dir(alias: &str) -> Res<PathBuf> {
+/// Where refetch backs files up before it overwrites or prunes them:
+/// `~/.cactup/refetch-backups/`, outside every installation. Production
+/// callers pass this; tests pass a scratch directory, never the real home.
+fn backups_root() -> PathBuf {
+    crate::CACTUP_ROOT.join("refetch-backups")
+}
+
+/// A fresh `<backups>/<alias>/<timestamp>/`, created.
+fn backup_dir(backups: &Path, alias: &str) -> Res<PathBuf> {
     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-    let dir = crate::CACTUP_ROOT.join("refetch-backups").join(alias).join(ts.to_string());
+    let dir = backups.join(alias).join(ts.to_string());
     fs::create_dir_all(&dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
     Ok(dir)
 }
@@ -1444,8 +1498,11 @@ fn report_configs(
     // machine is known here, so this is only an approximation; the build
     // itself makes the authoritative call via `provider_delta`. Any parse
     // failure silently disables the note below — a report must never fail
-    // the refetch.
-    let live_path = inst.live_thornlist_to_read();
+    // the refetch. The root cannot fail to resolve here (the refetch
+    // resolved it already, and it is cached), but if it did, no report.
+    let (Ok(live_path), Ok(cactus_root)) = (inst.live_thornlist_to_read(), inst.cactus_root()) else {
+        return;
+    };
     let live_list = fs::read_to_string(&live_path)
         .ok()
         .and_then(|text| thornlist::parse_with_base(&text, live_path.parent()).ok());
@@ -1458,7 +1515,7 @@ fn report_configs(
     // fetch itself, and a report must never fail the refetch.
     let fresh_shapes = live_list
         .as_ref()
-        .and_then(|list| crate::build::thorn_shapes_with_progress(&inst.cactus_root(), list).ok())
+        .and_then(|list| crate::build::thorn_shapes_with_progress(&cactus_root, list).ok())
         .map(|scan| scan.shapes);
 
     println!("{}", "Existing configs pick the refetched sources up on their next build:".bold());
@@ -1476,7 +1533,8 @@ fn report_configs(
             );
             continue;
         }
-        let custom = meta.as_ref().is_some_and(|m| !inst.is_live_thornlist(&m.thornlist));
+        let custom =
+            meta.as_ref().is_some_and(|m| inst.is_live_thornlist(&m.thornlist).is_ok_and(|live| !live));
         if custom {
             println!(
                 "  {}: `cactup build {name}` recompiles the refetched sources but keeps its own \
@@ -1585,6 +1643,93 @@ mod tests {
         assert_eq!(fs::read_dir(pruning_dir(&inst)).unwrap().count(), 0);
     }
 
+    /// A pair cactup once appended to an orphan's `.git/info/exclude` for a
+    /// library, with the user's own work at that path now: git ignores it,
+    /// so the probe lists nothing untracked, but prune counts it. Without -f
+    /// the orphan is kept; with -f it is backed up before it goes.
+    #[test]
+    fn a_prune_counts_user_files_under_a_library_exclude() {
+        use crate::fetch::git::testrepo;
+        let tmp = tempfile::tempdir().unwrap();
+        let up = tmp.path().join("up/KadathThorn");
+        testrepo::init(&up);
+        crate::fetch::tests::commit_files(&up, &[("src/build.sh", "x\n")]);
+        let alias = "prune".to_owned();
+        let inst = Installation::new(alias.clone(), tmp.path().join("inst"));
+        let dir = tmp.path().join("inst/Cactus/repos/KadathThorn");
+        let url = up.display().to_string();
+        let mut progress = prodash::tree::Root::new().add_child("clone");
+        fetch::git::clone(&url, None, &dir, &mut progress).unwrap();
+        let (branch, head) = fetch::git::head_of(&dir).unwrap();
+        let record = fetch::RepoRecord { url: url.clone(), branch: Some(branch), head: head.to_string(), commit: None };
+        let records = fetch::FetchRecords { repos: vec![("KadathThorn".into(), record)], downloads: Vec::new() };
+        fetch::FetchState::record(&inst.root, &records).unwrap();
+        let exclude = dir.join(".git/info/exclude");
+        let mut text = fs::read_to_string(&exclude).unwrap_or_default();
+        text.push_str(&format!("{}\n/src/fuka\n", fetch::library::EXCLUDE_COMMENT));
+        fs::write(&exclude, text).unwrap();
+        fs::create_dir(dir.join("src/fuka")).unwrap();
+        fs::write(dir.join("src/fuka/my-work.cpp"), "weeks of work\n").unwrap();
+        let probe = fetch::git::probe(&dir, &url, "");
+        assert!(probe.untracked.is_empty(), "git ignores it: {:?}", probe.untracked);
+
+        let orphan = || Orphan { repo: "KadathThorn".into(), dir: dir.clone(), symlinks: Vec::new(), prunable: true };
+        let args = |argv: &[&str]| match <crate::args::Args as clap::Parser>::try_parse_from(argv).unwrap().command {
+            crate::args::Commands::Inst(crate::args::InstallationCommand::Refetch(args)) => args,
+            other => panic!("{other:?}"),
+        };
+        let backups = tmp.path().join("refetch-backups");
+        let prune = |argv: &[&str]| prune_orphans(&inst, &[orphan()], &[], &args(argv), &backups);
+        prune(&["cactup", "inst", "refetch", "--prune"]).unwrap();
+        assert!(dir.join("src/fuka/my-work.cpp").is_file(), "kept without -f");
+
+        prune(&["cactup", "inst", "refetch", "--prune", "-f"]).unwrap();
+        assert!(!dir.exists(), "pruned with -f");
+        let backups = backups.join(&alias);
+        let saved: Vec<std::path::PathBuf> = fs::read_dir(&backups)
+            .unwrap()
+            .map(|e| e.unwrap().path().join("KadathThorn/src/fuka/my-work.cpp"))
+            .filter(|p| p.is_file())
+            .collect();
+        assert_eq!(saved.len(), 1, "backed up first, under {}", backups.display());
+        assert_eq!(fs::read_to_string(&saved[0]).unwrap(), "weeks of work\n");
+    }
+
+    /// A library a package placed is a repo of the list like any other:
+    /// never an orphan while listed, so a prune leaves it alone. And when
+    /// its dependent is pruned (the package removed), the link inside it
+    /// goes with it, never what the link points at.
+    #[test]
+    fn a_prune_keeps_a_listed_library_and_never_follows_its_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inst = Installation::new("t", tmp.path());
+        let repos = tmp.path().join("Cactus/repos");
+        for repo in ["KadathThorn/src", "fuka/src", "old"] {
+            fs::create_dir_all(repos.join(repo)).unwrap();
+        }
+        fs::write(repos.join("fuka/src/kadath.cpp"), "x").unwrap();
+        std::os::unix::fs::symlink("../../fuka", repos.join("KadathThorn/src/fuka")).unwrap();
+        let record = |url: &str| fetch::RepoRecord { url: url.into(), branch: None, head: "a".repeat(40), commit: None };
+        let records = fetch::FetchRecords {
+            repos: ["KadathThorn", "fuka", "old"].iter().map(|r| (r.to_string(), record(r))).collect(),
+            downloads: Vec::new(),
+        };
+        fetch::FetchState::record(tmp.path(), &records).unwrap();
+        let list = thornlist::parse(
+            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\
+             !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://x/KadathThorn.git\n!REPO_PATH = ../$2\n!CHECKOUT =\nFuka/KadathThorn\n\n\
+             !TARGET = $ROOT/repos/KadathThorn/src\n!TYPE = git\n!URL = https://x/fuka\n!NAME = fuka\n!CHECKOUT = .\n",
+        )
+        .unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("plan");
+        let plan = fetch::plan(&list, tmp.path(), &mut progress).unwrap();
+        let orphans: Vec<String> = enumerate_orphans(&inst, &list, &plan).unwrap().into_iter().map(|o| o.repo).collect();
+        assert_eq!(orphans, ["old"]);
+
+        remove_pruned_repo(&inst, "KadathThorn", &repos.join("KadathThorn")).unwrap();
+        assert_eq!(fs::read_to_string(repos.join("fuka/src/kadath.cpp")).unwrap(), "x", "the library is untouched");
+    }
+
     #[test]
     fn overwrite_selection_splits_on_whitespace_and_commas_and_dedupes() {
         assert_eq!(
@@ -1652,6 +1797,7 @@ mod tests {
             downloads: Vec::new(),
             external: Vec::new(),
             links: Vec::new(),
+            libraries: Vec::new(),
             root: "Cactus".to_string(),
         }
     }

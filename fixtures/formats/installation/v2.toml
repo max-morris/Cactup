@@ -1,0 +1,47 @@
+schema = 2
+active-config = "sim"
+sim-home = "/scratch/sims/et"
+test-home = "/scratch/tests/et"
+root-dir = "Cactus"
+
+[[added]]
+package = "owner/kadath"
+version = "2.0.0"
+tag = "v2.0.0"
+commit = "0123456789abcdef0123456789abcdef01234567"
+url = "https://github.com/owner/kadath"
+repo = "kadath"
+contact = "https://github.com/owner/kadath/issues"
+
+[[added.thorns]]
+checkout = "Kadath/KadathThorn"
+repo-path = "KadathThorn"
+
+[[added.libraries]]
+package = "owner/fuka"
+version = "1.1.0"
+tag = "v1.1.0"
+commit = "89abcdef0123456789abcdef0123456789abcdef"
+url = "https://github.com/owner/fuka"
+inside = "kadath"
+into = "KadathThorn/src/fuka"
+
+[[added.libraries]]
+package = "owner/fuka-extras"
+version = "fedcba9876543210fedcba9876543210fedcba98"
+commit = "fedcba9876543210fedcba9876543210fedcba98"
+url = "https://github.com/owner/fuka-extras"
+inside = "fuka"
+into = "extras/fuka-extras"
+
+[[added]]
+package = "owner/plain"
+version = "0.3.0"
+tag = "v0.3.0"
+commit = "456789abcdef0123456789abcdef0123456789ab"
+url = "https://github.com/owner/plain"
+repo = "plain"
+
+[[added.thorns]]
+checkout = "Plain/PlainThorn"
+repo-path = "Plain/PlainThorn"
