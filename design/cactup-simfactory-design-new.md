@@ -4565,10 +4565,18 @@ never rewritten), so the link is not an untracked file there; if that fails,
 the link and the folders it made are taken back. It never overwrites, moves
 or deletes anything else. When a list stops placing a library (the package
 is removed, its `into` changes, or the base takes the library over), `add`,
-`remove` and `refetch` take its link away before fetching, but only a
-symlink whose text is exactly the one placing writes; anything else there
-refuses the command. Independently, the link pass refuses any `!TARGET`
-that resolves physically outside the installation. A library whose
+`remove` and `refetch` take that placement away after every refusal, just
+before fetching: the link, only if it is a symlink whose text is exactly the
+one placing writes, and the exclude's comment and path pair (rewritten
+through a temporary file in `.git/info` and one rename, every other line
+kept). Whatever else is at the path (the dependent's own tracked files, a
+folder on the way that became a link) is left, with a note; removing
+nothing is always safe. A command that fails after that puts back what it
+took away. Prune counts files at any path still excluded by such a pair as
+untracked, so an orphan holding the user's work there is kept, or backed up
+under -f. Independently, the link pass refuses any `!TARGET` that resolves
+physically outside the installation, its Cactus root, `repos/` and
+`arrangements/` (each of which may be a symlink out, to scratch space). A library whose
 repository the base already checks out stays where the base puts it (a
 stack's or sim's own list places its libraries). Refused when composing,
 names compared without case (a case-insensitive filesystem): two libraries

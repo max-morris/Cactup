@@ -362,6 +362,13 @@ fn package_repos(a: &AddedPackage) -> BTreeSet<String> {
     a.thorns.iter().map(|t| clone_of(&a.repo, t)).collect()
 }
 
+/// `e`, the failure of a command after it dropped library placements, with
+/// those put back first; what could not be put back is said, with how.
+pub(crate) fn put_back(e: anyhow::Error, unplacing: &crate::fetch::library::Unplacing, root: &std::path::Path) -> anyhow::Error {
+    let problems = unplacing.restore(root);
+    if problems.is_empty() { e } else { anyhow!("{e:#}\n{}", problems.join("\n")) }
+}
+
 /// Narrow `plan` to `repos`: their git work and links, and only the library
 /// placements of or into them (never every placement of the list); no
 /// downloads, externals or skips. Nothing else in the installation moves.
@@ -389,19 +396,31 @@ fn check_library_dirs(install_root: &std::path::Path, root: &str, added: &[Added
                 continue;
             }
             let url = crate::fetch::git::normalize_url(&l.url);
-            let ours = state
-                .as_ref()
-                .and_then(|s| s.repos.get(name))
-                .is_some_and(|r| crate::fetch::git::normalize_url(&r.url) == url);
-            if !ours {
-                bail!(
-                    "{}'s library {} would be cloned at '{}', which is already there and is not a clone cactup \
-                     fetched from {}; move it aside, then add again",
+            let record = state.as_ref().and_then(|s| s.repos.get(name));
+            match record {
+                Some(r) if crate::fetch::git::normalize_url(&r.url) == url => {}
+                Some(r) => bail!(
+                    "{}'s library {} would be cloned at '{}', but cactup fetched that directory from {}, not from \
+                     {}: another repository. Move '{}' aside (it is that other repository's checkout), then run \
+                     the add again",
+                    a.package,
+                    l.package,
+                    dir.display(),
+                    r.url,
+                    l.url,
+                    dir.display()
+                ),
+                None => bail!(
+                    "{}'s library {} would be cloned at '{}', which is already there but has no fetch record in \
+                     this installation: cactup did not fetch it, or an older cactup or an import did, and cactup \
+                     will not take over a directory it cannot tell is its own. If it is a checkout of {} you no \
+                     longer need, delete or move it aside; if it holds work of yours, move it elsewhere first. \
+                     Then run the add again, and cactup clones the library there",
                     a.package,
                     l.package,
                     dir.display(),
                     l.url
-                );
+                ),
             }
         }
     }
@@ -930,17 +949,22 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<
         bail!("Repo {} in the installation has {}; it was left alone", skipped.repo, skipped.reason.describe());
     }
     narrow(&mut plan, &repos);
-    // A placement the add drops (its `into` changed, or the base took the
-    // library over) loses its link first: a stale link would have the new
-    // list's sections resolved through it.
-    let gone = crate::fetch::library::unplace_dropped(&inst.root, &before, &composed)?;
-    let report = crate::fetch::execute(&plan, &inst.root)?;
+    // After every refusal, just before the fetch: a placement the add drops
+    // (its `into` changed, or the base took the library over) loses its link
+    // and exclude line, since a stale link would have the new list's
+    // sections resolved through it. A failed fetch puts them back.
+    let unplacing = crate::fetch::library::unplace_dropped(&inst.root, &before, &composed)?;
+    let report = match crate::fetch::execute(&plan, &inst.root) {
+        Ok(report) => report,
+        Err(e) => return Err(put_back(e, &unplacing, &inst.root)),
+    };
     if !report.failures.is_empty() {
         // What did fetch is recorded all the same, so a later prune knows
         // cactup made it.
         crate::fetch::FetchState::record(&inst.root, &report.records())?;
         let why: Vec<String> = report.failures.iter().map(|f| format!("{}: {}", f.what, f.error)).collect();
-        bail!("Failed to fetch {}:\n  {}", repos.iter().copied().collect::<Vec<_>>().join(", "), why.join("\n  "));
+        let e = anyhow!("Failed to fetch {}:\n  {}", repos.iter().copied().collect::<Vec<_>>().join(", "), why.join("\n  "));
+        return Err(put_back(e, &unplacing, &inst.root));
     }
     crate::fetch::FetchState::record(&inst.root, &report.records())?;
 
@@ -977,8 +1001,11 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<
     for note in &notes {
         println!("{note}");
     }
-    for link in &gone {
+    for link in unplacing.links() {
         println!("Took away the old library link at {link}.");
+    }
+    for note in &unplacing.notes {
+        println!("{note}");
     }
     println!("Build a config to compile them, e.g. `{}`.", "cactup build <config>".bold());
     Ok(())
@@ -1020,12 +1047,10 @@ pub fn remove(ctx: &Ctx, package: &str, force: bool) -> Res<()> {
     }
     let removed = meta.added.remove(i);
     let composed = compose(&pristine, &meta.added)?;
-    // Its libraries' links go with it (only the links cactup made; anything
-    // else at those paths is refused and left).
-    let gone = crate::fetch::library::unplace_dropped(&inst.root, &before, &composed)?;
 
     // The replaced base repos go back to what the base pins.
     let touched: BTreeSet<&str> = removed.replaces.iter().map(String::as_str).collect();
+    let mut restore = None;
     if !touched.is_empty() {
         let list = thornlist::parse(&composed)?;
         let (progress, renderer) = crate::manifest::setup_prodash();
@@ -1037,10 +1062,21 @@ pub fn remove(ctx: &Ctx, package: &str, force: bool) -> Res<()> {
             bail!("Repo {} has {}; it was left alone, and {entry} is still added", skipped.repo, skipped.reason.describe());
         }
         narrow(&mut plan, &touched);
-        let report = crate::fetch::execute(&plan, &inst.root)?;
+        restore = Some(plan);
+    }
+    // After every refusal: its libraries' links and exclude lines go with it
+    // (only what placing made; whatever else is at those paths is left, with
+    // a note). A failed restore of the base's repos puts them back.
+    let unplacing = crate::fetch::library::unplace_dropped(&inst.root, &before, &composed)?;
+    if let Some(plan) = restore {
+        let report = match crate::fetch::execute(&plan, &inst.root) {
+            Ok(report) => report,
+            Err(e) => return Err(put_back(e, &unplacing, &inst.root)),
+        };
         if !report.failures.is_empty() {
             let why: Vec<String> = report.failures.iter().map(|f| format!("{}: {}", f.what, f.error)).collect();
-            bail!("Failed to restore {}:\n  {}", removed.replaces.join(", "), why.join("\n  "));
+            let e = anyhow!("Failed to restore {}:\n  {}", removed.replaces.join(", "), why.join("\n  "));
+            return Err(put_back(e, &unplacing, &inst.root));
         }
         crate::fetch::FetchState::record(&inst.root, &report.records())?;
     }
@@ -1049,8 +1085,11 @@ pub fn remove(ctx: &Ctx, package: &str, force: bool) -> Res<()> {
     drop(locked);
 
     println!("Removed {} from the thornlist.", removed.package.bold());
-    for link in &gone {
+    for link in unplacing.links() {
         println!("Took away its library link at {link}.");
+    }
+    for note in &unplacing.notes {
+        println!("{note}");
     }
     if touched.is_empty() {
         let repos: Vec<String> = all_repos(&removed).into_iter().collect();
@@ -1693,7 +1732,7 @@ mod tests {
         check_library_dirs(tmp.path(), "Cactus", std::slice::from_ref(&package)).unwrap();
         std::fs::create_dir_all(repos.join("fuka")).unwrap();
         let err = format!("{:#}", check_library_dirs(tmp.path(), "Cactus", std::slice::from_ref(&package)).unwrap_err());
-        assert!(err.contains("not a clone cactup fetched"), "{err}");
+        assert!(err.contains("has no fetch record") && err.contains("move it aside"), "{err}");
         let record = |url: &str| crate::fetch::FetchRecords {
             repos: vec![("fuka".into(), crate::fetch::RepoRecord { url: url.into(), branch: None, head: "b".repeat(40), commit: None })],
             downloads: Vec::new(),
@@ -1711,5 +1750,254 @@ mod tests {
         assert!(check_registry_names("et/x", "Arr", "Thorn", "../-$2").is_err());
         assert!(check_registry_names("et/x", "-Arr", "Thorn", "$2").is_err());
         check_registry_names("et/x", "Arr", "Thorn", "../$1-$2").unwrap();
+    }
+
+    // Command-level: `add`, `remove` and `refetch` taking a dropped
+    // placement away end to end, on an installation of real repos.
+
+    /// An installation (alias `t`, active) with et/kadaththorn added and FUKA
+    /// placed at `KadathThorn/<into>`, fetched: what `cactup add` leaves.
+    /// `base_extra` goes into the base list, and `replaces` into the package.
+    struct Installed {
+        tmp: tempfile::TempDir,
+        ctx: Ctx,
+        inst: Installation,
+        kadath_url: String,
+        fuka_url: String,
+        k: String,
+        f: String,
+    }
+
+    impl Installed {
+        fn new(into: &str, base_extra: &str, replaces: &[&str]) -> Installed {
+            use crate::fetch::git::testrepo;
+            let tmp = tempfile::tempdir().unwrap();
+            let up = |name: &str, files: &[(&str, &str)]| {
+                let dir = tmp.path().join("up").join(name);
+                testrepo::init(&dir);
+                (dir.display().to_string(), crate::fetch::tests::commit_files(&dir, files).to_string())
+            };
+            let (kadath_url, k) = up("KadathThorn", &[("interface.ccl", "kadath\n"), ("src/build.sh", "cd fuka\n")]);
+            let (fuka_url, f) = up("fuka", &[("Cmake/CMakeLists.txt", "fuka\n"), ("src/a.cpp", "a\n")]);
+            let root = tmp.path().join("inst");
+            let db = crate::database::Db::in_dir(&tmp.path().join("db"));
+            let path = root.display().to_string();
+            db.update(move |d| {
+                d.installations.insert(
+                    "t".into(),
+                    crate::database::CactusInstallation {
+                        alias: "t".into(),
+                        release: None,
+                        path,
+                        thornlist: None,
+                        simfile: None,
+                        stack: None,
+                        current_release: None,
+                        current_thornlist: None,
+                        stack_contact: None,
+                        unfetched_repos: Default::default(),
+                    },
+                );
+                d.active_installation = Some("t".into());
+                Ok(())
+            })
+            .unwrap();
+            let ctx = Ctx {
+                globals: crate::args::GlobalOpts {
+                    verbose: false,
+                    trace: false,
+                    manifest_url: String::new(),
+                    mdb_path: None,
+                    machine: None,
+                    installation: None,
+                    hostname: None,
+                    knob: Vec::new(),
+                    risky_allow_untrusted_artifacts: false,
+                },
+                db,
+            };
+            let inst = Installation::resolve(&ctx).unwrap();
+            let pristine = format!("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{base_extra}");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(inst.source_thornlist(), &pristine).unwrap();
+            let library = AddedLibrary {
+                url: fuka_url.clone(),
+                commit: f.clone(),
+                tag: None,
+                ..fuka("KadathThorn", into)
+            };
+            let package = AddedPackage {
+                url: kadath_url.clone(),
+                commit: k.clone(),
+                tag: None,
+                replaces: replaces.iter().map(|r| (*r).to_owned()).collect(),
+                ..kadath(vec![library])
+            };
+            let locked = inst.locked().unwrap();
+            let mut meta = locked.meta().unwrap();
+            meta.added = vec![package];
+            locked.set_meta(&meta).unwrap();
+            drop(locked);
+            let composed = compose(&pristine, &meta.added).unwrap();
+            let it = Installed { tmp, ctx, inst, kadath_url, fuka_url, k, f };
+            it.fetch(&composed);
+            std::fs::create_dir_all(it.inst.live_thornlist().parent().unwrap()).unwrap();
+            std::fs::write(it.inst.live_thornlist(), &composed).unwrap();
+            it
+        }
+
+        fn fetch(&self, text: &str) {
+            let list = thornlist::parse(text).unwrap();
+            let mut progress = prodash::tree::Root::new().add_child("plan");
+            let plan = crate::fetch::plan(&list, &self.inst.root, &mut progress).unwrap();
+            let report = crate::fetch::execute(&plan, &self.inst.root).unwrap();
+            assert!(report.failures.is_empty(), "{:?}", report.failures);
+            crate::fetch::FetchState::record(&self.inst.root, &report.records()).unwrap();
+        }
+
+        fn kadath_dir(&self) -> std::path::PathBuf {
+            self.inst.root.join("Cactus/repos/KadathThorn")
+        }
+
+        fn exclude(&self) -> String {
+            std::fs::read_to_string(self.kadath_dir().join(".git/info/exclude")).unwrap_or_default()
+        }
+    }
+
+    /// `cactup remove` refused (a base repo it replaced has local edits, so it
+    /// cannot go back): the package stays added, and its library's link and
+    /// exclude line stay with it.
+    #[test]
+    fn a_refused_remove_leaves_the_library_placed() {
+        use crate::fetch::git::testrepo;
+        let other_up = tempfile::tempdir().unwrap();
+        testrepo::init(other_up.path());
+        let c = crate::fetch::tests::commit_files(other_up.path(), &[("Oth/Thorn/interface.ccl", "x\n")]);
+        let base = format!(
+            "!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = {}\n!NAME = Other\n!REPO_PATH = $1/$2\n!REPO_COMMIT = {c}\n\
+             !CHECKOUT =\nOth/Thorn\n",
+            other_up.path().display()
+        );
+        let it = Installed::new("src/fuka", &base, &["Other"]);
+        let link = it.kadath_dir().join("src/fuka");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        std::fs::write(it.inst.root.join("Cactus/repos/Other/Oth/Thorn/interface.ccl"), "edited\n").unwrap();
+
+        let err = format!("{:#}", remove(&it.ctx, "et/kadaththorn", false).unwrap_err());
+        assert!(err.contains("is still added"), "{err}");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link stays");
+        assert!(it.exclude().contains("/src/fuka"), "and its exclude line");
+        assert_eq!(it.inst.meta().unwrap().added.len(), 1);
+    }
+
+    /// `cactup remove` done: the link and its exclude line are gone (the
+    /// exclude's other lines kept), and FUKA's clone stays for prune.
+    #[test]
+    fn a_remove_takes_the_library_link_and_its_exclude_line_away() {
+        let it = Installed::new("src/fuka", "", &[]);
+        let exclude = it.kadath_dir().join(".git/info/exclude");
+        let before = std::fs::read_to_string(&exclude).unwrap();
+        assert!(before.contains("/src/fuka"));
+        remove(&it.ctx, "et/kadaththorn", false).unwrap_or_else(|e| panic!("{e:#}"));
+        assert!(std::fs::symlink_metadata(it.kadath_dir().join("src/fuka")).is_err());
+        let after = std::fs::read_to_string(&exclude).unwrap();
+        assert!(!after.contains("/src/fuka") && !after.contains("cactup placed"), "{after}");
+        assert_eq!(after, before.replace(&format!("{}\n/src/fuka\n", crate::fetch::library::EXCLUDE_COMMENT), ""));
+        assert!(it.inst.root.join("Cactus/repos/fuka/src/a.cpp").is_file(), "the clone stays for prune");
+        assert!(it.inst.meta().unwrap().added.is_empty());
+    }
+
+    /// `cactup inst refetch` to a new base that carries FUKA itself, the
+    /// Einstein Toolkit's way (items linked through KadathThorn's
+    /// arrangement link into `src/fuka`): the package's own placement is
+    /// dropped and its link taken away first, so the base's sections land
+    /// in a real `src/fuka` inside the installation.
+    #[test]
+    fn a_refetch_to_a_base_that_carries_the_library_takes_the_link_away() {
+        let it = Installed::new("src/fuka", "", &[]);
+        let new_base = format!(
+            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!DEFINE ARR = $ROOT/arrangements\n\n\
+             !TARGET = $ARR/Fuka/KadathThorn/src/fuka/../../../../repos/KadathThorn/src/fuka\n!TYPE = git\n!URL = {}\n\
+             !REPO_COMMIT = {}\n!CHECKOUT = Cmake src\n",
+            it.fuka_url, it.f
+        );
+        let file = it.tmp.path().join("new-base.th");
+        std::fs::write(&file, &new_base).unwrap();
+        let args = match <crate::args::Args as clap::Parser>::try_parse_from([
+            "cactup",
+            "inst",
+            "refetch",
+            file.to_str().unwrap(),
+        ])
+        .unwrap()
+        .command
+        {
+            crate::args::Commands::Inst(crate::args::InstallationCommand::Refetch(args)) => args,
+            other => panic!("{other:?}"),
+        };
+        super::super::refetch::dispatch(&it.ctx, args).unwrap_or_else(|e| panic!("{e:#}"));
+        let dir = it.kadath_dir().join("src/fuka");
+        let meta = std::fs::symlink_metadata(&dir).unwrap();
+        assert!(meta.is_dir() && !meta.file_type().is_symlink(), "the base's own directory now");
+        assert_eq!(std::fs::read_to_string(dir.join("Cmake/CMakeLists.txt")).unwrap(), "fuka\n");
+        assert!(!it.exclude().contains("/src/fuka"), "{}", it.exclude());
+        assert!(!it.tmp.path().join("repos").exists(), "nothing outside the installation");
+        let _ = (&it.kadath_url, &it.k);
+    }
+
+    /// `cactup add` again, at a version whose dependency puts FUKA at
+    /// `ext/fuka` instead: the old link and exclude line go, the new ones
+    /// come.
+    #[test]
+    fn an_add_that_moves_the_library_takes_the_old_link_away() {
+        let it = Installed::new("src/fuka", "", &[]);
+        let facts = serde_json::to_string(&cactup_ecosystem_common::ccl::ThornFacts::default()).unwrap();
+        let info = |version: &str, commit: &str| {
+            format!(
+                r#""version":"{version}","track":null,"tag":null,"commit":"{commit}","tree":null,"yanked":false,
+                "yank-reason":null,"state":"ok","curated":false,"published":0"#
+            )
+        };
+        let (kurl, furl) = (it.kadath_url.clone(), it.fuka_url.clone());
+        let resolve_kadath = format!(
+            r#"{{"slug":"et/kadaththorn@2026.6.0","kind":"package","url":"{kurl}","contact":null,{}}}"#,
+            info("2026.6.0", &it.k)
+        );
+        let kadath_versions = format!(
+            r#"{{"slug":"et/kadaththorn","versions":[{{{},"url":"{kurl}",
+            "thorns":[{{"arrangement":"Fuka","thorn":"KadathThorn","repo-path":"../$2","facts":{facts}}}],
+            "claims":[{{"kind":"dependency","target":"et/fuka","range":"^2026.5.0","into":"ext/fuka","note":null}}]}}]}}"#,
+            info("2026.6.0", &it.k)
+        );
+        let resolve_fuka = format!(
+            r#"{{"slug":"et/fuka@2026.5.0","kind":"package","url":"{furl}","contact":null,{}}}"#,
+            info("2026.5.0", &it.f)
+        );
+        let fuka_versions = format!(
+            r#"{{"slug":"et/fuka","versions":[{{{},"url":"{furl}","library":true,"thorns":[],"claims":[]}}]}}"#,
+            info("2026.5.0", &it.f)
+        );
+        let (base, _) = crate::fetch::download::test_server::serve_with(4, move |path| {
+            let body = match path {
+                p if p.contains("/resolve") && p.contains("kadaththorn") => resolve_kadath.clone(),
+                p if p.contains("/resolve") => resolve_fuka.clone(),
+                p if p.contains("/packages/et/kadaththorn/") => kadath_versions.clone(),
+                _ => fuka_versions.clone(),
+            };
+            ("200 OK", "api-generation: 1\r\n".into(), body.into_bytes())
+        });
+        it.ctx
+            .db
+            .update(move |d| {
+                d.set_knob(crate::cactarium::URL_KNOB, base);
+                Ok(())
+            })
+            .unwrap();
+        dispatch(&it.ctx, &["et/kadaththorn".to_owned()], false, false).unwrap_or_else(|e| panic!("{e:#}"));
+        assert!(std::fs::symlink_metadata(it.kadath_dir().join("src/fuka")).is_err(), "the old link is gone");
+        assert_eq!(std::fs::read_link(it.kadath_dir().join("ext/fuka")).unwrap(), std::path::Path::new("../../fuka"));
+        let exclude = it.exclude();
+        assert!(!exclude.contains("/src/fuka") && exclude.contains("/ext/fuka"), "{exclude}");
+        assert_eq!(it.inst.meta().unwrap().added[0].libraries[0].into, "ext/fuka");
     }
 }

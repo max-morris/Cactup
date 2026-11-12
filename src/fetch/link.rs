@@ -80,6 +80,10 @@ pub struct LinkPass {
     /// leading components, so resolving the rest from here gives the same
     /// answer as resolving the whole path.
     physical_root: PathBuf,
+    /// Where else a target may resolve to: the Cactus root, and its
+    /// `arrangements/`, each resolved physically. Either (and `repos/`, above)
+    /// may be a symlink out of the installation, to scratch space say.
+    trees: [PathBuf; 2],
 }
 
 impl LinkPass {
@@ -89,7 +93,9 @@ impl LinkPass {
         // contains symlinks.
         let repos_dir = std::fs::canonicalize(install_root.join(root).join("repos"))
             .unwrap_or_else(|_| lexical_normalize(&install_root.join(root).join("repos")));
-        LinkPass { repos_dir, physical_root: physical_resolve(install_root) }
+        let cactus = install_root.join(root);
+        let trees = [physical_resolve(&cactus), physical_resolve(&cactus.join("arrangements"))];
+        LinkPass { repos_dir, physical_root: physical_resolve(install_root), trees }
     }
 
     /// [`link_component`] within this pass.
@@ -132,8 +138,13 @@ fn plan_link(pass: &LinkPass, component: &Component) -> crate::Res<LinkPlan> {
     });
     // Resolved physically, a target may leave the installation: a `..`
     // after a symlink climbs from wherever the link points. Nothing is made
-    // or linked outside the installation, whatever the list says.
-    if !target_dir.starts_with(&pass.physical_root) {
+    // or linked outside the installation (its Cactus root, `repos/` or
+    // `arrangements/`, wherever those are), whatever the list says.
+    let inside = std::iter::once(&pass.physical_root)
+        .chain(std::iter::once(&pass.repos_dir))
+        .chain(&pass.trees)
+        .any(|tree| target_dir.starts_with(tree));
+    if !inside {
         bail!(
             "The !TARGET of '{}' ({}) resolves to '{}', outside the installation '{}'; not linking there",
             component.checkout,

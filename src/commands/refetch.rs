@@ -220,15 +220,6 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
         return Ok(());
     }
 
-    // A library placement the new list drops (the new base carries the
-    // library itself, say) loses its link before anything is fetched: the
-    // new list's sections would otherwise be resolved through it. Only the
-    // links cactup made go; anything else there refuses the refetch.
-    let before = fs::read_to_string(&live_read).unwrap_or_default();
-    for link in fetch::library::unplace_dropped(&inst.root, &before, &composed)? {
-        println!("Took away the old library link at {link}.");
-    }
-
     // Back the dirty repos actually being forced up outside the installation
     // (uninstall deletes the installation), then fetch them like clean repos.
     if !forced_repo_names.is_empty() {
@@ -264,7 +255,29 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
         || !plan.external.is_empty()
         || !plan.links.is_empty()
         || !plan.libraries.is_empty();
-    let report = fetch::execute(&plan, &inst.root)?;
+    // After every refusal, just before the fetch: a library placement the
+    // new list drops (the new base carries the library itself, say) loses
+    // its link and exclude line, since the new list's sections would
+    // otherwise be resolved through it. Only what placing made goes;
+    // whatever else is there is left, with a note.
+    let before = fs::read_to_string(&live_read).unwrap_or_default();
+    let unplacing = fetch::library::unplace_dropped(&inst.root, &before, &composed)?;
+    for link in unplacing.links() {
+        println!("Took away the old library link at {link}.");
+    }
+    for note in &unplacing.notes {
+        println!("{note}");
+    }
+    let report = match fetch::execute(&plan, &inst.root) {
+        Ok(report) => report,
+        Err(e) => return Err(super::add::put_back(e, &unplacing, &inst.root)),
+    };
+    // A list not adopted (below) keeps its placements: put back what went.
+    if !(report.failures.is_empty() || had_work) {
+        for problem in unplacing.restore(&inst.root) {
+            println!("{}", problem.yellow());
+        }
+    }
 
     // Post-pass bookkeeping: record what we fetched (prune safety + the
     // future rebuild-decision hookup), then report.
@@ -1008,7 +1021,7 @@ fn prune_orphans(
             record.map(|r| r.url.as_str()).unwrap_or(""),
             record.and_then(|r| r.branch.as_deref()).unwrap_or(""),
         );
-        let dirty = !pristine(&probe.state, record) || !probe.untracked.is_empty();
+        let dirty = !pristine(&probe.state, record) || !probe.untracked.is_empty() || hides_user_files(&o.dir);
         if dirty && !args.force {
             println!(
                 "{}",
@@ -1058,7 +1071,7 @@ fn prune_orphans(
             record.map(|r| r.url.as_str()).unwrap_or(""),
             record.and_then(|r| r.branch.as_deref()).unwrap_or(""),
         );
-        let dirty = !pristine(&probe.state, record) || !probe.untracked.is_empty();
+        let dirty = !pristine(&probe.state, record) || !probe.untracked.is_empty() || hides_user_files(&o.dir);
         if dirty {
             let backup = backup_dir(&inst.alias)?.join(&o.repo);
             copy_tree(&o.dir, &backup)?;
@@ -1072,6 +1085,14 @@ fn prune_orphans(
         println!("Pruned {}.", o.repo.bold());
     }
     Ok(())
+}
+
+/// Whether an orphan holds files at a path cactup once excluded for a
+/// library (its `.git/info/exclude` pair), which git ignores, so the probe
+/// does not list them as untracked: they are the user's, and count as
+/// untracked for prune (kept, or backed up under -f).
+fn hides_user_files(dir: &Path) -> bool {
+    !fetch::library::hidden_by_library_excludes(dir).is_empty()
 }
 
 /// Whether a probed orphan holds nothing of the user's that pruning could
@@ -1593,6 +1614,57 @@ mod tests {
         remove_pruned_repo_until(&inst, "Orphan", &repo, &GO).unwrap();
         assert!(!repo.exists());
         assert_eq!(fs::read_dir(pruning_dir(&inst)).unwrap().count(), 0);
+    }
+
+    /// A pair cactup once appended to an orphan's `.git/info/exclude` for a
+    /// library, with the user's own work at that path now: git ignores it,
+    /// so the probe lists nothing untracked, but prune counts it. Without -f
+    /// the orphan is kept; with -f it is backed up before it goes.
+    #[test]
+    fn a_prune_counts_user_files_under_a_library_exclude() {
+        use crate::fetch::git::testrepo;
+        let tmp = tempfile::tempdir().unwrap();
+        let up = tmp.path().join("up/KadathThorn");
+        testrepo::init(&up);
+        crate::fetch::tests::commit_files(&up, &[("src/build.sh", "x\n")]);
+        let alias = format!("prune-{}", tmp.path().file_name().unwrap().to_string_lossy());
+        let inst = Installation::new(alias.clone(), tmp.path().join("inst"));
+        let dir = tmp.path().join("inst/Cactus/repos/KadathThorn");
+        let url = up.display().to_string();
+        let mut progress = prodash::tree::Root::new().add_child("clone");
+        fetch::git::clone(&url, None, &dir, &mut progress).unwrap();
+        let (branch, head) = fetch::git::head_of(&dir).unwrap();
+        let record = fetch::RepoRecord { url: url.clone(), branch: Some(branch), head: head.to_string(), commit: None };
+        let records = fetch::FetchRecords { repos: vec![("KadathThorn".into(), record)], downloads: Vec::new() };
+        fetch::FetchState::record(&inst.root, &records).unwrap();
+        let exclude = dir.join(".git/info/exclude");
+        let mut text = fs::read_to_string(&exclude).unwrap_or_default();
+        text.push_str(&format!("{}\n/src/fuka\n", fetch::library::EXCLUDE_COMMENT));
+        fs::write(&exclude, text).unwrap();
+        fs::create_dir(dir.join("src/fuka")).unwrap();
+        fs::write(dir.join("src/fuka/my-work.cpp"), "weeks of work\n").unwrap();
+        let probe = fetch::git::probe(&dir, &url, "");
+        assert!(probe.untracked.is_empty(), "git ignores it: {:?}", probe.untracked);
+
+        let orphan = || Orphan { repo: "KadathThorn".into(), dir: dir.clone(), symlinks: Vec::new(), prunable: true };
+        let args = |argv: &[&str]| match <crate::args::Args as clap::Parser>::try_parse_from(argv).unwrap().command {
+            crate::args::Commands::Inst(crate::args::InstallationCommand::Refetch(args)) => args,
+            other => panic!("{other:?}"),
+        };
+        prune_orphans(&inst, &[orphan()], &[], &args(&["cactup", "inst", "refetch", "--prune"])).unwrap();
+        assert!(dir.join("src/fuka/my-work.cpp").is_file(), "kept without -f");
+
+        prune_orphans(&inst, &[orphan()], &[], &args(&["cactup", "inst", "refetch", "--prune", "-f"])).unwrap();
+        assert!(!dir.exists(), "pruned with -f");
+        let backups = crate::CACTUP_ROOT.join("refetch-backups").join(&alias);
+        let saved: Vec<std::path::PathBuf> = fs::read_dir(&backups)
+            .unwrap()
+            .map(|e| e.unwrap().path().join("KadathThorn/src/fuka/my-work.cpp"))
+            .filter(|p| p.is_file())
+            .collect();
+        assert_eq!(saved.len(), 1, "backed up first, under {}", backups.display());
+        assert_eq!(fs::read_to_string(&saved[0]).unwrap(), "weeks of work\n");
+        let _ = fs::remove_dir_all(&backups);
     }
 
     /// A library a package placed is a repo of the list like any other:
