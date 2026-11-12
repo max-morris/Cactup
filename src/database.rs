@@ -715,6 +715,8 @@ mod tests {
                 hostname: "workstation".to_owned(),
                 session: Some("4242:1234567".to_owned()),
             }),
+            // Never stored (`serde(skip)`), so it plays no part in the shape.
+            overlaid: Vec::new(),
         }
     }
 
