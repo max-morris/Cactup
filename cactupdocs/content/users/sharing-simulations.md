@@ -99,8 +99,8 @@ cactup import bbh.sim --input my-initial-data=/data/id.h5 --submit
 
 `import` installs the file's sources at their pinned commits, builds them,
 creates the simulation, and with `--submit` (or `--run`) starts it. `-j N`
-(or `-j max`) sets the build's parallel make jobs, as for `cactup build`. It takes
-every option `sim submit` and `sim run` take (`-q`, `-n`, `-T`, `-c`, `-w`,
+(or `-j max`) sets the build's parallel make jobs, as for `cactup build`.
+`import` also takes every option `sim submit` and `sim run` take (`-q`, `-n`, `-T`, `-c`, `-w`,
 `--universe`, `--force-queue`, `--checkpt-buffer` and the rest) and passes
 them on; the file's suggested tasks, CPUs and GPUs per task and wall time fill
 in whatever you don't give. One difference: `-a` is `--alias` here, so give
