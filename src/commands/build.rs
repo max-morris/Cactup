@@ -15,7 +15,9 @@ use crate::scheduler::{is_live, JobRef, JobStatus, Scheduler, Statuses, Stopped}
 use crate::sim::cache;
 use crate::sim::restart::{thaw_vars, NO_JOB_ID};
 use crate::sim::start::{generate_script, resolve_submit_universe, write_executable, Identity};
-use crate::sim::vars::{resolve_topology, set_machine_vars, set_topology_vars, set_wall_only_vars};
+use crate::sim::vars::{
+    resolve_topology, set_machine_vars, set_topology_vars, set_wall_only_vars, Placement,
+};
 use crate::Res;
 use anyhow::{bail, Context};
 use chrono::Utc;
@@ -101,8 +103,8 @@ fn added_package_hint(installation: &Installation, name: Option<&str>) {
         println!(
             "{}",
             format!(
-                "{checkout} comes from {}@{} (added with cactup add); problems with it? {contact}",
-                package.package, package.version
+                "{checkout} comes from {} (added with cactup add); problems with it? {contact}",
+                crate::commands::add::describe(&package.package, &package.version)
             )
             .yellow()
         );
@@ -509,7 +511,7 @@ fn submit_impl(
     }
     build::apply_build_defaults(&mut flags, machine);
     let make_jobs = build::reconcile_make_jobs(&mut flags, args.opts.make_jobs, machine);
-    let topo = resolve_topology(&flags, machine, db, None, false)?;
+    let topo = resolve_topology(&flags, machine, db, None, false, Placement::submit(machine))?;
     if let Some(knob) = skipped_knob {
         eprintln!(
             "{} ignoring `build-queue` knob \"{knob}\": machine \"{}\" cannot queue a build there; \
@@ -518,6 +520,9 @@ fn submit_impl(
             machine.name,
             topo.queue
         );
+    }
+    if let Some(note) = topo.nodes_note() {
+        println!("{note}");
     }
 
     let reservation = Reservation {

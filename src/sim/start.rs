@@ -46,7 +46,7 @@ fn obtain_sim(
             inst,
             &crate::sim::CreateRequest {
                 force: false,
-                ignore_machine: args.ignore_machine || args.force,
+                ignore_machine: args.start_flags.ignore_machine || args.force,
                 name: &args.sim,
                 parfile: par,
                 config: args.config.as_deref(),
@@ -67,7 +67,7 @@ fn obtain_sim(
                 inst,
                 &crate::sim::CreateRequest {
                     force: true,
-                    ignore_machine: args.ignore_machine || args.force,
+                    ignore_machine: args.start_flags.ignore_machine || args.force,
                     name: &args.sim,
                     parfile: par,
                     config: args.config.as_deref(),
@@ -300,11 +300,13 @@ fn submit_impl(
     let cactus_root = inst.cactus_root();
     let cfg = ConfigMeta::load(&cactus_root, &sim.meta.configuration)?
         .ok_or_else(|| config_missing_error(&cactus_root, machine, &sim.meta.configuration))?;
-    check_sim_machine(machine, sim, &cfg, args.ignore_machine || args.force)?;
+    check_sim_machine(machine, sim, &cfg, args.start_flags.ignore_machine || args.force)?;
     crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.silent)?;
-    let force_queue = args.force_queue || args.force;
+    let force_queue = args.start_flags.force_queue || args.force;
     let fit = vars::BinaryFit::for_config(machine, &cfg)?;
-    let mut topo = vars::resolve_topology(&args.topology, machine, db, Some(&fit), force_queue)?;
+    let placement = vars::Placement::submit(machine);
+    let mut topo =
+        vars::resolve_topology(&args.topology, machine, db, Some(&fit), force_queue, placement)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
     let sched = Scheduler::for_machine(machine);
 
@@ -452,6 +454,9 @@ fn submit_impl(
     let (run_script_name, run_entry) = run_scripts.route(&topo.queue, cfg_universe, false)?;
     // Script default tasks (§4.2): submitscript first for a submit.
     vars::apply_tasks_default(&mut topo, &args.topology, sub_entry.tasks.or(run_entry.tasks), None);
+    if let Some(note) = topo.nodes_note() {
+        println!("{note}");
+    }
     let submit_uni = resolve_submit_universe(
         machine,
         sub_entry.universe.as_deref(),
@@ -470,7 +475,8 @@ fn submit_impl(
     // Automatic walltime chaining (§8.8).
     let ceiling = machine.meta.effective_max_walltime(&topo.queue)?;
     let (segments, job_wall) = vars::chain_segments(topo.total_wall, ceiling);
-    let buffer = args.checkpt_buffer.unwrap_or_else(|| vars::default_checkpt_buffer(job_wall));
+    let buffer =
+        args.start_flags.checkpt_buffer.unwrap_or_else(|| vars::default_checkpt_buffer(job_wall));
     if segments > 1 {
         // §8.8
         println!(
@@ -684,11 +690,13 @@ fn run_interactive(
     let cactus_root = inst.cactus_root();
     let cfg = ConfigMeta::load(&cactus_root, &sim.meta.configuration)?
         .ok_or_else(|| config_missing_error(&cactus_root, machine, &sim.meta.configuration))?;
-    check_sim_machine(machine, sim, &cfg, args.start.ignore_machine || args.start.force)?;
+    check_sim_machine(machine, sim, &cfg, args.start.start_flags.ignore_machine || args.start.force)?;
     crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.start.silent)?;
-    let force_queue = args.start.force_queue || args.start.force;
+    let force_queue = args.start.start_flags.force_queue || args.start.force;
     let fit = vars::BinaryFit::for_config(machine, &cfg)?;
-    let mut topo = vars::resolve_topology(&args.start.topology, machine, db, Some(&fit), force_queue)?;
+    let placement = vars::Placement::foreground(machine);
+    let mut topo =
+        vars::resolve_topology(&args.start.topology, machine, db, Some(&fit), force_queue, placement)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
     let sched = Scheduler::for_machine(machine);
 
@@ -721,6 +729,9 @@ fn run_interactive(
     let (run_script_name, run_entry) = run_scripts.route(&topo.queue, cfg_universe, false)?;
     // Script default tasks (§4.2).
     vars::apply_tasks_default(&mut topo, &args.start.topology, run_entry.tasks, None);
+    if let Some(note) = topo.nodes_note() {
+        println!("{note}");
+    }
     let run_uni = resolve_run_universe(
         machine,
         &cfg,
@@ -734,6 +745,7 @@ fn run_interactive(
     let job_wall = topo.total_wall.min(machine.meta.effective_max_walltime(&topo.queue)?);
     let buffer = args
         .start
+        .start_flags
         .checkpt_buffer
         .unwrap_or_else(|| vars::default_checkpt_buffer(job_wall));
 
@@ -1248,8 +1260,7 @@ mod tests {
             config: None,
             force: false,
             overwrite: false,
-            force_queue: false,
-            ignore_machine: false,
+            start_flags: crate::args::StartFlags::default(),
             universe: UniverseFlags { universe: None, no_universe: false },
             topology: TopologyFlags {
                 allocation: None,
@@ -1267,7 +1278,6 @@ mod tests {
                 out: None,
                 err: None,
             },
-            checkpt_buffer: None,
         }
     }
 
@@ -1609,7 +1619,7 @@ mod tests {
         req.ignore_machine = true;
         crate::sim::create(&ctx, &machine, &inst, &req).unwrap();
         let mut args = start_args("bbh", "1:00:00");
-        args.ignore_machine = true;
+        args.start_flags.ignore_machine = true;
         submit_impl(&inst, &machine, &db, &sim, &args, false, Some("testhost")).unwrap();
 
         // A simulation created elsewhere is refused on its own account, and

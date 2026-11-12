@@ -98,10 +98,17 @@ cactup import bbh.sim --input my-initial-data=/data/id.h5 --submit
 ```
 
 `import` installs the file's sources at their pinned commits, builds them,
-creates the simulation, and with `--submit` (or `--run`) starts it, using the
-file's suggested tasks, CPUs per task and wall time unless you give `-T`,
-`-c`, `-w` or `-q`. Without either flag it stops after creating the
-simulation and prints the submit command.
+creates the simulation, and with `--submit` (or `--run`) starts it. `-j N`
+(or `-j max`) sets the build's parallel make jobs, as for `cactup build`.
+`import` also takes every option `sim submit` and `sim run` take (`-q`, `-n`, `-T`, `-c`, `-w`,
+`--universe`, `--force-queue`, `--checkpt-buffer` and the rest) and passes
+them on; the file's suggested tasks, CPUs and GPUs per task and wall time fill
+in whatever you don't give. One difference: `-a` is `--alias` here, so give
+the account to charge as `--allocation`. The file suggests no node count: a
+submitted job gets as many nodes as its tasks need on your machine, unless
+you give `-n`; `--run` from a login node runs on that one machine. Without
+either flag it stops after creating the simulation and prints the submit
+command.
 
 Inputs are settled **before** anything long runs: from `--input KNOB=VALUE`,
 else by downloading the file the input names (into
@@ -149,7 +156,8 @@ copy, if any, stays.
 ## The Cactarium
 
 cactup talks to `https://cactarium.cct.lsu.edu` unless the `cactarium-url`
-knob or the `CACTARIUM_URL` environment variable names another.
+knob or the `CACTARIUM_URL` environment variable names another
+(`cactup knob cactarium-url https://registry.example.org`).
 
 ### Signing in
 
@@ -218,6 +226,7 @@ cactup add max/carpetx@mixed-precision:^1                # a whole package, from
 cactup add max/carpetx/TestReal4                         # one thorn of it
 cactup add max/carpetx/TestReal4 max/carpetx/Loop        # several thorns
 cactup add max/carpetx/Loop max/spacetimex               # several packages at once
+cactup add max/carpetx#3f2c9e1                          # at one commit
 ```
 
 The package is fetched at the commit the Cactarium recorded for that version
@@ -226,6 +235,16 @@ by cactup; only its repository is fetched. If your thornlist already has that
 repository (or one of its thorns), pass `--replace` to use the package in its
 place. Packages you add survive moving the installation to a newer stack
 release. Rebuild a config to compile them.
+
+`#` and a commit id (at least its first 7 hex digits) adds the package as it
+was at that commit; if the prefix matches more than one commit, the
+Cactarium lists them and you give more digits. If a published version was
+cut there, that version is what you get. Otherwise nobody has reviewed that commit, so
+the same rule as for a branch tip applies to a package the Cactarium does not
+trust: it may refuse, or cactup asks you to type `yes`. `cactup inst show`
+lists such a package as `owner/name at commit 3f2c9e1a0011`. The package's
+repository must let a commit be fetched by its id, as GitHub, GitLab and other
+current git hosts do.
 
 `cactup remove max/carpetx` takes a package out again, putting back any
 repository it replaced at the commit the base names.

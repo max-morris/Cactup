@@ -482,7 +482,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
 fn stay_on_track(selector: &str, entry: Option<&crate::database::CactusInstallation>) -> String {
     use cactup_ecosystem_common::slug::Slug;
     let Ok(wanted) = selector.parse::<Slug>() else { return selector.to_owned() };
-    if wanted.at.is_some() || wanted.thorn.is_some() {
+    if wanted.at.is_some() || wanted.sha.is_some() || wanted.thorn.is_some() {
         return selector.to_owned();
     }
     // The release it is on now: the last refetch's, else the installed one.
@@ -1547,6 +1547,7 @@ mod tests {
         let mp = entry(Some("max/carpetx-mp@mixed-precision:1.2.0"), None);
         assert_eq!(stay_on_track("max/carpetx-mp", Some(&mp)), "max/carpetx-mp@mixed-precision");
         assert_eq!(stay_on_track("max/carpetx-mp@^2", Some(&mp)), "max/carpetx-mp@^2");
+        assert_eq!(stay_on_track("max/carpetx-mp#abc1234", Some(&mp)), "max/carpetx-mp#abc1234", "a commit stays one");
         assert_eq!(stay_on_track("max/other", Some(&mp)), "max/other");
         assert_eq!(stay_on_track("max/carpetx-mp", Some(&entry(Some("max/carpetx-mp@1.2.0"), None))), "max/carpetx-mp");
         let moved = entry(Some("max/carpetx-mp@1.2.0"), Some("max/carpetx-mp@gpu:0.3.0"));
