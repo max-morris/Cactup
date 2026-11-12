@@ -128,6 +128,8 @@ fn main() -> Res<()> {
         db: Db::open()?,
     };
     let compute_node = compute_node_path(&args.command);
+    // D11 backstop: a job's run never rewrites a user-MDB overlay.
+    mdb::migrate::COMPUTE_NODE.store(compute_node, std::sync::atomic::Ordering::Relaxed);
     let updating = matches!(args.command, Commands::Update { .. });
     // Any `cactup knob …`: the user is configuring cactup — possibly turning
     // `autoupdate` off right now — so updating underneath them is wrong.
