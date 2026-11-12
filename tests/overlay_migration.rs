@@ -74,6 +74,11 @@ fn concurrent_loads_migrate_an_overlay_once() {
         fs::write(path, bytes).unwrap();
     }
 
+    // Hold the migration lock as another host would (a live foreign holder
+    // until its mtime is 15 minutes old), so every process finds it taken
+    // and goes down the wait path; release it once they have all started.
+    let lock = home.join("machines/.box.migrate.lock");
+    fs::write(&lock, "elsewhere.example\n1\n").unwrap();
     let children: Vec<_> = (0..8)
         .map(|_| {
             cactup(&home, &["machine", "show", "box"])
@@ -83,10 +88,14 @@ fn concurrent_loads_migrate_an_overlay_once() {
                 .unwrap()
         })
         .collect();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    fs::remove_file(&lock).unwrap();
     let outputs: Vec<Output> =
         children.into_iter().map(|child| check(child.wait_with_output().unwrap(), "machine show")).collect();
     let updated = outputs.iter().filter(|o| String::from_utf8_lossy(&o.stderr).contains("Updated user-MDB machine")).count();
     assert_eq!(updated, 1, "exactly one process migrates");
+    let waited = outputs.iter().filter(|o| String::from_utf8_lossy(&o.stderr).contains("Waiting for another cactup")).count();
+    assert!(waited >= 1, "the held lock made processes wait");
     for out in &outputs {
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(stdout.contains(&format!("mdb generation: {want}")), "{stdout}");
