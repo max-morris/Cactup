@@ -390,6 +390,16 @@ struct Exclude {
 
 pub(crate) const EXCLUDE_COMMENT: &str = "# A library cactup placed (a link to its own clone)";
 
+/// The one temporary [`Exclude::remove`] writes the new exclude to, in
+/// `.git/info`, before renaming it over the exclude.
+const EXCLUDE_TEMP: &str = ".exclude.cactup-tmp";
+
+/// A line of the exclude without its line ending (`\n`, and a `\r` before it).
+fn bare(line: &[u8]) -> &[u8] {
+    let line = line.strip_suffix(b"\n").unwrap_or(line);
+    line.strip_suffix(b"\r").unwrap_or(line)
+}
+
 impl Exclude {
     fn check(dependent: &OwnedFd, shown: &Path) -> Res<Exclude> {
         let git_path = shown.join(".git");
@@ -445,93 +455,89 @@ impl Exclude {
             self.info = Some(open_dir_at(&self.git, "info")?);
         }
         let info = self.info.as_ref().expect("made above");
-        let mut text = String::new();
-        match rustix::fs::openat(
-            info,
-            "exclude",
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        ) {
-            Ok(fd) => {
-                std::fs::File::from(fd)
-                    .read_to_string(&mut text)
-                    .with_context(|| format!("Failed to read '{}'", self.shown.display()))?;
-            }
-            Err(rustix::io::Errno::NOENT) => {}
-            Err(e) => {
-                return Err(anyhow!(e).context(format!("Failed to read '{}'", self.shown.display())));
-            }
-        }
-        if text.lines().any(|l| l.trim_end() == line) {
+        let text = self.read(info)?.map(|(text, _)| text).unwrap_or_default();
+        if text.split(|b| *b == b'\n').any(|l| bare(l) == line.as_bytes()) {
             return Ok(());
         }
         let flags =
             OFlags::WRONLY | OFlags::APPEND | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC;
         let fd = rustix::fs::openat(info, "exclude", flags, Mode::from_raw_mode(0o644))
             .map_err(|e| anyhow!(e).context(format!("Failed to open '{}'", self.shown.display())))?;
-        let lead = if text.is_empty() || text.ends_with('\n') { "" } else { "\n" };
+        let lead = if text.is_empty() || text.ends_with(b"\n") { "" } else { "\n" };
         std::fs::File::from(fd)
             .write_all(format!("{lead}{EXCLUDE_COMMENT}\n{line}\n").as_bytes())
             .with_context(|| format!("Failed to append to '{}'", self.shown.display()))
     }
 
-    /// Take away the comment and path pair [`Exclude::add`] appended for
-    /// `into`, leaving every other line as it is: the new text goes to a
-    /// temporary file beside it (created exclusively, never through a link),
-    /// which then replaces it in one rename. Returns whether there was a pair.
-    fn remove(&mut self, into: &str) -> Res<bool> {
-        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let Some(info) = &self.info else { return Ok(false) };
-        let fd = match rustix::fs::openat(
-            info,
-            "exclude",
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        ) {
+    /// The exclude's bytes (it need not be UTF-8: git reads it as bytes) and
+    /// its permission bits, read without following a link; `None` when there
+    /// is no exclude.
+    fn read(&self, info: &OwnedFd) -> Res<Option<(Vec<u8>, u32)>> {
+        let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let fd = match rustix::fs::openat(info, "exclude", flags, Mode::empty()) {
             Ok(fd) => fd,
-            Err(rustix::io::Errno::NOENT) => return Ok(false),
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
             Err(e) => {
                 return Err(anyhow!(e).context(format!("Failed to read '{}'", self.shown.display())));
             }
         };
         let mode = rustix::fs::fstat(&fd).map(|st| st.st_mode & 0o7777).unwrap_or(0o644);
-        let mut text = String::new();
+        let mut text = Vec::new();
         std::fs::File::from(fd)
-            .read_to_string(&mut text)
+            .read_to_end(&mut text)
             .with_context(|| format!("Failed to read '{}'", self.shown.display()))?;
+        Ok(Some((text, mode)))
+    }
+
+    /// Take away the comment and path pair [`Exclude::add`] appended for
+    /// `into`, leaving every other line byte for byte: the new bytes go to a
+    /// temporary file beside it, which then replaces it in one rename. The
+    /// temporary has one fixed name, [`EXCLUDE_TEMP`]: whatever a crash left
+    /// there is unlinked first (unlink never follows a link), then it is made
+    /// afresh, exclusively and never through a link. Returns whether there
+    /// was a pair.
+    fn remove(&mut self, into: &str) -> Res<bool> {
+        let Some(info) = &self.info else { return Ok(false) };
+        let Some((text, mode)) = self.read(info)? else { return Ok(false) };
         let line = format!("/{into}");
-        let bare = |s: &str| s.trim_end_matches(['\n', '\r']).to_owned();
-        let pieces: Vec<&str> = text.split_inclusive('\n').collect();
-        let mut kept = String::with_capacity(text.len());
+        let pieces: Vec<&[u8]> = text.split_inclusive(|b| *b == b'\n').collect();
+        let mut kept = Vec::with_capacity(text.len());
         let mut removed = false;
         let mut i = 0;
         while i < pieces.len() {
-            if bare(pieces[i]) == EXCLUDE_COMMENT
-                && pieces.get(i + 1).is_some_and(|next| bare(next) == line)
+            if bare(pieces[i]) == EXCLUDE_COMMENT.as_bytes()
+                && pieces.get(i + 1).is_some_and(|next| bare(next) == line.as_bytes())
             {
                 removed = true;
                 i += 2;
                 continue;
             }
-            kept.push_str(pieces[i]);
+            kept.extend_from_slice(pieces[i]);
             i += 1;
         }
         if !removed {
             return Ok(false);
         }
-        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let temp = format!(".exclude.cactup-{}-{n}", std::process::id());
+        match rustix::fs::unlinkat(info, EXCLUDE_TEMP, AtFlags::empty()) {
+            Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+            Err(e) => {
+                return Err(anyhow!(e).context(format!(
+                    "Failed to clear '{}'",
+                    self.shown.with_file_name(EXCLUDE_TEMP).display()
+                )));
+            }
+        }
         let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
         let out =
-            rustix::fs::openat(info, temp.as_str(), flags, Mode::from_raw_mode(mode)).map_err(|e| {
+            rustix::fs::openat(info, EXCLUDE_TEMP, flags, Mode::from_raw_mode(mode)).map_err(|e| {
                 anyhow!(e).context(format!("Failed to write beside '{}'", self.shown.display()))
             })?;
-        let written = std::fs::File::from(out).write_all(kept.as_bytes());
+        let written = std::fs::File::from(out).write_all(&kept);
         let renamed = written.map_err(anyhow::Error::from).and_then(|()| {
-            rustix::fs::renameat(info, temp.as_str(), info, "exclude").map_err(anyhow::Error::from)
+            rustix::fs::renameat(info, EXCLUDE_TEMP, info, "exclude").map_err(anyhow::Error::from)
         });
         if let Err(e) = renamed {
-            let _ = rustix::fs::unlinkat(info, temp.as_str(), AtFlags::empty());
+            let _ = rustix::fs::unlinkat(info, EXCLUDE_TEMP, AtFlags::empty());
             return Err(e.context(format!("Failed to rewrite '{}'", self.shown.display())));
         }
         Ok(true)
@@ -830,10 +836,22 @@ pub fn unplace(
             }
         }
     }
-    match exclude {
-        Ok(mut exclude) => done.exclude_removed = exclude.remove(into)?,
-        Err(e) => notes.push(format!("{repo}'s exclude line in {dependent} was left: {e:#}")),
-    }
+    // The exclude pair, after the link: a failure here (a read-only
+    // `.git/info`, a full disk) never undoes what went, nor hides it. It is
+    // a note, and the pair left behind is still covered by prune, which
+    // counts files at a path cactup excluded as the user's.
+    let left = match exclude.and_then(|mut exclude| exclude.remove(into)) {
+        Ok(removed) => {
+            done.exclude_removed = removed;
+            return Ok(done);
+        }
+        Err(e) => e,
+    };
+    notes.push(format!(
+        "{repo}'s exclude line for /{into} in {dependent} was left ({left:#}){}; prune still counts whatever is put \
+         at that path as the user's",
+        if done.link_removed { ", though its link was taken away" } else { "" }
+    ));
     Ok(done)
 }
 
@@ -909,15 +927,86 @@ impl Unplacing {
         for d in self.dropped.iter().filter(|d| d.link_removed || d.exclude_removed) {
             if let Err(e) = replace(install_root, &self.root, d) {
                 let link = install_root.join(&self.root).join("repos").join(&d.dependent).join(&d.into);
+                let text = link_text(d.into.split('/').count(), &d.repo);
+                // `ln -s` into a directory there would make the link inside it.
+                let aside = if std::fs::symlink_metadata(&link).is_ok() {
+                    format!("move '{}' aside first (something is there now), then ", link.display())
+                } else {
+                    String::new()
+                };
                 problems.push(format!(
-                    "{} could not be put back ({e:#}); restore it with `ln -s {} {}`",
+                    "{} could not be put back ({e:#}); {aside}restore it with `ln -s {} {}`",
                     d.label(),
-                    link_text(d.into.split('/').count(), &d.repo).display(),
+                    text.display(),
                     link.display()
                 ));
             }
         }
         problems
+    }
+}
+
+/// The undo of a command's library changes, armed from when it drops
+/// placements until it commits (writes the list that drops them). Dropped
+/// while armed (an error returned by `?`, a refusal, an interrupt), it takes
+/// away the placements the command newly made (those `after` makes and
+/// `before` does not) and puts back what it dropped, so a failed command
+/// leaves the placements as they were; what it cannot undo it prints, with
+/// how.
+pub struct PutBack<'a> {
+    install_root: &'a Path,
+    before: String,
+    after: String,
+    unplacing: Unplacing,
+    armed: bool,
+}
+
+impl<'a> PutBack<'a> {
+    /// Drop the placements `before` makes and `after` does not
+    /// ([`unplace_dropped`]), armed to undo that.
+    pub fn drop_placements(install_root: &'a Path, before: &str, after: &str) -> Res<PutBack<'a>> {
+        let unplacing = unplace_dropped(install_root, before, after)?;
+        Ok(PutBack {
+            install_root,
+            before: before.to_owned(),
+            after: after.to_owned(),
+            unplacing,
+            armed: true,
+        })
+    }
+
+    /// What was dropped, and the notes on what was left.
+    pub fn unplacing(&self) -> &Unplacing {
+        &self.unplacing
+    }
+
+    /// The command went through: nothing to undo.
+    pub fn commit(mut self) -> Unplacing {
+        self.armed = false;
+        std::mem::take(&mut self.unplacing)
+    }
+
+    /// Undo now, returning what could not be undone, each with how.
+    pub fn undo(&mut self) -> Vec<String> {
+        self.armed = false;
+        let mut problems = Vec::new();
+        match unplace_dropped(self.install_root, &self.after, &self.before) {
+            Ok(made) => problems.extend(made.notes),
+            Err(e) => problems
+                .push(format!("The libraries this run placed could not all be taken away: {e:#}")),
+        }
+        problems.extend(self.unplacing.restore(self.install_root));
+        problems
+    }
+}
+
+impl Drop for PutBack<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            for problem in self.undo() {
+                eprintln!("{problem}");
+            }
+        }
     }
 }
 
@@ -950,14 +1039,12 @@ pub fn unplace_dropped(install_root: &Path, before_text: &str, after_text: &str)
 /// other than a link: the user's own files, which git ignores there, so a
 /// status walk does not list them. Prune counts them as untracked.
 pub fn hidden_by_library_excludes(repo_dir: &Path) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(repo_dir.join(".git/info/exclude")) else {
-        return Vec::new();
-    };
-    let lines: Vec<&str> = text.lines().map(|l| l.trim_end_matches('\r')).collect();
+    let Ok(text) = std::fs::read(repo_dir.join(".git/info/exclude")) else { return Vec::new() };
+    let lines: Vec<&[u8]> = text.split(|b| *b == b'\n').map(bare).collect();
     let mut out = Vec::new();
     for pair in lines.windows(2) {
-        if pair[0] == EXCLUDE_COMMENT
-            && let Some(path) = pair[1].strip_prefix('/')
+        if pair[0] == EXCLUDE_COMMENT.as_bytes()
+            && let Some(path) = pair[1].strip_prefix(b"/").and_then(|p| std::str::from_utf8(p).ok())
             && check_into(path).is_ok()
             && std::fs::symlink_metadata(repo_dir.join(path)).is_ok_and(|m| !m.file_type().is_symlink())
         {
@@ -2154,5 +2241,147 @@ mod tests {
         let r = s.fetch(&s.list(&k, &f, ""));
         assert!(r.failures.is_empty(), "arrangements symlinked out: {:?}", r.failures);
         assert!(arr.join("Fuka/KadathThorn/src/fuka/src/a.cpp").is_file());
+    }
+
+    // From the third review.
+
+    /// The exclude is bytes (git reads it so): a line that is not UTF-8 does
+    /// not stop the pair from going, and stays byte for byte.
+    #[test]
+    fn review3_non_utf8_exclude() {
+        let s = Setup::new();
+        let k = commit_entries(&s.kadath, &[("src/build.sh", "1\n", false)]);
+        let f = commit_entries(&s.fuka, &[("Cmake/CMakeLists.txt", "fuka\n", false)]);
+        let placed = s.list(&k, &f, "");
+        assert!(s.fetch(&placed).failures.is_empty());
+        let ex = s.repos().join("KadathThorn/.git/info/exclude");
+        let mut bytes = std::fs::read(&ex).unwrap();
+        bytes.extend_from_slice(b"caf\xe9.o\n");
+        std::fs::write(&ex, &bytes).unwrap();
+        let unplacing = unplace_dropped(&s.install(), &placed, &without_fuka(&s, &k)).unwrap();
+        assert_eq!(unplacing.links(), ["KadathThorn/src/fuka"]);
+        assert!(unplacing.dropped[0].exclude_removed, "{:?}", unplacing.notes);
+        let pair = format!("{EXCLUDE_COMMENT}\n/src/fuka\n");
+        let expected: Vec<u8> = {
+            let at = bytes.windows(pair.len()).position(|w| w == pair.as_bytes()).unwrap();
+            [&bytes[..at], &bytes[at + pair.len()..]].concat()
+        };
+        assert_eq!(std::fs::read(&ex).unwrap(), expected);
+        // And back again, as bytes too.
+        assert!(unplacing.restore(&s.install()).is_empty());
+        assert_eq!(std::fs::read(&ex).unwrap(), [&expected[..], pair.as_bytes()].concat());
+    }
+
+    /// The exclude cannot be rewritten (a read-only `.git/info`) after the
+    /// link went: no error with the link silently gone, but a note that says
+    /// the link was taken away and the line left (prune still covers it).
+    #[test]
+    fn an_exclude_that_cannot_be_rewritten_is_a_note() {
+        use std::os::unix::fs::PermissionsExt;
+        let s = Setup::new();
+        let k = commit_entries(&s.kadath, &[("src/build.sh", "1\n", false)]);
+        let f = commit_entries(&s.fuka, &[("Cmake/CMakeLists.txt", "fuka\n", false)]);
+        let placed = s.list(&k, &f, "");
+        assert!(s.fetch(&placed).failures.is_empty());
+        let info = s.repos().join("KadathThorn/.git/info");
+        std::fs::set_permissions(&info, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::write(info.join("probe"), "").is_ok() {
+            std::fs::set_permissions(&info, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return; // root: permissions do not bind
+        }
+        let unplacing = unplace_dropped(&s.install(), &placed, &without_fuka(&s, &k));
+        std::fs::set_permissions(&info, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let unplacing = unplacing.unwrap();
+        assert_eq!(unplacing.links(), ["KadathThorn/src/fuka"]);
+        assert!(
+            unplacing.notes.iter().any(|n| n.contains("was left")
+                && n.contains("its link was taken away")
+                && n.contains("prune")),
+            "{:?}",
+            unplacing.notes
+        );
+        assert!(std::fs::read_to_string(info.join("exclude")).unwrap().contains("/src/fuka"));
+    }
+
+    /// A temporary a crash left beside the exclude (a file, or a link to
+    /// somewhere else) is cleared, never written through, and none is left.
+    #[test]
+    fn a_stale_exclude_temporary_is_cleared() {
+        let s = Setup::new();
+        let k = commit_entries(&s.kadath, &[("src/build.sh", "1\n", false)]);
+        let f = commit_entries(&s.fuka, &[("Cmake/CMakeLists.txt", "fuka\n", false)]);
+        let placed = s.list(&k, &f, "");
+        assert!(s.fetch(&placed).failures.is_empty());
+        let info = s.repos().join("KadathThorn/.git/info");
+        let victim = s.tmp.path().join("victim");
+        std::fs::write(&victim, "precious\n").unwrap();
+        std::os::unix::fs::symlink(&victim, info.join(EXCLUDE_TEMP)).unwrap();
+        unplace_dropped(&s.install(), &placed, &without_fuka(&s, &k)).unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious\n");
+        assert!(!std::fs::read_to_string(info.join("exclude")).unwrap().contains("/src/fuka"));
+        let names: Vec<String> = std::fs::read_dir(&info)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["exclude"]);
+    }
+
+    /// Putting a link back where something sits now says to move that aside
+    /// first: a bare `ln -s` into a directory would make the link inside it.
+    #[test]
+    fn a_restore_blocked_by_something_there_says_to_move_it_aside() {
+        let s = Setup::new();
+        let k = commit_entries(&s.kadath, &[("src/build.sh", "1\n", false)]);
+        let f = commit_entries(&s.fuka, &[("Cmake/CMakeLists.txt", "fuka\n", false)]);
+        let placed = s.list(&k, &f, "");
+        assert!(s.fetch(&placed).failures.is_empty());
+        let unplacing = unplace_dropped(&s.install(), &placed, &without_fuka(&s, &k)).unwrap();
+        let path = s.repos().join("KadathThorn/src/fuka");
+        std::fs::create_dir(&path).unwrap();
+        let problems = unplacing.restore(&s.install());
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("aside first") && problems[0].contains("ln -s ../../fuka"),
+            "{}",
+            problems[0]
+        );
+    }
+
+    /// The undo of a command (dropped while armed): the placement the
+    /// command newly made goes, the one it dropped comes back, and the
+    /// exclude is as it was. Committed, nothing is undone.
+    #[test]
+    fn an_armed_undo_restores_the_prior_placements() {
+        let s = Setup::new();
+        let k = commit_entries(&s.kadath, &[("src/build.sh", "1\n", false)]);
+        let f = commit_entries(&s.fuka, &[("src/a.cpp", "a\n", false)]);
+        let old = s.list(&k, &f, "");
+        assert!(s.fetch(&old).failures.is_empty());
+        let exclude = s.repos().join("KadathThorn/.git/info/exclude");
+        let before = std::fs::read_to_string(&exclude).unwrap();
+        let new = old.replace("$ROOT/repos/KadathThorn/src\n", "$ROOT/repos/KadathThorn/ext\n");
+        let install = s.install();
+        {
+            let undo = PutBack::drop_placements(&install, &old, &new).unwrap();
+            assert_eq!(undo.unplacing().links(), ["KadathThorn/src/fuka"]);
+            assert!(s.fetch(&new).failures.is_empty());
+            assert!(s.repos().join("KadathThorn/ext/fuka").exists());
+            // A failure here: the undo runs as it goes out of scope.
+        }
+        assert!(
+            std::fs::symlink_metadata(s.repos().join("KadathThorn/ext/fuka")).is_err(),
+            "the new one went"
+        );
+        assert_eq!(
+            std::fs::read_link(s.repos().join("KadathThorn/src/fuka")).unwrap(),
+            Path::new("../../fuka")
+        );
+        assert_eq!(std::fs::read_to_string(&exclude).unwrap(), before);
+
+        let undo = PutBack::drop_placements(&install, &old, &new).unwrap();
+        assert!(s.fetch(&new).failures.is_empty());
+        undo.commit();
+        assert!(s.repos().join("KadathThorn/ext/fuka").exists());
+        assert!(std::fs::symlink_metadata(s.repos().join("KadathThorn/src/fuka")).is_err());
     }
 }

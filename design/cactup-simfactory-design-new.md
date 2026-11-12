@@ -4567,16 +4567,24 @@ or deletes anything else. When a list stops placing a library (the package
 is removed, its `into` changes, or the base takes the library over), `add`,
 `remove` and `refetch` take that placement away after every refusal, just
 before fetching: the link, only if it is a symlink whose text is exactly the
-one placing writes, and the exclude's comment and path pair (rewritten
-through a temporary file in `.git/info` and one rename, every other line
-kept). Whatever else is at the path (the dependent's own tracked files, a
+one placing writes, and the exclude's comment and path pair (handled as
+bytes, rewritten through one fixed-name temporary file in `.git/info`, any
+stale one unlinked first, and one rename; every other line kept). A failure
+to rewrite the exclude after the link went is a note, never an error that
+hides the link's removal. Whatever else is at the path (the dependent's own tracked files, a
 folder on the way that became a link) is left, with a note; removing
-nothing is always safe. A command that fails after that puts back what it
-took away. Prune counts files at any path still excluded by such a pair as
+nothing is always safe. Until a command commits (writes the list that
+drops them), any way out (an error, a late `?`, an interrupt, a list not
+adopted) undoes it: the placements the command newly made go, and what it
+dropped comes back; what cannot be put back is printed with how, moving
+aside whatever sits at the path first. Prune counts files at any path still excluded by such a pair as
 untracked, so an orphan holding the user's work there is kept, or backed up
 under -f. Independently, the link pass refuses any `!TARGET` that resolves
 physically outside the installation, its Cactus root, `repos/` and
-`arrangements/` (each of which may be a symlink out, to scratch space). A library whose
+`arrangements/` (each of which may be a symlink out, to scratch space, when
+the user made it: a link whose chain passes through `repos/` is a repo's
+content and is not trusted), and it never makes a link at the Cactus root,
+its `arrangements/` or its `repos/` themselves. A library whose
 repository the base already checks out stays where the base puts it (a
 stack's or sim's own list places its libraries). Refused when composing,
 names compared without case (a case-insensitive filesystem): two libraries

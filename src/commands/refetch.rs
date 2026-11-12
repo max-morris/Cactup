@@ -261,23 +261,16 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // otherwise be resolved through it. Only what placing made goes;
     // whatever else is there is left, with a note.
     let before = fs::read_to_string(&live_read).unwrap_or_default();
-    let unplacing = fetch::library::unplace_dropped(&inst.root, &before, &composed)?;
-    for link in unplacing.links() {
+    // Until the new list is adopted (below), any way out of here (an error,
+    // an interrupt, a list not adopted) undoes that.
+    let undo = fetch::library::PutBack::drop_placements(&inst.root, &before, &composed)?;
+    for link in undo.unplacing().links() {
         println!("Took away the old library link at {link}.");
     }
-    for note in &unplacing.notes {
+    for note in &undo.unplacing().notes {
         println!("{note}");
     }
-    let report = match fetch::execute(&plan, &inst.root) {
-        Ok(report) => report,
-        Err(e) => return Err(super::add::put_back(e, &unplacing, &inst.root)),
-    };
-    // A list not adopted (below) keeps its placements: put back what went.
-    if !(report.failures.is_empty() || had_work) {
-        for problem in unplacing.restore(&inst.root) {
-            println!("{}", problem.yellow());
-        }
-    }
+    let report = fetch::execute(&plan, &inst.root)?;
 
     // Post-pass bookkeeping: record what we fetched (prune safety + the
     // future rebuild-decision hookup), then report.
@@ -398,6 +391,8 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
                 let _ = fs::remove_file(&pristine_read);
             }
         }
+        // The list is adopted: the placements it drops stay dropped.
+        undo.commit();
 
         // DB provenance (§2.1): the thornlist is adopted on disk above
         // regardless of whether every repo behind it was actually fetched

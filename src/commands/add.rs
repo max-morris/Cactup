@@ -362,13 +362,6 @@ fn package_repos(a: &AddedPackage) -> BTreeSet<String> {
     a.thorns.iter().map(|t| clone_of(&a.repo, t)).collect()
 }
 
-/// `e`, the failure of a command after it dropped library placements, with
-/// those put back first; what could not be put back is said, with how.
-pub(crate) fn put_back(e: anyhow::Error, unplacing: &crate::fetch::library::Unplacing, root: &std::path::Path) -> anyhow::Error {
-    let problems = unplacing.restore(root);
-    if problems.is_empty() { e } else { anyhow!("{e:#}\n{}", problems.join("\n")) }
-}
-
 /// Narrow `plan` to `repos`: their git work and links, and only the library
 /// placements of or into them (never every placement of the list); no
 /// downloads, externals or skips. Nothing else in the installation moves.
@@ -952,25 +945,24 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<
     // After every refusal, just before the fetch: a placement the add drops
     // (its `into` changed, or the base took the library over) loses its link
     // and exclude line, since a stale link would have the new list's
-    // sections resolved through it. A failed fetch puts them back.
-    let unplacing = crate::fetch::library::unplace_dropped(&inst.root, &before, &composed)?;
-    let report = match crate::fetch::execute(&plan, &inst.root) {
-        Ok(report) => report,
-        Err(e) => return Err(put_back(e, &unplacing, &inst.root)),
-    };
+    // sections resolved through it. Until the new list and record are
+    // written, any failure (the fetch, a `?` below) undoes that, and takes
+    // away the placements this add newly made.
+    let undo = crate::fetch::library::PutBack::drop_placements(&inst.root, &before, &composed)?;
+    let report = crate::fetch::execute(&plan, &inst.root)?;
     if !report.failures.is_empty() {
         // What did fetch is recorded all the same, so a later prune knows
         // cactup made it.
         crate::fetch::FetchState::record(&inst.root, &report.records())?;
         let why: Vec<String> = report.failures.iter().map(|f| format!("{}: {}", f.what, f.error)).collect();
-        let e = anyhow!("Failed to fetch {}:\n  {}", repos.iter().copied().collect::<Vec<_>>().join(", "), why.join("\n  "));
-        return Err(put_back(e, &unplacing, &inst.root));
+        bail!("Failed to fetch {}:\n  {}", repos.iter().copied().collect::<Vec<_>>().join(", "), why.join("\n  "));
     }
     crate::fetch::FetchState::record(&inst.root, &report.records())?;
 
     std::fs::write(&live_path, &composed).with_context(|| format!("Failed to write '{}'", live_path.display()))?;
     locked.set_meta(&meta)?;
     drop(locked);
+    let unplacing = undo.commit();
 
     for package in &added {
         let checkouts: Vec<&str> = package.thorns.iter().map(|t| t.checkout.as_str()).collect();
@@ -1066,23 +1058,21 @@ pub fn remove(ctx: &Ctx, package: &str, force: bool) -> Res<()> {
     }
     // After every refusal: its libraries' links and exclude lines go with it
     // (only what placing made; whatever else is at those paths is left, with
-    // a note). A failed restore of the base's repos puts them back.
-    let unplacing = crate::fetch::library::unplace_dropped(&inst.root, &before, &composed)?;
+    // a note). Until the new list and record are written, any failure puts
+    // them back.
+    let undo = crate::fetch::library::PutBack::drop_placements(&inst.root, &before, &composed)?;
     if let Some(plan) = restore {
-        let report = match crate::fetch::execute(&plan, &inst.root) {
-            Ok(report) => report,
-            Err(e) => return Err(put_back(e, &unplacing, &inst.root)),
-        };
+        let report = crate::fetch::execute(&plan, &inst.root)?;
         if !report.failures.is_empty() {
             let why: Vec<String> = report.failures.iter().map(|f| format!("{}: {}", f.what, f.error)).collect();
-            let e = anyhow!("Failed to restore {}:\n  {}", removed.replaces.join(", "), why.join("\n  "));
-            return Err(put_back(e, &unplacing, &inst.root));
+            bail!("Failed to restore {}:\n  {}", removed.replaces.join(", "), why.join("\n  "));
         }
         crate::fetch::FetchState::record(&inst.root, &report.records())?;
     }
     std::fs::write(&live_path, &composed).with_context(|| format!("Failed to write '{}'", live_path.display()))?;
     locked.set_meta(&meta)?;
     drop(locked);
+    let unplacing = undo.commit();
 
     println!("Removed {} from the thornlist.", removed.package.bold());
     for link in unplacing.links() {
@@ -1999,5 +1989,79 @@ mod tests {
         let exclude = it.exclude();
         assert!(!exclude.contains("/src/fuka") && exclude.contains("/ext/fuka"), "{exclude}");
         assert_eq!(it.inst.meta().unwrap().added[0].libraries[0].into, "ext/fuka");
+    }
+
+    /// `cactup add` again at a version that moves FUKA to `ext/fuka` and also
+    /// wants a second library, whose repository cannot be fetched: the add
+    /// fails, and leaves exactly what was there before: the old link and
+    /// exclude line back, the new link (placed before the failure was
+    /// known) gone, the record unchanged.
+    #[test]
+    fn an_add_whose_fetch_fails_leaves_the_prior_placement() {
+        let it = Installed::new("src/fuka", "", &[]);
+        let facts = serde_json::to_string(&cactup_ecosystem_common::ccl::ThornFacts::default()).unwrap();
+        let info = |version: &str, commit: &str| {
+            format!(
+                r#""version":"{version}","track":null,"tag":null,"commit":"{commit}","tree":null,"yanked":false,
+                "yank-reason":null,"state":"ok","curated":false,"published":0"#
+            )
+        };
+        let (kurl, furl) = (it.kadath_url.clone(), it.fuka_url.clone());
+        let gone = it.tmp.path().join("up/missing/eigen").display().to_string();
+        let ec = "c".repeat(40);
+        let resolve_kadath = format!(
+            r#"{{"slug":"et/kadaththorn@2026.6.0","kind":"package","url":"{kurl}","contact":null,{}}}"#,
+            info("2026.6.0", &it.k)
+        );
+        let kadath_versions = format!(
+            r#"{{"slug":"et/kadaththorn","versions":[{{{},"url":"{kurl}",
+            "thorns":[{{"arrangement":"Fuka","thorn":"KadathThorn","repo-path":"../$2","facts":{facts}}}],
+            "claims":[{{"kind":"dependency","target":"et/fuka","range":"^2026.5.0","into":"ext/fuka","note":null}},
+                      {{"kind":"dependency","target":"et/eigen","range":"^3.4.0","into":"vendor/eigen","note":null}}]}}]}}"#,
+            info("2026.6.0", &it.k)
+        );
+        let resolve_fuka = format!(
+            r#"{{"slug":"et/fuka@2026.5.0","kind":"package","url":"{furl}","contact":null,{}}}"#,
+            info("2026.5.0", &it.f)
+        );
+        let fuka_versions = format!(
+            r#"{{"slug":"et/fuka","versions":[{{{},"url":"{furl}","library":true,"thorns":[],"claims":[]}}]}}"#,
+            info("2026.5.0", &it.f)
+        );
+        let resolve_eigen = format!(
+            r#"{{"slug":"et/eigen@3.4.0","kind":"package","url":"{gone}","contact":null,{}}}"#,
+            info("3.4.0", &ec)
+        );
+        let eigen_versions = format!(
+            r#"{{"slug":"et/eigen","versions":[{{{},"url":"{gone}","library":true,"thorns":[],"claims":[]}}]}}"#,
+            info("3.4.0", &ec)
+        );
+        let (base, _) = crate::fetch::download::test_server::serve_with(6, move |path| {
+            let body = match path {
+                p if p.contains("/resolve") && p.contains("kadaththorn") => resolve_kadath.clone(),
+                p if p.contains("/resolve") && p.contains("eigen") => resolve_eigen.clone(),
+                p if p.contains("/resolve") => resolve_fuka.clone(),
+                p if p.contains("/packages/et/kadaththorn/") => kadath_versions.clone(),
+                p if p.contains("/packages/et/eigen/") => eigen_versions.clone(),
+                _ => fuka_versions.clone(),
+            };
+            ("200 OK", "api-generation: 1\r\n".into(), body.into_bytes())
+        });
+        it.ctx
+            .db
+            .update(move |d| {
+                d.set_knob(crate::cactarium::URL_KNOB, base);
+                Ok(())
+            })
+            .unwrap();
+        let exclude_before = it.exclude();
+        let err = format!("{:#}", dispatch(&it.ctx, &["et/kadaththorn".to_owned()], false, false).unwrap_err());
+        assert!(err.contains("Failed to fetch") && err.contains("eigen"), "{err}");
+        assert_eq!(std::fs::read_link(it.kadath_dir().join("src/fuka")).unwrap(), std::path::Path::new("../../fuka"));
+        assert!(std::fs::symlink_metadata(it.kadath_dir().join("ext/fuka")).is_err(), "the new link went");
+        assert_eq!(it.exclude(), exclude_before);
+        let meta = it.inst.meta().unwrap();
+        assert_eq!(meta.added[0].libraries.len(), 1);
+        assert_eq!(meta.added[0].libraries[0].into, "src/fuka");
     }
 }
