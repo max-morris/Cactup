@@ -3578,7 +3578,11 @@ left while the attempt's `running.lock` is live (`build stop` says to stop
 it there and records nothing), and taken as ended once it is not. `build
 list` and `show` print `UNKNOWN` for an attempt with no outcome whose status
 query failed (unless its lock says it runs), and `build prune` keeps such an
-attempt. The submitter holds the attempt's `record.lock` while it submits
+attempt. `build stop` of a submitted attempt with no outcome whose job
+the scheduler does not list records nothing while the attempt's
+`running.lock` is held (a home two clusters share may hold another
+cluster's job), saying to run it again once the lock is released; once
+it is not, the outcome is recorded as before. The submitter holds the attempt's `record.lock` while it submits
 and records the job; `execute`'s writes take it and keep the job fields the
 submitter recorded, so a job that starts at once never writes back a copy
 without them.
@@ -4145,7 +4149,9 @@ Ports of `simfactory-docs.txt` §14.8 / §14.5:
     `unknown-job-pattern`) for a restart that has not recorded its end,
     rather than reading it as a run that left; it watches the lock instead
     of the queue for a job recorded on another host. The forced stop of a
-    batch job asks the scheduler nothing.
+    batch job asks the scheduler its status only to tell a job listed in a
+    state no pattern reads, or not listed at all, from a live one (§10);
+    a query that fails there sends the stop as before.
 - `cactup sim clean <sim>`: deactivate the active restart (remove the
   `-active` symlink), tighten `TERMINATE` perms, and run the Formaline tarball
   **hard-link dedup** across prior restarts. Dedup semantics are preserved verbatim from simfactory
@@ -4322,7 +4328,11 @@ machine sets `unknown-job-pattern`) refuses the delete for a restart that
 has not recorded its end, and is taken as the job ended for one that has; a
 job recorded on another host (pids) refuses it, `-f` too, while its
 restart's `running.lock` is live, and so does a foreground run on a batch
-scheduler's machine (§8.6); a restart recorded by an older cactup whose pid
+scheduler's machine (§8.6), and a restart that has not recorded its end
+whose job the scheduler here does not list (or, where the machine sets no
+`unknown-job-pattern`, could not be asked about) while its `running.lock`
+is held (a home two clusters share may hold another cluster's job; `test
+delete` refuses alike), nothing stopped; a restart recorded by an older cactup whose pid
 has a process here refuses it, `-f` too, saying to stop that pid by hand
 if it is the job (cactup cannot tell it from another process); `-f`
 refuses a restart whose process group is not its own rather than
@@ -5175,7 +5185,12 @@ and start time beside it), so no caller can skip the checks.
   it does not know taken as ended unless the run's `running.lock` is
   held; `sim stop -f` too (and, for a job a scheduler with
   `unknown-job-pattern` says it does not know, sends no stop and finishes
-  the restart, unless its `running.lock` is held). `sim submit` chains
+  the restart, unless its `running.lock` is held; where the machine sets
+  no `unknown-job-pattern`, a job not listed, which may be a query that
+  failed, is sent the stop, and the restart finished only if its
+  `running.lock` is not held, else nothing recorded; `build stop` of a job
+  not in the queue likewise records nothing while the attempt's
+  `running.lock` is held). `sim submit` chains
   behind it (the active restart has not recorded its end), `sim run`
   refuses beside it, the reaper never reaps it, and a graceful `sim stop`
   writes `TERMINATE` without waiting, at once or once the wait finds the

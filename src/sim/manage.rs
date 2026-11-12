@@ -72,16 +72,16 @@ fn left_unread(sim: &Simulation, r: &Restart, name: &str) {
 
 /// For `sim stop -f` of a job a batch scheduler answers for, that has not
 /// recorded its end: its state where that decides the stop, a state no
-/// pattern reads, or not known where the machine tells that from a failed
-/// query (`unknown-job-pattern`). `None` otherwise (live, a failed query,
-/// job ids that are pids): the stop is sent as it is.
+/// pattern reads, or not listed (not known where the machine tells that
+/// from a failed query, `unknown-job-pattern`; else not known or a query
+/// that failed). `None` otherwise (live, a failed query, job ids that are
+/// pids): the stop is sent as it is.
 fn batch_status(sched: &Scheduler, job: JobRef<'_>) -> Res<Option<JobStatus>> {
     if !sched.may_requeue() {
         return Ok(None);
     }
     match sched.get_status(job) {
-        Ok(JobStatus::Error) => Ok(Some(JobStatus::Error)),
-        Ok(JobStatus::Unknown) if sched.tells_failed_queries() => Ok(Some(JobStatus::Unknown)),
+        Ok(status @ (JobStatus::Error | JobStatus::Unknown)) => Ok(Some(status)),
         _ if gix::interrupt::is_triggered() => bail!("Interrupted"),
         _ => Ok(None),
     }
@@ -253,6 +253,28 @@ fn stop_sim(sim: &Simulation, sched: &Scheduler, name: &str, force: bool) -> Res
                             sentence(what)
                         ),
                     }
+                }
+                // Not listed where the machine cannot tell a job it does not
+                // know from a query that failed: the stop is sent (the job
+                // may be live), and the restart finished, unless something
+                // of its run still holds the restart's lock: a stop the
+                // scheduler takes for a job it does not list says nothing
+                // of the run (a home two clusters share may hold another
+                // cluster's job).
+                _ if !sched.tells_failed_queries() => {
+                    sched.stop(job)?;
+                    if crate::lock::LinkLock::is_held_live(&r.running_lock_path())? {
+                        println!(
+                            "Asked the scheduler to stop job {}, which it does not list or could not be asked \
+                             about, but the restart's running.lock is held; nothing recorded. Run `cactup sim \
+                             stop -f {name}` again once the lock is released (a stale lock expires within {} \
+                             minutes).",
+                            r.meta.job_id,
+                            crate::lock::LOCK_STALE_SECS / 60
+                        );
+                        return Ok(());
+                    }
+                    println!("Stopped job {} via the scheduler", r.meta.job_id.bold());
                 }
                 // Not known to a scheduler that tells a job it does not know
                 // from a failed query: nothing to stop, and over, unless
@@ -905,6 +927,32 @@ fn live_jobs(sim: &Simulation, sched: &Scheduler) -> Res<Vec<LiveJob>> {
             Some(status) => *status,
             None => sched.get_status_of(r.meta.job(), ended)?,
         };
+        // Before its end, a job the scheduler here does not list whose
+        // run still holds the restart's lock (a home two clusters share,
+        // the job another cluster's) is not taken for gone: refused, `-f`
+        // too, as for a foreground run or another host's pid above.
+        if !ended
+            && status == JobStatus::Unknown
+            && crate::lock::LinkLock::is_held_live(&r.running_lock_path())?
+        {
+            // §10: `unknown-job-pattern` makes a failed query an error,
+            // never this; where job ids are pids, `ps` is what answers.
+            let failed = match sched.tells_failed_queries() || !sched.may_requeue() {
+                true => "",
+                false => " or could not be asked",
+            };
+            bail!(
+                "Restart {} of simulation \"{}\" has its running.lock held, but the scheduler does not list \
+                 its job {}{failed}; it may be running on another host. Stop it where it runs, or run \
+                 `cactup sim delete {}` again once the lock is released (a stale lock expires within {} \
+                 minutes)",
+                restart::dir_name(r.id),
+                sim.name,
+                r.meta.job_id,
+                sim.name,
+                crate::lock::LOCK_STALE_SECS / 60
+            );
+        }
         if is_live(status, ended) {
             live.push(LiveJob {
                 id: r.id,
@@ -2538,6 +2586,12 @@ mod tests {
 
     impl UnreadFake {
         fn new() -> UnreadFake {
+            UnreadFake::with_pattern(true)
+        }
+
+        /// [`UnreadFake::new`], its machine setting no `unknown-job-pattern`
+        /// unless `pattern` (`gone` is then no status line: not listed).
+        fn with_pattern(pattern: bool) -> UnreadFake {
             let tmp = tempfile::tempdir().unwrap();
             let dir = tmp.path().display().to_string();
             fs::write(
@@ -2562,7 +2616,7 @@ mod tests {
                 [scheduler]
                 get-status = "sh {dir}/status.sh @JOB_ID@"
                 stop = "sh {dir}/stop.sh @JOB_ID@"
-                unknown-job-pattern = 'Invalid job id specified'
+                {unknown}
                 status-pattern = "^@JOB_ID@ "
                 queued-pattern = " PD"
                 running-pattern = " (CF|CG|R|TO)"
@@ -2572,7 +2626,8 @@ mod tests {
                 "default" = ["local"]
                 [runscripts]
                 "default" = ["local"]
-                "#
+                "#,
+                unknown = if pattern { "unknown-job-pattern = 'Invalid job id specified'" } else { "" },
             ))
             .unwrap();
             UnreadFake { tmp, meta }
@@ -2779,5 +2834,71 @@ mod tests {
         assert!(refused.ends_with("run `cactup sim stop s` first, or use -f to stop it and delete"), "{refused}");
         let refused = crate::sim::start::active_refusal_for_tests(&sim, &sched, 0);
         assert!(refused.ends_with("(output-0000); wait for it, or run `cactup sim stop s` first"), "{refused}");
+    }
+
+    /// `sim delete` of a simulation whose running restart's job the
+    /// scheduler does not list while the restart's `running.lock` is held
+    /// (a home two clusters share, the job another cluster's): refused,
+    /// `-f` too, nothing stopped or deleted; once the lock is let go, the
+    /// job is taken as gone. Where the machine sets no
+    /// `unknown-job-pattern`, the refusal allows for a failed query.
+    #[test]
+    fn sim_delete_refuses_while_an_unlisted_jobs_lock_is_held() {
+        for pattern in [true, false] {
+            let fake = UnreadFake::with_pattern(pattern);
+            let sched = fake.sched();
+            fake.set("state", "gone");
+            let sim = fake.sim("s", true);
+            let r = Restart::load(&sim.dir, 0).unwrap();
+            let held = crate::lock::LinkLock::acquire(&r.running_lock_path()).unwrap();
+            for force in [false, true] {
+                let err = clear_live(&sim, &sched, "s", force).unwrap_err().to_string();
+                assert!(
+                    err.starts_with(
+                        "Restart output-0000 of simulation \"s\" has its running.lock held, but the scheduler \
+                         does not list its job 4242"
+                    ),
+                    "{err}"
+                );
+                assert_eq!(err.contains("or could not be asked"), !pattern, "{err}");
+                assert!(err.contains("run `cactup sim delete s` again once the lock is released"), "{err}");
+            }
+            assert!(!fake.stopped(), "a stop was sent");
+            assert!(sim.dir.exists());
+            drop(held);
+            clear_live(&sim, &sched, "s", false).unwrap();
+            assert!(!fake.stopped());
+        }
+    }
+
+    /// `sim stop -f` where the machine sets no `unknown-job-pattern` and
+    /// the scheduler does not list the job (or could not be asked): the
+    /// stop is sent; with the restart's `running.lock` held nothing is
+    /// recorded, else the restart is finished.
+    #[test]
+    fn sim_stop_dash_f_of_an_unlisted_job_without_the_pattern() {
+        let fake = UnreadFake::with_pattern(false);
+        let sched = fake.sched();
+        fake.set("state", "gone");
+        let sim = fake.sim("gone", true);
+        let r = Restart::load(&sim.dir, 0).unwrap();
+        let held = crate::lock::LinkLock::acquire(&r.running_lock_path()).unwrap();
+        let before = record(&sim);
+        stop_sim(&sim, &sched, "gone", true).unwrap();
+        assert!(fake.stopped(), "no stop sent for a job that may be live");
+        assert_eq!(record(&sim), before, "recorded something with the lock held");
+        assert_eq!(restart::active_id(&sim.dir).unwrap(), Some(0));
+        drop(held);
+        stop_sim(&sim, &sched, "gone", true).unwrap();
+        assert!(fake.stopped());
+        assert!(finished(&sim));
+        assert!(logged(&sim).contains("stopped job 4242 (output-0000)"));
+
+        // A stop that fails is an error, nothing recorded, as before.
+        fake.set("refuse", TRANSIENT);
+        let sim = fake.sim("failing", true);
+        let before = record(&sim);
+        assert!(stop_sim(&sim, &sched, "failing", true).is_err());
+        assert_eq!(record(&sim), before);
     }
 }

@@ -1532,6 +1532,19 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
                     ),
                 }
             }
+            // Not in the queue: nothing to stop, and over, unless something
+            // of the attempt still holds its lock (a home two clusters
+            // share, the job another cluster's).
+            _ if LinkLock::is_held_live(&attempt.running_lock_path())? => {
+                println!(
+                    "Build job {} is not in the queue, but the attempt's running.lock is held; nothing \
+                     recorded. Run `cactup build stop {name}` again once the lock is released (a stale lock \
+                     expires within {} minutes).",
+                    attempt.meta.job_id,
+                    crate::lock::LOCK_STALE_SECS / 60
+                );
+                return Ok(());
+            }
             _ => println!(
                 "Build job {} is not in the queue; nothing to stop",
                 attempt.meta.job_id
@@ -3187,6 +3200,29 @@ mod tests {
         let attempt = BuildAttempt::open(&config_dir, 0).unwrap();
         let outcome = attempt.meta.outcome.expect("stop records an outcome");
         assert!(!outcome.complete);
+    }
+
+    /// A submitted attempt whose job the scheduler does not list, while its
+    /// `running.lock` is held (a home two clusters share, the job another
+    /// cluster's): `stop` records nothing; once the lock is let go it
+    /// records the outcome.
+    #[test]
+    fn stop_records_nothing_while_an_unlisted_jobs_lock_is_held() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = tmp.path().join("inst/Cactus");
+        let config_dir = cactus.join("configs/sim");
+        let attempt = make_attempt(&config_dir, &cactus, "sim", 0, "JOB-1", true, None);
+        let inst = Installation::new("et", tmp.path().join("inst"));
+        let machine = fake_submit_machine(&tmp.path().join("mdb/fake"), "", "", false);
+
+        let held = crate::lock::LinkLock::acquire(&attempt.running_lock_path()).unwrap();
+        stop_impl(&machine, &inst, Some("sim"), false).unwrap();
+        let after = BuildAttempt::open(&config_dir, 0).unwrap();
+        assert!(after.meta.outcome.is_none() && after.meta.timestamps.finished.is_none(), "recorded with the lock held");
+        drop(held);
+        stop_impl(&machine, &inst, Some("sim"), false).unwrap();
+        let after = BuildAttempt::open(&config_dir, 0).unwrap();
+        assert!(after.meta.outcome.is_some_and(|o| !o.complete));
     }
 
     /// `build prune` keeps the newest N, removes the rest, and skips (rather
