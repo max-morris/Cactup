@@ -206,13 +206,22 @@ pub struct Hardware {
     // §4.6
     #[serde(default)]
     pub autodetect: bool,
-    // §8.5
+    // §8.5 (the GPU bound on a derived TASKS_PER_NODE is detailed there)
     /// CPUs/cores available per node — the availability fact the fill-the-node
     /// rule divides by `CPUS_PER_TASK` to get `TASKS_PER_NODE` (on a GPU run a
-    /// fully derived result — no `--tpn`/`--tasks` — is bounded by
-    /// `max-gpus-per-node`, so a machine may declare a `default-cpus-per-task`
-    /// that deliberately leaves CPUs idle).
+    /// derived one is also bounded by `max-gpus-per-node`, so a machine may
+    /// declare a `default-cpus-per-task` that deliberately leaves CPUs idle),
+    /// and that a missing `--nodes` is derived from — when it is declared
+    /// (`max_cpus_per_node_detected` below).
     pub max_cpus_per_node: Option<u32>,
+    // §4.6 (filled at load), §8.5 (nothing derived from a detected value)
+    /// Whether `max_cpus_per_node` counts as detected rather than declared:
+    /// filled from this host at load, or the top-level value of a user-layer
+    /// overlay, where `machine create` writes this host's cores. A login
+    /// node's cores say nothing about a compute node's, so no node count is
+    /// derived, and no layout refused, on a detected value.
+    #[serde(skip)]
+    pub max_cpus_per_node_detected: bool,
     /// Request-side default for `CPUS_PER_TASK` when `--cpus` is omitted.
     // §8.5
     pub default_cpus_per_task: Option<u32>,
@@ -993,6 +1002,8 @@ impl Meta {
         Ok(Hardware {
             autodetect: self.hardware.autodetect,
             max_cpus_per_node: q.max_cpus_per_node.or(self.hardware.max_cpus_per_node),
+            max_cpus_per_node_detected: q.max_cpus_per_node.is_none()
+                && self.hardware.max_cpus_per_node_detected,
             default_cpus_per_task: q.default_cpus_per_task.or(self.hardware.default_cpus_per_task),
             max_gpus_per_node: q.max_gpus_per_node.or(self.hardware.max_gpus_per_node),
             default_gpus_per_task: q.default_gpus_per_task.or(self.hardware.default_gpus_per_task),
@@ -1087,6 +1098,44 @@ impl Meta {
     pub fn in_allocation(&self) -> Option<bool> {
         self.allocation_status(|name| {
             std::env::var_os(name).is_some_and(|v| !v.is_empty())
+        })
+    }
+
+    /// The node count of the job allocation this process runs in, where its
+    /// environment says (§8.5): beside a set Slurm `allocation-env` variable,
+    /// `SLURM_JOB_NUM_NODES` (or the older `SLURM_NNODES`); beside a PBS one,
+    /// Torque's `PBS_NUM_NODES`. `None` outside an allocation, or when the
+    /// family offers no count.
+    pub fn allocation_nodes(&self) -> Option<u32> {
+        let read = |path: &std::path::Path| std::fs::read_to_string(path).ok();
+        self.allocation_nodes_with(|name| std::env::var(name).ok(), read)
+    }
+
+    /// The `allocation_nodes` core, taking the env lookup and the file read
+    /// as closures.
+    pub(crate) fn allocation_nodes_with(
+        &self,
+        get: impl Fn(&str) -> Option<String>,
+        read: impl Fn(&std::path::Path) -> Option<String>,
+    ) -> Option<u32> {
+        let set = |name: &str| get(name).is_some_and(|v| !v.is_empty());
+        let count = |name: &str| get(name)?.trim().parse::<u32>().ok().filter(|&n| n > 0);
+        self.scheduler.allocation_env.iter().filter(|var| set(var)).find_map(|var| {
+            if var.starts_with("SLURM_") {
+                count("SLURM_JOB_NUM_NODES").or_else(|| count("SLURM_NNODES"))
+            } else if var.starts_with("PBS_") {
+                // PBS Pro sets no PBS_NUM_NODES: its node file lists one line
+                // per slot, so the distinct host names are the nodes. A file
+                // missing or unreadable leaves the count unknown.
+                count("PBS_NUM_NODES").or_else(|| {
+                    let text = read(std::path::Path::new(&get("PBS_NODEFILE")?))?;
+                    let hosts: std::collections::BTreeSet<&str> =
+                        text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+                    u32::try_from(hosts.len()).ok().filter(|&n| n > 0)
+                })
+            } else {
+                None
+            }
         })
     }
 
@@ -2370,6 +2419,29 @@ mod tests {
         assert_eq!(meta.scheduler.allocation_env, ["SLURM_JOB_ID", "PBS_JOBID"]);
         assert_eq!(meta.allocation_status(|n| n == "PBS_JOBID"), Some(true));
         assert_eq!(meta.allocation_status(|_| false), Some(false));
+
+        // The allocation's node count, from the family of the set variable.
+        let env = |vars: &'static [(&'static str, &'static str)]| {
+            move |name: &str| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.to_string())
+        };
+        let nodes = |vars| meta.allocation_nodes_with(env(vars), |_| None);
+        assert_eq!(nodes(&[]), None);
+        assert_eq!(nodes(&[("SLURM_JOB_ID", "7"), ("SLURM_JOB_NUM_NODES", "4")]), Some(4));
+        assert_eq!(nodes(&[("SLURM_JOB_ID", "7"), ("SLURM_NNODES", "2")]), Some(2));
+        assert_eq!(nodes(&[("PBS_JOBID", "7"), ("PBS_NUM_NODES", "3")]), Some(3));
+        // A count without its allocation variable, or one that is no count, is none.
+        assert_eq!(nodes(&[("SLURM_JOB_NUM_NODES", "4")]), None);
+        assert_eq!(nodes(&[("SLURM_JOB_ID", "7"), ("SLURM_JOB_NUM_NODES", "0")]), None);
+        assert_eq!(nodes(&[("PBS_JOBID", "7"), ("SLURM_NNODES", "2")]), None);
+        // PBS Pro: the distinct hosts of $PBS_NODEFILE; no file, no count.
+        let pro = env(&[("PBS_JOBID", "7"), ("PBS_NODEFILE", "/var/spool/pbs/aux/7")]);
+        let file = |p: &std::path::Path| {
+            let lines = "n1\nn1\nn2\n\nn3\nn2\n";
+            (p == std::path::Path::new("/var/spool/pbs/aux/7")).then(|| lines.to_owned())
+        };
+        assert_eq!(meta.allocation_nodes_with(pro, file), Some(3));
+        assert_eq!(meta.allocation_nodes_with(pro, |_| None), None);
+        assert_eq!(meta.allocation_nodes_with(pro, |_| Some(String::new())), None);
     }
 
     #[test]

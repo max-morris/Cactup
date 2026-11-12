@@ -231,6 +231,16 @@ pub(crate) enum MakeJobs {
     Max,
 }
 
+impl std::fmt::Display for MakeJobs {
+    /// The `-j` word that parses back to this value.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MakeJobs::Count(n) => write!(f, "{n}"),
+            MakeJobs::Max => f.write_str("max"),
+        }
+    }
+}
+
 /// clap adapter for `-j`: a positive integer or the word `max`.
 fn parse_make_jobs(s: &str) -> Result<MakeJobs, String> {
     if s.eq_ignore_ascii_case("max") {
@@ -320,6 +330,9 @@ pub(crate) enum Commands {
     Install(InstallArgs),
     // §8.9
     /// Reproduce a .sim file: install its sources, build them, create the simulation, and optionally submit or run it
+    // `-a` is `--alias` here, as in `install`: the flattened TOPOLOGY
+    // allocation keeps its long form only.
+    #[command(mut_arg("allocation", |a| a.short(None)))]
     Import(ImportArgs),
     // §8.11
     /// Add Cactarium packages' thorns to the active installation, at the commit the registry froze for each version
@@ -604,7 +617,7 @@ pub(crate) struct InstallArgs {
 
 // §4.8
 /// `--universe U | --no-universe`, shared by build/submit/run commands.
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, Clone, Default)]
 pub(crate) struct UniverseFlags {
     // §4.8
     /// Run inside the named universe, overriding any default.
@@ -613,6 +626,20 @@ pub(crate) struct UniverseFlags {
     /// Force the host context, overriding any default universe.
     #[clap(long)]
     pub no_universe: bool,
+}
+
+impl UniverseFlags {
+    /// These flags as the command line that parses back to them.
+    pub fn to_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if let Some(u) = &self.universe {
+            args.extend(["--universe".to_owned(), u.clone()]);
+        }
+        if self.no_universe {
+            args.push("--no-universe".to_owned());
+        }
+        args
+    }
 }
 
 // §8.5
@@ -631,19 +658,23 @@ pub(crate) struct TopologyFlags {
     /// Notification type (default: knob, `all`).
     #[clap(short = 'M', long, value_name = "TYPE")]
     pub mail_type: Option<String>,
-    /// Node count (default: 1).
-    #[clap(short, long, value_name = "N")]
+    /// Node count. Default: for a job given to the scheduler, as many as the
+    /// tasks need, ceil(tasks / tasks-per-node), where --tpn is given or the
+    /// machine database declares the node size; inside a job allocation, its
+    /// own node count (all of it without --tasks); otherwise 1.
+    #[clap(short, long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     pub nodes: Option<u32>,
     /// Total tasks (MPI ranks). Default: the run/submit script's `tasks` setting,
     /// else nodes * tasks-per-node; `test run`/`test submit` default to 2.
-    #[clap(short = 'T', long, value_name = "N")]
+    #[clap(short = 'T', long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     pub tasks: Option<u32>,
-    /// Tasks per node (default: fill the node, floor(MAX_CPUS_PER_NODE / cpus);
-    /// on a GPU run without --tasks, also bounded by the node's GPU count).
-    #[clap(short, long, value_name = "N")]
+    /// Tasks per node. Default: fill the node, floor(MAX_CPUS_PER_NODE / cpus),
+    /// and on a GPU run no more than the node's GPUs can feed; with --tasks,
+    /// the tasks spread evenly over the nodes.
+    #[clap(short, long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     pub tpn: Option<u32>,
     /// CPUs (threads) per task (default: the machine/queue `default-cpus-per-task`, else 1).
-    #[clap(short, long, value_name = "N")]
+    #[clap(short, long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     pub cpus: Option<u32>,
     /// Use GPUs (default: inferred from the queue's gpu flag).
     #[clap(short, long)]
@@ -669,6 +700,36 @@ pub(crate) struct TopologyFlags {
     /// stderr filename (default: template default).
     #[clap(short, long, value_name = "FILE")]
     pub err: Option<String>,
+}
+
+impl TopologyFlags {
+    /// These flags as the command line that parses back to them (long
+    /// forms, so it reads the same under `import`, where `-a` is `--alias`).
+    pub fn to_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        let mut add = |flag: &str, value: Option<String>| {
+            if let Some(value) = value {
+                args.extend([format!("--{flag}"), value]);
+            }
+        };
+        add("allocation", self.allocation.clone());
+        add("queue", self.queue.clone());
+        add("mail", self.mail.clone());
+        add("mail-type", self.mail_type.clone());
+        add("nodes", self.nodes.map(|n| n.to_string()));
+        add("tasks", self.tasks.map(|n| n.to_string()));
+        add("tpn", self.tpn.map(|n| n.to_string()));
+        add("cpus", self.cpus.map(|n| n.to_string()));
+        add("gpus-per-task", self.gpus_per_task.map(|n| n.to_string()));
+        add("job-name", self.job_name.clone());
+        add("wall-time", self.wall_time.map(|w| w.canonical()));
+        add("out", self.out.clone());
+        add("err", self.err.clone());
+        if self.gpu {
+            args.push("--gpu".to_owned());
+        }
+        args
+    }
 }
 
 // §7.1, §7.6, §7.7
@@ -1017,27 +1078,19 @@ pub(crate) struct ImportArgs {
     /// Optionlist flavor to build with, when the machine has several and none is the default.
     #[clap(long, value_name = "FLAVOR")]
     pub flavor: Option<String>,
+    // §7.6: passed to the import's build, which runs with or without --submit/--run.
+    /// Parallel make jobs for the build: a number, or `max` for all threads available in the build context (default: machine make-jobs, else 1).
+    #[clap(long, short = 'j', value_name = "N|max", value_parser = parse_make_jobs)]
+    pub make_jobs: Option<MakeJobs>,
     /// A value for one of the parfile's knob inputs; repeat for several. Stored with the simulation, never as a global knob.
     #[clap(long = "input", value_name = "KNOB=VALUE")]
     pub inputs: Vec<String>,
-    /// Submit the simulation once it is created.
+    /// Submit the simulation once it is created, with the options below as `sim submit` takes them; the .sim's suggestion fills in tasks, CPUs and GPUs per task, and wall time.
     #[clap(long, conflicts_with = "run")]
     pub submit: bool,
-    /// Run the simulation in the foreground once it is created.
+    /// Run the simulation in the foreground once it is created, with the options below as `sim run` takes them.
     #[clap(long)]
     pub run: bool,
-    /// Total tasks (MPI ranks) for --submit/--run (default: the .sim's suggestion).
-    #[clap(short = 'T', long, value_name = "N")]
-    pub tasks: Option<u32>,
-    /// CPUs per task for --submit/--run (default: the .sim's suggestion).
-    #[clap(short, long, value_name = "N")]
-    pub cpus: Option<u32>,
-    /// Wall time for --submit/--run (default: the .sim's suggestion).
-    #[clap(short, long, value_name = "(DD-)?HH:MM:SS")]
-    pub wall_time: Option<String>,
-    /// Queue for --submit.
-    #[clap(short, long, value_name = "QUEUE")]
-    pub queue: Option<String>,
     /// The prefix to install to.
     #[clap(long)]
     pub install_prefix: Option<String>,
@@ -1047,6 +1100,16 @@ pub(crate) struct ImportArgs {
     /// Take every default without asking.
     #[clap(short, long)]
     pub yes: bool,
+    // §8.9: what `sim submit`/`sim run` take, passed through to the one
+    // started; the .sim's run hints fill in tasks, CPUs and GPUs per task
+    // and wall time where these give none. `-a` is `--alias` here, so the
+    // allocation is long-only (the `mut_arg` on `Commands::Import`).
+    #[clap(flatten, next_help_heading = "With --submit or --run")]
+    pub start_flags: StartFlags,
+    #[clap(flatten, next_help_heading = "With --submit or --run")]
+    pub universe: UniverseFlags,
+    #[clap(flatten, next_help_heading = "With --submit or --run")]
+    pub topology: TopologyFlags,
 }
 
 /// `cactup sim export`. Every field the .sim carries has a default; on a
@@ -1262,6 +1325,24 @@ pub(crate) struct SimStartArgs {
     #[clap(long)]
     pub overwrite: bool,
     // §4.4
+    /// Suppress the notice that the source tree has changed since this
+    /// config was built.
+    #[clap(short, long)]
+    pub silent: bool,
+    #[clap(flatten)]
+    pub start_flags: StartFlags,
+    #[clap(flatten)]
+    pub universe: UniverseFlags,
+    #[clap(flatten)]
+    pub topology: TopologyFlags,
+}
+
+// §4.4, §7.4, §8.8
+/// The start flags `sim submit`, `sim run` and `import` share, beside the
+/// TOPOLOGY and universe flags.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub(crate) struct StartFlags {
+    // §4.4
     /// Bypass the optionlist↔queue compatibility check.
     #[clap(long)]
     pub force_queue: bool,
@@ -1270,19 +1351,28 @@ pub(crate) struct SimStartArgs {
     /// your own risk.
     #[clap(long)]
     pub ignore_machine: bool,
-    /// Suppress the notice that the source tree has changed since this
-    /// config was built.
-    #[clap(short, long)]
-    pub silent: bool,
-    #[clap(flatten)]
-    pub universe: UniverseFlags,
-    #[clap(flatten)]
-    pub topology: TopologyFlags,
     // §8.8
     /// Override the checkpoint-hint buffer: @CHECKPOINT_WALLTIME@ = hard wall
     /// − buffer (default max(wall/24, 10 min)).
     #[clap(long, value_name = "(DD-)?HH:MM:SS", value_parser = parse_walltime)]
     pub checkpt_buffer: Option<Walltime>,
+}
+
+impl StartFlags {
+    /// These flags as the command line that parses back to them.
+    pub fn to_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if self.force_queue {
+            args.push("--force-queue".to_owned());
+        }
+        if self.ignore_machine {
+            args.push("--ignore-machine".to_owned());
+        }
+        if let Some(w) = self.checkpt_buffer {
+            args.extend(["--checkpt-buffer".to_owned(), w.canonical()]);
+        }
+        args
+    }
 }
 
 #[derive(clap::Args, Debug)]
