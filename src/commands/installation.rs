@@ -256,7 +256,8 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
                 format!(", in place of {}", package.replaces.join(", "))
             };
             let follows = if crate::commands::add::is_tip(&package.version) { ", follows its default branch" } else { "" };
-            println!("  {label:<13} {}@{} ({}){replaces}{follows}", package.package, package.version, thorns.join(", "));
+            let what = crate::commands::add::describe(&package.package, &package.version);
+            println!("  {label:<13} {what} ({}){replaces}{follows}", thorns.join(", "));
             println!("  {:<13}   problems? {}", "", package.contact.as_deref().unwrap_or(&package.url));
             if let Some(why) = yanked.get(&format!("{}@{}", package.package, package.version)) {
                 println!("{}", format!("  {:<13}   yanked on the Cactarium{}", "", reason(why)).yellow());
@@ -309,8 +310,11 @@ fn yanked_since(
     if let Some(slug) = current_stack(entry) {
         asks.push((EntryKind::Stack, slug.to_owned()));
     }
-    // A branch tip has no version to yank.
-    for package in added.iter().filter(|p| !crate::commands::add::is_tip(&p.version)) {
+    // A branch tip or a bare commit has no version to yank.
+    for package in added
+        .iter()
+        .filter(|p| !crate::commands::add::is_tip(&p.version) && !crate::commands::add::is_commit(&p.version))
+    {
         asks.push((EntryKind::Package, format!("{}@{}", package.package, package.version)));
     }
     if asks.is_empty() {

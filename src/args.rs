@@ -292,9 +292,10 @@ pub(crate) struct GlobalOpts {
         action = ArgAction::Append
     )]
     pub knob: Vec<KnobOverride>,
-    /// Take a branch tip (@head, @master) of a stack or package the Cactarium
-    /// does not trust without asking. Nobody reviews those tips: they may
-    /// fetch and build arbitrary code. The warning is still printed.
+    /// Take a branch tip (@head, @master) of a stack or package, or a package
+    /// at a commit no published version names (#commit), from a source the Cactarium
+    /// does not trust, without asking. Nobody reviews those: they may fetch
+    /// and build arbitrary code. The warning is still printed.
     #[clap(long, global = true)]
     pub risky_allow_untrusted_artifacts: bool,
 }
@@ -323,7 +324,7 @@ pub(crate) enum Commands {
     // §8.11
     /// Add Cactarium packages' thorns to the active installation, at the commit the registry froze for each version
     Add {
-        /// The packages: owner/name for all its thorns, owner/name/Thorn for one (repeat for several), with @version or @track:range to choose.
+        /// The packages: owner/name for all its thorns, owner/name/Thorn for one (repeat for several), with @version or @track:range to choose, or #commit (7 or more hex digits) for a commit.
         #[clap(required = true, value_name = "PACKAGE")]
         packages: Vec<String>,
         /// Use the package in place of a repo the installation's thornlist already has.
@@ -576,7 +577,7 @@ pub(crate) struct RefetchArgs {
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct InstallArgs {
-    #[clap(help = "The release to install, or \"master\" for the tip of the manifest's master branch (default: the most recent release).")]
+    #[clap(help = "What to install: a release, \"master\" for the tip of the manifest's master branch, or a Cactarium stack (owner/stack, owner/stack@version or owner/stack@track:range). Default: the most recent release.")]
     pub release: Option<String>,
     #[clap(long, value_name = "PATH", conflicts_with = "release", help = "Install from this thornlist file instead of a release.")]
     pub thornlist: Option<PathBuf>,
