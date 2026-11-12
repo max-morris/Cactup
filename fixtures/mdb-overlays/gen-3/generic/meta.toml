@@ -1,0 +1,64 @@
+[machine]
+name = "generic"
+nickname = "fixture"
+location = "somewhere"
+description = "Single-node workstation, no batch system"
+status = "personal"
+hostname = "fixture.example.org"
+
+[paths]
+simulation-home = "/scratch/fixture-home/simulations"
+install-home = "/scratch/fixture-home/cacti"
+
+[hardware]
+max-cpus-per-node = 16
+memory = 65536
+
+[build]
+make = "make -j@MAKEJOBS@"
+
+[scheduler]
+submit = "exec nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
+blocking-submit = "@SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
+get-status = "ps @JOB_ID@"
+job-ids = "pids"
+stop = "pkill -g $(ps -o pgid= -p @JOB_ID@)"
+submit-pattern = "(.*)"
+status-pattern = "^ *@JOB_ID@ "
+queued-pattern = "$^"
+running-pattern = "^"
+holding-pattern = "$^"
+exec-host = "echo localhost"
+exec-host-pattern = "(.*)"
+
+[environment]
+env-setup = """
+export LIBRARY_PATH="${LIBRARY_PATH:+$LIBRARY_PATH:}/usr/local/lib64:/usr/local/lib:/usr/lib64:/usr/lib:/lib64:/lib"
+export CPATH="${CPATH:+$CPATH:}/usr/local/include:/usr/include:/include"
+"""
+
+[queues.local]
+gpu = false
+max-walltime = "8760:00:00"
+default = true
+
+[submitscripts.default]
+queues = ["local"]
+
+[submitscripts.test]
+queues = ["local"]
+test = true
+
+[runscripts.default]
+queues = ["local"]
+
+[runscripts.test]
+queues = ["local"]
+test = true
+
+[cactup]
+mdb-generation = 3
+
+[cactup.origin]
+from = "generic"
+hash = "add42becdad6522f"
