@@ -308,7 +308,7 @@ pub fn create(
     let CreateRequest { force, ignore_machine, name, parfile, config, sim_dir } = *req;
     let inst_meta = inst.meta()?;
     let sim_home = inst_meta.sim_home()?.to_owned();
-    let cactus_root = inst.cactus_root();
+    let cactus_root = inst.cactus_root()?;
 
     // 1. Resolve the config and locate its built executable (fatal if missing).
     let config = match config {

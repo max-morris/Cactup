@@ -8,6 +8,7 @@
 pub mod download;
 pub mod external;
 pub mod git;
+pub mod library;
 pub mod link;
 pub(crate) mod retry;
 
@@ -50,6 +51,10 @@ pub struct Plan {
     pub external: Vec<Component>,
     /// Components needing an arrangement symlink after fetching.
     pub links: Vec<Component>,
+    /// Libraries placed inside another clone (`!CHECKOUT = .` sections whose
+    /// `!TARGET` is inside `repos/`; see [`library`]), in the order they are
+    /// placed: after every clone, a library inside another library after it.
+    pub libraries: Vec<library::Placement>,
     /// The thornlist's `ROOT` define (typically `Cactus`).
     pub root: String,
 }
@@ -702,6 +707,10 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
             });
         }
     });
+    // The pool is joined: every clone and checkout of this fetch is over.
+    // Placing a library takes this, so it cannot be done from inside the
+    // pool, while the clone it goes into may still be being written.
+    let clones_done = library::ClonesDone::after_the_pool();
 
     // External tools (svn/cvs) talk to the terminal directly, so the
     // renderer must be gone before they run — shut it down here rather than
@@ -771,6 +780,31 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
         }
     }
     drop(link_span);
+
+    // Libraries, after every clone above has finished (the pool is joined)
+    // and in the plan's order: the one write each makes is a link inside the
+    // clone it goes into, so nothing writes inside a dependent while it is
+    // being cloned or checked out, and a library inside another library comes
+    // after it. One whose dependent (or own clone, or the library it goes
+    // inside) failed is not attempted, and says why.
+    let failed: std::collections::BTreeSet<String> = report.failures.iter().map(|f| f.what.clone()).collect();
+    let mut unplaced = std::collections::BTreeSet::new();
+    for (i, p) in plan.libraries.iter().enumerate() {
+        if gix::interrupt::is_triggered() {
+            for p in &plan.libraries[i..] {
+                let error = "Interrupted before this library was placed".to_owned();
+                report.failures.push(Failure { what: p.label(), error });
+            }
+            return Ok(report);
+        }
+        match library::place(&clones_done, install_root, &plan.root, p, &failed, &unplaced) {
+            Ok(outcome) => report.links.push((p.label(), outcome)),
+            Err(e) => {
+                unplaced.insert(p.repo.clone());
+                report.failures.push(Failure { what: p.label(), error: format!("{e:#}") });
+            }
+        }
+    }
 
     // Last, after all git work: settle the index of every repo that was
     // cloned or aligned (or found already at its tip), so later status walks
@@ -1240,6 +1274,7 @@ pub fn plan(
     let mut downloads = Vec::new();
     let mut external = Vec::new();
     let mut links = Vec::new();
+    let mut placements: Vec<(&Component, String, String)> = Vec::new();
 
     for c in list.components() {
         match c.ty {
@@ -1248,6 +1283,17 @@ pub fn plan(
                     .url
                     .clone()
                     .with_context(|| format!("git component {} has no !URL", c.checkout))?;
+                // Two names that differ only in case are one directory on a
+                // case-insensitive filesystem: one clone, claimed twice.
+                if let Some(other) =
+                    git_groups.keys().find(|k| **k != c.repo && k.eq_ignore_ascii_case(&c.repo))
+                {
+                    bail!(
+                        "Thornlist names repos {other} and {}, which differ only in case: on a case-insensitive \
+                         filesystem they are one directory",
+                        c.repo
+                    );
+                }
                 match git_groups.get_mut(&c.repo) {
                     None => {
                         git_groups.insert(
@@ -1280,7 +1326,10 @@ pub fn plan(
                         group.checkouts.push(c.checkout.clone());
                     }
                 }
-                links.push(c.clone());
+                match library::placement_of(&root, c) {
+                    Some((dependent, into)) => placements.push((c, dependent, into)),
+                    None => links.push(c.clone()),
+                }
             }
             ComponentType::Http | ComponentType::Https | ComponentType::Ftp => {
                 downloads.push(c.clone());
@@ -1298,12 +1347,37 @@ pub fn plan(
         }
     }
 
+    // Each library goes inside a clone this list checks out, at a plain path
+    // under it; the dependent's source comes along, to check the clone on
+    // disk against before anything is placed inside it.
+    let mut libraries = Vec::new();
+    for (c, dependent, into) in placements {
+        library::check_into(&into).with_context(|| format!("The thornlist places {} inside {dependent}", c.repo))?;
+        let Some(host) = git_groups.get(&dependent) else {
+            bail!(
+                "The thornlist places {} inside repos/{dependent}, which it does not check out; a library goes only \
+                 inside a clone the same list fetches",
+                c.repo
+            );
+        };
+        libraries.push(library::Placement {
+            repo: c.repo.clone(),
+            url: c.url.clone().unwrap_or_default(),
+            dependent,
+            dependent_url: host.url.clone(),
+            dependent_commit: host.commit.clone(),
+            into,
+        });
+    }
+    let libraries = library::order(libraries)?;
+
     let mut plan = Plan {
         git: Vec::new(),
         skipped: Vec::new(),
         downloads,
         external,
         links,
+        libraries,
         root,
     };
 
@@ -1767,6 +1841,7 @@ pub(crate) mod tests {
             .unwrap();
 
         let mut plan = Plan {
+            libraries: Vec::new(),
             git: Vec::new(),
             skipped: vec![skipped_repo(a_dir.clone(), "A", None), skipped_repo(b_dir.clone(), "B", Some("main"))],
             downloads: Vec::new(),
@@ -1829,6 +1904,7 @@ pub(crate) mod tests {
             checkouts: vec!["R".to_string()],
         };
         let mut plan = Plan {
+            libraries: Vec::new(),
             git: Vec::new(),
             skipped: vec![skipped],
             downloads: Vec::new(),
@@ -1855,6 +1931,7 @@ pub(crate) mod tests {
         // Control: the identical fixture, skipped for a reason that is *not*
         // a URL change, does take the `Update` early-out.
         let mut plan = Plan {
+            libraries: Vec::new(),
             git: Vec::new(),
             skipped: vec![skipped_repo(dir.clone(), "R", Some("main"))],
             downloads: Vec::new(),
@@ -1881,6 +1958,7 @@ pub(crate) mod tests {
         let mut plan = Plan {
             git: Vec::new(),
             skipped: vec![skipped],
+            libraries: Vec::new(),
             downloads: Vec::new(),
             external: Vec::new(),
             links: Vec::new(),

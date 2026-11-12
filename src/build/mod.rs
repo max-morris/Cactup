@@ -1808,7 +1808,7 @@ fn prepare_with_cache(
     submit: Option<&SubmitReservation>,
     cache: Option<(crate::objcache::Mode, &str)>,
 ) -> Res<Prepared> {
-    let cactus_root = installation.cactus_root();
+    let cactus_root = installation.cactus_root()?;
     if !cactus_root.is_dir() {
         bail!("No Cactus tree at '{}'", cactus_root.display());
     }

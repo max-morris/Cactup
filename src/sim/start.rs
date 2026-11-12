@@ -297,7 +297,7 @@ fn submit_impl(
     verbose: bool,
     hostname_override: Option<&str>,
 ) -> Res<()> {
-    let cactus_root = inst.cactus_root();
+    let cactus_root = inst.cactus_root()?;
     let cfg = ConfigMeta::load(&cactus_root, &sim.meta.configuration)?
         .ok_or_else(|| config_missing_error(&cactus_root, machine, &sim.meta.configuration))?;
     check_sim_machine(machine, sim, &cfg, args.start_flags.ignore_machine || args.force)?;
@@ -692,7 +692,7 @@ fn run_interactive(
     verbose: bool,
     hostname_override: Option<&str>,
 ) -> Res<()> {
-    let cactus_root = inst.cactus_root();
+    let cactus_root = inst.cactus_root()?;
     let cfg = ConfigMeta::load(&cactus_root, &sim.meta.configuration)?
         .ok_or_else(|| config_missing_error(&cactus_root, machine, &sim.meta.configuration))?;
     check_sim_machine(machine, sim, &cfg, args.start.start_flags.ignore_machine || args.start.force)?;
@@ -1201,7 +1201,7 @@ mod tests {
             meta.sim_home = Some(sim_home);
             locked.set_meta(&meta).unwrap();
         }
-        let cfg_dir = inst.cactus_root().join("configs").join("sim");
+        let cfg_dir = inst.cactus_root().unwrap().join("configs").join("sim");
         fs::create_dir_all(&cfg_dir).unwrap();
         fs::write(
             cfg_dir.join("cactup-config.toml"),
@@ -1225,7 +1225,7 @@ mod tests {
         ] {
             fs::write(cfg_dir.join(file), body).unwrap();
         }
-        let exe_dir = inst.cactus_root().join("exe");
+        let exe_dir = inst.cactus_root().unwrap().join("exe");
         fs::create_dir_all(&exe_dir).unwrap();
         fs::write(exe_dir.join("cactus_sim"), "#!/bin/sh\necho cactus\n").unwrap();
         inst
@@ -1510,7 +1510,7 @@ mod tests {
 
         // A rebuild of "sim" is actively running right now — running.lock is
         // held, exactly what `execute` holds for the whole life of a build.
-        let cactus_root = inst.cactus_root();
+        let cactus_root = inst.cactus_root().unwrap();
         let config_dir = cactus_root.join("configs/sim");
         let attempt = crate::build::attempt::BuildAttempt::create(
             crate::build::attempt::BuildAttempt::attempt_dir(&config_dir, 0),
@@ -1620,7 +1620,7 @@ mod tests {
         let sim = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
 
         // The config now claims another machine.
-        let cfg_path = inst.cactus_root().join("configs/sim/cactup-config.toml");
+        let cfg_path = inst.cactus_root().unwrap().join("configs/sim/cactup-config.toml");
         let text = fs::read_to_string(&cfg_path)
             .unwrap()
             .replace("machine = \"fake\"", "machine = \"elsewhere\"");
@@ -1834,7 +1834,7 @@ mod tests {
         let machine = fake_machine(&tmp.path().join("mdb-fake"));
         let inst = fake_installation(&tmp.path().join("inst"));
         let ctx = fake_ctx(&tmp.path().join("db"));
-        let cfg_path = inst.cactus_root().join("configs/sim/cactup-config.toml");
+        let cfg_path = inst.cactus_root().unwrap().join("configs/sim/cactup-config.toml");
         let with_sources = |build_id: &str, head: &str| {
             format!(
                 "schema = 2\nname = \"sim\"\nflavor = \"default\"\nthornlist = \"installation-default.th\"\n\
@@ -1897,11 +1897,11 @@ mod tests {
         let built = crate::fetch::git::testrepo::commit_tree(&upstream, &[("Makefile", "all:\n", false)]);
         let (branch, _) = crate::fetch::git::head_of(&upstream).unwrap();
         let url = upstream.to_string_lossy().into_owned();
-        let repo_dir = inst.cactus_root().join("repos/carpetx");
+        let repo_dir = inst.cactus_root().unwrap().join("repos/carpetx");
         let mut progress = prodash::tree::Root::new().add_child("test clone");
         crate::fetch::git::clone(&url, Some(&branch), &repo_dir, &mut progress).unwrap();
 
-        let cfg_dir = inst.cactus_root().join("configs/sim");
+        let cfg_dir = inst.cactus_root().unwrap().join("configs/sim");
         let list = format!(
             "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!TARGET = $ROOT/arrangements\n!TYPE = git\n\
              !URL = {url}\n!REPO_BRANCH = {branch}\n!REPO_PATH = $2\n!CHECKOUT = CarpetX/Loop\n"
