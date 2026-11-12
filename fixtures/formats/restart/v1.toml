@@ -1,0 +1,27 @@
+schema = 1
+created = "2026-05-01T12:00:00Z"
+started = "2026-05-01T12:05:00Z"
+finished = "2026-05-01T13:05:00Z"
+nodes = 2
+tasks = 8
+tpn = 4
+cpus = 1
+gpus-per-task = 0
+queue = "workq"
+allocation = "proj1"
+walltime = "01-00:00:00"
+checkpt-buffer = "00:30:00"
+job-id = "1234"
+terminated = true
+
+[universe]
+name = "container"
+wrapper = "apptainer exec img.sif @COMMAND@"
+
+[vars]
+SIMULATION_NAME = "bbh"
+NUM_PROCS = 8
+FOREGROUND = false
+
+[knobs]
+queue = "workq"

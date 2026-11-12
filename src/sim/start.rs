@@ -6,7 +6,7 @@ use crate::args::{SimRunArgs, SimStartArgs, UniverseFlags};
 use crate::build::ConfigMeta;
 use crate::commands::build as build_cmd;
 use crate::commands::Ctx;
-use crate::database::{Database, SCHEMA};
+use crate::database::Database;
 use crate::installation::Installation;
 use crate::lock::{LinkLock, HEARTBEAT_SECS};
 use crate::mdb::{discover, Machine, Phase, ScriptKind, Universe, WrappedCommand, HOST_UNIVERSE};
@@ -547,7 +547,6 @@ fn submit_impl(
             id,
             dir: rdir.clone(),
             meta: RestartMeta {
-                schema: SCHEMA,
                 created: Utc::now(),
                 started: None,
                 finished: None,
@@ -794,7 +793,6 @@ fn run_interactive(
         id,
         dir: rdir.clone(),
         meta: RestartMeta {
-            schema: SCHEMA,
             created: Utc::now(),
             started: None,
             finished: None,
@@ -1299,7 +1297,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("bbh");
         let meta = crate::sim::SimulationMeta { parfile: "bbh.par".to_owned(), ..Default::default() };
-        crate::installation::write_toml(&dir.join(".cactup").join("simulation.toml"), &meta).unwrap();
+        let record = dir.join(".cactup").join("simulation.toml");
+        crate::format::write(&record, &meta, &crate::sim::SIMULATION).unwrap();
         let rdir = restart::restart_dir(&dir, 0);
         fs::create_dir_all(rdir.join(".cactup")).unwrap();
         fs::write(
@@ -1516,7 +1515,6 @@ mod tests {
         let attempt = crate::build::attempt::BuildAttempt::create(
             crate::build::attempt::BuildAttempt::attempt_dir(&config_dir, 0),
             crate::build::attempt::BuildMeta {
-                schema: crate::database::SCHEMA,
                 attempt_id: 0,
                 config: "sim".to_owned(),
                 optionlist_source: OptionlistSource::Flavor("default".to_owned()),

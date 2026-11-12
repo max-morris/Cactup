@@ -2,8 +2,7 @@
 //! per-restart `.cactup/restart.toml` metadata (§9.3), and the stale-restart
 //! reaper (§8.3).
 
-use crate::database::SCHEMA;
-use crate::installation::write_toml;
+use crate::format::{self, Format, Toml};
 use crate::lock::{LinkLock, HEARTBEAT_STALE_SECS};
 use crate::mdb::Universe;
 use crate::scheduler::{JobStatus, Scheduler};
@@ -19,9 +18,23 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-fn default_schema() -> u32 {
-    SCHEMA
-}
+/// `restart.toml`'s format: version 1, no migrations. Read and written by
+/// the compute-node binary of a queued job, so it is `frozen_read`: a
+/// breaking change ships its down-step. `vars` and `knobs` are open maps the
+/// submit writes whole; `[universe]` is a struct edited in place (never
+/// replaced once a restart exists), so a key a newer binary added to it is
+/// put back.
+pub static RESTART: Format<Toml> = Format {
+    name: "restart record",
+    key: "schema",
+    current: 1,
+    upgrades: &[],
+    downgrades: &[],
+    down_floor: 1,
+    frozen_read: true,
+    legacy: None,
+    replace_whole: &["vars", "knobs"],
+};
 
 /// Job id recorded when submission failed / produced no id (§8.3).
 pub const NO_JOB_ID: &str = "-1";
@@ -66,8 +79,6 @@ impl UniverseSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct RestartMeta {
-    #[serde(default = "default_schema")]
-    pub schema: u32,
     pub created: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started: Option<DateTime<Utc>>,
@@ -189,24 +200,14 @@ impl Restart {
         if !path.is_file() {
             bail!("Restart {} has no metadata at '{}'", dir_name(id), path.display());
         }
-        // RestartMeta has no Default; read + schema-guard manually.
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read '{}'", path.display()))?;
-        let meta: RestartMeta =
-            toml::from_str(&text).with_context(|| format!("Failed to parse '{}'", path.display()))?;
-        if meta.schema > SCHEMA {
-            bail!(
-                "'{}' has schema {} but this cactup understands at most schema {SCHEMA}; \
-                 please upgrade cactup",
-                path.display(),
-                meta.schema
-            );
-        }
+        let Some(meta) = format::read(&path, &RESTART)? else {
+            bail!("Restart {} has no metadata at '{}'", dir_name(id), path.display());
+        };
         Ok(Restart { id, dir, meta })
     }
 
     pub fn store(&self) -> Res<()> {
-        write_toml(&self.dir.join(".cactup").join("restart.toml"), &self.meta)
+        format::write(&self.dir.join(".cactup").join("restart.toml"), &self.meta, &RESTART)
     }
 
     pub fn cactup_dir(&self) -> PathBuf {
@@ -543,6 +544,94 @@ pub fn reap_stale(sim: &Simulation, sched: &Scheduler) -> Res<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A restart written by a newer cactup is refused when loaded, before a
+    /// run does anything with it.
+    #[test]
+    fn a_newer_restart_is_refused_at_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let rdir = restart_dir(dir.path(), 0);
+        std::fs::create_dir_all(rdir.join(".cactup")).unwrap();
+        std::fs::write(rdir.join(".cactup").join("restart.toml"), "schema = 2\nwhatever = \"a newer shape\"\n").unwrap();
+        let err = format!("{:#}", Restart::load(dir.path(), 0).err().expect("refused"));
+        assert!(err.contains("newer cactup") && err.contains("restart.toml"), "{err}");
+    }
+
+    /// Every field set, every collection non-empty, and no `..`: a new field
+    /// fails to compile here, and the shape pin then says what to do.
+    fn exhaustive_sample() -> RestartMeta {
+        let time = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        RestartMeta {
+            created: time("2026-05-01T12:00:00Z"),
+            started: Some(time("2026-05-01T12:05:00Z")),
+            finished: Some(time("2026-05-01T13:05:00Z")),
+            job_stopped: Some(time("2026-05-01T13:06:00Z")),
+            nodes: 2,
+            tasks: 8,
+            tpn: 4,
+            cpus: 1,
+            gpus_per_task: 1,
+            queue: "workq".to_owned(),
+            allocation: Some("proj1".to_owned()),
+            walltime: Walltime::parse("24:00:00").unwrap(),
+            checkpt_buffer: Walltime::parse("00:30:00").unwrap(),
+            job_id: "1234".to_owned(),
+            job_host: Some("login1".to_owned()),
+            job_start: Some(99887766),
+            foreground: true,
+            chained_job_id: Some("1233".to_owned()),
+            status: Some("R".to_owned()),
+            terminated: true,
+            universe: Some(UniverseSpec {
+                name: "container".to_owned(),
+                wrapper_argv: Some(["apptainer", "exec", "img.sif", "@COMMAND@"].map(String::from).to_vec()),
+                wrapper: Some("apptainer exec img.sif @COMMAND@".to_owned()),
+            }),
+            vars: [
+                ("SIMULATION_NAME".to_owned(), toml::Value::String("bbh".to_owned())),
+                ("NUM_PROCS".to_owned(), toml::Value::Integer(8)),
+                ("FOREGROUND".to_owned(), toml::Value::Boolean(false)),
+            ]
+            .into_iter()
+            .collect(),
+            knobs: [("queue".to_owned(), "workq".to_owned())].into_iter().collect(),
+        }
+    }
+
+    #[test]
+    fn restart_format_generic_tests() {
+        use crate::format::testing::*;
+        let fixtures = fixture_dir("restart");
+        descriptor_is_consistent(&RESTART);
+        assert!(RESTART.frozen_read);
+        shape_is_pinned(&RESTART, &fixtures, &exhaustive_sample());
+        every_fixture_loads::<RestartMeta, _>(&RESTART, &fixtures);
+        newer_is_refused::<RestartMeta, _>(&RESTART, "restart.toml", "nodes = \"many\"\n", &exhaustive_sample());
+        unknown_keys_survive(
+            &RESTART,
+            "restart.toml",
+            &exhaustive_sample(),
+            &["universe"],
+            |m: &mut RestartMeta| m.finished = None,
+            &["finished"],
+        );
+    }
+
+    /// `Restart::load` on a restart from before the `schema` key, and on a
+    /// missing file.
+    #[test]
+    fn load_reads_an_old_record_and_names_a_missing_one() {
+        let sim = tempfile::tempdir().unwrap();
+        let err = format!("{:#}", Restart::load(sim.path(), 0).unwrap_err());
+        assert!(err.contains("has no metadata"), "{err}");
+        let cactup = restart_dir(sim.path(), 0).join(".cactup");
+        fs::create_dir_all(&cactup).unwrap();
+        fs::copy(crate::format::testing::fixture_dir("restart").join("v1-noschema.toml"), cactup.join("restart.toml"))
+            .unwrap();
+        let restart = Restart::load(sim.path(), 0).unwrap();
+        assert_eq!(restart.meta.queue, "workq");
+        assert_eq!(restart.meta.gpus_per_task, 0);
+    }
 
     #[test]
     fn dir_names_and_discovery() {

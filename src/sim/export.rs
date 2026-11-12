@@ -563,7 +563,7 @@ fn installed_download_hashes(
     install_root: &Path,
     list: &thornlist::Thornlist,
 ) -> Res<std::collections::BTreeMap<String, String>> {
-    let mut hashes = fetch::download_hashes(install_root, list);
+    let mut hashes = fetch::download_hashes(install_root, list)?;
     let missing: Vec<&thornlist::Component> = list
         .components()
         .iter()
@@ -818,7 +818,7 @@ mod tests {
             downloads: vec![("Cactus/dl/zlib.tar.gz".into(), fetched.clone()), ("Cactus/dl/a.tgz".into(), "a".repeat(64))],
         };
         fetch::FetchState::record(tmp.path(), &records).unwrap();
-        let hashes = fetch::download_hashes(tmp.path(), &list);
+        let hashes = fetch::download_hashes(tmp.path(), &list).unwrap();
         let pins = repo_pins(&list, |_| None, |repo| hashes.get(repo).cloned());
         let sha = |repo: &str| pins.iter().find(|p| p.name == repo).unwrap().sha256.clone();
         assert_eq!(sha("zlib"), Some(fetched));

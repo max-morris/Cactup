@@ -1,0 +1,11 @@
+schema = 1
+
+[tests.et-tests]
+dir = "/scratch/tests/et/et-tests"
+config = "sim"
+created = "2026-05-01T12:00:00Z"
+
+[tests.gone]
+dir = "/scratch/tests/et/gone"
+config = "sim"
+created = "2026-05-01T12:00:00Z"

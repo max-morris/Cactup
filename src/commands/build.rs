@@ -2621,7 +2621,6 @@ mod tests {
         outcome: Option<BuildOutcomeRecord>,
     ) -> BuildMeta {
         BuildMeta {
-            schema: crate::database::SCHEMA,
             attempt_id: id,
             config: config.to_owned(),
             optionlist_source: OptionlistSource::Flavor("default".to_owned()),

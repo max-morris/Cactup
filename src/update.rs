@@ -205,6 +205,14 @@ const UPDATE_LOCK: &str = ".update.lock";
 
 /// The release manifest, `<update-url>/latest.json`. Read leniently: keys
 /// a later site adds are ignored.
+///
+/// **Never break this file.** Every deployed binary and the installer read
+/// it to update themselves; a `latest.json` one of them refuses would leave
+/// it unable to update, forever. It carries no version key on purpose: the
+/// path is the version. Keys may only be added, and the existing ones keep
+/// their names, types and meanings. A change that cannot be additive (a
+/// renamed key, a different shape) is published at a new path beside this
+/// one (for example `latest-2.json`), which binaries that understand it read instead.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Latest {
     /// The build id (abbreviated commit hash) of the published release.
@@ -615,6 +623,17 @@ pub(crate) fn sha256_hex_counting(path: &Path, progress: &mut impl prodash::Prog
     Ok(context.finish().as_ref().iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// The database as updating reads it: a database written by a newer cactup
+/// is refused everywhere else ("upgrade cactup"), so here only its knobs
+/// are taken ([`crate::database::Db::knobs_only`]) and updating stays the way
+/// out of that message, under the user's own update settings.
+pub(crate) fn readable_db(db: &crate::database::Db) -> Res<Database> {
+    match db.read() {
+        Err(e) if e.downcast_ref::<crate::format::Newer>().is_some() => db.knobs_only(),
+        other => other,
+    }
+}
+
 /// Run `<path> --version` (at most [`VERSION_TIMEOUT`], interrupt-aware)
 /// and require it to succeed and name `build`.
 fn answers_version(path: &Path, build: &str) -> Res<()> {
@@ -765,7 +784,7 @@ pub fn maybe_auto_update(ctx: &Ctx) {
     if lock::mtime_age(&stamp).is_some_and(|age| age < CHECK_INTERVAL) {
         return;
     }
-    let Ok(db) = ctx.db.read() else { return };
+    let Ok(db) = readable_db(&ctx.db) else { return };
     let mode = autoupdate(&db);
     if mode == AutoUpdate::Off {
         return;
@@ -870,6 +889,37 @@ pub(crate) fn mdb_generation_notice() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A manifest with keys this binary has never heard of (a later site's
+    /// additions, at the top level, on a target and inside it) still parses:
+    /// reading `latest.json` stays lenient.
+    #[test]
+    fn a_manifest_with_unknown_keys_still_parses() {
+        let json = br#"{"build":"abc1234","date":"2026-11-10T12:00:00Z","mdb_generation":3,
+            "channel":"stable","notes":{"url":"https://example.org/notes"},
+            "targets":{"x86_64-unknown-linux-musl":{"path":"x86_64-unknown-linux-musl/cactup-abc1234",
+            "sha256":"ab","size":12,"signature":"sig","mirrors":["https://example.org/m"]}}}"#;
+        let latest: Latest = serde_json::from_slice(json).unwrap();
+        assert_eq!(latest.build, "abc1234");
+        assert_eq!(latest.mdb_generation, 3);
+        assert_eq!(latest.targets["x86_64-unknown-linux-musl"].size, 12);
+    }
+
+    /// Updating is the way out of "written by a newer cactup", so a newer
+    /// database reads as an empty one there (default update knobs), while
+    /// any other failure still fails.
+    #[test]
+    fn a_newer_database_does_not_stop_an_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::database::Db::in_dir(dir.path());
+        std::fs::write(dir.path().join("database.json"), r#"{"schema": 99, "knobs": {"update-url": "https://x"}}"#).unwrap();
+        assert!(db.read().is_err(), "everywhere else it is refused");
+        let read = readable_db(&db).unwrap();
+        assert!(read.installations.is_empty());
+        assert_eq!(read.knob("update-url"), Some("https://x"), "the user's update settings still hold");
+        std::fs::write(dir.path().join("database.json"), "{ not json").unwrap();
+        assert!(readable_db(&db).is_err(), "an unreadable database still fails");
+    }
 
     #[test]
     fn autoupdate_values() {

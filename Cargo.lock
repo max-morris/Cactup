@@ -277,7 +277,7 @@ checksum = "49e78e506b9d7633710dab98996f22f95f3d0f488e8f1aa162830556ed9fc14d"
 [[package]]
 name = "cactup-ecosystem-common"
 version = "0.1.0"
-source = "git+https://github.com/max-morris/cactup-ecosystem-common?rev=a4cc7aeb5aebe5ca68f71a4db736677047dd5bca#a4cc7aeb5aebe5ca68f71a4db736677047dd5bca"
+source = "git+https://github.com/max-morris/cactup-ecosystem-common?rev=ede90f956bc7368c17cd973e71d1a8725e8c1021#ede90f956bc7368c17cd973e71d1a8725e8c1021"
 dependencies = [
  "anyhow",
  "indexmap",
@@ -1358,7 +1358,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b305d85504de270ad3525d726a6b69cc59ee7b2269b014387651107ab9f0755b"
 dependencies = [
  "bstr",
- "hashbrown 0.17.1",
+ "hashbrown 0.16.1",
 ]
 
 [[package]]
@@ -3270,6 +3270,7 @@ version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",

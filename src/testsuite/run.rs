@@ -7,7 +7,7 @@ use crate::args::TestStartArgs;
 use crate::build::{self, ConfigMeta};
 use crate::commands::build as build_cmd;
 use crate::commands::{machine, Ctx};
-use crate::database::{Database, SCHEMA};
+use crate::database::Database;
 use crate::installation::{Installation, TestEntry};
 use crate::lock::LinkLock;
 use crate::mdb::meta::{Route, ScriptTable};
@@ -385,7 +385,15 @@ fn start_impl(
 
     // A previous run of this config that is still in the queue must be dealt
     // with first (there is no reaper for tests — §11.6).
-    if let Ok(old) = TestRun::open(&run_dir) {
+    // A record a newer cactup wrote stops a re-run here, before anything of
+    // it (results directory, scripts) is touched.
+    let old = TestRun::open(&run_dir);
+    if let Err(e) = &old
+        && e.downcast_ref::<crate::format::Newer>().is_some()
+    {
+        return Err(old.err().expect("matched as an error"));
+    }
+    if let Ok(old) = old {
         if old.lock_live()? {
             bail!("Test run \"{name}\" is already running");
         }
@@ -476,7 +484,6 @@ fn start_impl(
         name: name.clone(),
         dir: run_dir.clone(),
         meta: TestMeta {
-            schema: SCHEMA,
             name: name.clone(),
             config: cfg_name.clone(),
             config_id: cfg.config_id.clone(),
@@ -522,7 +529,7 @@ fn start_impl(
 
     if let Some((submit_vars, submit_script)) = rendered_submit {
         write_executable(&run_dir.join("submit-script"), &submit_script)?;
-        run.store_meta()?;
+        run.store_fresh()?;
 
         let submitted = sched.submit(&submit_vars, submit_uni.as_ref().map(|(n, u)| (n.as_str(), *u)))?;
         run.meta.set_job(&submitted);
@@ -539,7 +546,7 @@ fn start_impl(
         Ok(())
     } else {
         run.meta.job_id = std::process::id().to_string();
-        run.store_meta()?;
+        run.store_fresh()?;
         drop(lock);
         run.log("test-run", &format!("running {} in the foreground (select: {select})", results_name(results_id)));
         println!("Running testsuite of {} into {}", name.bold(), results_name(results_id));
@@ -1047,7 +1054,6 @@ mod tests {
         let cactus_root = inst.cactus_root();
         let config_dir = cactus_root.join("configs/tests");
         let attempt_meta = crate::build::attempt::BuildMeta {
-            schema: crate::database::SCHEMA,
             attempt_id: 0,
             config: "tests".to_owned(),
             optionlist_source: OptionlistSource::Flavor("default".to_owned()),
