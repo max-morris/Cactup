@@ -52,6 +52,11 @@ pub enum DirtyReason {
     /// override (via [`set_origin_url`] + a normal align), so it is also the
     /// one whose backup pass needs to know what to save *before* that happens.
     RemoteUrlChanged { on_disk: String, wanted: String, modified: Vec<String> },
+    /// Clean, on a branch cactup cannot vouch for, with no `!REPO_BRANCH`,
+    /// and the remote did not say which branch is its default (`why`): the
+    /// planner cannot tell an update from a branch switch, so the branch is
+    /// left alone. Not a probe result; the planner's.
+    DefaultUnknown { head: String, why: String },
     /// Any probe failure. Never silently "clean".
     Unknown(String),
 }
@@ -81,6 +86,10 @@ impl DirtyReason {
                     s.push_str(&format!(" ({} local modification(s))", modified.len()));
                 }
                 s
+            }
+            DirtyReason::DefaultUnknown { head, why } => {
+                let what = "no answer from its remote on which branch is its default";
+                format!("{what}, so {head} is left alone ({why})")
             }
             DirtyReason::Unknown(err) => format!("could not inspect the repo ({err})"),
         }

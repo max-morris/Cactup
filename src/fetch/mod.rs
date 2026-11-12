@@ -1312,9 +1312,12 @@ pub fn plan(
                 } else {
                     let asked = ask();
                     // Said here, on the repo's own line, since nothing else
-                    // would: the plan keeps the repo where it is (below).
+                    // would, when the plan keeps the repo where it is and
+                    // updates it (below). One on a branch cactup cannot
+                    // vouch for is skipped instead, and its skip says why.
                     if let Asked::Failed(why) = &asked
                         && !gix::interrupt::is_triggered()
+                        && record.is_some_and(|r| r.put_there(head_branch))
                     {
                         use colored::Colorize;
                         let warning = format!(
@@ -1380,14 +1383,37 @@ pub fn plan(
                 let (wanted, follows_default, named_branch) = match (group.branch, default) {
                     (Some(branch), _) => (branch, false, true),
                     (None, Asked::Default(default)) => (default, true, false),
-                    // The remote did not say (the probe warned): stay on the
-                    // current branch, following what the record says it
-                    // follows, so that one unanswered question changes
-                    // nothing. The fetch goes to the same remote and reports
-                    // the failure; the next plan asks again.
-                    (None, _) => match record.filter(|r| r.put_there(&head_branch)) {
+                    // The remote did not say. On a branch cactup put it on
+                    // (the probe warned): stay there, following what the
+                    // record says it follows, so that one unanswered
+                    // question changes nothing. The fetch goes to the same
+                    // remote and reports the failure; the next plan asks
+                    // again. On any other branch, the user's, an update is
+                    // not known to be what the list asks (were the default
+                    // elsewhere, the repo would be skipped as a branch
+                    // switch): skipped, the branch left alone. Forced, it
+                    // goes to the default, which `execute` asks again.
+                    (None, asked) => match record.filter(|r| r.put_there(&head_branch)) {
                         Some(r) => (head_branch.clone(), r.follows_default, r.named_branch),
-                        None => (head_branch.clone(), false, false),
+                        None => {
+                            let why = match asked {
+                                Asked::Failed(why) => why,
+                                _ => "nothing was asked".to_owned(),
+                            };
+                            plan.skipped.push(SkippedRepo {
+                                repo,
+                                dir,
+                                url: group.url,
+                                branch: None,
+                                follows_default: true,
+                                named_branch: false,
+                                commit: None,
+                                reason: DirtyReason::DefaultUnknown { head: head_branch, why },
+                                untracked: probe.untracked,
+                                checkouts: group.checkouts,
+                            });
+                            continue;
+                        }
                     },
                 };
                 // Off the default branch with no !REPO_BRANCH: switch only if
@@ -2245,13 +2271,14 @@ pub(crate) mod tests {
         assert!(plan.git[0].follows_default);
     }
 
-    /// When the remote cannot say, the repo stays where it is, following
-    /// what its record says it follows (one unanswered question changes
-    /// nothing; the next plan asks again), and its line says why.
+    /// When the remote cannot say, a repo on a branch cactup put it on
+    /// stays where it is, following what its record says it follows (one
+    /// unanswered question changes nothing; the next plan asks again), and
+    /// its line says why.
     #[test]
     fn an_unanswered_lookup_leaves_the_repo_on_its_branch() {
-        // Followed as the default, named by the list, or an older record.
-        for (followed, named) in [(true, false), (false, true), (false, false)] {
+        // Followed as the default, or named by the list.
+        for (followed, named) in [(true, false), (false, true)] {
             let tmp = tempfile::tempdir().unwrap();
             let (root, upstream, _, _) = cloned_on_a_release_branch(tmp.path());
             record_fetch(&root, &upstream, "rel", followed, named);
@@ -2267,12 +2294,56 @@ pub(crate) mod tests {
         }
     }
 
-    /// Dropping a branchless pin while its remote cannot say which branch is
-    /// its default: the plan still moves cactup's detached HEAD (it does not
-    /// blame the user, nor guess a branch), and the fetch fails the repo
-    /// with the remote's own error, leaving it where it was.
+    /// When the remote cannot say, a branch cactup cannot vouch for — the
+    /// user's (the record names another), or one an older record names —
+    /// is skipped, not updated: were the default elsewhere it would be a
+    /// branch switch, so nothing moves it, and no fast-forward lands on it
+    /// in the remote's stead. Its skip says why. Forced, it goes to the
+    /// remote's default, which `execute` asks again: still unanswered, the
+    /// repo fails, left where it was.
     #[test]
-    fn a_default_the_remote_cannot_name_fails_the_repo_at_execute() {
+    fn an_unanswered_lookup_skips_a_branch_cactup_cannot_vouch_for() {
+        for old_record in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let (root, upstream, default, _) = cloned_on_a_release_branch(tmp.path());
+            let dir = root.join("Cactus/repos/R");
+            let before = git::head_of(&dir).unwrap();
+            match old_record {
+                true => record_fetch(&root, &upstream, "rel", false, false),
+                false => record_fetch(&root, &upstream, &default, true, false),
+            }
+            std::fs::remove_dir_all(&upstream).unwrap();
+
+            let (mut plan, messages) = plan_with_messages(&list_without_a_branch(&upstream), &root);
+            assert!(plan.git.is_empty(), "{:?}", plan.git);
+            assert!(messages.is_empty(), "the skip says it: {messages:?}");
+            match &plan.skipped[0].reason {
+                DirtyReason::DefaultUnknown { head, why } => {
+                    assert_eq!(head, "rel");
+                    assert!(why.contains(&*upstream.to_string_lossy()), "{why}");
+                }
+                other => panic!("expected DefaultUnknown, got {other:?}"),
+            }
+            let said = plan.skipped[0].reason.describe();
+            assert!(said.contains("so rel is left alone"), "{said}");
+
+            plan.force_where(|s| s.repo == "R");
+            assert!(matches!(plan.git[0].action, GitAction::Align));
+            assert_eq!(plan.git[0].branch, None);
+            assert!(plan.git[0].follows_default);
+            let report = execute(&plan, &root).unwrap();
+            assert!(report.repos.is_empty(), "{:?}", report.repos);
+            assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+            assert_eq!(git::head_of(&dir).unwrap(), before);
+        }
+    }
+
+    /// Dropping a branchless pin while its remote is out of reach: the plan
+    /// still moves cactup's detached HEAD (it does not blame the user, nor
+    /// guess a branch), and the fetch fails the repo with the remote's own
+    /// error, leaving it where it was.
+    #[test]
+    fn an_unreachable_remote_fails_a_dropped_branchless_pin_at_execute() {
         let tmp = tempfile::tempdir().unwrap();
         let (root, upstream, _, pin, _) = cloned_on_a_branchless_pin(tmp.path());
         std::fs::remove_dir_all(&upstream).unwrap();
@@ -2288,6 +2359,30 @@ pub(crate) mod tests {
         assert_eq!(report.failures[0].what, "R");
         let error = &report.failures[0].error;
         assert!(error.contains(&*upstream.to_string_lossy()), "{error}");
+        let dir = root.join("Cactus/repos/R");
+        assert_eq!(git::head_of(&dir).unwrap(), (git::DETACHED.to_owned(), pin));
+    }
+
+    /// The same, against a remote that answers but names no default branch
+    /// (its HEAD is detached, so it advertises no symbolic HEAD): the fetch
+    /// fails the repo saying so, and leaves it where it was.
+    #[test]
+    fn a_remote_that_names_no_default_fails_a_dropped_branchless_pin_at_execute() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, upstream, _, pin, tip) = cloned_on_a_branchless_pin(tmp.path());
+        let mut progress = prodash::tree::Root::new().add_child("test detach");
+        git::pin(&upstream, None, tip, false, &mut progress).unwrap();
+        assert_eq!(git::head_of(&upstream).unwrap().0, git::DETACHED);
+
+        let plan = plan_for(&list_without_a_branch(&upstream), &root);
+        assert!(plan.skipped.is_empty(), "{:?}", plan.skipped);
+        assert!(matches!(plan.git[0].action, GitAction::Align));
+        assert_eq!(plan.git[0].branch, None);
+        let report = execute(&plan, &root).unwrap();
+        assert!(report.repos.is_empty(), "{:?}", report.repos);
+        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+        let error = &report.failures[0].error;
+        assert!(error.contains("does not say which branch is its default"), "{error}");
         let dir = root.join("Cactus/repos/R");
         assert_eq!(git::head_of(&dir).unwrap(), (git::DETACHED.to_owned(), pin));
     }
