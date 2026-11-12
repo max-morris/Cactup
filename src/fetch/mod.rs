@@ -165,17 +165,20 @@ impl Plan {
             // branch, it stays there (the next plan asks for the default).
             // Detached — a branchless pin the list dropped, say — it has no
             // branch to stay on: `branch` stays `None`, and `execute` asks
-            // the remote for its default branch and switches to that.
+            // the remote for its default branch and switches to that. A HEAD
+            // that cannot be read (not a repo, an unborn branch: a probe that
+            // failed) is neither: forcing it onto the default would be a
+            // guess about a repo nothing could inspect, so it goes with no
+            // branch and no default, and `execute` fails it, naming why.
             // A pinned repo needs no branch: it is checked out by commit.
             let (branch, follows_default, named_branch) = match (s.commit, s.branch) {
                 (Some(_), branch) => (branch, false, s.named_branch),
                 (None, Some(branch)) => (Some(branch), s.follows_default, s.named_branch),
-                (None, None) => {
-                    match git::head_of(&s.dir).ok().map(|(b, _)| b).filter(|b| b != git::DETACHED) {
-                        Some(head) => (Some(head), false, false),
-                        None => (None, true, false),
-                    }
-                }
+                (None, None) => match git::head_of(&s.dir) {
+                    Ok((head, _)) if head == git::DETACHED => (None, true, false),
+                    Ok((head, _)) => (Some(head), false, false),
+                    Err(_) => (None, false, false),
+                },
             };
             moved.push(s.repo.clone());
             self.git.push(GitRepoPlan {
@@ -473,11 +476,24 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                         // branchless pin the list dropped): it goes to the
                         // remote's default branch, which only the remote
                         // knows. A clone without a branch lands there on its
-                        // own.
+                        // own. Not following the default either, it is one
+                        // forced with a HEAD nothing could read (see
+                        // `Plan::force_where`): failed, with that reason.
                         let branch = match (&item.action, &item.branch, item.commit) {
+                            (GitAction::Update | GitAction::Align, None, None)
+                                if !item.follows_default =>
+                            {
+                                Err(match git::head_of(&item.dir) {
+                                    Err(e) => {
+                                        e.context("Its HEAD cannot be read: no branch to fetch it on")
+                                    }
+                                    Ok(_) => anyhow::anyhow!("No branch resolved for existing repo"),
+                                })
+                            }
                             (GitAction::Update | GitAction::Align, None, None) => {
                                 line.phase("asking for the default branch".to_string());
-                                git::ask_remote_default_branch(Some(&item.dir), &item.url).map(|default| {
+                                let asked = git::ask_remote_default_branch(Some(&item.dir), &item.url);
+                                asked.map(|default| {
                                     line.phase(format!("switching to {default}"));
                                     Some(default)
                                 })
@@ -1131,9 +1147,10 @@ enum Asked {
 /// that cactup may move: a clean one, or one detached where cactup's last
 /// fetch left it. `defaults` says whether the fetch record can spare that
 /// question. A clean repo whose remote does not answer stays where it is,
-/// with a warning on its line of `progress`. `progress` is init'ed to the repo count once the group map is
-/// built, then incremented as each repo's probe — a plain gix status walk,
-/// plus that question where there is one — finishes. The probes run on the
+/// with a warning on its line of `progress`. `progress` is init'ed to the
+/// repo count once the group map is built, then incremented as each repo's
+/// probe — a plain gix status walk, plus that question where there is one —
+/// finishes. The probes run on the
 /// [`crate::par`] pool: even so, on ~80 repos they take long enough that
 /// without progress the command looks hung before anything appears.
 pub fn plan(
@@ -1288,8 +1305,9 @@ pub fn plan(
                         && !gix::interrupt::is_triggered()
                     {
                         use colored::Colorize;
-                        let warning =
-                            format!("could not ask for its default branch, so it stays on {head_branch}: {why}");
+                        let warning = format!(
+                            "could not ask for its default branch, so it stays on {head_branch}: {why}"
+                        );
                         current.info(warning.yellow().to_string());
                     }
                     asked
@@ -1454,9 +1472,9 @@ pub fn plan(
                 // is set; that cannot occur (probe compares against the head
                 // branch then), but guard the invariant anyway. A forced
                 // refetch of a repo with no !REPO_BRANCH stays on its current
-                // branch, or goes to the remote's default from a detached
-                // HEAD (see `force_where`); the next plan asks for the
-                // default.
+                // branch, goes to the remote's default from a detached HEAD,
+                // and fails when its HEAD cannot be read (see `force_where`);
+                // the next plan asks for the default.
                 plan.skipped.push(SkippedRepo {
                     repo,
                     dir,
@@ -1744,6 +1762,37 @@ pub(crate) mod tests {
         assert_eq!(plan.git[0].retarget, None);
     }
 
+    /// Forced with no branch named and a HEAD nothing can read (here, an
+    /// unborn branch): never guessed onto the remote's default, the repo
+    /// fails, saying why.
+    #[test]
+    fn a_forced_repo_whose_head_cannot_be_read_fails_saying_why() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("Cactus/repos/R");
+        std::fs::create_dir_all(&dir).unwrap();
+        gix::init(&dir).unwrap();
+        let mut skipped = skipped_repo(dir.clone(), "R", None);
+        skipped.reason = DirtyReason::Unknown("HEAD points at no commit".to_owned());
+        let mut plan = Plan {
+            git: Vec::new(),
+            skipped: vec![skipped],
+            downloads: Vec::new(),
+            external: Vec::new(),
+            links: Vec::new(),
+            root: "Cactus".to_string(),
+        };
+
+        plan.force();
+        assert_eq!(plan.git[0].branch, None);
+        assert!(!plan.git[0].follows_default);
+        let report = execute(&plan, tmp.path()).unwrap();
+        assert!(report.repos.is_empty(), "{:?}", report.repos);
+        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+        assert_eq!(report.failures[0].what, "R");
+        let error = &report.failures[0].error;
+        assert!(error.starts_with("Its HEAD cannot be read: no branch to fetch it on: "), "{error}");
+    }
+
     /// An upstream at `<tmp>/upstream` whose default branch is one commit
     /// past a second branch `rel`. Returns the upstream, `rel`'s commit, the
     /// default branch and its tip.
@@ -2027,7 +2076,13 @@ pub(crate) mod tests {
     /// remote's default when `follows_default`, the list's `!REPO_BRANCH`
     /// when `named_branch`, and when neither, a record an older cactup
     /// wrote, which cannot say which.
-    fn record_fetch(root: &Path, upstream: &Path, branch: &str, follows_default: bool, named_branch: bool) {
+    fn record_fetch(
+        root: &Path,
+        upstream: &Path,
+        branch: &str,
+        follows_default: bool,
+        named_branch: bool,
+    ) {
         let record = RepoRecord {
             url: upstream.to_string_lossy().into_owned(),
             branch: Some(branch.to_string()),
@@ -2182,10 +2237,8 @@ pub(crate) mod tests {
             assert!(matches!(plan.git[0].action, GitAction::Update));
             assert_eq!(plan.git[0].branch.as_deref(), Some("rel"));
             assert_eq!((plan.git[0].follows_default, plan.git[0].named_branch), (followed, named));
-            assert!(
-                matches!(messages.as_slice(), [m] if m.contains("could not ask for its default branch, so it stays on rel")),
-                "{messages:?}"
-            );
+            let said = "could not ask for its default branch, so it stays on rel";
+            assert!(matches!(messages.as_slice(), [m] if m.contains(said)), "{messages:?}");
         }
     }
 
