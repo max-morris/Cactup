@@ -337,7 +337,37 @@ fn list(ctx: &Ctx, mdb: &Mdb) -> Res<()> {
         }
         println!();
     }
+    for dir in hidden_machine_dirs(&mdb.user_root) {
+        eprintln!(
+            "{}",
+            format!(
+                "Note: ignoring '{}': a machine name may not start with '.'; rename the directory to use it.",
+                dir.display()
+            )
+            .yellow()
+        );
+    }
     Ok(())
+}
+
+/// Hidden directories in the user layer that hold a machine (`.foo`, made
+/// before such names were refused), which `machine list` would otherwise
+/// leave out without a word. The copies "start over" parks
+/// (`.<name>.old`, `.<name>.old.2`, …) are meant to be out of the way and are
+/// not mentioned.
+fn hidden_machine_dirs(user_root: &Path) -> Vec<std::path::PathBuf> {
+    let parked = regex::Regex::new(r"^\..+\.old(\.[0-9]+)?$").expect("valid pattern");
+    let Ok(entries) = fs::read_dir(user_root) else { return Vec::new() };
+    let mut dirs: Vec<_> = entries
+        .flatten()
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.starts_with('.') && !parked.is_match(&name) && e.path().join("meta.toml").is_file()
+        })
+        .map(|e| e.path())
+        .collect();
+    dirs.sort();
+    dirs
 }
 
 /// `cactup machine show [name]`: the machine this host resolves to (§4.3), or
@@ -1110,6 +1140,18 @@ mod tests {
         };
         list(&ctx, &sb.mdb).unwrap();
         assert!(sb.mdb.load("old").is_err());
+    }
+
+    #[test]
+    fn list_mentions_a_hidden_machine_but_not_a_parked_copy() {
+        let root = tempfile::tempdir().unwrap();
+        for name in [".foo", ".box.old", ".box.old.2", ".empty", "box"] {
+            fs::create_dir_all(root.path().join(name)).unwrap();
+            if name != ".empty" {
+                fs::write(root.path().join(name).join("meta.toml"), "").unwrap();
+            }
+        }
+        assert_eq!(hidden_machine_dirs(root.path()), [root.path().join(".foo")]);
     }
 
     #[test]

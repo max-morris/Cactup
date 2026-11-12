@@ -139,17 +139,7 @@ fn generation_2_to_3(overlay: &mut Overlay) -> Result<Vec<String>, Stop> {
             }
         }
     }
-    // The ENV_SETUP check needs the typed result. The later steps only
-    // raise the number, so a renamed file today's schema rejects would fail
-    // the final verification anyway: refuse here rather than skip the check.
-    let meta = toml::from_str::<Meta>(&overlay.meta.doc.to_string())
-        .map_err(|e| {
-            // serde's "unknown field `x`, expected one of …" without the list.
-            let message = e.message();
-            let message = message.split_once(", expected").map_or(message, |(head, _)| head);
-            Stop::Found(format!("the renamed meta.toml would not load ({message})"))
-        })?;
-    check_env_setup_scripts(overlay, &meta)?;
+    check_env_setup_scripts(overlay)?;
     let mut notes = Vec::new();
     if !suspects.is_empty() {
         let shown = suspects.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
@@ -207,43 +197,72 @@ fn provisioning_hits(text: &str) -> Vec<&'static str> {
 // declared host) or none (`--no-universe`, routed as `host`), so every one
 // the route is compatible with is a candidate: a false refusal costs a hand
 // edit, a missed one a quietly different build.
-fn check_env_setup_scripts(overlay: &Overlay, meta: &Meta) -> Result<(), Stop> {
+//
+// It reads the renamed file as generation 3 wrote it, leniently and only for
+// what it needs, never through today's schema: a later generation may change
+// that schema, and this check must still judge a generation-2 overlay.
+fn check_env_setup_scripts(overlay: &Overlay) -> Result<(), Stop> {
+    let table: toml::Table = overlay.meta.doc.to_string().parse().unwrap_or_default();
+    let get = |t: Option<&toml::Value>, key: &str| t.and_then(|t| t.get(key)).and_then(toml::Value::as_str).map(str::to_owned);
+    let environment = table.get("environment");
+    let universes = table.get("universes").and_then(toml::Value::as_table).cloned().unwrap_or_default();
+    // The submit phase's setup in `universe`: `env-setup`, then
+    // `submit-env-setup`, a universe's keys replacing the machine's one by
+    // one (`Meta::effective_env`). A generation-2 overlay has no
+    // provisioning keys (generation 2 knew none), so this is all
+    // `phase_env` gives too.
+    let submit_block = |universe: Option<&str>| {
+        let over = universe.and_then(|u| universes.get(u));
+        let pick = |key: &str| get(over, key).or_else(|| get(environment, key));
+        let mut block = String::new();
+        for part in [pick("env-setup"), pick("submit-env-setup")].into_iter().flatten() {
+            if !block.is_empty() && !block.ends_with('\n') {
+                block.push('\n');
+            }
+            block.push_str(&part);
+        }
+        block
+    };
+    let host = universes.contains_key(super::HOST_UNIVERSE).then(|| super::HOST_UNIVERSE.to_owned());
+    let build_universe = get(table.get("build"), "universe");
     // The flavors' own build universes first, so a refusal names the one a
     // plain `build submit` uses.
-    let host = meta.declared_host().map(|_| super::HOST_UNIVERSE.to_owned());
     let mut candidates: Vec<Option<String>> = Vec::new();
-    let headers = overlay.optionlists.iter().filter_map(|f| optionlist::parse_header(&f.doc.to_string()).ok());
-    for header in headers {
-        candidates.push(header.universe.or_else(|| meta.build.universe.clone()).or_else(|| host.clone()));
+    for file in &overlay.optionlists {
+        let header: toml::Table = file.doc.to_string().parse().unwrap_or_default();
+        let universe = get(header.get("cactup"), "universe");
+        candidates.push(universe.or_else(|| build_universe.clone()).or_else(|| host.clone()));
     }
-    candidates.extend([meta.build.universe.clone(), host.clone(), None]);
-    candidates.extend(meta.universes.keys().cloned().map(Some));
+    candidates.extend([build_universe.clone(), host.clone(), None]);
+    candidates.extend(universes.keys().cloned().map(Some));
     let mut seen = Vec::new();
     candidates.retain(|c| !seen.contains(c) && {
         seen.push(c.clone());
         true
     });
-    for (script, route) in &meta.scripts(super::ScriptKind::BuildSubmit).routes {
-        let mut uses = None;
-        for file in [format!("{script}.py"), format!("{script}.sh")] {
-            let rel = format!("buildsubmitscripts/{file}");
-            if !overlay.scripts.contains(&rel) {
-                continue;
-            }
-            let text = fs::read_to_string(overlay.dir.join(&rel))
-                .map_err(|e| Stop::Found(format!("its build-submit script '{rel}' could not be read ({e})")))?;
-            if text.contains("ENV_SETUP") {
-                uses = Some(file);
-            }
-        }
-        let Some(file) = uses else { continue };
-        let submit = route.universe.clone().or_else(|| host.clone());
-        let now = meta.effective_env(submit.as_deref(), super::Phase::Submit);
+    let routes = table.get("buildsubmitscripts").and_then(toml::Value::as_table).cloned().unwrap_or_default();
+    for (script, route) in &routes {
+        // An array lists queues only; a table may add `universe` and
+        // `build-universes` (absent: every build universe).
+        let route_universe = get(Some(route), "universe");
+        let serves: Option<Vec<String>> = route
+            .get("build-universes")
+            .and_then(toml::Value::as_array)
+            .map(|list| list.iter().filter_map(toml::Value::as_str).map(str::to_owned).collect());
+        let Some(file) = [format!("{script}.py"), format!("{script}.sh")]
+            .into_iter()
+            .find(|file| overlay.scripts.get(&format!("buildsubmitscripts/{file}")).is_some_and(|t| t.contains("ENV_SETUP")))
+        else {
+            continue;
+        };
+        let submit = route_universe.or_else(|| host.clone());
+        let now = submit_block(submit.as_deref());
         for build in &candidates {
-            if !route.compatible_with(build.as_deref().unwrap_or(super::HOST_UNIVERSE)) {
+            let routed_as = build.as_deref().unwrap_or(super::HOST_UNIVERSE);
+            if serves.as_ref().is_some_and(|list| !list.iter().any(|u| u == routed_as)) {
                 continue;
             }
-            let before = meta.effective_env(build.as_deref(), super::Phase::Submit);
+            let before = submit_block(build.as_deref());
             if before != now {
                 let name = |u: &Option<String>| u.as_ref().map_or("none".to_owned(), |u| format!("\"{u}\""));
                 return Err(Stop::Found(format!(
@@ -424,8 +443,10 @@ pub struct Overlay {
     pub meta: TomlFile,
     /// `optionlists/*.toml`, the files `Machine::flavors` lists.
     pub optionlists: Vec<TomlFile>,
-    /// Script files relative to the overlay (`buildsubmitscripts/build.py`).
-    pub scripts: Vec<String>,
+    /// Script files relative to the overlay (`buildsubmitscripts/build.py`),
+    /// with their text, read once here so a file that cannot be read is a
+    /// condition to clear (like any other read), not a refusal.
+    pub scripts: std::collections::BTreeMap<String, String>,
 }
 
 impl Overlay {
@@ -442,7 +463,7 @@ impl Overlay {
             let text = fs::read_to_string(&path).map_err(|e| unreadable(&path, e))?;
             optionlists.push(TomlFile::parse(format!("optionlists/{stem}.toml"), text)?);
         }
-        let mut scripts = Vec::new();
+        let mut scripts = std::collections::BTreeMap::new();
         for kind in ["submitscripts", "runscripts", "buildsubmitscripts"] {
             let entries = match fs::read_dir(dir.join(kind)) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -450,11 +471,12 @@ impl Overlay {
             };
             for entry in entries.flatten() {
                 if entry.path().is_file() {
-                    scripts.push(format!("{kind}/{}", entry.file_name().to_string_lossy()));
+                    let bytes = fs::read(entry.path()).map_err(|e| unreadable(&entry.path(), e))?;
+                    let text = String::from_utf8_lossy(&bytes).into_owned();
+                    scripts.insert(format!("{kind}/{}", entry.file_name().to_string_lossy()), text);
                 }
             }
         }
-        scripts.sort();
         Ok(Overlay { name: name.to_owned(), dir: dir.to_owned(), meta, optionlists, scripts })
     }
 
@@ -1539,7 +1561,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_unreadable_build_submit_script_is_refused_not_skipped() {
+    fn an_unreadable_build_submit_script_is_transient_not_skipped() {
         use std::os::unix::fs::PermissionsExt;
         let home = Home::new();
         let dir = home.overlay("two", 2);
@@ -1555,8 +1577,9 @@ pub(crate) mod tests {
         }
         let result = home.mdb.load("two");
         fs::set_permissions(&script, fs::Permissions::from_mode(0o644)).unwrap();
-        let text = result.unwrap_err().to_string();
-        assert!(text.contains("buildsubmitscripts/build.py' could not be read"), "{text}");
+        assert_transient_shape(&result.unwrap_err(), "two", "buildsubmitscripts/build.py' could not be read");
+        // Readable again, the same overlay comes forward.
+        home.mdb.load("two").unwrap();
     }
 
     #[test]
@@ -1567,8 +1590,27 @@ pub(crate) mod tests {
         fs::write(dir.join("meta.toml"), meta.replace("[queues.local]", "[queues.local]\nretired-key = 1")).unwrap();
         let hash = hash_machine_dir(&dir).unwrap();
         let text = home.mdb.load("two").unwrap_err().to_string();
-        assert!(text.contains("the renamed meta.toml would not load") && text.contains("retired-key"), "{text}");
+        assert!(text.contains("would not load") && text.contains("retired-key"), "{text}");
         assert_eq!(hash_machine_dir(&dir).unwrap(), hash);
+    }
+
+    /// The `ENV_SETUP` check reads the generation-3 file on its own terms,
+    /// not through today's schema: it still judges an overlay whose file a
+    /// later generation's schema would reject.
+    #[test]
+    fn the_env_setup_check_does_not_depend_on_todays_schema() {
+        let home = Home::new();
+        let dir = home.overlay("two", 2);
+        let meta = fs::read_to_string(dir.join("meta.toml")).unwrap();
+        fs::create_dir_all(dir.join("buildsubmitscripts")).unwrap();
+        fs::write(dir.join("buildsubmitscripts/build.py"), "print(ENV_SETUP)\n").unwrap();
+        let extra = "[universes.img]\nwrapper-argv = [\"env\"]\nenv-submit-setup = \"module load apptainer\"\n\
+                     [buildsubmitscripts]\nbuild = [\"local\"]\n[cactup]";
+        let text = meta.replace("[cactup]", extra).replace("[queues.local]", "[queues.local]\nretired-key = 1");
+        fs::write(dir.join("meta.toml"), text).unwrap();
+        let mut overlay = Overlay::read("two", &dir, fs::read_to_string(dir.join("meta.toml")).unwrap()).ok().unwrap();
+        let stop = generation_2_to_3(&mut overlay).unwrap_err();
+        assert!(matches!(&stop, Stop::Found(f) if f.contains("uses ENV_SETUP") && f.contains("\"img\"")), "{stop:?}");
     }
 
     #[test]
