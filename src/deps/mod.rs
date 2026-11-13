@@ -10,6 +10,7 @@
 //! - [`resolve`]: named specs plus the installation's present packages → a [`Plan`] of steps
 //!   (add, add thorns, upgrade, replace, keep), each with why, or a typed [`Refusal`] that names
 //!   its way past.
+//! - [`plan_remove`]: the dependents that block a removal, and the packages it orphans.
 //!
 //! Determinism: every map is a `BTreeMap`/`BTreeSet` (or keeps insertion order), and any-of
 //! dependencies are decided in a fixed order, so the same inputs give the same plan whatever the
@@ -23,6 +24,7 @@ mod conflict;
 mod overrides;
 mod plan;
 mod refusal;
+mod remove;
 mod resolve;
 
 use std::collections::BTreeSet;
@@ -40,6 +42,7 @@ use anyhow::{anyhow, bail};
 pub use overrides::{ClaimKind, ClaimPattern, Override, Rules};
 pub use plan::{Choice, ChoiceRule, Library, Placement, Plan, Record, Step, Untrusted};
 pub use refusal::{Live, Refusal, Unmet};
+pub use remove::{is_requested, plan_remove, AddedFor, Orphan, RemovePlan};
 pub use resolve::resolve;
 
 /// A package: `owner/name`, or `repo:<name>` for a repo of the installation's base that no
