@@ -153,7 +153,9 @@ impl Client {
     /// Download sim file `owner/name@number` to `dest`, checked against the
     /// hash the server sends with it. `sim` names one sim of a multi-sim
     /// entry (`?sim=`, which such an entry requires); `None` for an entry
-    /// that is one sim.
+    /// that is one sim. One sim of several must also be stamped as that sim
+    /// (`owner/name/sim@number`). Nothing is written to `dest` unless every
+    /// check passes.
     pub fn download_sim(&self, owner: &str, name: &str, version: &str, sim: Option<&str>, dest: &Path) -> Res<()> {
         let mut url = self.url(&format!("/sims/{owner}/{name}/{version}/download"));
         if let Some(sim) = sim {
@@ -171,6 +173,9 @@ impl Client {
                 };
                 bail!("The download of {what} has SHA-256 {actual}, but the registry says {expected}");
             }
+        }
+        if let Some(sim) = sim {
+            check_stamp(&bytes, &format!("{owner}/{name}/{sim}@{version}"))?;
         }
         let dir = dest.parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
@@ -428,6 +433,19 @@ pub(crate) fn confirm_untrusted_on(slug: &str, kind: &str, what: Unreviewed, all
     Ok(())
 }
 
+/// A downloaded `.sim` is stamped as `want` (`owner/name/sim@X.Y.Z`): what
+/// was asked for, and not some other sim of the entry.
+fn check_stamp(bytes: &[u8], want: &str) -> Res<()> {
+    let text = std::str::from_utf8(bytes).map_err(|_| anyhow!("The Cactarium's file for {want} is not text"))?;
+    let file = cactup_ecosystem_common::sim::SimFile::from_toml(text)
+        .map_err(|e| anyhow!("The Cactarium's file for {want}: {e}"))?;
+    match file.sim.cactarium.map(|s| s.to_string()) {
+        Some(stamp) if stamp == want => Ok(()),
+        Some(stamp) => bail!("Asked the Cactarium for {want}, and it sent the file of {stamp}"),
+        None => bail!("Asked the Cactarium for {want}, and it sent a file that does not say which sim it is"),
+    }
+}
+
 fn json<T: DeserializeOwned>(response: reqwest::blocking::Response) -> Res<T> {
     let url = response.url().to_string();
     let text = response.text().with_context(|| format!("Failed to read the answer from {url}"))?;
@@ -607,22 +625,43 @@ mod tests {
     }
 
     /// One sim of a multi-sim entry is asked for by `?sim=`, and its own hash
-    /// is checked; an entry that is one sim is asked for without it.
+    /// is checked, and so is its stamp: a file of another sim, or one with no
+    /// stamp, is refused, and nothing is written. An entry that is one sim is
+    /// asked for without `?sim=`.
     #[test]
     fn one_sim_of_several_is_asked_for_by_name() {
+        use crate::commands::import::tests::{stamped, unstamped};
         let tmp = tempfile::tempdir().unwrap();
-        let good = sha256_hex(b"format = 4\n");
-        let (base, heads) = serve_with(2, move |path| {
-            let hash = if path.ends_with("?sim=qc0-z4c") { good.clone() } else { "0".repeat(64) };
-            ("200 OK", format!("x-sha256: {hash}\r\n"), b"format = 4\n".to_vec())
+        let (base, heads) = serve_with(5, move |path| {
+            let (body, hash) = match path.rsplit_once("?sim=").map(|(_, sim)| sim) {
+                Some("qc0-z4c") => (stamped("et/sims/qc0-z4c@1.0.0"), None),
+                Some("mag-tov") => (stamped("et/sims/mag-tov@1.0.0"), Some("0".repeat(64))),
+                Some("other") => (stamped("et/sims/qc0-z4c@1.0.0"), None),
+                Some(_) => (unstamped(), None),
+                None => (stamped("et/one@1.0.0"), None),
+            };
+            let hash = hash.unwrap_or_else(|| sha256_hex(body.as_bytes()));
+            ("200 OK", format!("x-sha256: {hash}\r\n"), body.into_bytes())
         });
         let client = Client::at(&base);
-        client.download_sim("et", "sims", "1.0.0", Some("qc0-z4c"), &tmp.path().join("ok.sim")).unwrap();
-        let err = format!("{:#}", client.download_sim("et", "sims", "1.0.0", Some("mag-tov"), &tmp.path().join("bad.sim")).unwrap_err());
+        let at = |file: &str| tmp.path().join(file);
+        client.download_sim("et", "sims", "1.0.0", Some("qc0-z4c"), &at("ok.sim")).unwrap();
+        let fails = |sim: &str, file: &str| {
+            let err = format!("{:#}", client.download_sim("et", "sims", "1.0.0", Some(sim), &at(file)).unwrap_err());
+            assert!(!at(file).exists(), "{file} was written");
+            err
+        };
+        let err = fails("mag-tov", "hash.sim");
         assert!(err.contains("et/sims/mag-tov@1.0.0") && err.contains("SHA-256"), "{err}");
+        let err = fails("other", "other.sim");
+        assert!(err.contains("et/sims/other@1.0.0") && err.contains("sent the file of et/sims/qc0-z4c@1.0.0"), "{err}");
+        let err = fails("bare", "bare.sim");
+        assert!(err.contains("does not say which sim it is"), "{err}");
+        client.download_sim("et", "one", "1.0.0", None, &at("one.sim")).unwrap();
         let heads = heads.join().unwrap();
         assert!(heads[0].starts_with("GET /api/v1/sims/et/sims/1.0.0/download?sim=qc0-z4c "), "{}", heads[0]);
         assert!(heads[1].starts_with("GET /api/v1/sims/et/sims/1.0.0/download?sim=mag-tov "), "{}", heads[1]);
+        assert!(heads[4].starts_with("GET /api/v1/sims/et/one/1.0.0/download "), "{}", heads[4]);
     }
 
     /// A tip asked for, answered with neither header, is untrusted: the

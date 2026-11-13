@@ -16,6 +16,7 @@ use crate::installation::Installation;
 use crate::Res;
 use anyhow::{anyhow, bail, Context};
 use cactup_ecosystem_common::sim::{Input, SimFile};
+use cactup_ecosystem_common::version::TrackedVersion;
 use clap::Parser;
 use colored::Colorize;
 use indexmap::IndexMap;
@@ -23,13 +24,9 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 pub fn dispatch(ctx: &Ctx, args: ImportArgs) -> Res<()> {
-    let path = match std::fs::canonicalize(&args.simfile) {
-        Ok(path) => path,
-        // Not a file: a published sim, `owner/name[/sim][@range]`.
-        Err(_) if looks_published(&args.simfile.to_string_lossy()) => {
-            download_published(ctx, &args.simfile.to_string_lossy())?
-        }
-        Err(e) => return Err(e).with_context(|| format!("Failed to find '{}'", args.simfile.display())),
+    let path = match source_of(&args.simfile)? {
+        Source::File(path) => path,
+        Source::Published(req) => download_published(ctx, &req)?,
     };
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read '{}'", path.display()))?;
@@ -262,12 +259,29 @@ fn paste_word(word: &str) -> String {
     if plain { word.to_owned() } else { crate::sim::start::shell_quote(word) }
 }
 
-/// Whether `arg`, which names no file, is meant as a published sim rather
-/// than a missing file: a Cactarium reference (`owner/name[/sim][@…]`), and
-/// not a path ending in `.sim`. A sim name may hold a `.`, so a `.sim`
-/// anywhere else does not make it a path.
-fn looks_published(arg: &str) -> bool {
-    !arg.ends_with(".sim") && arg.parse::<cactup_ecosystem_common::slug::Slug>().is_ok()
+/// What `import`'s argument names: a `.sim` file, or a sim published on
+/// the Cactarium.
+#[derive(Debug, PartialEq, Eq)]
+enum Source {
+    File(PathBuf),
+    Published(String),
+}
+
+/// A file when one is there. Otherwise a published sim when the argument
+/// has a `/`, does not end in `.sim` and does not start like a path (`/`,
+/// `.`, `~`); a mistyped reference (`Max/bbh`) then fails with what is wrong
+/// with it, not with "no such file". Anything else is a missing file. A sim
+/// name may hold a `.`, so a `.sim` that is not at the end does not make it
+/// a path.
+fn source_of(arg: &Path) -> Res<Source> {
+    let text = arg.to_string_lossy();
+    match std::fs::canonicalize(arg) {
+        Ok(path) => Ok(Source::File(path)),
+        Err(_) if text.contains('/') && !text.ends_with(".sim") && !text.starts_with(['/', '.', '~']) => {
+            Ok(Source::Published(text.into_owned()))
+        }
+        Err(e) => Err(e).with_context(|| format!("Failed to find '{}'", arg.display())),
+    }
 }
 
 /// Where the copy of a published sim downloaded from the Cactarium is kept,
@@ -276,8 +290,16 @@ fn looks_published(arg: &str) -> bool {
 /// copies downloaded before stay in use), `<owner>/<name>/<sim>/<version>.sim`
 /// for one sim of a multi-sim entry, which serves a file per sim at each
 /// version. The two never meet: a sim name starts with a letter, a version
-/// with a digit. Every read and write of the cache goes through this.
-pub(crate) fn simfile_cache_path(root: &Path, owner: &str, name: &str, sim: Option<&str>, version: &str) -> PathBuf {
+/// with a digit. `version` is a parsed version, written in its canonical
+/// form, so nothing typed or answered can lead out of the cache. Every read
+/// and write of the cache goes through this.
+pub(crate) fn simfile_cache_path(
+    root: &Path,
+    owner: &str,
+    name: &str,
+    sim: Option<&str>,
+    version: &TrackedVersion,
+) -> PathBuf {
     let entry = root.join(owner).join(name);
     let dir = match sim {
         Some(sim) => entry.join(sim),
@@ -291,6 +313,16 @@ pub(crate) fn simfile_cache_path(root: &Path, owner: &str, name: &str, sim: Opti
 fn download_published(ctx: &Ctx, req: &str) -> Res<PathBuf> {
     let client = crate::cactarium::Client::new(&ctx.db.read()?);
     fetch_published(&client, &crate::CACTUP_ROOT.join("simfiles"), req)
+}
+
+/// The one version `slug` names exactly (`@=1.0.1`, or `@1.0.1` written out
+/// in full), or `None` for a range (`@^1.0.1`, `@~2026.5.1`, `@>=1.0.0`
+/// included), or no version at all.
+fn exact_version(slug: &cactup_ecosystem_common::slug::Slug) -> Option<TrackedVersion> {
+    if !slug.req().is_ok_and(|r| r.is_exact()) {
+        return None;
+    }
+    slug.at.as_deref()?.trim_start_matches('=').trim().parse().ok()
 }
 
 /// Fetch published sim `req` into the cache under `root`, checked against the
@@ -314,13 +346,12 @@ fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) ->
         Some(sim) => format!("{owner}/{name}/{sim}"),
         None => format!("{owner}/{name}"),
     };
-    let cached = |version: &str| simfile_cache_path(root, owner, name, sim, version);
-    // An exact version (`@=1.0.1`, or `@1.0.1` written out in full).
-    let exact = slug.at.as_deref().map(|at| at.trim_start_matches('=')).filter(|v| v.split('.').count() == 3);
+    let cached = |version: &TrackedVersion| simfile_cache_path(root, owner, name, sim, version);
+    let exact = exact_version(&slug);
     // Resolved even for an exact version: that is how a yanked version is
     // told. An exact version already downloaded still imports offline, its
     // yank status unknown.
-    let resolved = match (client.resolve(req), exact) {
+    let resolved = match (client.resolve(req), &exact) {
         (Ok(resolved), _) => resolved,
         (Err(e), Some(v)) if cached(v).is_file() => {
             println!(
@@ -330,8 +361,14 @@ fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) ->
             return Ok(cached(v));
         }
         // A Cactarium from before multi-sim entries reads the third segment
-        // as a thorn, and refuses a sim name that is not a thorn name.
-        (Err(e), _) if sim.is_some() && format!("{e:#}").contains("is not a thorn name") => {
+        // as a thorn, and refuses a sim name that is not a thorn name, in its
+        // own words. A current one says "is not a thorn name" too, but only
+        // of a package, and that message is shown as it is.
+        (Err(e), _)
+            if sim.is_some()
+                && format!("{e:#}").contains("is not a Cactarium reference")
+                && format!("{e:#}").contains("is not a thorn name") =>
+        {
             return Err(predates_multi_sim(client, &shown, &format!("{e:#}")));
         }
         (Err(e), _) => return Err(e),
@@ -352,16 +389,19 @@ fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) ->
         (None, None) => {}
     }
     crate::cactarium::warn_if_yanked(&resolved.slug, &resolved.version);
-    let version = resolved.version.version.clone();
+    // A version is all a cache path and a download URL are made of: only
+    // one that reads as a version is taken, in its canonical form.
+    let version: TrackedVersion = resolved
+        .version
+        .version
+        .parse()
+        .map_err(|_| anyhow!("The Cactarium named sim version \"{}\"", resolved.version.version.escape_debug()))?;
     // An exact request answered with another version would import code the
     // user did not ask for; refuse rather than trust the server's matching.
-    if let Some(wanted) = exact
-        && version != wanted
+    if let Some(wanted) = &exact
+        && version != *wanted
     {
         bail!("Asked the Cactarium for {shown}@{wanted}, and it answered with version {version}");
-    }
-    if version.is_empty() || !version.bytes().all(|b| b.is_ascii_alphanumeric() || b".-+".contains(&b)) {
-        bail!("The Cactarium named sim version \"{}\"", version.escape_debug());
     }
     // Said, never refused: the version chosen is what was asked for, the
     // newest in range that has the sim.
@@ -377,13 +417,9 @@ fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) ->
     }
     let dest = cached(&version);
     if !dest.is_file() {
-        client.download_sim(owner, name, &version, sim, &dest)?;
-        if let Some(sim) = sim
-            && let Err(e) = check_stamp(&dest, &format!("{owner}/{name}/{sim}@{version}"))
-        {
-            let _ = std::fs::remove_file(&dest);
-            return Err(e);
-        }
+        // Checked (hash, and for one sim of several its stamp) before it is
+        // put in the cache, whose copies are used again unchecked.
+        client.download_sim(owner, name, &version.to_string(), sim, &dest)?;
         println!("Downloaded {shown}@{version} from {}", client.base());
     }
     Ok(dest)
@@ -397,18 +433,6 @@ fn predates_multi_sim(client: &crate::cactarium::Client, shown: &str, detail: &s
          import it from a Cactarium that has them",
         client.base()
     )
-}
-
-/// The downloaded file at `path` is stamped as `want` (`owner/name/sim@X.Y.Z`):
-/// what was asked for, and not some other sim of the entry.
-fn check_stamp(path: &Path, want: &str) -> Res<()> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("Failed to read '{}'", path.display()))?;
-    let file = SimFile::from_toml(&text).map_err(|e| anyhow!("The Cactarium's file for {want}: {e}"))?;
-    match file.sim.cactarium.map(|s| s.to_string()) {
-        Some(stamp) if stamp == want => Ok(()),
-        Some(stamp) => bail!("Asked the Cactarium for {want}, and it sent the file of {stamp}"),
-        None => bail!("Asked the Cactarium for {want}, and it sent a file that does not say which sim it is"),
-    }
 }
 
 /// `cactup login` (§8.10): store a token for the Cactarium this cactup
@@ -672,7 +696,7 @@ fn parse(words: &[String]) -> Res<Commands> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     /// The printed command pastes back as the words it was built from.
     #[test]
     fn printed_words_paste_back_as_themselves() {
@@ -1073,10 +1097,15 @@ mod tests {
     }
 
     /// A `.sim` as the Cactarium stores it, stamped with `stamp`.
-    fn stamped(stamp: &str) -> String {
+    pub(crate) fn stamped(stamp: &str) -> String {
         let mut sim = sim_without_hints();
         sim.sim.cactarium = Some(stamp.parse().unwrap());
         sim.to_toml().unwrap()
+    }
+
+    /// A `.sim` that names no Cactarium version.
+    pub(crate) fn unstamped() -> String {
+        sim_without_hints().to_toml().unwrap()
     }
 
     /// A `/resolve` answer for a sim entry.
@@ -1121,27 +1150,58 @@ mod tests {
     #[test]
     fn the_sim_cache_keys_on_the_sim_name() {
         let root = Path::new("/c/simfiles");
-        assert_eq!(simfile_cache_path(root, "max", "bbh", None, "1.0.0"), root.join("max/bbh/1.0.0.sim"));
+        let v = |v: &str| v.parse::<TrackedVersion>().unwrap();
+        assert_eq!(simfile_cache_path(root, "max", "bbh", None, &v("1.0.0")), root.join("max/bbh/1.0.0.sim"));
         assert_eq!(
-            simfile_cache_path(root, "et", "cottonmouth-sims", Some("qc0-z4c"), "2026.5.1"),
+            simfile_cache_path(root, "et", "cottonmouth-sims", Some("qc0-z4c"), &v("2026.5.1")),
             root.join("et/cottonmouth-sims/qc0-z4c/2026.5.1.sim")
         );
         assert_ne!(
-            simfile_cache_path(root, "et", "s", Some("a"), "1.0.0"),
-            simfile_cache_path(root, "et", "s", Some("b"), "1.0.0")
+            simfile_cache_path(root, "et", "s", Some("a"), &v("1.0.0")),
+            simfile_cache_path(root, "et", "s", Some("b"), &v("1.0.0"))
         );
     }
 
-    /// What names no file is a published sim when it reads as a reference
-    /// and is not a `.sim` path; a sim name may carry a dot.
+    /// Only one version, written out in full, is exact: a range is not,
+    /// whatever its digits, and neither is anything that is no version.
     #[test]
-    fn what_names_a_published_sim() {
-        for published in ["max/bbh", "max/bbh@1", "et/cottonmouth-sims/qc0-z4c@~2026.5", "et/x/bhns.gw230529", "max/a.sims"] {
-            assert!(looks_published(published), "{published}");
+    fn only_one_version_is_exact() {
+        use cactup_ecosystem_common::slug::Slug;
+        let exact = |s: &str| exact_version(&s.parse::<Slug>().unwrap()).map(|v| v.to_string());
+        assert_eq!(exact("et/s/a@=1.0.1").as_deref(), Some("1.0.1"));
+        assert_eq!(exact("et/s/a@1.0.1").as_deref(), Some("1.0.1"));
+        assert_eq!(exact("max/bbh@=2026.5.1").as_deref(), Some("2026.5.1"));
+        for range in ["et/s/a@^1.0.0", "et/s/a@~2026.5.1", "et/s/a@>=1.0.0", "et/s/a@1", "et/s/a@1.0", "et/s/a"] {
+            assert_eq!(exact(range), None, "{range}");
         }
-        for path in ["runs/qc0.sim", "bbh.sim", "./x/y", "/abs/path", "Runs/x", "a/b/c/d"] {
-            assert!(!looks_published(path), "{path}");
+        // Nothing typed can name a cache path that is not a version.
+        assert!("o/n@=/abs/a.b.c".parse::<Slug>().map(|s| exact_version(&s)).ok().flatten().is_none());
+    }
+
+    /// `import` takes a file when one is there; otherwise a reference-like
+    /// argument is a published sim (a sim name may carry a dot, and a typo
+    /// like `Max/bbh` gets the reference's error), and a path-like one is a
+    /// missing file.
+    #[test]
+    fn import_tells_a_file_from_a_published_sim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("et/s");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "").unwrap();
+        assert_eq!(source_of(&file).unwrap(), Source::File(file.canonicalize().unwrap()));
+        let missing = tmp.path().join("bbh.sim");
+        let err = format!("{:#}", source_of(&missing).unwrap_err());
+        assert!(err.starts_with("Failed to find"), "{err}");
+        for published in ["max/bbh", "max/bbh@1", "et/cottonmouth-sims/qc0-z4c@~2026.5", "et/x/bhns.gw230529", "max/a.sims", "Max/bbh"] {
+            assert_eq!(source_of(Path::new(published)).unwrap(), Source::Published(published.to_owned()), "{published}");
         }
+        for path in ["runs/qc0.sim", "bbh.sim", "./x/y", "/no/such/path", "~/x/y", "bbh"] {
+            assert!(source_of(Path::new(path)).is_err(), "{path}");
+        }
+        // A mistyped reference says what is wrong with it.
+        let nobody = crate::cactarium::Client::at("http://127.0.0.1:9");
+        let err = format!("{:#}", fetch_published(&nobody, tmp.path(), "Max/bbh").unwrap_err());
+        assert!(err.contains("neither a file nor a sim"), "{err}");
     }
 
     /// One sim of a multi-sim entry: the 3-part request goes to /resolve,
@@ -1247,5 +1307,86 @@ mod tests {
         let nobody = crate::cactarium::Client::at("http://127.0.0.1:9");
         let err = format!("{:#}", fetch_published(&nobody, tmp.path(), "et/s/Qc0").unwrap_err());
         assert!(err.contains("is not a sim"), "{err}");
+    }
+
+    /// A range written with a full version (`^2026.5.1`, `~2026.5.1`,
+    /// `>=1.0.0`) is a range: the newest match is taken, not refused for
+    /// differing from the digits typed.
+    #[test]
+    fn a_range_with_a_full_version_is_a_range() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (client, _) = cactarium(
+            6,
+            |_| ("200 OK", resolved("et/cottonmouth-sims/qc0-z4c@2026.5.3", "2026.5.3", Some("qc0-z4c"), None)),
+            |_| stamped("et/cottonmouth-sims/qc0-z4c@2026.5.3"),
+        );
+        let want = tmp.path().join("et/cottonmouth-sims/qc0-z4c/2026.5.3.sim");
+        for req in ["^2026.5.1", "~2026.5.1", ">=2026.0.0"] {
+            let got = fetch_published(&client, tmp.path(), &format!("et/cottonmouth-sims/qc0-z4c@{req}"));
+            assert_eq!(got.unwrap_or_else(|e| panic!("{req}: {e:#}")), want);
+        }
+        // Exact is still exact.
+        let err = format!("{:#}", fetch_published(&client, tmp.path(), "et/cottonmouth-sims/qc0-z4c@=2026.5.1").unwrap_err());
+        assert!(err.contains("answered with version 2026.5.3"), "{err}");
+    }
+
+    /// A current Cactarium refuses a third segment that is no thorn name for
+    /// a package, in words close to an old one's: that is relayed as is,
+    /// not taken for a registry that predates multi-sim entries.
+    #[test]
+    fn a_current_cactariums_refusal_is_relayed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let refused = r#"{"error":{"code":"bad-request","message":"invalid: 'qc0-z4c' in 'et/carpetx/qc0-z4c' is not a thorn name"}}"#;
+        let (client, _) = cactarium(1, move |_| ("400 Bad Request", refused.to_owned()), |_| unreachable!());
+        let err = format!("{:#}", fetch_published(&client, tmp.path(), "et/carpetx/qc0-z4c").unwrap_err());
+        assert_eq!(err, "invalid: 'qc0-z4c' in 'et/carpetx/qc0-z4c' is not a thorn name");
+    }
+
+    /// One sim of several, downloaded before: used again without a second
+    /// download, and, for an exact version, when the Cactarium cannot be
+    /// reached.
+    #[test]
+    fn one_sim_of_several_is_cached_and_used_offline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (client, heads) = cactarium(
+            3,
+            |_| ("200 OK", resolved("et/s/a@1.0.0", "1.0.0", Some("a"), None)),
+            |_| stamped("et/s/a@1.0.0"),
+        );
+        let path = fetch_published(&client, tmp.path(), "et/s/a@1").unwrap();
+        assert_eq!(path, tmp.path().join("et/s/a/1.0.0.sim"));
+        assert_eq!(fetch_published(&client, tmp.path(), "et/s/a@=1.0.0").unwrap(), path);
+        let heads = heads.join().unwrap();
+        assert!(heads[2].contains("/resolve?"), "the second import asked only /resolve: {}", heads[2]);
+        let gone = crate::cactarium::Client::at(client.base());
+        assert_eq!(fetch_published(&gone, tmp.path(), "et/s/a@=1.0.0").unwrap(), path);
+        // Offline, another sim of that version is not that copy.
+        assert!(fetch_published(&gone, tmp.path(), "et/s/b@=1.0.0").is_err());
+    }
+
+    /// An answer about another sim than the one asked for, or naming a sim
+    /// when none was asked for, is refused before anything is downloaded.
+    #[test]
+    fn an_answer_about_another_sim_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (client, _) =
+            cactarium(2, |_| ("200 OK", resolved("et/s/b@1.0.0", "1.0.0", Some("b"), None)), |_| unreachable!());
+        let err = format!("{:#}", fetch_published(&client, tmp.path(), "et/s/a").unwrap_err());
+        assert!(err.contains("the sim a of et/s, and it answered with b"), "{err}");
+        let err = format!("{:#}", fetch_published(&client, tmp.path(), "et/s@1").unwrap_err());
+        assert!(err.contains("with the sim b; name the sim you want, as et/s/b"), "{err}");
+        assert!(!tmp.path().join("et").exists(), "nothing downloaded");
+    }
+
+    /// A file with no stamp is not the sim asked for: refused, and not
+    /// left in the cache.
+    #[test]
+    fn a_sim_without_a_stamp_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (client, _) =
+            cactarium(2, |_| ("200 OK", resolved("et/s/a@1.0.0", "1.0.0", Some("a"), None)), |_| unstamped());
+        let err = format!("{:#}", fetch_published(&client, tmp.path(), "et/s/a").unwrap_err());
+        assert!(err.contains("does not say which sim it is"), "{err}");
+        assert!(!tmp.path().join("et/s/a/1.0.0.sim").exists());
     }
 }

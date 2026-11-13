@@ -4756,7 +4756,10 @@ What uses it, all on the login node (D11):
   `simfiles/<owner>/<name>/<sim>/<X.Y.Z>.sim` (`import::simfile_cache_path`;
   a sim name starts with a letter, so it never meets a version's file); and
   the file's stamp (`owner/name/sim@X.Y.Z`, `.sim` format 4) must name that
-  sim. A bare `owner/name` of such an entry is refused by the server, listing
+  sim, checked with the hash before anything is written to the cache. Only
+  one version written out in full (`@=X.Y.Z` or `@X.Y.Z`; `TrackedReq::is_exact`)
+  is exact; `@^X.Y.Z` and the like are ranges. Cache paths are made only of
+  parsed versions, in their canonical form. A bare `owner/name` of such an entry is refused by the server, listing
   its sims, and that message is printed. A registry from before multi-sim
   entries (it reads the third segment as a thorn: it refuses a sim name that
   is no thorn name, or answers without `sim`) is refused, saying so. It
