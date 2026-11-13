@@ -535,10 +535,14 @@ pub trait Facts {
     /// A loaded package's releases, newest first within each track; `None` when the Cactarium
     /// has no such package.
     fn releases(&self, id: &PkgId) -> Option<&[Release]>;
-    /// The package read at a commit (full or abbreviated) or a tip (`head`, `master`). Never
-    /// asks the user anything: an untrusted snapshot is only marked, and confirmed by the caller
-    /// once the plan is known.
-    fn snapshot(&mut self, id: &PkgId, at: &str) -> Res<Snapshot>;
+    /// The package read at a commit (full or abbreviated) or a tip (`head`, `master`); `None`
+    /// when the Cactarium has no such commit (the search then tries something else). An error is
+    /// for what should stop the command: the network, an interrupt. Never asks the user anything:
+    /// an untrusted snapshot is only marked, and confirmed by the caller once the plan is known.
+    fn snapshot(&mut self, id: &PkgId, at: &str) -> Res<Option<Snapshot>>;
     /// The registered thorns meeting a requirement (to list in a refusal; never planned).
     fn providers(&mut self, requirement: &Requirement) -> Res<Vec<Provider>>;
+    /// Called every few search steps with the number taken so far, so the caller can show that a
+    /// long search is still going (a progress line). Cheap; does nothing by default.
+    fn tick(&mut self, _steps: usize) {}
 }

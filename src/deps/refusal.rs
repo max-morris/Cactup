@@ -64,8 +64,10 @@ pub enum Refusal {
     FleshUnmet { target: PkgId, constraints: Vec<Live> },
     /// The plan would need two fleshes. `ignore`: the claim that brings the second, when one does.
     TwoFleshes { first: String, second: String, ignore: Option<String> },
-    /// The constraints kept displacing each other past the step budget.
+    /// No combination of releases meets these together (or the search gave up before finding one).
     NoConsistentSet { constraints: Vec<Live> },
+    /// A commit or tip the Cactarium cannot read.
+    NotAvailable { target: PkgId, at: String, by: Option<Live>, detail: String },
     /// Whoever takes a need lacks thorns it names.
     MissingThorns { taker: String, thorns: Vec<String>, live: Live },
     /// Under `--replace`, a package taking over a base repo whose package it upgrades or forks
@@ -166,6 +168,10 @@ impl Refusal {
                 None => "Check the name".to_owned(),
             },
             Refusal::NotRegistered { by: None, .. } => "Check the name".to_owned(),
+            Refusal::NotAvailable { by: Some(Live { ignore: Some(ignore), .. }), .. } => {
+                format!("Pass --ignore-claim {ignore}")
+            }
+            Refusal::NotAvailable { .. } => "Name a commit or version the Cactarium has".to_owned(),
             Refusal::BadClaim { ignore, .. } => {
                 format!("Pass --ignore-claim {ignore} (and tell the package's authors)")
             }
@@ -237,9 +243,16 @@ impl fmt::Display for Refusal {
             }
             Refusal::NoConsistentSet { constraints } => write!(
                 f,
-                "No consistent set of releases: these constraints keep displacing each other:{}",
+                "No consistent set of releases: no combination meets these constraints together:{}",
                 list(constraints)
             )?,
+            Refusal::NotAvailable { target, at, by, detail } => {
+                match by {
+                    Some(live) => write!(f, "{} needs {target} at {at}", live.source)?,
+                    None => write!(f, "{target} at {at} was asked for")?,
+                }
+                write!(f, ", which the Cactarium cannot read: {detail}")?
+            }
             Refusal::MissingThorns { taker, thorns, live } => {
                 write!(f, "{taker} has no {}, which {} needs", thorns.join(", "), live.source)?
             }

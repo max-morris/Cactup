@@ -261,6 +261,18 @@ POOL = {
     "et--aslab": ("et/aslab", [V("1.0.0", ["CarpetSlab"])]),
     "max--z4c--carpet-plain": (Z4C, [V("1.2.0", Z4C_THORNS, [dep("et/carpet", None, ["CarpetSlab"])])]),
     "et--a-flesh": ("et/a-flesh", [V("1.0.0", flesh=True)]),
+    # The fork reached later, with the package bringing it sorting after the upstream (H2).
+    "max--app--b-then-c-zz": ("max/app", [V("1.0.0", ["App"], [dep("et/lib-b", None, ["B"]), dep("et/lib-c-zz", None, ["C"])])]),
+    "et--lib-c-zz": ("et/lib-c-zz", [V("1.0.0", ["C"], [dep("et/zz-d", None, ["D"])])]),
+    "et--zz-d": ("et/zz-d", [V("1.0.0", ["D"], [dep("max/fork", None, ["Up"])])]),
+    # A present package that must move for what its new thorn needs (H3).
+    "max--z4c--two-arith": (Z4C, [V("2.0.0", Z4C_THORNS, [dep("et/arith", "^2", ["Arith"], ["Z4cTest"])]),
+                                  V("1.0.0", Z4C_THORNS, [dep("et/arith", "^1", ["Arith"], ["Z4cTest"])])]),
+    "max--z4c--arith-exact-for-test": (Z4C, [V("1.0.0", Z4C_THORNS, [dep("et/arith", "=1.3.0", ["Arith"], ["Z4cTest"])])]),
+    "et--arith--two-only": ("et/arith", [V("2.0.0", ["Arith"])]),
+    "max--z4c--carpetx-missing-commit": (Z4C, [V("1.2.0", Z4C_THORNS, [dep("et/carpetx", sha="5555555555", needs=["CarpetX"])])]),
+    "max--carpetx-mp--arithx": ("max/carpetx-mp", [V("1.0.0", ["CarpetX", T("Arith", implements="arithx")])]),
+    "max--new--needs-z4ctest": ("max/new", [V("1.0.0", ["New"], [dep("max/z4c", None, ["Z4cTest"])])]),
     "et--carpet--newest-incompatible": ("et/carpet", [V("2026.6.0", ["Carpet", "CarpetSlab"], [incompatible("et/b")]),
                                                        V("2026.5.0", ["Carpet", "CarpetSlab"])]),
 

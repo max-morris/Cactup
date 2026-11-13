@@ -1,4 +1,5 @@
-//! The checks over the final set: conflicts between packages, and CCL requirements nothing meets.
+//! The checks over a set of packages in play: conflicts between them, and CCL requirements nothing
+//! meets.
 // Plan §2.2 steps 6 and 7; decisions 5 and 7.
 
 use std::collections::BTreeMap;
@@ -19,81 +20,101 @@ pub(super) fn incompatible(a: &Release, b: &Release) -> bool {
         .any(|q| q.map_or(true, |q| q.fit(b) != Fit::No))
 }
 
-/// The first conflict in the final set that involves something this command changes (brings
-/// in, moves, or gives thorns; two unchanged present packages are the installation's business,
-/// not this plan's), the most specific kind first (a fork usually shares its upstream's thorn
-/// names):
+/// The first conflict among the packages `among` accepts that involves something this command
+/// changes (brings in, moves, or gives thorns; two unchanged present packages are the
+/// installation's business, not this plan's), with the two packages it is between. The most
+/// specific kind comes first (a fork usually shares its upstream's thorn names):
 /// - a fork and its upstream;
 /// - an `incompatible-with`, whichever of the two declares it;
 /// - two enabled thorns of one name (case-insensitive) in different packages, pseudo-packages
-///   included.
-pub(super) fn conflicts(chosen: &BTreeMap<PkgId, Entry>) -> Option<Refusal> {
-    for (id, e) in chosen {
-        for (up, eu) in chosen {
-            if id != up && forks(&e.release, up) && (e.changed() || eu.changed()) {
-                return Some(Refusal::ForkAndUpstream {
-                    fork: id.clone(),
-                    fork_label: e.release.label(),
-                    upstream: up.clone(),
-                    upstream_base_repo: eu.base_repo().map(str::to_owned),
-                });
+///   included (only when `same_thorn`).
+pub(super) fn conflicts(
+    chosen: &BTreeMap<PkgId, Entry>,
+    among: &dyn Fn(&PkgId) -> bool,
+    same_thorn: bool,
+) -> Option<(Refusal, Vec<PkgId>)> {
+    let entries: Vec<(&PkgId, &Entry)> = chosen.iter().filter(|(id, _)| among(id)).collect();
+    // Only a pair with something changing can conflict anew: each changing package against all.
+    let changing: Vec<(&PkgId, &Entry)> = entries.iter().copied().filter(|(_, e)| e.changed()).collect();
+    for (a, ea) in &changing {
+        for (b, eb) in &entries {
+            for ((fork, ef), (up, eu)) in [((a, ea), (b, eb)), ((b, eb), (a, ea))] {
+                if fork != up && forks(&ef.release, up) {
+                    let r = Refusal::ForkAndUpstream {
+                        fork: (*fork).clone(),
+                        fork_label: ef.release.label(),
+                        upstream: (*up).clone(),
+                        upstream_base_repo: eu.base_repo().map(str::to_owned),
+                    };
+                    return Some((r, vec![(*fork).clone(), (*up).clone()]));
+                }
             }
         }
     }
-    for (a, ea) in chosen {
-        for (b, eb) in chosen {
-            if a != b && (ea.changed() || eb.changed()) && incompatible(&ea.release, &eb.release) {
-                return Some(Refusal::Incompatible {
-                    by: a.clone(),
-                    by_label: ea.release.label(),
-                    target: b.clone(),
-                    target_label: eb.release.label(),
-                });
+    for (a, ea) in &changing {
+        for (b, eb) in &entries {
+            for ((x, ex), (y, ey)) in [((a, ea), (b, eb)), ((b, eb), (a, ea))] {
+                if x != y && incompatible(&ex.release, &ey.release) {
+                    let r = Refusal::Incompatible {
+                        by: (*x).clone(),
+                        by_label: ex.release.label(),
+                        target: (*y).clone(),
+                        target_label: ey.release.label(),
+                    };
+                    return Some((r, vec![(*x).clone(), (*y).clone()]));
+                }
             }
         }
     }
-    let mut by_name: BTreeMap<String, Vec<(&PkgId, &Entry, &str)>> = BTreeMap::new();
-    for (id, e) in chosen {
-        for t in &e.enabled {
-            by_name.entry(t.to_ascii_lowercase()).or_default().push((id, e, t));
-        }
+    if !same_thorn {
+        return None;
     }
-    for group in by_name.values() {
-        for (i, (a, ea, ta)) in group.iter().enumerate() {
-            for (b, eb, tb) in &group[i + 1..] {
-                let (a_new, b_new) = (ea.thorn_is_new(ta), eb.thorn_is_new(tb));
-                if !a_new && !b_new {
+    for (a, ea) in &changing {
+        for ta in ea.enabled.iter().filter(|t| ea.thorn_is_new(t)) {
+            for (b, eb) in &entries {
+                if a == b {
                     continue;
                 }
-                // The newcomer is the one changing; the other may be a base repo to replace.
-                let (newcomer, other) = if b_new { (*b, *ea) } else { (*a, *eb) };
-                let base_repo = other.base_repo().map(str::to_owned);
-                return Some(Refusal::SameThorn {
-                    thorn: ta.to_string(),
-                    first: ea.release.label(),
-                    second: eb.release.label(),
+                let Some(tb) = eb.enabled.iter().find(|t| t.eq_ignore_ascii_case(ta)) else { continue };
+                // Reported with the two in id order; the newcomer is the one changing (the later
+                // one when both are), and the other may be a base repo to replace.
+                let ((first, ef, tf), (_, es, _)) =
+                    if a < b { ((a, ea, ta), (b, eb, tb)) } else { ((b, eb, tb), (a, ea, ta)) };
+                let b_new = eb.thorn_is_new(tb);
+                let (newcomer, other) = if b_new && b > a { (*b, *ea) } else { (*a, *eb) };
+                let r = Refusal::SameThorn {
+                    thorn: tf.clone(),
+                    first: ef.release.label(),
+                    second: es.release.label(),
                     newcomer: newcomer.clone(),
-                    base_repo,
+                    base_repo: other.base_repo().map(str::to_owned),
                     ignore: None,
-                });
+                };
+                let _ = first;
+                return Some((r, vec![(*a).clone(), (*b).clone()]));
             }
         }
     }
     None
 }
 
+/// The enabled thorns, with their facts.
+fn enabled_facts(chosen: &BTreeMap<PkgId, Entry>) -> Vec<(&str, &ThornFacts)> {
+    chosen
+        .values()
+        .flat_map(|e| e.enabled.iter().filter_map(|t| e.release.thorn(t)))
+        .map(|t| (t.thorn.as_str(), &t.facts))
+        .collect()
+}
+
 /// Every hard requirement of every thorn this command enables (a package brought in or moved:
 /// all its enabled thorns; a present one: the thorns new to it) that no enabled thorn of the
-/// final set meets: (thorn, its package, the requirement), in plan order.
+/// set meets: (thorn, its package, the requirement), in plan order.
 pub(super) fn unmet_requirements(
     chosen: &BTreeMap<PkgId, Entry>,
     ccl: &dyn Requirements,
 ) -> Vec<(String, PkgId, Requirement)> {
-    let enabled: Vec<(&str, &ThornFacts)> = chosen
-        .values()
-        .flat_map(|e| e.enabled.iter().filter_map(|t| e.release.thorn(t)))
-        .map(|t| (t.thorn.as_str(), &t.facts))
-        .collect();
+    let enabled = enabled_facts(chosen);
     let mut entries: Vec<(&PkgId, &Entry)> = chosen.iter().collect();
     entries.sort_by(|(a, ea), (b, eb)| ea.order.cmp(&eb.order).then_with(|| a.cmp(b)));
     let mut out: Vec<(String, PkgId, Requirement)> = Vec::new();
@@ -102,6 +123,29 @@ pub(super) fn unmet_requirements(
             let Some(thorn) = e.release.thorn(name) else { continue };
             for r in ccl.of(&thorn.facts) {
                 if !enabled.iter().any(|(n, f)| ccl.meets(n, f, &r)) {
+                    out.push((thorn.thorn.clone(), id.clone(), r));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The requirements of thorns the installation keeps that `before` (the thorns it had) met and
+/// the set no longer does: what replacing a base repo's checkouts, or the flesh, takes away.
+pub(super) fn broken_requirements(
+    chosen: &BTreeMap<PkgId, Entry>,
+    before: &[(String, ThornFacts)],
+    ccl: &dyn Requirements,
+) -> Vec<(String, PkgId, Requirement)> {
+    let enabled = enabled_facts(chosen);
+    let mut out = Vec::new();
+    for (id, e) in chosen.iter().filter(|(_, e)| !e.is_new()) {
+        for name in e.enabled.iter().filter(|t| !e.thorn_is_new(t)) {
+            let Some(thorn) = e.release.thorn(name) else { continue };
+            for r in ccl.of(&thorn.facts) {
+                let now = enabled.iter().any(|(n, f)| ccl.meets(n, f, &r));
+                if !now && before.iter().any(|(n, f)| ccl.meets(n, f, &r)) {
                     out.push((thorn.thorn.clone(), id.clone(), r));
                 }
             }

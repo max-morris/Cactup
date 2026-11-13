@@ -1,0 +1,27 @@
+{
+  "about": "An exact need a present package's new thorn makes may take a yanked release",
+  "packages": [
+    "max--new--needs-z4ctest",
+    "max--z4c--arith-exact-for-test",
+    "et--arith--yanked"
+  ],
+  "specs": [
+    "max/new"
+  ],
+  "present": [
+    {
+      "package": "max/z4c",
+      "version": "1.0.0",
+      "enabled": [
+        "Z4c"
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/new@1.0.0 New named",
+      "add max/z4c@1.0.0 Z4cTest needed by max/new@1.0.0",
+      "add et/arith@1.3.0 Arith needed by max/z4c@1.0.0 (Z4cTest), =1.3.0"
+    ]
+  }
+}

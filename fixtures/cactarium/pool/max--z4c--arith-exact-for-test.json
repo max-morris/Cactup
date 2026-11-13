@@ -1,0 +1,70 @@
+{
+  "slug": "max/z4c",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "acac9c8593f2a601cc2a94406684fd93ba28dc62",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/z4c.git",
+      "thorns": [
+        {
+          "arrangement": "Z4c",
+          "thorn": "Z4c",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Z4c",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        },
+        {
+          "arrangement": "Z4c",
+          "thorn": "Z4cTest",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Z4cTest",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/arith",
+          "range": "=1.3.0",
+          "needs": [
+            "Arith"
+          ],
+          "needed-by": [
+            "Z4cTest"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

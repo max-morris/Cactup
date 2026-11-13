@@ -84,9 +84,9 @@ impl Facts for FixtureFacts {
         self.releases.get(id).map(Vec::as_slice)
     }
 
-    fn snapshot(&mut self, id: &PkgId, at: &str) -> Res<Snapshot> {
+    fn snapshot(&mut self, id: &PkgId, at: &str) -> Res<Option<Snapshot>> {
         let found = self.snapshots.iter().find(|((i, a), _)| i == id && (a == at || a.starts_with(at)));
-        found.map(|(_, s)| s.clone()).ok_or_else(|| anyhow!("no snapshot of {id} at {at} in the fixture"))
+        Ok(found.map(|(_, s)| s.clone()))
     }
 
     fn providers(&mut self, r: &Requirement) -> Res<Vec<Provider>> {
@@ -719,6 +719,16 @@ fn records_merge_into_added_for() {
     assert_eq!((fresh.requested, fresh.by.as_slice()), (false, &["max/b@1.0.0".to_owned()][..]));
 }
 
+/// One package present twice is the caller's mistake, refused rather than half-read.
+#[test]
+fn a_package_present_twice_is_refused() {
+    let Loaded { mut facts, mut present, rules, .. } = load(&cases_dir().join("fixed-when-it-fits"));
+    present.push(present[0].clone());
+    let request = Request { specs: &[], present: &present, rules: &rules, options: Options::default() };
+    let e = resolve(&request, &mut facts, &ServerRules).unwrap_err();
+    assert!(e.downcast_ref::<Refusal>().is_none() && e.to_string().contains("in the installation twice"), "{e}");
+}
+
 #[test]
 fn a_missing_or_stale_added_for_means_requested() {
     let c = "0123456789abcdef0123456789abcdef01234567";
@@ -888,4 +898,316 @@ fn claim_patterns_round_trip() {
     }
     assert!("max/z4c:depends:et/carpet".parse::<ClaimPattern>().is_err());
     assert!("max/z4c:dependency".parse::<ClaimPattern>().is_err());
+}
+
+/// `owner/name` → `owner/eman`: a consistent rename (reversing is its own inverse) that reorders
+/// ids alphabetically almost everywhere.
+fn renamed(id: &PkgId) -> PkgId {
+    if id.is_repo() {
+        return id.clone();
+    }
+    let (owner, name) = id.as_str().split_once('/').expect("owner/name");
+    PkgId::parse(&format!("{owner}/{}", name.chars().rev().collect::<String>())).expect("a valid name")
+}
+
+fn renamed_str(s: &str) -> String {
+    PkgId::parse(s).map(|id| renamed(&id).to_string()).unwrap_or_else(|_| s.to_owned())
+}
+
+fn rename_release(r: &mut Release) {
+    r.id = renamed(&r.id);
+    for c in &mut r.claims {
+        c.target = renamed_str(&c.target);
+        for a in &mut c.alternatives {
+            a.target = renamed_str(&a.target);
+        }
+    }
+}
+
+fn rename_pattern(p: &ClaimPattern) -> ClaimPattern {
+    ClaimPattern { package: renamed(&p.package), kind: p.kind.as_ref().map(|(k, t)| (*k, renamed(t))) }
+}
+
+/// The decisions of a plan, ids put back through `back`, whatever order they come in.
+fn decisions(plan: &Plan, back: &dyn Fn(&PkgId) -> PkgId) -> std::collections::BTreeSet<String> {
+    let at = |r: &Release| match &r.at {
+        At::Version(v) => v.to_string(),
+        At::Commit(c) | At::Unknown(c) => c.clone(),
+        At::Tip { name, commit } => format!("{name} {commit}"),
+    };
+    let sorted = |v: &[String]| {
+        let mut v = v.to_vec();
+        v.sort();
+        v.join(",")
+    };
+    let mut out = std::collections::BTreeSet::new();
+    for s in &plan.steps {
+        out.insert(match s {
+            Step::Add { release, thorns, .. } => format!("add {} {} {}", back(&release.id), at(release), sorted(thorns)),
+            Step::Readd { release, thorns } => format!("readd {} {} {}", back(&release.id), at(release), sorted(thorns)),
+            Step::AddThorns { id, thorns, .. } => format!("thorns {} {}", back(id), sorted(thorns)),
+            Step::Upgrade { from, to, thorns, .. } => {
+                format!("upgrade {} {} {} {}", back(&to.id), at(from), at(to), sorted(thorns))
+            }
+            Step::Replace { replaced, by, thorns, flesh, .. } => {
+                let what = match replaced {
+                    Replaced::Base { repo } => format!("repo {repo}"),
+                    Replaced::Added { id } => back(id).to_string(),
+                };
+                format!("replace {what} by {} {} {flesh}", back(by), sorted(thorns))
+            }
+            Step::Keep { id, .. } => format!("keep {}", back(id)),
+        });
+    }
+    for c in &plan.choices {
+        out.insert(format!("choice {} {} -> {} {}", back(&c.dependent), c.claim, back(&c.chosen), c.rule));
+    }
+    for l in &plan.libraries {
+        let mut ps: Vec<String> = l.placements.iter().map(|p| format!("{}:{}:{}", back(&p.by), p.into, p.new)).collect();
+        ps.sort();
+        out.insert(format!("library {} {} {}", back(&l.release.id), at(&l.release), ps.join(",")));
+    }
+    out.extend(plan.untrusted.iter().map(|u| format!("untrusted {} {}", back(&u.id), u.commit)));
+    out
+}
+
+/// Every case decides the same with every package renamed so that ids sort differently: no
+/// decision depends on the alphabetical order of ids (who stands in for whom included).
+#[test]
+fn decisions_do_not_depend_on_ids() {
+    let mut differ = Vec::new();
+    for dir in case_dirs() {
+        let Loaded { case, mut facts, present, rules } = load(&dir);
+        if case.remove.is_some() {
+            continue;
+        }
+        let specs = specs_of(&case);
+        let options = options_of(&case);
+        let request = Request { specs: &specs, present: &present, rules: &rules, options };
+        let original = match resolve(&request, &mut facts, &ServerRules) {
+            Ok(plan) => decisions(&plan, &|id| id.clone()),
+            Err(e) => [format!("refused {}", e.downcast_ref::<Refusal>().map(variant).unwrap_or_default())].into(),
+        };
+        // The same case, renamed throughout.
+        let Loaded { mut facts, mut present, rules, .. } = load(&dir);
+        facts.releases = std::mem::take(&mut facts.releases)
+            .into_iter()
+            .map(|(id, mut rs)| {
+                rs.iter_mut().for_each(rename_release);
+                (renamed(&id), rs)
+            })
+            .collect();
+        facts.snapshots = std::mem::take(&mut facts.snapshots)
+            .into_iter()
+            .map(|((id, at), mut s)| {
+                rename_release(&mut s.release);
+                ((renamed(&id), at), s)
+            })
+            .collect();
+        for ps in facts.providers.values_mut() {
+            ps.iter_mut().for_each(|p| p.package = renamed(&p.package));
+        }
+        for p in &mut present {
+            rename_release(&mut p.release);
+            p.libraries.iter_mut().for_each(|l| {
+                l.id = renamed(&l.id);
+                l.inside = l.inside.as_ref().map(renamed);
+            });
+        }
+        let specs: Vec<NamedSpec> = specs.iter().map(|s| NamedSpec { id: renamed(&s.id), ..s.clone() }).collect();
+        let rules = Rules {
+            ignore: rules.ignore.iter().map(rename_pattern).collect(),
+            overrides: rules
+                .overrides
+                .iter()
+                .map(|o| match o {
+                    Override::Drop(p) => Override::Drop(rename_pattern(p)),
+                    Override::Add { package, claim } => {
+                        let mut claim = claim.clone();
+                        claim.target = renamed_str(&claim.target);
+                        Override::Add { package: renamed(package), claim }
+                    }
+                    Override::Needs { package, target, thorns } => {
+                        Override::Needs { package: renamed(package), target: renamed(target), thorns: thorns.clone() }
+                    }
+                    Override::Satisfies { by, target } => Override::Satisfies { by: renamed(by), target: renamed(target) },
+                })
+                .collect(),
+        };
+        let request = Request { specs: &specs, present: &present, rules: &rules, options };
+        let after = match resolve(&request, &mut facts, &ServerRules) {
+            Ok(plan) => decisions(&plan, &renamed),
+            Err(e) => [format!("refused {}", e.downcast_ref::<Refusal>().map(variant).unwrap_or_default())].into(),
+        };
+        if original != after {
+            let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+            differ.push(format!("{name}:\n  original {original:?}\n  renamed  {after:?}"));
+        }
+    }
+    assert!(differ.is_empty(), "{}", differ.join("\n"));
+}
+
+/// Out of steps, the search reports the most specific refusal it found, not a bare "no
+/// consistent set".
+#[test]
+fn running_out_reports_the_best_refusal_seen() {
+    let dir = cases_dir().join("any-of-first-without-conflict");
+    plan_of("any-of-first-without-conflict");
+    let steps = super::resolve::STEPS.with(|s| s.get());
+    let Loaded { case, mut facts, present, rules } = load(&dir);
+    let specs = specs_of(&case);
+    let request = Request { specs: &specs, present: &present, rules: &rules, options: options_of(&case) };
+    // One step short of the plan: the branch that refused (et/carpet's thorn clash) was seen.
+    super::resolve::BUDGET.with(|b| b.set(Some(steps - 1)));
+    let result = resolve(&request, &mut facts, &ServerRules);
+    super::resolve::BUDGET.with(|b| b.set(None));
+    let e = result.expect_err("out of steps");
+    assert_eq!(e.downcast_ref::<Refusal>().map(variant).as_deref(), Some("SameThorn"), "{e}");
+}
+
+/// Facts of a realistic size for a thorn: a few inherits and functions, a dozen includes.
+fn sized_facts(implements: &str, inherits: &[String]) -> ThornFacts {
+    ThornFacts {
+        implements: Some(implements.to_owned()),
+        inherits: inherits.to_vec(),
+        friends: vec![],
+        requires_functions: vec![format!("{implements}_Fn")],
+        uses_functions: (0..4).map(|i| format!("Use{i}_{implements}")).collect(),
+        provides_functions: vec![format!("{implements}_Fn")],
+        uses_includes: (0..12).map(|i| format!("{implements}_{i}.h")).collect(),
+        requires: vec![],
+        requires_thorns: vec![],
+        optional: vec![],
+        provides: vec![],
+    }
+}
+
+fn synthetic_release(id: &str, version: &str, thorns: &[(String, ThornFacts)], claims: Vec<ClaimInfo>) -> Release {
+    let id = PkgId::parse(id).unwrap();
+    let commit = format!("{:040x}", {
+        let mut h: u128 = 0;
+        for b in format!("{id}@{version}").bytes() {
+            h = h.wrapping_mul(131).wrapping_add(b as u128);
+        }
+        h
+    });
+    Release {
+        id,
+        at: At::Version(version.parse().unwrap()),
+        commit: commit[commit.len() - 40..].to_owned(),
+        tag: Some(format!("v{version}")),
+        url: String::new(),
+        contact: None,
+        flesh: false,
+        library: false,
+        yanked: false,
+        pending: false,
+        usable: true,
+        thorns: thorns
+            .iter()
+            .map(|(t, f)| ThornInfo { arrangement: "Arr".into(), thorn: t.clone(), repo_path: "$1/$2".into(), facts: f.clone() })
+            .collect(),
+        claims,
+    }
+}
+
+fn dependency(target: &str, range: &str, needs: &[&str]) -> ClaimInfo {
+    ClaimInfo {
+        kind: "dependency".into(),
+        target: target.into(),
+        range: Some(range.into()),
+        sha: None,
+        needs: needs.iter().map(|s| s.to_string()).collect(),
+        into: None,
+        needed_by: vec![],
+        alternatives: vec![],
+        note: None,
+    }
+}
+
+/// An installation of the size of a real one: 80 base repos with 400 thorns (each needing the
+/// thorn before it and providing what the next one inherits), 4 added packages, and a named
+/// package with 5 releases and 4 dependencies of 5 releases each; `clash` gives every release of
+/// the named package (or of one dependency) a thorn a base repo has.
+fn synthetic(clash: Option<&str>) -> (FixtureFacts, Vec<Present>, Vec<NamedSpec>) {
+    let mut facts = FixtureFacts::default();
+    let mut present = Vec::new();
+    for i in 0..80 {
+        let thorns: Vec<(String, ThornFacts)> = (0..5)
+            .map(|j| {
+                let name = format!("T{i}x{j}");
+                let inherits = if i == 0 && j == 0 { vec![] } else { vec![format!("T{}x{}", if j == 0 { i - 1 } else { i }, (j + 4) % 5)] };
+                (name.clone(), sized_facts(&name, &inherits))
+            })
+            .collect();
+        let claims = if i > 0 { vec![dependency(&format!("base/pkg{}", i - 1), "^1", &[&format!("T{}x0", i - 1)])] } else { vec![] };
+        let r = synthetic_release(&format!("base/pkg{i}"), "1.0.0", &thorns, claims);
+        let enabled = thorns.iter().map(|(t, _)| t.clone()).collect();
+        present.push(Present { release: r, enabled, origin: Origin::Base { repo: format!("pkg{i}") }, libraries: vec![] });
+    }
+    for k in 0..4 {
+        let thorns = vec![(format!("Added{k}"), sized_facts(&format!("Added{k}"), &["T3x1".to_owned()]))];
+        let id = format!("add/a{k}");
+        let releases: Vec<Release> = (0..5).rev().map(|v| synthetic_release(&id, &format!("1.{v}.0"), &thorns, vec![])).collect();
+        let enabled = [format!("Added{k}")].into_iter().collect();
+        present.push(Present { release: releases[4].clone(), enabled, origin: Origin::Added, libraries: vec![] });
+        facts.releases.insert(PkgId::parse(&id).unwrap(), releases);
+    }
+    let thorn = |name: &str, clashing: bool| {
+        let name = if clashing { "T0x0".to_owned() } else { name.to_owned() };
+        let f = sized_facts(&name, &["T10x2".to_owned(), "T20x3".to_owned()]);
+        (name, f)
+    };
+    for d in 1..=4 {
+        let id = format!("new/d{d}");
+        let clashing = clash == Some(id.as_str());
+        let releases =
+            (0..5).rev().map(|v| synthetic_release(&id, &format!("1.{v}.0"), &[thorn(&format!("D{d}"), clashing)], vec![])).collect();
+        facts.releases.insert(PkgId::parse(&id).unwrap(), releases);
+    }
+    let clashing = clash == Some("new/top");
+    // A clashing dependency's thorn is the one asked of it.
+    let asked = |d: usize| if clash == Some(format!("new/d{d}").as_str()) { "T0x0".to_owned() } else { format!("D{d}") };
+    let claims: Vec<ClaimInfo> = (1..=4).map(|d| dependency(&format!("new/d{d}"), "^1", &[&asked(d)])).collect();
+    let releases = (0..5)
+        .rev()
+        .map(|v| synthetic_release("new/top", &format!("1.{v}.0"), &[thorn("Top", clashing)], claims.clone()))
+        .collect();
+    facts.releases.insert(PkgId::parse("new/top").unwrap(), releases);
+    (facts, present, vec![NamedSpec::parse("new/top").unwrap()])
+}
+
+fn timed(clash: Option<&str>) -> (Res<Plan>, usize, std::time::Duration) {
+    let (mut facts, present, specs) = synthetic(clash);
+    let rules = Rules::default();
+    let request = Request { specs: &specs, present: &present, rules: &rules, options: Options::default() };
+    let start = std::time::Instant::now();
+    let result = resolve(&request, &mut facts, &ServerRules);
+    (result, super::resolve::STEPS.with(|s| s.get()), start.elapsed())
+}
+
+/// A realistic installation resolves in a handful of steps.
+#[test]
+fn a_realistic_installation_resolves_quickly() {
+    let (result, steps, time) = timed(None);
+    eprintln!("realistic installation: {steps} steps, {time:?}");
+    let plan = result.unwrap();
+    assert_eq!(plan.steps.len(), 5, "{}", plan.render("x"));
+    assert!(steps <= 10, "{steps} steps");
+    assert!(time < std::time::Duration::from_secs(1), "{time:?}");
+}
+
+/// A thorn clash on every release refuses at once with the clash, in the named package or deep in
+/// a dependency (the decisions it does not involve are jumped over).
+#[test]
+fn a_clash_on_every_release_refuses_quickly() {
+    for clash in ["new/top", "new/d3"] {
+        let (result, steps, time) = timed(Some(clash));
+        eprintln!("clash in {clash}: {steps} steps, {time:?}");
+        let e = result.expect_err("a clash");
+        assert_eq!(e.downcast_ref::<Refusal>().map(variant).as_deref(), Some("SameThorn"), "{e}");
+        // Linear: each release of new/top tries new/d3's five and jumps over d1 and d2 (without
+        // jumping back it is some 3,000 leaves).
+        assert!(steps <= 60, "{clash}: {steps} steps");
+    }
 }

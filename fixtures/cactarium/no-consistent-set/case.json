@@ -1,5 +1,5 @@
 {
-  "about": "Constraints that keep displacing each other end, past the budget, in a deterministic refusal",
+  "about": "Every combination of et/p and et/q fails one of the other's ranges: a deterministic refusal with the constraints of the deepest failure",
   "packages": [
     "max--x--needs-p-q",
     "et--p--swings",
@@ -11,7 +11,7 @@
   "expect": {
     "refusal": "NoConsistentSet",
     "message": [
-      "these constraints keep displacing each other",
+      "no combination meets these constraints together",
       "et/p ^1 (from et/q@1.0.0)",
       "et/p * (from max/x@1.0.0)"
     ]
