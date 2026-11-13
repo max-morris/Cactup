@@ -532,7 +532,7 @@ of a server or update site.
 | `cactup-config.toml` | S at build finish; L on build, the up-to-date refresh and the thornlist retarget | (a) S at `execute` start | Sticky and put-back. The 1 → 2 bump predates down-steps and is grandfathered (`down_floor` 2): §7.4's accepted narrow window. | Chain `[1 → 2]`. |
 | `<sim>/.cactup/cfg/cactup-config.toml` | `sim create`, once, by `replace` | login readers (`sim export`) | Written once, at the oldest version that holds it. | The config chain. |
 | `.sim` | `cactup export` | (c) every cactup import, the server | Written at the oldest generation that holds the content (`SimFile::required_format`), so a file needing nothing new stays readable by older cactups. | Reads generations 1 to `SIM_FORMAT`; a newer one is refused with an upgrade message, and a file claiming a generation older than its content needs is refused as invalid. |
-| `cactarium.toml`, `cactarium-stack.toml` | authors | the server | Read 1..=`MANIFEST_FORMAT` forever: tags are immutable. | n/a |
+| `cactarium.toml`, `cactarium-stack.toml`, `cactarium-sim.toml` | authors | the server | Read 1..=`MANIFEST_FORMAT` forever: tags are immutable. | n/a |
 | Stack release (API JSON, `FrozenStack`) | the server | (c) all clients | Gated by the `api-generation` header, and cactup checks the release's `format` against the shared crate's `STACK_FORMAT` before the typed parse, so a newer one says to upgrade rather than failing on an unknown key. The server should keep answering older-generation clients in their generation beside the new one until a deliberate cutoff (a rule for the Cactarium repository). | n/a |
 | `latest.json` | CI (`ci/assemble-site.sh`) | (c) every deployed binary and the installer | **Never versioned and never broken**: a refusal would leave old binaries unable to update themselves. It carries no version key; **the path is the version**. Keys may only be added (it is read leniently), and a change that cannot be additive is published at a new path beside the old one. | n/a |
 
@@ -565,8 +565,8 @@ written older).
 | `<test>/.cactup/test.toml` | `testsuite::TEST` | `schema` | 1 | yes |
 | `.cactup-builds/NNNN/build.toml` | `build::attempt::BUILD` (`legacy`: `variant` → `flavor`) | `schema` | 1 | yes |
 | `configs/<c>/cactup-config.toml` (and the sim's frozen copy) | `build::CONFIG` (chain `[1 → 2]`, `down_floor` 2) | `schema` | 2 | yes |
-| `.sim` | shared crate, `SimFile` (`SIM_FORMAT`) | `format` | 3 | n/a |
-| `cactarium.toml`, `cactarium-stack.toml` | shared crate (`MANIFEST_FORMAT`) | `format` | 1 | n/a |
+| `.sim` | shared crate, `SimFile` (`SIM_FORMAT`) | `format` | 4 | n/a |
+| `cactarium.toml`, `cactarium-stack.toml`, `cactarium-sim.toml` | shared crate (`MANIFEST_FORMAT`) | `format` | 2 | n/a |
 | Stack release JSON | shared crate (`STACK_FORMAT`) | `format` | 1 | n/a |
 | `latest.json` | none: the path is the version | n/a | n/a | n/a |
 
@@ -4721,6 +4721,12 @@ sides cannot drift apart silently. `src/cactarium.rs` is only transport:
 - **Generations:** every request says the API generation cactup speaks; an
   answer from a newer generation is refused with "run `cactup update`".
 - **Errors:** an error body's `message` is printed as the server wrote it.
+- **Kinds:** every `/resolve` says the kind of entry the command wants
+  (`kind=package` from `add`, `stack` from install and refetch, `sim` from
+  import), so a registry that knows the parameter refuses another kind
+  saying so (`owner/name is a sim, not a package`) before reading the rest of
+  the reference. An older one ignores it, and the client still checks
+  `Resolved::kind`.
 - **Tokens:** `cactup login [--token T]` stores one per registry in
   `~/.cactup/credentials`, written owner-only; `CACTARIUM_TOKEN` overrides.
   Never a knob: knob values are frozen into every restart's metadata (§5.1),
@@ -4744,10 +4750,25 @@ What uses it, all on the login node (D11):
   `refetch --release` reach stack tips through
   `cactarium::stack_release_text`, `add` reaches package tips through the
   same `confirm_untrusted`.
-- `cactup import owner/name[@range|=X.Y.Z]` downloads the published sim
+- `cactup import owner/name[/sim][@range|=X.Y.Z]` downloads the published sim
   (versions are semver, like packages and stacks; the newest matching, or
   the newest at all) to `~/.cactup/simfiles/<owner>/<name>/<X.Y.Z>.sim`,
-  checked against the registry's `x-sha256`, then imports it as a file. It
+  checked against the registry's `x-sha256`, then imports it as a file. An
+  entry holding several sims (`[sim.files]`, manifest format 2) names each:
+  `owner/name/sim` goes to `/resolve` as is, which answers with the newest
+  version in range that has the sim (and `newer-without-sim` when a newer one
+  in range dropped it: cactup warns and goes on); the download takes
+  `?sim=<sim>`; the copy is cached at
+  `simfiles/<owner>/<name>/<sim>/<X.Y.Z>.sim` (`import::simfile_cache_path`;
+  a sim name starts with a letter, so it never meets a version's file); and
+  the file's stamp (`owner/name/sim@X.Y.Z`, `.sim` format 4) must name that
+  sim, checked with the hash before anything is written to the cache. Only
+  one version written out in full (`@=X.Y.Z` or `@X.Y.Z`; `TrackedReq::is_exact`)
+  is exact; `@^X.Y.Z` and the like are ranges. Cache paths are made only of
+  parsed versions, in their canonical form. A bare `owner/name` of such an entry is refused by the server, listing
+  its sims, and that message is printed. A registry from before multi-sim
+  entries (it reads the third segment as a thorn: it refuses a sim name that
+  is no thorn name, or answers without `sim`) is refused, saying so. It
   resolves even an exact version, which is how a yank is told; an exact
   version already downloaded still imports when the registry cannot be
   reached, its yank status unknown. A sim the Cactarium publishes from its

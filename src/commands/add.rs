@@ -528,13 +528,15 @@ fn resolve_all(
         }
         let slug: Slug =
             spec.parse().map_err(|e| anyhow!("\"{spec}\" is not a package (owner/name[/Thorn][@version|#commit]): {e}"))?;
+        // A slug's third segment also holds a sim name now; for a package it is a thorn.
+        slug.as_thorn().map_err(|e| anyhow!("\"{spec}\" is not a package (owner/name[/Thorn][@version|#commit]): {e}"))?;
         let entry = slug.entry();
         let req = match (&slug.at, slug.sha()) {
             (Some(at), _) => format!("{entry}@{at}"),
             (None, Some(sha)) => format!("{entry}#{sha}"),
             (None, None) => entry.clone(),
         };
-        let resolved = client.resolve(&req)?;
+        let resolved = client.resolve(&req, "package")?;
         if resolved.kind != "package" {
             bail!("{} is a {}, not a package; install a stack with `cactup install`", resolved.slug, resolved.kind);
         }
@@ -773,7 +775,7 @@ fn resolve_libraries(
             (Some(range), None) => format!("{entry}@{range}"),
             (None, None) => entry.clone(),
         };
-        let resolved = ask.client.resolve(&req).with_context(|| format!("{dependent} builds against {req}"))?;
+        let resolved = ask.client.resolve(&req, "package").with_context(|| format!("{dependent} builds against {req}"))?;
         if resolved.kind != "package" {
             bail!("{dependent} builds against {}, a {}, not a library package", resolved.slug, resolved.kind);
         }
@@ -1393,6 +1395,36 @@ mod tests {
             .map(drop)
             .unwrap_err());
         assert!(err.contains("answered with max/carpetx@1.2.0"), "{err}");
+    }
+
+    /// `add` asks `/resolve` for a package (`kind=package`), so a Cactarium
+    /// that knows the parameter says a sim entry is a sim rather than asking
+    /// for one of its sims; that message is shown as is.
+    #[test]
+    fn add_resolves_a_package_as_a_package() {
+        let refused = r#"{"error":{"code":"bad-request","message":"et/cottonmouth-sims is a sim, not a package"}}"#;
+        let (base, heads) = crate::fetch::download::test_server::serve_with(1, move |_| {
+            ("400 Bad Request", "api-generation: 1\r\n".into(), refused.as_bytes().to_vec())
+        });
+        let client = crate::cactarium::Client::at(&base);
+        let err = format!("{:#}", resolve_all(&client, &["et/cottonmouth-sims".to_owned()], false, false).map(drop).unwrap_err());
+        assert_eq!(err, "et/cottonmouth-sims is a sim, not a package");
+        let head = &heads.join().unwrap()[0];
+        assert!(head.starts_with("GET /api/v1/resolve?req=et/cottonmouth-sims&kind=package "), "{head}");
+    }
+
+    /// A slug's third segment may hold a sim name (`owner/name/qc0-z4c`), but
+    /// for a package it is a thorn: anything else is refused before asking the
+    /// Cactarium (nothing listens at this address).
+    #[test]
+    fn a_package_spec_names_a_thorn_not_a_sim() {
+        let err = format!(
+            "{:#}",
+            resolve_all(&crate::cactarium::Client::at("http://127.0.0.1:9"), &["et/carpetx/Carpet-X".to_owned()], false, false)
+                .map(drop)
+                .unwrap_err()
+        );
+        assert!(err.contains("is not a package") && err.contains("not a thorn name"), "{err}");
     }
 
     /// A package sharing a clone the base keeps other thorns of must match

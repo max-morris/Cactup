@@ -1106,7 +1106,7 @@ pub(crate) enum StackCommand {
 // §8.9
 #[derive(clap::Args, Debug)]
 pub(crate) struct ImportArgs {
-    /// The .sim file, or a sim published on the Cactarium (owner/name, or owner/name@X.Y.Z for one version).
+    /// The .sim file, or a sim published on the Cactarium: owner/name, or owner/name/sim for one sim of an entry that holds several, with @range or @=X.Y.Z to choose the version.
     pub simfile: PathBuf,
     /// Alias of the new installation (default: the .sim's name).
     #[clap(short, long)]

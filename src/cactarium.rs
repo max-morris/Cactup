@@ -15,7 +15,7 @@ use colored::Colorize;
 use cactup_ecosystem_common::api::{
     ErrorBody, PackageVersions, Published, Refreshed, Resolved, StackReleases, VersionInfo, API_GENERATION,
     API_GENERATION_HEADER, API_PREFIX,
-    CONTACT_HEADER, SHA256_HEADER, UNPINNED_HEADER, UNTRUSTED_HEADER,
+    CONTACT_HEADER, SHA256_HEADER, SIM_QUERY, UNPINNED_HEADER, UNTRUSTED_HEADER,
 };
 use cactup_ecosystem_common::stack::FrozenStack;
 use cactup_ecosystem_common::STACK_FORMAT;
@@ -86,8 +86,13 @@ impl Client {
 
     /// The newest release (or `@head`/`@master`, or an exact version)
     /// matching `req`, which is `owner/name[@…]` as a user writes it.
-    pub fn resolve(&self, req: &str) -> Res<Resolved> {
-        let url = format!("{}?req={}", self.url("/resolve"), query_escape(req));
+    /// `kind` is the kind of entry the caller wants (`package`, `stack` or
+    /// `sim`): a Cactarium that knows the parameter refuses an entry of
+    /// another kind saying so, before reading the rest of the reference; an
+    /// older one ignores it, and the caller's own check of `Resolved::kind`
+    /// still holds.
+    pub fn resolve(&self, req: &str, kind: &str) -> Res<Resolved> {
+        let url = format!("{}?req={}&kind={}", self.url("/resolve"), query_escape(req), query_escape(kind));
         json(self.send(crate::fetch::download::client().get(&url))?)
     }
 
@@ -151,17 +156,31 @@ impl Client {
     }
 
     /// Download sim file `owner/name@number` to `dest`, checked against the
-    /// hash the server sends with it.
-    pub fn download_sim(&self, owner: &str, name: &str, version: &str, dest: &Path) -> Res<()> {
-        let url = self.url(&format!("/sims/{owner}/{name}/{version}/download"));
+    /// hash the server sends with it. `sim` names one sim of a multi-sim
+    /// entry (`?sim=`, which such an entry requires); `None` for an entry
+    /// that is one sim. One sim of several must also be stamped as that sim
+    /// (`owner/name/sim@number`). Nothing is written to `dest` unless every
+    /// check passes.
+    pub fn download_sim(&self, owner: &str, name: &str, version: &str, sim: Option<&str>, dest: &Path) -> Res<()> {
+        let mut url = self.url(&format!("/sims/{owner}/{name}/{version}/download"));
+        if let Some(sim) = sim {
+            url.push_str(&format!("?{SIM_QUERY}={}", query_escape(sim)));
+        }
         let response = self.send(crate::fetch::download::client().get(&url))?;
         let expected = response.headers().get(SHA256_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
         let bytes = response.bytes().with_context(|| format!("Failed to download {url}"))?;
         if let Some(expected) = expected {
             let actual = sha256_hex(&bytes);
             if !actual.eq_ignore_ascii_case(&expected) {
-                bail!("The download of {owner}/{name}@{version} has SHA-256 {actual}, but the registry says {expected}");
+                let what = match sim {
+                    Some(sim) => format!("{owner}/{name}/{sim}@{version}"),
+                    None => format!("{owner}/{name}@{version}"),
+                };
+                bail!("The download of {what} has SHA-256 {actual}, but the registry says {expected}");
             }
+        }
+        if let Some(sim) = sim {
+            check_stamp(&bytes, &format!("{owner}/{name}/{sim}@{version}"))?;
         }
         let dir = dest.parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
@@ -320,13 +339,17 @@ pub struct StackRelease {
 /// typed at the terminal, or with `allow_untrusted`
 /// (`--risky-allow-untrusted-artifacts`), which still prints the warning.
 pub fn stack_release_text(db: &Database, req: &str, allow_untrusted: bool) -> Res<StackRelease> {
+    stack_release_from(&Client::new(db), req, allow_untrusted)
+}
+
+/// [`stack_release_text`], from the registry `client` talks to.
+fn stack_release_from(client: &Client, req: &str, allow_untrusted: bool) -> Res<StackRelease> {
     use cactup_ecosystem_common::slug::Slug;
     let slug: Slug = req.parse().map_err(|e| anyhow!("\"{req}\" is not a stack (owner/name[@version]): {e}"))?;
-    let client = Client::new(db);
     let version = match slug.tip() {
         Some(_) => slug.at.clone().expect("a tip is an @ form"),
         None => {
-            let resolved = client.resolve(req)?;
+            let resolved = client.resolve(req, "stack")?;
             if resolved.kind != "stack" {
                 bail!("{} is a {}, not a stack", resolved.slug, resolved.kind);
             }
@@ -417,6 +440,19 @@ pub(crate) fn confirm_untrusted_on(slug: &str, kind: &str, what: Unreviewed, all
         bail!("Not fetching {slug}: use a release instead (owner/name@X.Y.Z or a range)");
     }
     Ok(())
+}
+
+/// A downloaded `.sim` is stamped as `want` (`owner/name/sim@X.Y.Z`): what
+/// was asked for, and not some other sim of the entry.
+fn check_stamp(bytes: &[u8], want: &str) -> Res<()> {
+    let text = std::str::from_utf8(bytes).map_err(|_| anyhow!("The Cactarium's file for {want} is not text"))?;
+    let file = cactup_ecosystem_common::sim::SimFile::from_toml(text)
+        .map_err(|e| anyhow!("The Cactarium's file for {want}: {e}"))?;
+    match file.sim.cactarium.map(|s| s.to_string()) {
+        Some(stamp) if stamp == want => Ok(()),
+        Some(stamp) => bail!("Asked the Cactarium for {want}, and it sent the file of {stamp}"),
+        None => bail!("Asked the Cactarium for {want}, and it sent a file that does not say which sim it is"),
+    }
 }
 
 fn json<T: DeserializeOwned>(response: reqwest::blocking::Response) -> Res<T> {
@@ -542,10 +578,10 @@ mod tests {
             "version":"1.4.0","track":"mixed-precision","tag":"mixed-precision/v1.4.0","commit":"3f2c","tree":null,
             "yanked":false,"yank-reason":null,"state":"published","curated":false,"published":0}"#;
         let (base, heads) = serve_with(1, move |_| ("200 OK", "api-generation: 1\r\n".into(), answer.as_bytes().to_vec()));
-        let resolved = Client::at(&base).resolve("max-morris/carpetx@mixed-precision:^1.2").unwrap();
+        let resolved = Client::at(&base).resolve("max-morris/carpetx@mixed-precision:^1.2", "package").unwrap();
         assert_eq!(resolved.version.tag.as_deref(), Some("mixed-precision/v1.4.0"));
         let head = &heads.join().unwrap()[0];
-        assert!(head.starts_with("GET /api/v1/resolve?req=max-morris/carpetx%40mixed-precision%3A%5E1.2 "), "{head}");
+        assert!(head.starts_with("GET /api/v1/resolve?req=max-morris/carpetx%40mixed-precision%3A%5E1.2&kind=package "), "{head}");
         assert!(head.to_ascii_lowercase().contains("api-generation: 1"), "{head}");
     }
 
@@ -553,11 +589,11 @@ mod tests {
     fn errors_carry_the_registrys_message_and_newer_generations_are_refused() {
         let body = r#"{"error":{"code":"not-found","message":"No sim mmorris/nope"}}"#;
         let (base, _) = serve_with(1, move |_| ("404 Not Found", String::new(), body.as_bytes().to_vec()));
-        let err = format!("{:#}", Client::at(&base).resolve("mmorris/nope").unwrap_err());
+        let err = format!("{:#}", Client::at(&base).resolve("mmorris/nope", "sim").unwrap_err());
         assert_eq!(err, "No sim mmorris/nope");
 
         let (base, _) = serve_with(1, |_| ("200 OK", "api-generation: 99\r\n".into(), b"{}".to_vec()));
-        let err = format!("{:#}", Client::at(&base).resolve("a/b").unwrap_err());
+        let err = format!("{:#}", Client::at(&base).resolve("a/b", "package").unwrap_err());
         assert!(err.contains("generation 99") && err.contains("cactup update"), "{err}");
     }
 
@@ -576,7 +612,7 @@ mod tests {
         // A port nothing listens on: bound, then let go.
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let base = format!("http://127.0.0.1:{port}");
-        let err = format!("{:#}", Client::at(&base).resolve("a/b").unwrap_err());
+        let err = format!("{:#}", Client::at(&base).resolve("a/b", "package").unwrap_err());
         assert!(err.starts_with(&format!("The Cactarium at {base} isn't reachable (")), "{err}");
         assert!(err.contains("cactarium-url") && !err.contains("error sending request"), "{err}");
     }
@@ -590,11 +626,82 @@ mod tests {
             ("200 OK", format!("x-sha256: {hash}\r\n"), b"format = 1\n".to_vec())
         });
         let client = Client::at(&base);
-        client.download_sim("o", "n", "1.0.0", &tmp.path().join("ok.sim")).unwrap();
+        client.download_sim("o", "n", "1.0.0", None, &tmp.path().join("ok.sim")).unwrap();
         assert_eq!(std::fs::read_to_string(tmp.path().join("ok.sim")).unwrap(), "format = 1\n");
-        let err = format!("{:#}", client.download_sim("o", "n", "2.0.0", &tmp.path().join("bad.sim")).unwrap_err());
+        let err = format!("{:#}", client.download_sim("o", "n", "2.0.0", None, &tmp.path().join("bad.sim")).unwrap_err());
         assert!(err.contains("SHA-256"), "{err}");
         assert!(!tmp.path().join("bad.sim").exists());
+    }
+
+    /// One sim of a multi-sim entry is asked for by `?sim=`, and its own hash
+    /// is checked, and so is its stamp: a file of another sim, or one with no
+    /// stamp, is refused, and nothing is written. An entry that is one sim is
+    /// asked for without `?sim=`.
+    #[test]
+    fn one_sim_of_several_is_asked_for_by_name() {
+        use crate::commands::import::tests::{stamped, unstamped};
+        let tmp = tempfile::tempdir().unwrap();
+        let (base, heads) = serve_with(5, move |path| {
+            let (body, hash) = match path.rsplit_once("?sim=").map(|(_, sim)| sim) {
+                Some("qc0-z4c") => (stamped("et/sims/qc0-z4c@1.0.0"), None),
+                Some("mag-tov") => (stamped("et/sims/mag-tov@1.0.0"), Some("0".repeat(64))),
+                Some("other") => (stamped("et/sims/qc0-z4c@1.0.0"), None),
+                Some(_) => (unstamped(), None),
+                None => (stamped("et/one@1.0.0"), None),
+            };
+            let hash = hash.unwrap_or_else(|| sha256_hex(body.as_bytes()));
+            ("200 OK", format!("x-sha256: {hash}\r\n"), body.into_bytes())
+        });
+        let client = Client::at(&base);
+        let at = |file: &str| tmp.path().join(file);
+        client.download_sim("et", "sims", "1.0.0", Some("qc0-z4c"), &at("ok.sim")).unwrap();
+        let fails = |sim: &str, file: &str| {
+            let err = format!("{:#}", client.download_sim("et", "sims", "1.0.0", Some(sim), &at(file)).unwrap_err());
+            assert!(!at(file).exists(), "{file} was written");
+            err
+        };
+        let err = fails("mag-tov", "hash.sim");
+        assert!(err.contains("et/sims/mag-tov@1.0.0") && err.contains("SHA-256"), "{err}");
+        let err = fails("other", "other.sim");
+        assert!(err.contains("et/sims/other@1.0.0") && err.contains("sent the file of et/sims/qc0-z4c@1.0.0"), "{err}");
+        let err = fails("bare", "bare.sim");
+        assert!(err.contains("does not say which sim it is"), "{err}");
+        client.download_sim("et", "one", "1.0.0", None, &at("one.sim")).unwrap();
+        let heads = heads.join().unwrap();
+        assert!(heads[0].starts_with("GET /api/v1/sims/et/sims/1.0.0/download?sim=qc0-z4c "), "{}", heads[0]);
+        assert!(heads[1].starts_with("GET /api/v1/sims/et/sims/1.0.0/download?sim=mag-tov "), "{}", heads[1]);
+        assert!(heads[4].starts_with("GET /api/v1/sims/et/one/1.0.0/download "), "{}", heads[4]);
+    }
+
+    /// A stack install asks `/resolve` for a stack (`kind=stack`), so a
+    /// Cactarium that knows the parameter can say when the entry is another
+    /// kind; an answer of another kind is refused here too.
+    #[test]
+    fn a_stack_is_resolved_as_a_stack() {
+        let release = r#"{"format":1,"stack":"et/et-stack@1.0.0","root":"Cactus","repo":[],
+            "thornlist":{"filename":"et.th","text":"!CRL_VERSION = 1.0\n"}}"#;
+        let answer = |kind: &str| {
+            format!(
+                r#"{{"slug":"et/et-stack@1.0.0","kind":"{kind}","url":null,"contact":null,"version":"1.0.0","track":null,
+                "tag":"v1.0.0","commit":null,"tree":null,"yanked":false,"yank-reason":null,"state":"ok","curated":false,"published":0}}"#
+            )
+        };
+        let (base, heads) = serve_with(3, move |path| {
+            let body = match path {
+                p if p.contains("/resolve?req=et/et-stack%40") => answer("stack"),
+                p if p.contains("/resolve?") => answer("package"),
+                _ => release.to_owned(),
+            };
+            ("200 OK", "api-generation: 1\r\nx-cactarium-untrusted: false\r\n".into(), body.into_bytes())
+        });
+        let client = Client::at(&base);
+        let stack = stack_release_from(&client, "et/et-stack@1", false).unwrap_or_else(|e| panic!("{e:#}"));
+        assert_eq!(stack.slug, "et/et-stack@1.0.0");
+        let err = format!("{:#}", stack_release_from(&client, "et/carpetx", false).err().unwrap());
+        assert!(err.contains("is a package, not a stack"), "{err}");
+        let heads = heads.join().unwrap();
+        assert!(heads[0].starts_with("GET /api/v1/resolve?req=et/et-stack%401&kind=stack "), "{}", heads[0]);
+        assert!(heads[2].starts_with("GET /api/v1/resolve?req=et/carpetx&kind=stack "), "{}", heads[2]);
     }
 
     /// A tip asked for, answered with neither header, is untrusted: the
