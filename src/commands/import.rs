@@ -316,13 +316,17 @@ fn download_published(ctx: &Ctx, req: &str) -> Res<PathBuf> {
 }
 
 /// The one version `slug` names exactly (`@=1.0.1`, or `@1.0.1` written out
-/// in full), or `None` for a range (`@^1.0.1`, `@~2026.5.1`, `@>=1.0.0`
-/// included), or no version at all.
+/// in full, on a track too: `@mixed:=1.0.1`, `@:1.0.1`), or `None` for a
+/// range (`@^1.0.1`, `@~2026.5.1`, `@>=1.0.0` included), or no version at
+/// all. Read from the parsed range, its track and its one exact comparator,
+/// never from the text again.
 fn exact_version(slug: &cactup_ecosystem_common::slug::Slug) -> Option<TrackedVersion> {
-    if !slug.req().is_ok_and(|r| r.is_exact()) {
-        return None;
-    }
-    slug.at.as_deref()?.trim_start_matches('=').trim().parse().ok()
+    let req = slug.req().ok().filter(|r| r.is_exact())?;
+    let [alt] = req.alts.as_slice() else { return None };
+    let [c] = alt.req.comparators.as_slice() else { return None };
+    let pre = if c.pre.is_empty() { String::new() } else { format!("-{}", c.pre) };
+    let track = alt.track.as_ref().map(|t| format!("{t}:")).unwrap_or_default();
+    format!("{track}{}.{}.{}{pre}", c.major, c.minor?, c.patch?).parse().ok()
 }
 
 /// Fetch published sim `req` into the cache under `root`, checked against the
@@ -1171,6 +1175,12 @@ pub(crate) mod tests {
         assert_eq!(exact("et/s/a@=1.0.1").as_deref(), Some("1.0.1"));
         assert_eq!(exact("et/s/a@1.0.1").as_deref(), Some("1.0.1"));
         assert_eq!(exact("max/bbh@=2026.5.1").as_deref(), Some("2026.5.1"));
+        // On a track, and on the default track named as one.
+        assert_eq!(exact("o/n@mixed:=1.0.0").as_deref(), Some("mixed:1.0.0"));
+        assert_eq!(exact("o/n@mixed:1.0.0").as_deref(), Some("mixed:1.0.0"));
+        assert_eq!(exact("o/n@:1.0.0").as_deref(), Some("1.0.0"));
+        assert_eq!(exact("o/n@:=1.0.0-rc.1").as_deref(), Some("1.0.0-rc.1"));
+        assert_eq!(exact("o/n@mixed:^1.0.0"), None);
         for range in ["et/s/a@^1.0.0", "et/s/a@~2026.5.1", "et/s/a@>=1.0.0", "et/s/a@1", "et/s/a@1.0", "et/s/a"] {
             assert_eq!(exact(range), None, "{range}");
         }
@@ -1388,5 +1398,29 @@ pub(crate) mod tests {
         let err = format!("{:#}", fetch_published(&client, tmp.path(), "et/s/a").unwrap_err());
         assert!(err.contains("does not say which sim it is"), "{err}");
         assert!(!tmp.path().join("et/s/a/1.0.0.sim").exists());
+    }
+
+    /// A version on a track: cached as `track:X.Y.Z.sim` beside the others,
+    /// downloaded by that version with `?sim=`, and an exact request on a
+    /// track is held to it and imports offline from that copy.
+    #[test]
+    fn a_tracked_version_is_downloaded_and_cached_as_such() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (client, heads) = cactarium(
+            4,
+            |_| ("200 OK", resolved("et/s/a@mixed:1.0.0", "mixed:1.0.0", Some("a"), None)),
+            |_| stamped("et/s/a@mixed:1.0.0"),
+        );
+        let path = fetch_published(&client, tmp.path(), "et/s/a@mixed:=1.0.0").unwrap();
+        assert_eq!(path, tmp.path().join("et/s/a/mixed:1.0.0.sim"));
+        let err = format!("{:#}", fetch_published(&client, tmp.path(), "et/s/a@mixed:=1.0.1").unwrap_err());
+        assert!(err.contains("answered with version mixed:1.0.0"), "{err}");
+        let err = format!("{:#}", fetch_published(&client, tmp.path(), "et/s/a@:1.0.0").unwrap_err());
+        assert!(err.contains("answered with version mixed:1.0.0"), "the default track is another track: {err}");
+        let heads = heads.join().unwrap();
+        assert!(heads[0].starts_with("GET /api/v1/resolve?req=et/s/a%40mixed%3A%3D1.0.0 "), "{}", heads[0]);
+        assert!(heads[1].starts_with("GET /api/v1/sims/et/s/mixed:1.0.0/download?sim=a "), "{}", heads[1]);
+        let gone = crate::cactarium::Client::at(client.base());
+        assert_eq!(fetch_published(&gone, tmp.path(), "et/s/a@mixed:1.0.0").unwrap(), path);
     }
 }
