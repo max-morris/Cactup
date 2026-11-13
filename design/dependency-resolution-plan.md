@@ -1,0 +1,253 @@
+# Plan: Cactarium package dependencies, the Cactup side
+
+*Status: draft for Max and the Cactarium session, 2026-11-11; Max decided all ten open questions (§10) on 2026-11-13, and the sections they touch are updated. Starts after Cactup #39 (multi-sim import, crate pin 2f2c8f4) merges. An Opus review (2026-11-13) and the Cactarium session's answers on §5-§6 are folded in. Line numbers in §1 are as of Cactup `01c2577` (master), cactup-ecosystem-common `2354048` (master, "dependency-claims" merged) and Cactarium `9dc85f0`. The spec is the crate's `docs/dependencies.md`; "D1".."D7" below are Max's client decisions as relayed (resolution in Cactup; any-of order; unclaimed requirements; escape hatches; generation; sims; admin review).*
+
+## Base
+
+#31, #32, #33, #34, #35 (library packages) and #38 are merged (`origin/master` 8418e77). The work starts on top of **#39** (multi-sim import: crate pin `2f2c8f4`, `import::simfile_cache_path`, `Client::download_sim(…, sim)`), after it merges. **Line numbers in §1 are as of `01c2577` and stale** (the Opus review of 2026-11-13 re-based some: `resolve_all` is now add.rs:515-732, `remove` :1013, the flesh refusal :632, `resolve_libraries` :750, export flags args.rs:1177-1203, crate pin Cargo.toml:41); each phase re-checks the lines it touches.
+
+## 0. Summary
+
+Resolution runs in Cactup over data the Cactarium already serves: `GET /packages/{o}/{n}/versions` gives every version with its thorns (CCL facts included) and its claims (dependencies with `needs`/`needed-by`/`alternatives`, `fork-of`, `incompatible-with`). What is missing is the reverse map from an installed repo (URL + commit) to its package, which every installation's base needs before "what is installed" means anything. A pure resolver module computes a plan (add / add thorns / upgrade / replace, each with why), the plan is shown and confirmed, and `add`'s existing machinery executes it: transitively added packages become ordinary `[[added]]` entries carrying only their `needs` thorns, so compose, refetch and remove keep working. Choices and durable overrides go into new top-level maps of `installation.toml` (no version bump for those; an installed flesh package bumps `INSTALLATION` to 3, §4.9). `sim export` gains the registered-package refusal and `--local`; `package init`/`stack init` generate manifests from the live installation; `--risky-allow-untrusted-artifacts` also asks admins' tokens for versions awaiting review.
+
+## 1. What the code does today (checked)
+
+| # | Finding | Where |
+|---|---|---|
+| 1 | `add` resolves each spec with `/resolve`, then reads the version's thorns from `package_versions` (one call per package, cached per command). Claims are read only for libraries (#35): `resolve_libraries` walks `into` dependencies and places each library's checkout; `add` refuses a library or a flesh named directly. Re-adding a present package resolves its newest version and replaces its record. | `commands/add.rs:515-732`, `:750`, `:625-640`, `:910-925` |
+| 2 | A package colliding with the base (same repo name or normalized URL, or a checkout the base has) is refused unless `--replace`, which records `replaces`; a package going into a clone the base already has must be at the base's commit. | `add.rs:425-447`, `:107-168` |
+| 3 | The live thornlist is always `compose(base, added)`; refetch composes `added` onto a new base and never looks at claims. | `add.rs:31-89`, `commands/refetch.rs:106`, `:572` |
+| 4 | `remove` drops one package and restores the base repos it replaced; it knows nothing of dependents. | `add.rs:538-605` |
+| 5 | `installation.toml` (`INSTALLATION` schema 2, sticky; its v2→v1 down-step answers `CannotExpress` when libraries are present) records `[[added]]` (package, version, tag, commit, url, repo, thorns with `repo-path`, replaces, contact, `[[added.libraries]]`). No reason, no dependents, no overrides. | `installation.rs:26-52`, `:163-168` |
+| 6 | The base is not mapped to packages. The DB records only the stack slug and contact; the server leaves `RepoPin.cactarium` empty in every frozen stack. | `database.rs:195-204`; Cactarium `stacks.rs:263` |
+| 7 | A stack install pins and installs the frozen thornlist as is; no claims are read. | `commands/install.rs:540`, `cactarium.rs:300-334` |
+| 8 | `import` installs a `.sim`'s pins as is; published sims are cached at `~/.cactup/simfiles/<o>/<n>/<v>.sim` and reused offline for an exact version. | `commands/import.rs:23-75`, `:257-310` |
+| 9 | `sim export`/`pack` refuse dirty and unpushed repos with `--allow-dirty`/`--allow-unpushed` as ways past; `RepoPin.cactarium` is always written `None`; no registry lookup. | `sim/export.rs:80`, `:159-184`, `:551`, `:356`; `args.rs:1066-1071`, `:1089-1094` |
+| 10 | CCL is read locally only by `--trim`, with the crate's `ThornFacts::scan` and its own requirement rules (implementation defaults to the thorn name; every provider kept). The server's check has its own `Need`/`needs_of`/`meets`. The two differ. | `sim/trim.rs:47-170`; Cactarium `deps.rs:24-63` |
+| 11 | All GETs are anonymous; the token is sent only on publish/refresh. The global flag only skips the untrusted-tip prompt. | `cactarium.rs:68-115`, `:155-196`, `args.rs:295-299` |
+| 12 | Flesh: several `$ROOT`-target components of the base (Makefile, lib, src…; `fetch::is_flesh`), whose root files link into `repos/`. `add` refuses a flesh package explicitly. `compose` emits only `{root}/arrangements` sections and drops a replaced repo's base checkouts only where an added package claims them; collision detection matches repo name, URL or claimed checkout, so a thornless flesh fork collides with nothing. | `add.rs:632`, `:35-63`, `:876-884`; `fetch/mod.rs:1020`; `thornlist.rs:133` |
+| 13 | Cactup uses the crate's `api`, `ccl`, `crl`, `sim`, `slug`, `stack`, `par` and `manifest` (claims for libraries since #35); the crate pin is `2f2c8f4` after #39. `RepoPin.cactarium` is a typed `Option<Slug>`, and `#` in a slug only parses since crate `a4cc7ae`. | grep of `src/`; crate `sim.rs:258-260` |
+| 14 | Server facts: `/packages/{o}/{n}/versions` serves approved versions only, each with `thorns[].facts`, `claims[]` (`ClaimInfo` with `needs`, `needed-by`, `alternatives`, `sha`) and `flesh`; `/versions/{commit|head|master}` serves a snapshot (abbreviated commits expanded) that the dependency check never ran on. There is no reverse lookup, provider search, registration or whoami endpoint. | Cactarium `web/api.rs:113-153`, `:309-351`, `web/mod.rs:26-34`, `tracker.rs:1109` |
+
+## 2. The resolver (decided shape)
+
+### 2.1 Data model (`src/deps/`, pure: no I/O, no printing)
+```rust
+pub struct PkgId(String);                         // "owner/name"
+pub enum At { Version(TrackedVersion), Commit(String), Unknown(String) } // Unknown: a commit no version froze
+pub struct Release { id: PkgId, at: At, commit: String, url: String, flesh: bool, yanked: bool,
+                     pending: bool, thorns: Vec<ThornInfo>, claims: Vec<ClaimInfo> }
+pub enum Origin { Base { repo: String }, Added, Planned }
+pub struct Present { release: Release, enabled: BTreeSet<String>, origin: Origin } // what the installation has
+pub enum Req { Range(TrackedReq), Commit(String) }
+pub struct Why { by: PkgId, at: At, claim: String /* Dependency::label() */, thorns: Vec<String> }
+pub enum Step { Add { release, thorns, why }, AddThorns { id, thorns, why }, Upgrade { from, to, thorns, why },
+                Replace { base_repo, by: PkgId }, Keep { id, note } }
+pub struct Plan { steps: Vec<Step>, choices: Vec<Choice>, notes: Vec<String> }
+pub trait Facts { fn versions(&mut self, ids: &[PkgId]) -> Res<()>; fn release(&self, ..) -> ..; fn providers(&mut self, need: &Requirement) -> Res<Vec<(PkgId, String)>>; }
+```
+Base thorns from repos the lookup can't map become pseudo-packages `repo:<name>` with `At::Unknown`, so conflicts see them.
+
+### 2.2 Algorithm
+Inputs: the named specs (package, `Req`, optional thorn subset), the present set (added packages, plus base repos mapped by the pin lookup, flesh included), overrides (§4.4), `--ignore-claim`s, `--upgrade`, `--no-deps`.
+1. Apply overrides and ignores to every release's claims as they are loaded (drop, add, extra `needs`, "X satisfies Y").
+2. **Seed** `chosen` with the present set. Present releases are fixed unless `--upgrade` and the plan touches them, or `--upgrade-all` (then each present package starts as a need for its newest release fitting every constraint). A **named** spec for a present package is never "fixed": it targets the newest release that fits, as re-adding does today (`add.rs:910-925`); "fixed unless `--upgrade`" applies to packages that were not named.
+3. **Worklist of needs** `(target, Req, thorns, Why)`, starting with the named specs. Single-target dependencies first, to a fixpoint; then **any-of** dependencies one at a time in a fixed order (the dependent's id, then declaration order), re-running the fixpoint after each, so "already brought in" never depends on hash order.
+4. For each need:
+   - **Identity.** A chosen fork F of the target (a `fork-of` claim of F's chosen release) takes the need if `ForkOf::stands_in_for(dep, published(target))` (one more versions call for the upstream); else it is a conflict. An override "X satisfies T" takes it without a version check. The `needs` thorns must exist in whoever takes it.
+   - **Version.** Add `Req` to the target's constraints. Keep the chosen release if it matches all of them; a fixed one that doesn't is a refusal (§4.5). Otherwise take the newest release that matches every constraint, has every required thorn, is not `state = invalid|upstream-missing`, and is not yanked unless a constraint is exact. A `#sha` need resolves through `/versions/<commit>` (an unreviewed commit of an untrusted package goes through `confirm_untrusted`, as `add` does since #32). `At::Unknown` satisfies a range with a note (misfit 5), and a `Commit` need only if it is that commit.
+   - If a version changes for a package already expanded, restart from step 2. Constraints are keyed by their source `id@version`; when a source's release changes, its constraints are dropped, so a replaced release's constraints never refuse a consistent set. The work is bounded by a fixed step budget (and by the total number of candidate versions); past it, a deterministic "no consistent set" lists the live constraints and their sources.
+   - **Upgrade, replace, stand-in carry the present set.** An `Upgrade` or `Replace` of a present package, or a fork standing in for one, enables the package's present enabled thorns plus the new `needs`, never `needs` alone (else `share_base_clone`, `add.rs:249-283`, refuses a clone whose other checkouts stay at the base's commit, and a fork leaves upstream thorns enabled, a conflict under decision 7).
+   - **Libraries are placement, not needs.** A dependency with `into` (a library) is never pushed as a need: `resolve_libraries` keeps placing it, also under `--no-deps`. Its version constraint still enters the resolver, and two packages placing one library at incompatible versions (or at different `into` paths with different commits) are a conflict.
+   - **Untrusted snapshots** (`#sha` or tip dependencies of untrusted packages) are collected by `Facts`, not confirmed inside the resolver: after a wave's renderer `shutdown_and_wait()`, `confirm_untrusted` asks for them, then the next wave starts.
+   - **Pending releases** (served only under `--risky-allow-untrusted-artifacts`): "newest that fits" prefers approved releases; a pending one is taken only when a spec names it exactly or no approved release fits, and the plan lists every pending release it chose.
+   - **Transitive.** Enable `needs − enabled`. For each newly enabled thorn, push the chosen release's dependencies whose `needed-by` contains it, plus those with empty `needed-by` when the package first enters. `--no-deps` pushes nothing beyond the named specs.
+5. **any-of (D2):** an alternative present; else one already chosen by the plan; else the first listed among those conflicting with nothing present or planned. The choice and its rule are printed and recorded. No "fewest packages" rule.
+6. **Conflicts after the fixpoint:** two enabled thorns of one name (case-insensitive) from different packages, pseudo-packages included; a fork and its upstream both present; any chosen release's `incompatible-with` matching another chosen release (both directions); a flesh dependency (`needs = []` on a flesh) not met by the installed or planned flesh or a fork standing in. (An unmet flesh dependency is first handled in step 4 like any need: the newest fitting flesh release is planned as a `Replace` of the base's `$ROOT` component; only when none fits does it get here.)
+7. **CCL check on the delta (D3).** Every hard requirement (`ccl::Requirement`, P1) of every newly enabled thorn must be met by the final set. Planned thorns use the registry's facts, present ones a local scan (`trim::thorn_facts`, made shared: parallel, with progress). This catches what the publish check doesn't cover: `--no-deps`, ignores, `#sha`/tip snapshots (never checked), base and local thorns. An unmet requirement always refuses (artifacts must be fully specified; open question 5): the refusal names the thorn, the requirement and the package whose manifest leaves it undeclared, and lists what `GET /providers` returns as `cactup add` lines (or says nothing provides it). Cactup never plans an undeclared provider. No defaults table.
+
+Interrupt and progress: `versions` calls go in waves (each wave is the packages newly named), on `par::parallel_map`, one `progress::Line` per package under a `Headline` ("ask the Cactarium"), the flag polled per item and between waves; each request has a timeout (blocking reqwest can't be interrupted mid-request). One `lookup` request per command, behind a `Line` too.
+
+### 2.3 Showing and confirming
+```
+Plan for cactup add max/z4c:
+  add      max/z4c@1.2.0           Z4c, Z4cTest              named
+  add      et/carpetx@2026.5.1     CarpetX, Loop             needed by max/z4c (Z4c)
+  add      et/carpet@2026.5.0      CarpetSlab                max/z4c: any of et/carpet, et/cactuspugh (the first listed)
+  upgrade  et/admbase 2026.4.0 -> 2026.5.1  ADMBase          max/z4c needs ^2026.5 (--upgrade)
+  replace  base repo admbase with et/admbase@2026.5.1
+Proceed? [Y/n]
+```
+Asked only when the plan goes beyond what was named, on a terminal (`read_line_interruptibly`). Without a terminal it refuses unless `--yes` (open question 2). `--dry-run` prints the plan and stops.
+
+### 2.4 What is recorded (`installation.toml`, `INSTALLATION` schema 2; flesh packages bump it to 3, see §4.9)
+New top-level **maps**, so #31's put-back keeps them through an older binary's rewrite. Fields in `[[added]]` elements would be dropped, since put-back never enters arrays (misfit 18):
+```toml
+[added-for."et/carpet"]          # one per [[added]] package
+requested = false                 # named on a command line, or brought in
+by = ["max/z4c@1.2.0"]            # whose dependencies brought it in
+choice = "any of et/carpet, et/cactuspugh: the first listed"   # only for an any-of choice
+
+[claim-overrides."drop max/foo:dependency:et/bar"]   # key = the override's canonical text
+kind = "drop"                     # drop | add | needs | satisfies
+note = "et/bar's thorns ship with the flesh"
+```
+Readers ignore `added-for` keys with no `[[added]]` entry (an older binary's `remove`). **Defaults that keep a named package safe:** each `added-for` entry also stores the `[[added]]` `commit` it was written for (`for-commit`); an entry that is missing (every installation written before this work) or whose `for-commit` differs from the `[[added]]` entry (an older binary re-added or upgraded it) means `requested = true`, so no orphan pass ever deletes a package the user may have named. `by` is informational (shown by `inst show`); dependents and orphans are computed from current claims (§4.2), never from `by`. If `added-for.*` entries are rebuilt whole by a writer, they go in `INSTALLATION.replace_whole` and the comment at `installation.rs:26-28` is updated. The shape pin of #31 fails: copy `current.toml` to a numbered fixture and re-pin, as its §2.5 says. Nothing new in `database.json`.
+
+## 3. Where CCL facts come from
+
+| Thorns | Source |
+|---|---|
+| A registry release (planned, or present and mapped, unchanged) | `ThornInfo.facts` from the versions call |
+| Present on disk (base, local edits, unmapped repos) | local `ThornFacts::scan`, files read as trim reads them (regular files only, size cap) |
+| Requirement semantics | one function in the crate, `ccl::Requirement` + `ThornFacts::requirements()` + `ThornFacts::meets()` (moved from Cactarium `deps.rs:24-63`), used by the server check, the resolver, `--trim` and generation |
+
+## 4. Commands
+
+### 4.1 `cactup add` (`args.rs:325`, `add.rs`)
+New flags: `--upgrade`, `--upgrade-all` (every present package is movable, not only those the plan touches), `--no-deps`, `--ignore-claim OWNER/PKG[:KIND:TARGET]` (repeatable), `--yes`, `--dry-run`. `resolve_all` becomes "load releases plus lookup, then `deps::resolve`". The plan's steps turn into `Wanted` entries; `Replace` uses the existing `replaces` path (`--upgrade` implies it for the repos it names). `reuse_base_clone`/`share_base_clone` cover "more thorns of a base package at the same commit". Writes `added-for`.
+
+### 4.2 `cactup remove`
+Dependents and orphans are computed from the **current** claims of every present package (one `versions` wave plus the base lookup, with progress), with overrides and the any-of choices applied, never from the stored `by`. Offline (the Cactarium unreachable), `remove` refuses and names `--no-deps` (remove exactly what was named, no dependents check, no orphan removal) as the way past. Refuses to remove a package another added or base package depends on, naming the dependents, with `--no-deps` as the way past. Packages the removal orphans (`requested = false`, no remaining `by`, computed to a fixpoint) join the plan as `remove` steps, each with why ("brought in by max/z4c, nothing else needs it"); the plan is shown and confirmed as in §2.3, and `--no-deps` leaves orphans installed (open question 9).
+
+### 4.3 `install owner/stack`, `inst refetch`, `import`
+- **Stack install / refetch to a stack:** no resolution (a release is frozen). After composing, run the check (steps 6-7) over the result and print problems as warnings naming `cactup add --upgrade <pkg>` or `cactup claims override …`. They never fail the command. Base mapping comes from `RepoPin.cactarium` once the server fills it (S2), else from the lookup.
+- **`import`:** unchanged except §4.8; a sim pins everything.
+
+### 4.4 New `cactup claims` (D4)
+- `claims override drop OWNER/PKG:KIND:TARGET [--note]`: drop a dependency, `incompatible-with` or `fork-of`.
+- `claims override add OWNER/PKG --dependency TARGET --needs A,B [--needed-by T]`: add a missing claim.
+- `claims override needs OWNER/PKG:dependency:TARGET THORN…`: add missing `needs` thorns.
+- `claims override satisfies X Y`: X stands in for Y. X is `owner/pkg` or `repo:<name>` for an unregistered repo of the installation (misfit 15).
+- `claims list` (the overrides plus the any-of choices); `claims override --remove KEY`; `claims check` (steps 6-7 over the whole installation, read-only; what refetch and stack install print).
+
+Carried: into exported sims as `provenance.extra["claims-overrides"]`, informational (misfit 4); into generated manifests as comment lines.
+
+### 4.5 Refusals and their way past (user-visible text: no §-refs)
+| Situation | Message ends with |
+|---|---|
+| Present release outside a new range | "Pass --upgrade to move it, or --ignore-claim max/z4c:dependency:et/carpetx" |
+| Same thorn name, two packages | "Pass --replace to use et/carpetx in place of base repo carpetx, or `cactup claims override satisfies repo:carpetx et/carpetx`" |
+| `incompatible-with` | "--ignore-claim et/a:incompatible-with:et/b (this command) or `cactup claims override drop …` (for good)" |
+| Fork doesn't stand in | "--ignore-claim …, or `cactup claims override satisfies max/carpet-mp et/carpet`" |
+| No release fits every constraint | each constraint with its source, then "--ignore-claim <the one to drop>" |
+| Unclaimed requirement (any number of providers) | the package whose manifest leaves it undeclared, then the candidates as `cactup add et/carpet/CarpetSlab` lines (or "no registered package provides it") |
+| Flesh dependency unmet and no flesh package fits | each flesh constraint with its source, then "--ignore-claim …" (misfit 11) |
+| Non-terminal, plan beyond the named | "pass --yes, or --dry-run to see it" |
+
+### 4.6 `sim export` / `sim pack` / `sim publish` (D6)
+After the existing pins (`export.rs:58-80`), one lookup of every git pin. Refuse, naming each repo: uncommitted changes ("commit and rebuild"), unpushed commits ("push, then `cactup inst refetch`"), a repo that is no registered package's ("push it and register it with `cactup package init <repo> --publish`, or fork a registered package"), untracked/`ignore` thorns, and download components the Cactarium has not reviewed (misfit 13; S9: a reviewed download, matched by URL and sha256, passes). Each refusal also says "or --local for a sim for your own use". `--local` replaces `--allow-dirty`/`--allow-unpushed` (open question 3); it needs no marker in the file, because the Cactarium refuses exactly the sims that needed it. `RepoPin.cactarium` is filled from the lookup **only with `owner/pkg@version` stamps**; a pin at a commit no version froze stays unstamped. (A `#sha` stamp would make older readers, whose `Slug` predates `#`, refuse the whole `.sim`; stamping it would need a `.sim` format bump through `required_format()`, not worth it for information the git pin already carries.) A download whose hash the build never froze (today only a warning, `export.rs:63-77`) now refuses without `--local`: there is nothing to review. Download pins go through S9's lookup. `sim publish` (in `import.rs`, rewritten by #39) runs the same lookup check before uploading.
+
+### 4.7 `cactup package init [REPO]` / `cactup stack init` (D5)
+- **package init:** REPO is a repo of the active installation (default: the one containing the current directory). It writes `cactarium.toml` at the repo root, for review; it refuses to overwrite without `-f`. `[package]`: `name` (the repo name, lowercased; `--name`), `owners` (whoami, S5; `--owner`), `root`/`arrangement` from `ccl::scan_tree`'s layout. For each requirement the repo's own thorns don't meet: the installed thorn meeting it (capabilities and functions: the one in the active config's built ThornList; implementations: if several from different packages, a commented TODO `any-of`, misfit 10), mapped to package and version. One `[[dependency]]` per provider package and distinct `needed-by` set, with `needed-by` always explicit. Ranges are `~X.Y.Z`, or `track:~X.Y.Z` on a track; `--exact` writes `=X.Y.Z`; a provider at a commit no version froze, or in an unregistered repo, becomes a TODO comment. **Forks:** for each present package sharing thorn names with the repo, if one of its versions' frozen commits is an ancestor of HEAD (new `fetch::git::is_ancestor`) and the thorns match → `[[fork-of]] target = "<pkg>@=<newest contained version>"`, missing thorns as a TODO. **Smells → TODO comments only:** an `#include` whose path leaves the thorn's directory into another thorn (sources scanned in parallel, with progress); a generic `Driver` inherit next to one driver's headers; repo thorns not built here (as a possible `exclude-thorns`); a flesh fork in use (possible flesh dependency). Overrides go in as comments. Written by template, then checked with `Manifest::from_repo_file` (TOML serialization can't carry comments).
+- **stack init:** writes `cactarium-stack.toml` with `extends = [<the release the installation is on>]`, `[[stack.pin]]` for base repos whose commit differs from the release's pins, and added packages: `[[override]] repo = "<repo>" package = "<pkg>@=<version>"` (the crate's `Override` requires `repo`) where they replace a base repo, pinned CRL sections in a generated thornlist otherwise. Packages at a tip or at a commit no version froze (which `compose` writes unpinned for tips, `add.rs:62-76`) are pinned at their fetched commit in the generated thornlist, never `@=<version>`. A base that is a stack tip (`@head`) has no release for `extends`: refuse, naming `cactup inst refetch --release` to move onto a release first. Plus informational `[[dependency]]` entries: for each package another installed package depends on, the range and `needs` those declarations give, with a comment naming each declaring package (misfit 7, open question 10). It refuses dirty/unpushed repos like export.
+- **`--publish`** never writes. Package: requires `cactarium.toml` committed and pushed (refusing with the git commands), then registers (S4) or refreshes (exists). Stack: `--publish --version V` uploads the definition through the existing `publish_stack`.
+
+### 4.8 `--risky-allow-untrusted-artifacts`, second meaning (D7)
+With the flag, every request carries `x-cactarium-include-unreviewed: true` and the stored token, if any, whether or not the user is an admin (update from the Cactarium session, per Max, server PR Cactarium#3). Without the flag, GETs stay anonymous. The server decides what the header gets: with an admin token, releases awaiting review plus entries awaiting their first review; for anyone else, releases awaiting review of public entries when the site's untrusted-tips setting is `allow`, otherwise nothing changes. A response that serves anything unreviewed carries `x-cactarium-unreviewed: true`, and Cactup warns on it as it does for untrusted tips (the `confirm_untrusted` shape from #32). A release with `review = "pending"` is printed in red ("awaiting review: nobody has approved it"). Unreviewed sims download to `<v>.unreviewed.sim`, which the offline fallback never uses; the name comes from #39's `simfile_cache_path` (which every cache read and write goes through, sim segment included), and "unreviewed" from the `/resolve` answer's `x-cactarium-unreviewed` header, since `fetch_published` picks the destination before downloading (`Client::resolve` must stop discarding headers). Help text (with #32's text as the base):
+> Take what nobody has reviewed without asking: a branch tip (@head, @master) or a commit no published version names (#commit) of a stack or package the Cactarium does not trust, and, with an admin's token (cactup login), versions still awaiting review. Such code may fetch and build anything. The warning is still printed.
+
+### 4.9 Flesh packages (decision 6)
+The "existing `replaces` path" does not cover the flesh (finding 12), so this is its own work (phase P3b):
+- **Replacement is keyed on the flesh, not on collision:** a flesh package replaces every base component for which `fetch::is_flesh` holds, whatever its name or URL. `add` drops its flesh refusal (`add.rs:632`) for that path.
+- **`compose`** emits a `$ROOT` section for the flesh package, with the base flesh component's checkout list (Makefile, lib, src, …) at the package's URL and commit, and drops the base's flesh components.
+- **Links:** the new clone goes in `repos/`, the root's links (already links into `repos/`, `UNTRACKED_FLESH`) are re-pointed to it; `remove` re-points them to the base's flesh clone (fetched again if pruned).
+- **Rebuild notice:** the plan and the command's summary say every config of the installation needs a rebuild.
+- **Format: `INSTALLATION` 2 → 3.** The `[[added]]` element needs a flesh marker (and its checkout items), and put-back never enters arrays: an older binary would compose it as "no thorns, drops nothing" and silently put the base flesh back. Following the library precedent (`installation.rs:26-41`): v3 adds the marker; the v3 → v2 down-step answers `CannotExpress` when a flesh package is present, so only installations with one get v3 (sticky afterward), and an older binary refuses them rather than corrupting them. New `v3` fixture, re-pin, spec §2.5 matrix.
+
+## 5. Misfits (for the Cactarium session and Max)
+
+1. **fork-of range.** The spec's generation section writes `<package>@~<series>`; D5 writes `<pkg>@~<version>`. *Decided:* `=<newest upstream version the fork contains>` (a tilde range would claim later patches the fork lacks); fix the spec.
+2. **Requirement semantics fork three ways** (trim, server, soon resolver). *Proposal:* move `Need`/`needs_of`/`meets` into the crate's `ccl`; all callers use it.
+3. **Base isn't mapped to packages** (finding 6), so "installed stays fixed" has no packages to fix, and every base thorn would read as a foreign same-named thorn. *Proposal:* S1 + S2; a blocker for P3.
+4. **Overrides "carried into exported sims":** sims declare no dependencies and import never resolves, so there is nothing to act on. *Proposal:* informational `provenance.extra["claims-overrides"]` (no format bump). In manifests they are comments, since they are about other packages' claims.
+5. **Installed at no version** (ET `install master`, stack `@head`, custom lists, `add …@head`/`#sha`, unmapped commits): a range can't be checked. *Proposal:* it satisfies a range with a printed note (installed stays fixed); a `#sha` need only by that commit.
+6. **Conflict granularity.** "Two packages with a thorn of the same name", but Cactup adds single thorns (`owner/pkg/Thorn`, `AddedPackage.thorns`). *Decided:* the conflict is on enabled thorns; fork and upstream always conflict.
+7. **A `[stack]`'s `[[dependency]]`** (`needs` optional) has no resolution meaning, and stacks are installed frozen. Nothing checks stack releases. *Decided:* the resolver ignores stack dependencies; stack install and refetch run the check as warnings; `stack init` writes them as information (what could be swapped in, e.g. a fork), taken from the installed packages' own declarations; the server checks stack releases (S8).
+8. **Upgrades.** The spec says resolution runs on "upgrades"; Cactup upgrades a base by `inst refetch --release`. *Proposal:* only `add --upgrade` re-resolves; refetch re-checks and warns.
+9. **One unclaimed provider:** D3 covers "several". Snapshots (`#sha`, tips) are never checked server-side (`tracker.rs:1109` is the only call), so unclaimed requirements are real there. *Decided:* zero, one or several, it refuses; cactup never fills in an undeclared dependency.
+10. **"The installed thorns that actually met each requirement":** for implementations several compiled thorns can (Carpet and PUGH both implement `driver`), and nothing records which a run uses. *Proposal:* capabilities and functions from the active config's ThornList (CST allows one provider); an ambiguous implementation becomes a TODO `any-of`, never a claim.
+11. **Flesh packages.** No CCL requirement points at the flesh, so generation never writes a flesh dependency, and `add` can't install a flesh (finding 12). *Decided:* generation writes a TODO for a flesh fork; `add` can install a flesh package, replacing the base's flesh, and the resolver plans that replacement when a flesh dependency is unmet (open question 6).
+12. **`--publish` vs "written for review, the user commits"**, and no registration API (only the web form `/new/repo`). *Proposal:* `--publish` never writes; it registers an already committed and pushed manifest (S4).
+13. **Pins that can never be a package:** download components (pinned by sha256, `export.rs:62-76`), `!TYPE = ignore`/untracked private thorns. *Decided:* private/untracked thorns refuse without `--local`; downloads pass once reviewed by the Cactarium like a package submission (S9), else refuse without `--local` (open question 4).
+14. **`--ignore-claim` on an any-of:** the `:target` is ambiguous. *Proposal:* it matches any alternative's `owner/name`; the kind may be `dependency`, `incompatible-with` or `fork-of`; it covers every version.
+15. **"X satisfies Y" when X is no registered package** (an unregistered fork in the base). *Proposal:* allow `repo:<name>`.
+16. **The review page's `cactup import et/foo@1.2.0`** fits sims only. *Proposal:* show `cactup add` for packages, `cactup install` for stacks. The header must also reveal pending *entries* (`public_entry` hides them). Unreviewed sims stay out of the offline cache.
+17. **A version can pass the check against a target awaiting review** (`deps.rs` `target_version`: `review IN ('approved','pending')`), which ordinary clients can't see. Resolution then fails with "no served version in range". *Cactarium session's answer (2026-11-13):* neither; fit it into #6's wait logic. A dependent whose check passes only through a pending target waits (left unread, retried) until the target is reviewed: approved → it freezes normally; rejected → re-checked against approved versions only.
+18. **`[[added]]` is an array** that #31's put-back doesn't protect. *Proposal:* new maps (§2.4), no `INSTALLATION` bump.
+19. **"Driver inherit next to one driver's headers"** needs to know which thorn provides a header; `ThornFacts` scans `USES INCLUDE` but not `INCLUDE[S] HEADER: … in …`. *Agreed with the Cactarium session:* add `provides-includes` to `ThornFacts` (additive, serde default) for new versions; frozen non-curated versions are not re-scanned (curated ones get it on `reapply`); where a version lacks it, the smell falls back to by-path includes.
+20. **One flag, two meanings:** an admin reviewing also skips untrusted-tip prompts. Accepted as decided; noted in the help text.
+
+## 6. Server needs (exact shapes; shared types in the crate's `api`)
+
+*The Cactarium session's answers (2026-11-13; its technical views, the shapes still await Max's approval; server work starts after Cactarium #7, multi-sim, merges). #7 lets one repo carry several entries (package, stack, sims), registers all missing entries of a repo at once, decides each tag's version from the manifest at that commit, and allows 3-part sim slugs.*
+- *S1: accepted. URL normalization becomes one shared crate function (server and Cactup), replacing `fetch::git::normalize_url`'s private copy; on a repo with several entries the lookup answers for the package entry; curated packages match their tracked URL; `fork-of` comes from that version's frozen claims.*
+- *S2: filled for new stack releases and stored sims; already-frozen releases get it computed when served (pins → lookup), no row rewrite.*
+- *S3, S5, S8: accepted. S4: the response is a list, `{"entries":[{slug,kind,url,new-versions,awaiting-review,warnings}]}`, 409 only when nothing is left to add; optional `"tag"`.*
+- *S6: mostly done in Cactarium #3 (merged): honored on `/resolve`, `/packages/…/versions`, `/stacks/…/releases[/…]`, `/sims/…/download`. Missing: `/entries/{o}/{n}`, `/packages/…/versions/{tip}`, and the new `/providers`, `/lookup`. The header constants move from the server's api.rs into the crate, and `VersionInfo` gains `review`, in the same crate PR as the S1 and S3–S5 types.*
+- *S7: accepted, not started; follows #7 (which changes deps.rs).*
+- *S9: a `downloads` table (url, sha256, size, review pending/approved/rejected, submitted_by, note). `POST /api/v1/downloads` (bearer) `{"url","sha256","note"}`: the server fetches the URL once (size cap) and checks the hash before queuing it for review; answers `{"id","review":"pending"}`, 409 with the state if known. Admins review on the review page. S1 accepts `{"url","sha256"}` pins and answers `{"url","sha256","reviewed":true|false|null}` (null: never submitted). Sim publish refuses an unreviewed or unknown download, naming the submit command. Cactup fetches the URL at import and checks the hash; the server stores no copy. Cactup side: `cactup` needs a submit command for downloads (to name in refusals), and P1 carries the download-pin variant of S1's types.*
+
+Already enough for resolution: `GET /packages/{o}/{n}/versions` (every version with `thorns[].facts`, `claims[]` with `needs`/`needed-by`/`alternatives`/`sha`, `fork-of`, `incompatible-with`, `flesh`, `yanked`, `state`) and `GET /packages/{o}/{n}/versions/{commit|head|master}` (missing from `api.rs`'s doc table; add the row).
+
+- **S1. Pin lookup** (blocker): `POST /api/v1/lookup` (no auth). Body `{"pins":[{"url":"https://github.com/x/y.git","commit":"<40 or 64 hex>"}]}` (≤ 1000). Response `{"pins":[{"url":…,"commit":…,"package":"et/carpet"|null,"version":"2026.5.1"|"mixed-precision:1.2.0"|null,"flesh":false,"fork-of":["et/carpet@=2026.5.1"],"commit-known":true|false|null}]}`, in request order. URLs matched normalized as `fetch::git::normalize_url` does (scheme, `.git`, trailing slash, `git@host:` form). `version` is null for a commit no valid version froze (Cactup then writes `owner/pkg#sha`). `commit-known` says whether the registry's mirror has the commit (null: not checked). This tells "unpushed" from "not on the registered repo".
+- **S2. Fill `RepoPin.cactarium`** in frozen stack releases (and stored sims): `owner/pkg@version` or `owner/pkg#sha`. The field exists; `stacks.rs:263` writes `None`.
+- **S3. Provider search** (only to list candidates in an unmet-requirement refusal; never planned): `GET /api/v1/providers?implements=Hyperslab` (or `capability=`, `function=`, `thorn=`; one per request). Response `{"providers":[{"package":"et/carpet","version":"2026.5.0","arrangement":"Carpet","thorn":"CarpetSlab"}]}`, newest version per package on its default track. (The site's `/implementations/{name}` and `/thorns/{name}` pages hold the same index.)
+- **S4. Register a repo** (for `--publish`): `POST /api/v1/repos`, bearer. Body `{"url":"…"}`. Response `Registered {"slug":"max/z4c","kind":"package","url":"…","new-versions":2,"awaiting-review":2,"warnings":[…]}`; 409 `conflict` when the repo is registered (message names `cactup refresh`).
+- **S5. Whoami** (owners default; honest warning for the flag): `GET /api/v1/whoami`, bearer. Response `{"user":"max","orgs":["et"],"admin":false}`.
+- **S6. Include unreviewed** (D7; being built as Cactarium#3): request header `x-cactarium-include-unreviewed: true`, sent under the flag with or without a token, honored on every GET (`/resolve`, `/entries`, `/packages/…/versions[/…]`, `/stacks/…/releases[/…]`, `/sims/…/download`, `/providers`, `/lookup`). An admin token gets pending releases and entries awaiting their first review; anyone else gets pending releases of public entries when untrusted tips are allowed site-wide. `VersionInfo` gains `"review": "pending"` (absent = approved; additive, no API generation bump). A response that serves anything unreviewed carries `x-cactarium-unreviewed: true`. Crate: `INCLUDE_UNREVIEWED_HEADER`, `UNREVIEWED_HEADER`, the field.
+- **S7. Shared requirement logic** in the crate's `ccl` (misfit 2); the server's `deps.rs` switches to it.
+- **S8. Server-side** (no client shape): check stack releases like package versions (misfit 7); settle misfit 17; re-scan facts if `provides-includes` lands (misfit 19).
+- **S9. Reviewed downloads** (open question 4): a download component (URL + sha256) can be submitted for review like a new package and approved by an admin. The pin lookup (S1) answers for download pins too, e.g. `{"url":…,"sha256":…,"reviewed":true|false}`; `sim publish` refuses a sim with an unreviewed download, and import fetches the URL and checks the hash. Exact shapes to settle with the Cactarium session.
+- *Optional:* `?req=<range>` on `/packages/{o}/{n}/versions` to shrink large answers; a batch `POST /api/v1/packages/versions {"packages":[…]}` for fewer round trips from slow login nodes.
+
+## 7. Phases
+
+Every phase: never `cargo fmt` (format touched lines by hand); American spelling; §-refs only in comments; interrupt and progress contracts as in §2.2; no new crates (static MUSL); nothing on the compute path (D11). **An Opus review after each phase**, checking these plus the phase's own list, and a real-binary check under `CACTUP_HOME=$(mktemp -d -p $TMPDIR)` against a dev Cactarium (`deploy/compose.dev.yaml`), never the real `~/.cactup`.
+
+| Phase | Model | Contents | Reviewer checks |
+|---|---|---|---|
+| **P1** crate | Opus | `ccl::Requirement`/`requirements()`/`meets()` moved from the server; `api`: S1, S3-S6 types and constants, the `versions/{at}` doc row; optional `provides_includes`; tests and fixtures in the crate. Coordinate with the Cactarium session, which builds S1-S6. | Same semantics as `deps.rs` (case-insensitive; inherits+friends, requires, requires-thorns, requires-functions); additive serde only; still no system libraries |
+| **P1b** pin bump | Sonnet | `Cargo.toml:41` to P1's rev (past `2f2c8f4`, the pin #39 sets); `trim.rs` uses the shared predicate while keeping its "every provider" policy | Trim tests unchanged; `STACK_FORMAT`/`#sha` uses from #31/#32 compile |
+| **P2** resolver | Opus | `src/deps/{mod,resolve,conflict,plan}.rs` per §2 against a `Facts` trait; table tests from JSON fixtures | Determinism (any-of order independent of maps); bounded restarts; every refusal carries its way past; no I/O in the module |
+| **P3** `add`/`remove` | Opus | Client: `lookup`, `providers`, parallel `versions` with progress; plan print and confirm; flags; `added-for` (with `for-commit`); delta CCL check with local facts (`trim::thorn_facts`, already parallel, made `pub(crate)`); libraries kept as placement; `remove` dependents from current claims, orphan removal after confirmation, offline refusal | Interrupt per item and wave; `compose` unchanged; `--replace`, `--upgrade` and `--upgrade-all` agree; upgrades carry the present enabled set; a missing or stale `added-for` never orphans a package; fixture re-pin done right |
+| **P3b** flesh | Opus | §4.9: flesh replacement in `add`/`compose`/`remove`, root links, rebuild notice, `INSTALLATION` 3 with its down-step | An older binary refuses a v3 file, never recomposes the base flesh; installations without a flesh package stay v2; `remove` restores the base flesh's links |
+| **P4** `claims` | Sonnet | `claims override/list/check`, `claim-overrides` map, `--ignore-claim` parsing, `inst show` lines | Canonical keys stable; overrides applied before resolution, on load |
+| **P5** sims, refetch, stack install (on #39) | Sonnet | Export/pack/publish lookup refusals, `--local`, `RepoPin.cactarium`, overrides in `provenance.extra`; refetch and stack-install checks as warnings | Export still pins from what was built; `.sim` stays at the oldest format that holds it |
+| **P6** unreviewed | Sonnet | Header (and the token, if any) on GETs under the flag; warn on `x-cactarium-unreviewed: true`; `review` labeling; `.unreviewed.sim`; help text | No token on anonymous GETs; offline fallback never takes an unreviewed copy |
+| **P7** generation | Opus | `package init`, `stack init`, `--publish`, `--exact`, fork detection (`is_ancestor`), include scan, TODO smells | No heuristic ever writes a claim; output parses with `Manifest::from_repo_file`; ranges floored at the version built with |
+| **P8** docs | Sonnet drafts, Opus reviews | §9 | Docs match flags and messages |
+
+## 8. Tests and fixtures
+- **Resolver tables** (`fixtures/cactarium/<case>/*.json`, real `PackageVersions` shapes captured from the dev server, then trimmed): transitive closure; `needed-by` limiting a single-thorn add; each any-of rule, including "first listed after dropping conflicting"; same-name conflict against a base pseudo-package; `incompatible-with` both directions; fork standing in by range and by `#sha`, and failing; `--upgrade` vs fixed; track mismatch; yanked skipped unless exact; no consistent set; restart bound; unclaimed requirement with 0/1/many providers; `--no-deps`; `--ignore-claim` on an any-of; each override kind.
+- **Integration**, in the style of `add.rs`'s tests (local upstream repos, `fetch::download::test_server::serve_with` as the Cactarium): `add` brings in a dependency's `needs` thorns into the right clone; `remove` refuses a dependency and removes orphans after confirmation (and keeps a package whose `added-for` is missing or stale); a flesh package replaces and restores the base flesh; refetch to a new base warns; export refuses an unregistered repo and passes with `--local`; generation round-trips through `Manifest::from_repo_file` with TODO comments intact; the unreviewed header and token are sent only under the flag.
+- **Formats:** the `installation` shape-pin re-pin with a new numbered fixture; an older-binary rewrite keeps `added-for`/`claim-overrides` (#31's put-back test pattern).
+
+## 9. Docs to update
+- `cactupdocs/content/users/sharing-simulations.md`: "Adding a package" (plan, dependencies, hatches, `claims`); "Exporting" (new refusals, `--local`); "Publishing".
+- New `cactupdocs/content/users/publishing-packages.md`: `package init`, `stack init`, ranges, TODO lines, `--publish`.
+- Spec: §8.9 (export refusals, `--local`), §8.10 (the flag's second meaning, new endpoints), §8.11 (resolution in `add`, `remove` dependents), new **§8.12 "Dependencies"** (resolver, records, overrides, generation).
+- Crate `docs/dependencies.md`: misfits 1, 5-7, 9, 14 once settled.
+
+## 10. Open questions for Max (with a recommendation)
+1. **`--upgrade` scope:** *Decided (Max, 2026-11-13):* `--upgrade` moves only the packages the plan touches; `--upgrade-all` also moves every other installed package to its newest release that fits.
+2. **No terminal:** *Decided (Max, 2026-11-13):* refuse unless `--yes` when the plan goes beyond what was named, printing the plan and naming `--yes` and `--dry-run`.
+3. **`--local` replaces `--allow-dirty`/`--allow-unpushed`:** *Decided (Max, 2026-11-13):* `--local` only; both old flags are removed with no shim.
+4. **Download and private/untracked components in sims:** *Decided (Max, 2026-11-13):* private/untracked/`ignore` thorns refuse without `--local`. A download component pinned by sha256 is allowed, but only once the Cactarium has reviewed that download (URL + sha256) through a review like a new package submission (S9); an unreviewed download refuses without `--local`. Refusing all downloads would reject pretty-bhns, which is too strict.
+5. **Exactly one provider for an unclaimed requirement:** *Decided (Max, 2026-11-13): "Artifacts MUST be fully-specified."* Cactup never fills in a dependency nobody declared. Any unmet requirement refuses, whatever the number of providers, naming the package whose manifest leaves it undeclared and listing the providers found as `cactup add` lines.
+6. **Flesh forks as dependencies:** *Decided (Max, 2026-11-13):* flesh replacement in `add` is part of this work ("the flesh is mostly just a repo checked out like any other"). A flesh package replaces the base's `$ROOT` component through the existing `replaces` path: its clone goes in `repos/` and the root's links point into it (the flesh is already a link into `repos/`, see `UNTRACKED_FLESH`); `remove` restores the base's flesh. A plan that needs a flesh the installation lacks plans its replacement like any other step. The plan output says every config needs a rebuild.
+7. **Conflicts on enabled thorns, not whole packages:** *Decided (Max, 2026-11-13):* two enabled thorns with one name conflict; a fork and its upstream always conflict.
+8. **fork-of range:** *Decided (Max, 2026-11-13):* `=<newest contained version>` (exact), neither `~<version>` nor `~<series>`, both of which claim later patch releases the fork lacks.
+9. **`remove` of a depended-on package:** *Decided (Max, 2026-11-13):* refuse naming dependents, `--no-deps` to force. Packages the removal leaves unneeded (brought in as dependencies, never named, no remaining dependent) are removed in the same command: shown as a plan and confirmed like `add`'s (no terminal: refuse unless `--yes`).
+10. **`stack init`:** *Decided (Max, 2026-11-13):* exact-version overrides and pinned extra sections (what installs), plus `[[dependency]]` entries as information: what forks or other versions could be swapped in with a good chance of the stack still working. Each entry carries the range and `needs` that the installation's packages actually declare for that package (several declarations: one entry each, a comment naming the declaring package); a package nothing depends on gets none, its pin covers it. Nothing is invented. Exact pins are always required: every component of a stack is pinned exactly, and a `[[dependency]]` entry never stands in for a pin. Resolution still never runs at stack install.
+
+### Critical files for implementation
+- /home/max/src/Cactup/src/commands/add.rs
+- /home/max/src/Cactup/src/cactarium.rs
+- /home/max/src/Cactup/src/installation.rs
+- /home/max/src/Cactup/src/sim/export.rs
+- /home/max/src/Cactup/src/sim/trim.rs
+- /home/max/src/Cactup/src/args.rs
+- /home/max/src/Cactup/src/deps/ (new)
+- /home/max/src/cactup-ecosystem-common/src/{ccl,api,manifest}.rs
+- /home/max/src/Cactarium/crates/cactarium-server/src/{deps,web/api,stacks}.rs
