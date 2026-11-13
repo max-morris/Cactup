@@ -4,6 +4,7 @@ mod build_info;
 mod cactarium;
 mod commands;
 mod database;
+mod deps;
 mod fetch;
 mod format;
 mod freeze;
