@@ -1,0 +1,110 @@
+{
+  "slug": "et/carpetx",
+  "versions": [
+    {
+      "version": "2026.6.0",
+      "track": null,
+      "tag": "v2026.6.0",
+      "commit": "acf388a7a0aa3b383d545011fb7cae2437435b85",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "review": "pending",
+      "url": "https://github.com/et/carpetx.git",
+      "thorns": [
+        {
+          "arrangement": "Carpetx",
+          "thorn": "CarpetX",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "CarpetX",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        },
+        {
+          "arrangement": "Carpetx",
+          "thorn": "Loop",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Loop",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    },
+    {
+      "version": "2026.5.1",
+      "track": null,
+      "tag": "v2026.5.1",
+      "commit": "ba20bf7e830f893466fceda170ebf5b844c342ba",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/carpetx.git",
+      "thorns": [
+        {
+          "arrangement": "Carpetx",
+          "thorn": "CarpetX",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "CarpetX",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        },
+        {
+          "arrangement": "Carpetx",
+          "thorn": "Loop",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Loop",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    }
+  ]
+}

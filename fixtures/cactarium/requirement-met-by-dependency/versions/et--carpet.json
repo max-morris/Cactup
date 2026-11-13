@@ -1,0 +1,57 @@
+{
+  "slug": "et/carpet",
+  "versions": [
+    {
+      "version": "2026.5.0",
+      "track": null,
+      "tag": "v2026.5.0",
+      "commit": "e0ee7a970864d979124e8f5d2767c9f2bff4c4b4",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/carpet.git",
+      "thorns": [
+        {
+          "arrangement": "Carpet",
+          "thorn": "Carpet",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Carpet",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        },
+        {
+          "arrangement": "Carpet",
+          "thorn": "CarpetSlab",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Hyperslab",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    }
+  ]
+}

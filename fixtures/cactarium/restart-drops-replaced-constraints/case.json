@@ -1,0 +1,14 @@
+{
+  "about": "A release replaced after its dependencies were pushed restarts the pass, and its constraints (et/d ^2) go with it",
+  "specs": [
+    "max/a"
+  ],
+  "expect": {
+    "plan": [
+      "add max/a@1.0.0 A named",
+      "add et/b@1.9.0 B needed by max/a@1.0.0",
+      "add et/c@1.0.0 C needed by max/a@1.0.0",
+      "add et/d@1.0.0 D needed by et/b@1.9.0, ^1"
+    ]
+  }
+}

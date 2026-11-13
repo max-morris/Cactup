@@ -1,0 +1,12 @@
+{
+  "about": "A range on a track takes that track's newest, never a newer version on another track",
+  "specs": [
+    "max/z4c"
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named",
+      "add max/carpetx@mixed-precision:1.4.0 CarpetX needed by max/z4c@1.2.0, mixed-precision:^1.2"
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "about": "A named tip reads the package at the tip",
+  "specs": [
+    "et/carpetx@head"
+  ],
+  "expect": {
+    "plan": [
+      "add et/carpetx#444444444444 CarpetX, Loop named"
+    ],
+    "untrusted": [
+      "et/carpetx#4444444444444444444444444444444444444444"
+    ]
+  }
+}

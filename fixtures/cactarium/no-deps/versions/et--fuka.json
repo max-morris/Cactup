@@ -1,0 +1,53 @@
+{
+  "slug": "et/fuka",
+  "versions": [
+    {
+      "version": "2.0.0",
+      "track": null,
+      "tag": "v2.0.0",
+      "commit": "3d5255f05700a4407b6400660eea9dcfeb476fe6",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/fuka.git",
+      "library": true,
+      "thorns": [],
+      "claims": []
+    },
+    {
+      "version": "1.2.0",
+      "track": null,
+      "tag": "v1.2.0",
+      "commit": "fa451b9fd0361568a9f10e1cb4094604848abed4",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/fuka.git",
+      "library": true,
+      "thorns": [],
+      "claims": []
+    },
+    {
+      "version": "1.1.5",
+      "track": null,
+      "tag": "v1.1.5",
+      "commit": "547817e775491964edcb9d9e2c8cde37b1742b80",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/fuka.git",
+      "library": true,
+      "thorns": [],
+      "claims": []
+    }
+  ]
+}

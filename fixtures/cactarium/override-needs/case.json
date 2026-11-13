@@ -1,0 +1,23 @@
+{
+  "about": "A needs override adds thorns to a dependency's needs",
+  "specs": [
+    "max/z4c"
+  ],
+  "overrides": [
+    {
+      "needs": {
+        "package": "max/z4c",
+        "target": "et/carpetx",
+        "thorns": [
+          "Loop"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named",
+      "add et/carpetx@2026.5.1 CarpetX, Loop needed by max/z4c@1.2.0, ^2026.5"
+    ]
+  }
+}

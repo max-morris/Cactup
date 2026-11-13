@@ -1,0 +1,107 @@
+{
+  "slug": "max/carpetx",
+  "versions": [
+    {
+      "version": "1.9.0",
+      "track": null,
+      "tag": "v1.9.0",
+      "commit": "396882f7b7edca30d39986b7caf05bbbf1c088e7",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/carpetx.git",
+      "thorns": [
+        {
+          "arrangement": "Carpetx",
+          "thorn": "CarpetX",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "CarpetX",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    },
+    {
+      "version": "mixed-precision:1.4.0",
+      "track": "mixed-precision",
+      "tag": "mixed-precision/v1.4.0",
+      "commit": "9ed279dcd8e9efebd255b0811d46e0654a64f099",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/carpetx.git",
+      "thorns": [
+        {
+          "arrangement": "Carpetx",
+          "thorn": "CarpetX",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "CarpetX",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    },
+    {
+      "version": "mixed-precision:1.3.0",
+      "track": "mixed-precision",
+      "tag": "mixed-precision/v1.3.0",
+      "commit": "a4cd460d00bb29ecefa2ea75eb9edc467d7963cd",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/carpetx.git",
+      "thorns": [
+        {
+          "arrangement": "Carpetx",
+          "thorn": "CarpetX",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "CarpetX",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    }
+  ]
+}

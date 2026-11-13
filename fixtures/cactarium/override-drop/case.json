@@ -1,0 +1,16 @@
+{
+  "about": "A drop override removes a dependency for good",
+  "specs": [
+    "max/z4c"
+  ],
+  "overrides": [
+    {
+      "drop": "max/z4c:dependency:et/carpetx"
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named"
+    ]
+  }
+}

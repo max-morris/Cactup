@@ -1,0 +1,23 @@
+{
+  "about": "A present package outside a new range stays put without --upgrade",
+  "specs": [
+    "max/z4c"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "version": "2026.4.0",
+      "enabled": [
+        "ADMBase",
+        "StaticConformal"
+      ]
+    }
+  ],
+  "expect": {
+    "refusal": "PresentOutsideRange",
+    "message": [
+      "The installation has et/admbase@2026.4.0, outside ^2026.5 which max/z4c@1.2.0 asks",
+      "Pass --upgrade to move it, or --ignore-claim max/z4c:dependency:et/admbase"
+    ]
+  }
+}

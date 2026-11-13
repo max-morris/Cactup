@@ -1,0 +1,22 @@
+{
+  "about": "No flesh release meets the flesh dependency",
+  "specs": [
+    "max/z4c"
+  ],
+  "present": [
+    {
+      "package": "et/cactus",
+      "version": "2026.4.0",
+      "base": "flesh",
+      "enabled": []
+    }
+  ],
+  "expect": {
+    "refusal": "FleshUnmet",
+    "message": [
+      "The installation's flesh does not meet a flesh dependency, and no release of et/cactus does",
+      "et/cactus ^2026.5 (from max/z4c@1.2.0)",
+      "Pass --ignore-claim max/z4c:dependency:et/cactus"
+    ]
+  }
+}

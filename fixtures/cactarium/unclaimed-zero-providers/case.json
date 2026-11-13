@@ -1,0 +1,13 @@
+{
+  "about": "An unmet requirement refuses even with no provider to name",
+  "specs": [
+    "max/z4c"
+  ],
+  "expect": {
+    "refusal": "Unclaimed",
+    "message": [
+      "Z4c (max/z4c) inherits or befriends hyperslab; no registered package provides it",
+      "or ask the package's authors to declare the dependency"
+    ]
+  }
+}

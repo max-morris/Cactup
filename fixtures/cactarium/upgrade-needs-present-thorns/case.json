@@ -1,0 +1,25 @@
+{
+  "about": "An upgrade keeps every enabled thorn, so it skips a newer release that dropped one",
+  "specs": [
+    "max/z4c"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "version": "2026.4.0",
+      "enabled": [
+        "ADMBase",
+        "StaticConformal"
+      ]
+    }
+  ],
+  "options": {
+    "upgrade": true
+  },
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named",
+      "upgrade et/admbase 2026.4.0 -> 2026.5.0 ADMBase, StaticConformal needed by max/z4c@1.2.0, ^2026.4 (--upgrade)"
+    ]
+  }
+}

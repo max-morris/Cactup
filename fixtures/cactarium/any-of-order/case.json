@@ -1,0 +1,18 @@
+{
+  "about": "Any-of dependencies are decided in dependent order, whatever order the specs came in",
+  "specs": [
+    "max/b",
+    "max/a"
+  ],
+  "expect": {
+    "plan": [
+      "add max/b@1.0.0 B named",
+      "add max/a@1.0.0 A named",
+      "add et/p@1.0.0 P max/a@1.0.0: any of et/p, et/q (the first listed)"
+    ],
+    "choices": [
+      "any of et/p, et/q: the first listed",
+      "any of et/q, et/p: already in the plan"
+    ]
+  }
+}

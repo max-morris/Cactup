@@ -1,0 +1,68 @@
+{
+  "slug": "max/z4c",
+  "versions": [
+    {
+      "version": "1.2.0",
+      "track": null,
+      "tag": "v1.2.0",
+      "commit": "979d9c63b0d0149a35316d274469a9d4724e9db9",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/z4c.git",
+      "thorns": [
+        {
+          "arrangement": "Z4c",
+          "thorn": "Z4c",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Z4c",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        },
+        {
+          "arrangement": "Z4c",
+          "thorn": "Z4cTest",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Z4cTest",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/carpetx",
+          "range": null,
+          "sha": "ba20bf7e830f",
+          "needs": [
+            "CarpetX"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

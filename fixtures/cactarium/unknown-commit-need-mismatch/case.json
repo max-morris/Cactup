@@ -1,0 +1,61 @@
+{
+  "about": "A present package at an unknown commit meets a commit need only at that commit",
+  "specs": [
+    "max/z4c"
+  ],
+  "present": [
+    {
+      "package": "et/carpetx",
+      "unknown": "3333333333333333333333333333333333333333",
+      "thorns": [
+        {
+          "arrangement": "Carpetx",
+          "thorn": "CarpetX",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "CarpetX",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        },
+        {
+          "arrangement": "Carpetx",
+          "thorn": "Loop",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Loop",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "base": "carpetx",
+      "enabled": [
+        "CarpetX",
+        "Loop"
+      ]
+    }
+  ],
+  "expect": {
+    "refusal": "PresentOutsideRange",
+    "message": [
+      "The installation has et/carpetx#333333333333, outside #ba20bf7e830f"
+    ]
+  }
+}

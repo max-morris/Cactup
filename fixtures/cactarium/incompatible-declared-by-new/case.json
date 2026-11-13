@@ -1,0 +1,22 @@
+{
+  "about": "A planned package declares itself incompatible with a present one",
+  "specs": [
+    "max/a"
+  ],
+  "present": [
+    {
+      "package": "et/b",
+      "version": "1.5.0",
+      "enabled": [
+        "B"
+      ]
+    }
+  ],
+  "expect": {
+    "refusal": "Incompatible",
+    "message": [
+      "max/a@1.0.0 says it is incompatible with et/b@1.5.0",
+      "Pass --ignore-claim max/a:incompatible-with:et/b (this command), or run `cactup claims override drop max/a:incompatible-with:et/b` (for good)"
+    ]
+  }
+}

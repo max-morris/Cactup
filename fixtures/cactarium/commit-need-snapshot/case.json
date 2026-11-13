@@ -1,0 +1,15 @@
+{
+  "about": "A commit need no version names reads the package there; an untrusted snapshot is returned to confirm",
+  "specs": [
+    "max/z4c"
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named",
+      "add et/carpetx#444444444444 CarpetX needed by max/z4c@1.2.0, #4444444444"
+    ],
+    "untrusted": [
+      "et/carpetx#4444444444444444444444444444444444444444"
+    ]
+  }
+}

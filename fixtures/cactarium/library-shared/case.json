@@ -1,0 +1,16 @@
+{
+  "about": "Two packages placing one library share the newest release both accept",
+  "specs": [
+    "max/kadath",
+    "max/fuka-gw"
+  ],
+  "expect": {
+    "plan": [
+      "add max/kadath@1.0.0 Kadath named",
+      "add max/fuka-gw@1.0.0 FukaGW named"
+    ],
+    "libraries": [
+      "et/fuka@1.1.5 into src/fuka by max/kadath@1.0.0; into lib/fuka by max/fuka-gw@1.0.0"
+    ]
+  }
+}

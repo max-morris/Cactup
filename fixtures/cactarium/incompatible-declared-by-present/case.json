@@ -1,0 +1,22 @@
+{
+  "about": "A present package declares itself incompatible with a planned one: the other direction",
+  "specs": [
+    "max/a"
+  ],
+  "present": [
+    {
+      "package": "et/b",
+      "version": "1.5.0",
+      "enabled": [
+        "B"
+      ]
+    }
+  ],
+  "expect": {
+    "refusal": "Incompatible",
+    "message": [
+      "et/b@1.5.0 says it is incompatible with max/a@1.0.0",
+      "--ignore-claim et/b:incompatible-with:max/a"
+    ]
+  }
+}

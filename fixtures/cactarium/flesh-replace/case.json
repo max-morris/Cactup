@@ -1,0 +1,22 @@
+{
+  "about": "An unmet flesh dependency plans the base flesh's replacement",
+  "specs": [
+    "max/z4c"
+  ],
+  "present": [
+    {
+      "package": "et/cactus",
+      "version": "2026.4.0",
+      "base": "flesh",
+      "enabled": []
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named",
+      "upgrade et/cactus 2026.4.0 -> 2026.5.0 needed by max/z4c@1.2.0, ^2026.5",
+      "replace base repo flesh with et/cactus",
+      "The flesh changes: every config of this installation needs a rebuild"
+    ]
+  }
+}

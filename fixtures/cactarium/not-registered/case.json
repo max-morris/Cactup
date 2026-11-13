@@ -1,0 +1,13 @@
+{
+  "about": "A dependency on a package the Cactarium does not know",
+  "specs": [
+    "max/z4c"
+  ],
+  "expect": {
+    "refusal": "NotRegistered",
+    "message": [
+      "max/z4c@1.2.0 needs et/nothere, which the Cactarium does not know",
+      "Pass --ignore-claim max/z4c:dependency:et/nothere"
+    ]
+  }
+}

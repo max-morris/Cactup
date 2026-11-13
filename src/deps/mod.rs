@@ -26,6 +26,8 @@ mod plan;
 mod refusal;
 mod remove;
 mod resolve;
+#[cfg(test)]
+mod tests;
 
 use std::collections::BTreeSet;
 use std::fmt;

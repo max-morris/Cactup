@@ -1,0 +1,23 @@
+{
+  "about": "One provider is never filled in: the requirement refuses, naming it",
+  "specs": [
+    "max/z4c"
+  ],
+  "providers": {
+    "implementation:hyperslab": [
+      {
+        "package": "et/carpet",
+        "version": "2026.5.0",
+        "arrangement": "Carpet",
+        "thorn": "CarpetSlab"
+      }
+    ]
+  },
+  "expect": {
+    "refusal": "Unclaimed",
+    "message": [
+      "Z4c (max/z4c) inherits or befriends hyperslab",
+      "cactup add et/carpet/CarpetSlab"
+    ]
+  }
+}

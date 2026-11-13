@@ -1,0 +1,69 @@
+{
+  "about": "A satisfies override lets an unregistered base repo stand in for a package",
+  "specs": [
+    "max/z4c"
+  ],
+  "present": [
+    {
+      "package": "repo:carpetx",
+      "unknown": "2222222222222222222222222222222222222222",
+      "thorns": [
+        {
+          "arrangement": "Carpetx",
+          "thorn": "CarpetX",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "CarpetX",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        },
+        {
+          "arrangement": "Carpetx",
+          "thorn": "Loop",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Loop",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "base": "carpetx",
+      "enabled": [
+        "CarpetX",
+        "Loop"
+      ]
+    }
+  ],
+  "overrides": [
+    {
+      "satisfies": {
+        "by": "repo:carpetx",
+        "target": "et/carpetx"
+      }
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named",
+      "keep repo:carpetx repo:carpetx stands in for et/carpetx (a claims override)"
+    ]
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "about": "An incompatible-with whose range misses the present release is no conflict",
+  "specs": [
+    "max/a"
+  ],
+  "present": [
+    {
+      "package": "et/b",
+      "version": "1.5.0",
+      "enabled": [
+        "B"
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/a@1.0.0 A named"
+    ]
+  }
+}

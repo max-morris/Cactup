@@ -1,0 +1,14 @@
+{
+  "about": "Constraints that keep displacing each other end, past the budget, in a deterministic refusal",
+  "specs": [
+    "max/x"
+  ],
+  "expect": {
+    "refusal": "NoConsistentSet",
+    "message": [
+      "these constraints keep displacing each other",
+      "et/p * (from max/x@1.0.0)",
+      "et/q * (from max/x@1.0.0)"
+    ]
+  }
+}

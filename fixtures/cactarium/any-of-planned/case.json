@@ -1,0 +1,19 @@
+{
+  "about": "An any-of takes an alternative the rest of the plan brings in (single dependencies are decided first)",
+  "specs": [
+    "max/z4c"
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named",
+      "add et/cactuspugh@2026.5.0 PUGHReduce, PUGHSlab needed by max/z4c@1.2.0"
+    ],
+    "choices": [
+      "any of et/carpet, et/cactuspugh: already in the plan"
+    ],
+    "records": [
+      "max/z4c requested by []",
+      "et/cactuspugh brought in by [max/z4c@1.2.0] choice: any of et/carpet, et/cactuspugh: already in the plan"
+    ]
+  }
+}

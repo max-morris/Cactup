@@ -1,0 +1,28 @@
+{
+  "about": "--upgrade-all moves every present package to its newest release on its track",
+  "command": "cactup add --upgrade-all",
+  "present": [
+    {
+      "package": "et/admbase",
+      "version": "2026.5.1",
+      "enabled": [
+        "ADMBase"
+      ]
+    },
+    {
+      "package": "et/hydrobase",
+      "version": "1.0.0",
+      "enabled": [
+        "HydroBase"
+      ]
+    }
+  ],
+  "options": {
+    "upgrade-all": true
+  },
+  "expect": {
+    "plan": [
+      "upgrade et/hydrobase 1.0.0 -> 1.1.0 HydroBase --upgrade-all"
+    ]
+  }
+}

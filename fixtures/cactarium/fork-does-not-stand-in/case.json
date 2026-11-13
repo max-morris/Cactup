@@ -1,0 +1,23 @@
+{
+  "about": "A present fork of versions the dependency does not accept",
+  "specs": [
+    "max/z4c"
+  ],
+  "present": [
+    {
+      "package": "max/carpetx-mp",
+      "version": "1.0.0",
+      "enabled": [
+        "CarpetX",
+        "Loop"
+      ]
+    }
+  ],
+  "expect": {
+    "refusal": "ForkDoesNotStandIn",
+    "message": [
+      "max/z4c@1.2.0 needs et/carpetx ^2026.5, and max/carpetx-mp@1.0.0, a fork of it, does not stand in",
+      "Pass --ignore-claim max/z4c:dependency:et/carpetx, or run `cactup claims override satisfies max/carpetx-mp et/carpetx`"
+    ]
+  }
+}

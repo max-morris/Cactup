@@ -1,0 +1,12 @@
+{
+  "about": "An exact constraint may take a yanked release",
+  "specs": [
+    "max/z4c"
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named",
+      "add et/arith@1.3.0 Arith needed by max/z4c@1.2.0, =1.3.0"
+    ]
+  }
+}

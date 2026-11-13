@@ -1,0 +1,21 @@
+{
+  "about": "A present release on another track does not meet a default-track range",
+  "specs": [
+    "max/z4c"
+  ],
+  "present": [
+    {
+      "package": "max/carpetx",
+      "version": "mixed-precision:1.4.0",
+      "enabled": [
+        "CarpetX"
+      ]
+    }
+  ],
+  "expect": {
+    "refusal": "PresentOutsideRange",
+    "message": [
+      "The installation has max/carpetx@mixed-precision:1.4.0, outside ^1.4"
+    ]
+  }
+}
