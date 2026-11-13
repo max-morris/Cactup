@@ -1,6 +1,6 @@
 +++
 title = "The .sim Format"
-description = "Every table and field of a .sim file, formats 1 to 3"
+description = "Every table and field of a .sim file, formats 1 to 4"
 +++
 
 # The .sim format
@@ -27,6 +27,7 @@ Required, and the first key. Which generation of this format the file is:
 | 1 | Everything not listed below. |
 | 2 | Archive inputs: `unpack`, `path` and `[[input.fixup]]`. |
 | 3 | Inputs that are a file of the simulation's own repository: `repo-file`. |
+| 4 | A `[sim] cactarium` stamp naming one sim of an entry that holds several: `owner/name/sim@version`. |
 
 cactup writes the **oldest** format that can hold a file's content, so a file
 that uses nothing newer stays readable by older readers. A reader refuses a
@@ -55,7 +56,7 @@ root = "Cactus"
 | `license` | no | An SPDX license expression. |
 | `contact` | no | Where to go for help with it: an `https://` URL or a `mailto:` address. |
 | `root` | yes | The thornlist's `!DEFINE ROOT`: the source tree's directory under the installation. |
-| `cactarium` | no | Set by the Cactarium when it publishes the file: `owner/name@version`. `cactup import` uses it to find a published simulation's repository for `repo-file` inputs. |
+| `cactarium` | no | Set by the Cactarium when it publishes the file: `owner/name@version`, or `owner/name/sim@version` for one sim of an entry that holds several (format 4). `cactup import` uses it to find a published simulation's repository for `repo-file` inputs. |
 
 ## `[thornlist]`
 

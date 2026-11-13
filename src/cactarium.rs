@@ -15,7 +15,7 @@ use colored::Colorize;
 use cactup_ecosystem_common::api::{
     ErrorBody, PackageVersions, Published, Refreshed, Resolved, StackReleases, VersionInfo, API_GENERATION,
     API_GENERATION_HEADER, API_PREFIX,
-    CONTACT_HEADER, SHA256_HEADER, UNPINNED_HEADER, UNTRUSTED_HEADER,
+    CONTACT_HEADER, SHA256_HEADER, SIM_QUERY, UNPINNED_HEADER, UNTRUSTED_HEADER,
 };
 use cactup_ecosystem_common::stack::FrozenStack;
 use cactup_ecosystem_common::STACK_FORMAT;
@@ -151,16 +151,25 @@ impl Client {
     }
 
     /// Download sim file `owner/name@number` to `dest`, checked against the
-    /// hash the server sends with it.
-    pub fn download_sim(&self, owner: &str, name: &str, version: &str, dest: &Path) -> Res<()> {
-        let url = self.url(&format!("/sims/{owner}/{name}/{version}/download"));
+    /// hash the server sends with it. `sim` names one sim of a multi-sim
+    /// entry (`?sim=`, which such an entry requires); `None` for an entry
+    /// that is one sim.
+    pub fn download_sim(&self, owner: &str, name: &str, version: &str, sim: Option<&str>, dest: &Path) -> Res<()> {
+        let mut url = self.url(&format!("/sims/{owner}/{name}/{version}/download"));
+        if let Some(sim) = sim {
+            url.push_str(&format!("?{SIM_QUERY}={}", query_escape(sim)));
+        }
         let response = self.send(crate::fetch::download::client().get(&url))?;
         let expected = response.headers().get(SHA256_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
         let bytes = response.bytes().with_context(|| format!("Failed to download {url}"))?;
         if let Some(expected) = expected {
             let actual = sha256_hex(&bytes);
             if !actual.eq_ignore_ascii_case(&expected) {
-                bail!("The download of {owner}/{name}@{version} has SHA-256 {actual}, but the registry says {expected}");
+                let what = match sim {
+                    Some(sim) => format!("{owner}/{name}/{sim}@{version}"),
+                    None => format!("{owner}/{name}@{version}"),
+                };
+                bail!("The download of {what} has SHA-256 {actual}, but the registry says {expected}");
             }
         }
         let dir = dest.parent().unwrap_or(Path::new("."));
@@ -590,11 +599,30 @@ mod tests {
             ("200 OK", format!("x-sha256: {hash}\r\n"), b"format = 1\n".to_vec())
         });
         let client = Client::at(&base);
-        client.download_sim("o", "n", "1.0.0", &tmp.path().join("ok.sim")).unwrap();
+        client.download_sim("o", "n", "1.0.0", None, &tmp.path().join("ok.sim")).unwrap();
         assert_eq!(std::fs::read_to_string(tmp.path().join("ok.sim")).unwrap(), "format = 1\n");
-        let err = format!("{:#}", client.download_sim("o", "n", "2.0.0", &tmp.path().join("bad.sim")).unwrap_err());
+        let err = format!("{:#}", client.download_sim("o", "n", "2.0.0", None, &tmp.path().join("bad.sim")).unwrap_err());
         assert!(err.contains("SHA-256"), "{err}");
         assert!(!tmp.path().join("bad.sim").exists());
+    }
+
+    /// One sim of a multi-sim entry is asked for by `?sim=`, and its own hash
+    /// is checked; an entry that is one sim is asked for without it.
+    #[test]
+    fn one_sim_of_several_is_asked_for_by_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let good = sha256_hex(b"format = 4\n");
+        let (base, heads) = serve_with(2, move |path| {
+            let hash = if path.ends_with("?sim=qc0-z4c") { good.clone() } else { "0".repeat(64) };
+            ("200 OK", format!("x-sha256: {hash}\r\n"), b"format = 4\n".to_vec())
+        });
+        let client = Client::at(&base);
+        client.download_sim("et", "sims", "1.0.0", Some("qc0-z4c"), &tmp.path().join("ok.sim")).unwrap();
+        let err = format!("{:#}", client.download_sim("et", "sims", "1.0.0", Some("mag-tov"), &tmp.path().join("bad.sim")).unwrap_err());
+        assert!(err.contains("et/sims/mag-tov@1.0.0") && err.contains("SHA-256"), "{err}");
+        let heads = heads.join().unwrap();
+        assert!(heads[0].starts_with("GET /api/v1/sims/et/sims/1.0.0/download?sim=qc0-z4c "), "{}", heads[0]);
+        assert!(heads[1].starts_with("GET /api/v1/sims/et/sims/1.0.0/download?sim=mag-tov "), "{}", heads[1]);
     }
 
     /// A tip asked for, answered with neither header, is untrusted: the

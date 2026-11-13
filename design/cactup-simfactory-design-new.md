@@ -4744,10 +4744,22 @@ What uses it, all on the login node (D11):
   `refetch --release` reach stack tips through
   `cactarium::stack_release_text`, `add` reaches package tips through the
   same `confirm_untrusted`.
-- `cactup import owner/name[@range|=X.Y.Z]` downloads the published sim
+- `cactup import owner/name[/sim][@range|=X.Y.Z]` downloads the published sim
   (versions are semver, like packages and stacks; the newest matching, or
   the newest at all) to `~/.cactup/simfiles/<owner>/<name>/<X.Y.Z>.sim`,
-  checked against the registry's `x-sha256`, then imports it as a file. It
+  checked against the registry's `x-sha256`, then imports it as a file. An
+  entry holding several sims (`[sim.files]`, manifest format 2) names each:
+  `owner/name/sim` goes to `/resolve` as is, which answers with the newest
+  version in range that has the sim (and `newer-without-sim` when a newer one
+  in range dropped it: cactup warns and goes on); the download takes
+  `?sim=<sim>`; the copy is cached at
+  `simfiles/<owner>/<name>/<sim>/<X.Y.Z>.sim` (`import::simfile_cache_path`;
+  a sim name starts with a letter, so it never meets a version's file); and
+  the file's stamp (`owner/name/sim@X.Y.Z`, `.sim` format 4) must name that
+  sim. A bare `owner/name` of such an entry is refused by the server, listing
+  its sims, and that message is printed. A registry from before multi-sim
+  entries (it reads the third segment as a thorn: it refuses a sim name that
+  is no thorn name, or answers without `sim`) is refused, saying so. It
   resolves even an exact version, which is how a yank is told; an exact
   version already downloaded still imports when the registry cannot be
   reached, its yank status unknown. A sim the Cactarium publishes from its

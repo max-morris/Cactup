@@ -189,6 +189,27 @@ cactup import someone/bbh@1        # the newest 1.x.x
 cactup import someone/bbh@=1.0.1   # exactly version 1.0.1
 ```
 
+Some entries hold **several sims**, released together from one repository
+(for example a code's example simulations). Each of those is always named,
+as `owner/name/sim`:
+
+```sh
+cactup import et/cottonmouth-sims/qc0-z4c              # the newest version that has qc0-z4c
+cactup import et/cottonmouth-sims/qc0-z4c@~2026.5      # the newest 2026.5.x that has it
+cactup import et/cottonmouth-sims/mag-tov@=2026.5.1    # exactly version 2026.5.1
+```
+
+Naming such an entry without a sim (`cactup import et/cottonmouth-sims`) is
+refused, and the message lists its sims. A version range picks the newest
+version in it that still has the sim you named; if a newer version in the
+range dropped that sim, cactup says so and imports the newest one that has
+it. An entry that is one sim is never named with a third part.
+
+A downloaded sim is kept in `~/.cactup/simfiles/`, so importing the same
+exact version again needs no download, and still works when the Cactarium
+cannot be reached. Naming one sim of several needs a Cactarium that knows
+such entries; an older one is refused with a message saying so.
+
 ### Installing a stack
 
 A stack is a published, versioned thornlist. Install one like a release:
