@@ -171,12 +171,17 @@ Machines in your overlay record the generation they were written for, as
 
 - a machine **without** the key loads with a one-time warning that cactup is
   assuming its own generation;
-- a machine written for an **older** generation is refused, with a pointer to
-  the list of changes you need to apply; `cactup machine list` still lists it,
-  marked in yellow;
+- a machine written for an **older** generation is brought forward by cactup
+  itself, once, the first time any command loads it: it prints one line
+  saying so, and your old files are kept in
+  `~/.cactup/machine-backups/<name>/generation-<N>/`. If it cannot do that
+  without risking a change in what the machine does (or the machine is from
+  generation 1, which is never updated automatically), it stops, keeps what
+  it finished, and says which entry of the list of changes to follow by hand;
+  `cactup machine list` still lists such a machine, marked in yellow;
 - a machine written for a **newer** generation asks you to run `cactup update`.
 
-How to bring an overlay machine forward is described in
+What the automatic update does and how to finish one it stopped is described in
 [MDB Generations](../authors/mdb-generations.html#updating-an-overlay-machine).
 An optionlist file of your own that you build from with `--optionlist` follows
 the same format: if its `[cactup]` header uses keys a newer generation moved,
@@ -282,7 +287,8 @@ that binary from where it was built.
    `~/.cactup` (installation, simulation and test directories can live
    elsewhere, as set by your machine definition).
 2. Remove cactup's home. **This also removes anything else under it**: your
-   overlay machines (`machines/`), knobs and installation list
+   overlay machines (`machines/`) and the copies kept when cactup updated
+   them (`machine-backups/`), knobs and installation list
    (`database.json`), and any installations or simulations that live under
    the default `~/.cactup/cacti/` or `~/.cactup/simulations/`:
 

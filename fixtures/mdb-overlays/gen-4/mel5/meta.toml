@@ -1,0 +1,68 @@
+[machine]
+name = "mel5"
+nickname = "fixture"
+location = "CCT"
+description = "Melete 05"
+status = "personal"
+hostname = "fixture.example.org"
+
+[paths]
+install-home = "/scratch/fixture-home/cacti"
+simulation-home = "/scratch/fixture-home/simulations"
+test-home = "/home/@USER@/tests"
+
+[hardware]
+max-cpus-per-node = 16
+memory = 65536
+
+[build]
+make = "make -j@MAKEJOBS@"
+
+[scheduler]
+submit = "setsid sh @SCRIPTFILE@ < /dev/null > /dev/null 2> /dev/null & echo $!"
+blocking-submit = "setsid sh @SCRIPTFILE@ < /dev/null > /dev/null 2> /dev/null & pid=$!; echo $pid; wait $pid"
+get-status = "ps @JOB_ID@"
+job-ids = "pids"
+stop = "kill @JOB_ID@"
+submit-pattern = "(.*)"
+status-pattern = "^ *@JOB_ID@ "
+queued-pattern = "$^"
+running-pattern = "^"
+holding-pattern = "$^"
+exec-host = "echo localhost"
+exec-host-pattern = "(.*)"
+
+[environment]
+env-setup = """
+export MPI_DIR="/home/sbrandt/spack/var/spack/environments/cactus/.spack-env/view"
+export PATH="${MPI_DIR}/bin:/usr/local/bin:/usr/bin:/bin"
+export LD_LIBRARY_PATH="${MPI_DIR}/lib"
+export CC="${MPI_DIR}/bin/mpicc"
+export CXX="${MPI_DIR}/bin/mpicxx"
+"""
+
+[queues.local]
+gpu = false
+max-walltime = "8760:00:00"
+default = true
+
+[submitscripts.default]
+queues = ["local"]
+
+[submitscripts.test]
+queues = ["local"]
+test = true
+
+[runscripts.default]
+queues = ["local"]
+
+[runscripts.test]
+queues = ["local"]
+test = true
+
+[cactup]
+mdb-generation = 4
+
+[cactup.origin]
+from = "mel5"
+hash = "f1bb6f0e5521b096"

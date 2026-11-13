@@ -6222,7 +6222,7 @@ later)"). Compute-node paths (D11) never open the MDB, so never sync.
 
 `mdb/GENERATION` (an integer, compiled into the binary as `MDB_GENERATION`)
 and `mdb/GENERATIONS.md` (one `## Generation N` entry per generation: what
-changed and how to migrate an overlay) version the published MDB. Unlike all
+changed, what the automatic overlay migration does, and the hand recipe) version the published MDB. Unlike all
 other on-disk state, the published MDB has deployed readers, so it carries a
 compatibility promise, and the generation is its only mechanism.
 
@@ -6272,12 +6272,55 @@ account line out (`@KNOB-OR-DROP-LINE(allocation)@`, or a `.py` `if`).
 
 **Overlays** (`~/.cactup/machines/<name>/meta.toml`) carry
 `[cactup] mdb-generation = N` (written by `machine create`). On load of a
-user-layer machine: missing → one warning per process ("assuming generation
-N"); older → `OverlayGenerationError` naming `GENERATIONS.md`; newer →
-"requires a newer cactup; run `cactup update`". `machine list` shows a
-refused overlay annotated instead of failing. A `--mdb-path` directory whose
-`GENERATION` differs from the binary's is a hard error (a missing file is
-accepted, for fixtures).
+user-layer machine (`Mdb::check_overlay`, before the typed parse): missing →
+one warning per process ("assuming generation N", naming the older
+generation when its keys give it away), never rewritten; newer → "run
+`cactup update`", never downgraded, with the kept copy named when a newer
+cactup made one; older → brought forward on disk (below). Hidden directories
+are not machines (`Mdb::machines`, `machine_dir`; `machine create` rejects a
+name starting with '.'). `machine list` shows an overlay that is refused or
+could not be updated annotated instead of failing. A `--mdb-path` directory
+whose `GENERATION` differs from the binary's is a hard error (a missing file
+is accepted, for fixtures).
+
+**Overlay migration** (`src/mdb/migrate.rs`; plan in
+`design/mdb-overlay-migration-plan.md`). The first login command that loads
+an older overlay takes a `LinkLock` beside it (`.<name>.migrate.lock`, never
+inside the directory; a holder is waited for, up to 60 s, with one line on
+stderr), re-reads the stamp, runs `STEPS[N-1..]` in memory over `meta.toml`
+and the optionlists (`toml_edit`: comments survive), checks that the result
+loads under today's schema, and only then copies the whole overlay into
+`<CACTUP_HOME>/machine-backups/<name>/generation-<N>/` (`.2`, `.3`, … when
+one is kept already; backups are never pruned) and writes the changed files
+atomically, `meta.toml` last, its stamp the commit point. A refusal from the
+first step, or from the check, writes nothing, not even the copy. The copy
+carries `.committing` before the first write and `.complete` plus a
+`NOTES.txt` after the last, so a crashed run is finished by the next load
+from the same copy. One line says what was updated and where the old files
+are; steps may add `note:` lines, and a step whose generation has optional
+changes points at them. A step preserves behavior or refuses (`Stop`): it
+does mechanical edits, notes what can only fail loudly later, and stops where
+the machine could quietly behave differently; earlier finished steps are kept
+and the refusal names the generation reached. Optional recommendations are
+never applied, scripts never edited, and a step never writes a key the target
+generation's first binary lacks. Generation 1 is never migrated (the 1→2
+step always refuses), 2→3 renames the three phase setups and refuses on an
+ambiguous rename or a build-submit script whose `ENV_SETUP` would change, and
+3→4 and 4→5 only raise the number. A refusal is short: machine and file,
+generation found and wanted, what stopped, then a line of its own pointing at
+that generation's section of `GENERATIONS.md` and the stamp to set, and, when
+the base still exists, a start-over command that moves the overlay to a hidden
+`.<name>.old` (`.<name>.old.2`, … when that is taken) and runs
+`machine create`. Transient failures (the lock, I/O)
+say nothing needs editing and finish on the next run. Nothing here runs on the
+compute path (D11). Enforcement: `every_generation_has_a_migration`,
+`every_older_generation_has_snapshots` and `every_snapshot_migrates` (over
+`fixtures/mdb-overlays/gen-N/`, taken by `ci/overlay-fixtures.sh`, plus the
+`edge/` cases: generation-1 snapshots and the refusal cases must be refused
+untouched, the rest must migrate, load, and stay put on the next load), so
+every bump ships its step. A step's checks read the files at the step's own
+generation, never through today's schema, which later generations may
+change.
 
 ---
 

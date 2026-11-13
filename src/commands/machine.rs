@@ -304,6 +304,9 @@ fn list(ctx: &Ctx, mdb: &Mdb) -> Res<()> {
     for (name, layer) in machines {
         // One overlay of another MDB generation must not hide the rest of
         // the list: it is shown, annotated, instead of failing the command.
+        // An older one is brought forward right here, and the notice that
+        // says so lands on stderr just above its line; one that could not be
+        // (a step refused, a lock timed out, a write failed) is annotated.
         let machine = match mdb.load(&name) {
             Ok(machine) => machine,
             Err(e) => match e.downcast_ref::<OverlayGenerationError>() {
@@ -334,7 +337,37 @@ fn list(ctx: &Ctx, mdb: &Mdb) -> Res<()> {
         }
         println!();
     }
+    for dir in hidden_machine_dirs(&mdb.user_root) {
+        eprintln!(
+            "{}",
+            format!(
+                "Note: ignoring '{}': a machine name may not start with '.'; rename the directory to use it.",
+                dir.display()
+            )
+            .yellow()
+        );
+    }
     Ok(())
+}
+
+/// Hidden directories in the user layer that hold a machine (`.foo`, made
+/// before such names were refused), which `machine list` would otherwise
+/// leave out without a word. The copies "start over" parks
+/// (`.<name>.old`, `.<name>.old.2`, …) are meant to be out of the way and are
+/// not mentioned.
+fn hidden_machine_dirs(user_root: &Path) -> Vec<std::path::PathBuf> {
+    let parked = regex::Regex::new(r"^\..+\.old(\.[0-9]+)?$").expect("valid pattern");
+    let Ok(entries) = fs::read_dir(user_root) else { return Vec::new() };
+    let mut dirs: Vec<_> = entries
+        .flatten()
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.starts_with('.') && !parked.is_match(&name) && e.path().join("meta.toml").is_file()
+        })
+        .map(|e| e.path())
+        .collect();
+    dirs.sort();
+    dirs
 }
 
 /// `cactup machine show [name]`: the machine this host resolves to (§4.3), or
@@ -347,7 +380,7 @@ fn show(ctx: &Ctx, mdb: &Mdb, name: Option<String>, flavors: bool) -> Res<()> {
     if flavors {
         return show_flavors(&machine);
     }
-    print_summary(&machine)
+    print_summary(&machine, mdb)
 }
 
 /// Read-only machine section for the aggregate `cactup show` (§3): honors the
@@ -366,8 +399,11 @@ pub(crate) fn show_cached_summary(ctx: &Ctx) -> Res<()> {
         return Ok(());
     };
     let mdb = Mdb::open(ctx.globals.mdb_path.as_deref(), &ctx.db)?;
+    // Loading may bring an older user-MDB overlay forward on disk. That
+    // writes the user's machine directory, but never prompts and never
+    // touches the DB, so this stays fit for a read-only overview.
     let machine = load_checked(&mdb, &name)?;
-    print_summary(&machine)?;
+    print_summary(&machine, &mdb)?;
     if let Some(hostname) = verified_for {
         println!("  detected for host: {hostname}");
     }
@@ -375,7 +411,7 @@ pub(crate) fn show_cached_summary(ctx: &Ctx) -> Res<()> {
 }
 
 /// The `machine show` summary block for an already-loaded machine.
-fn print_summary(machine: &Machine) -> Res<()> {
+fn print_summary(machine: &Machine, mdb: &Mdb) -> Res<()> {
     let meta = &machine.meta;
     println!("{} ({:?} MDB, '{}')", machine.name.bold(), machine.layer, machine.dir.display());
     for (label, value) in [
@@ -396,6 +432,10 @@ fn print_summary(machine: &Machine) -> Res<()> {
     }
     if let Some(generation) = meta.cactup.mdb_generation {
         println!("  mdb generation: {generation}");
+    }
+    let backups = mdb.backup_root().join(&machine.name);
+    if machine.layer == Layer::User && backups.is_dir() {
+        println!("  earlier generations kept in: {}", backups.display());
     }
     println!(
         "  hardware: max-cpus-per-node={} default-cpus-per-task={} max-gpus-per-node={} \
@@ -550,6 +590,11 @@ fn create_machine(
     let hostname = discover::resolve_hostname(hostname_override);
     let short = hostname.split('.').next().unwrap_or(&hostname).to_owned();
     let name = name.unwrap_or_else(|| short.clone());
+    // Hidden directories are not machines: one by that name would never be
+    // listed, discovered or loaded.
+    if name.starts_with('.') {
+        bail!("A machine name may not start with '.': \"{name}\"");
+    }
 
     // The base to clone: generic, a named machine, or the detected one (§4.7).
     let base = match &from_existing {
@@ -574,7 +619,8 @@ fn create_machine(
         .machine_dir(&base)
         .ok_or_else(|| anyhow::anyhow!("Base machine \"{base}\" does not exist in the MDB"))?;
     // A user-MDB base of another generation would be copied forward under a
-    // generation stamp it does not deserve.
+    // generation stamp it does not deserve: an older one is brought forward
+    // first, and one that cannot be (or is newer) is refused.
     if base_layer == Layer::User {
         mdb.check_overlay(&base, &base_dir)?;
     }
@@ -840,7 +886,8 @@ mod tests {
     fn sandbox() -> Sandbox {
         let user = tempfile::tempdir().unwrap();
         let dbdir = tempfile::tempdir().unwrap();
-        let mdb = Mdb::with_roots(dev_system_root(), user.path().to_owned());
+        // `<tmp>/machines`, so migration backups stay inside the scratch dir.
+        let mdb = Mdb::with_roots(dev_system_root(), user.path().join("machines"));
         let db = Db::in_dir(dbdir.path());
         Sandbox { mdb, db, _user: user, _dbdir: dbdir }
     }
@@ -1110,6 +1157,53 @@ mod tests {
         };
         list(&ctx, &sb.mdb).unwrap();
         assert!(sb.mdb.load("old").is_err());
+    }
+
+    #[test]
+    fn list_mentions_a_hidden_machine_but_not_a_parked_copy() {
+        let root = tempfile::tempdir().unwrap();
+        for name in [".foo", ".box.old", ".box.old.2", ".empty", "box"] {
+            fs::create_dir_all(root.path().join(name)).unwrap();
+            if name != ".empty" {
+                fs::write(root.path().join(name).join("meta.toml"), "").unwrap();
+            }
+        }
+        assert_eq!(hidden_machine_dirs(root.path()), [root.path().join(".foo")]);
+    }
+
+    #[test]
+    fn a_machine_name_may_not_be_hidden() {
+        let sb = sandbox();
+        let e = create_machine(&sb.db, &sb.mdb, Some(".hid".into()), None, true, true, Some("h.example")).unwrap_err();
+        assert!(e.to_string().contains("may not start with '.'"), "{e:#}");
+        assert!(!sb.mdb.user_root.join(".hid").exists());
+    }
+
+    #[test]
+    fn an_older_base_is_brought_forward_before_it_is_copied() {
+        let sb = sandbox();
+        create_machine(&sb.db, &sb.mdb, Some("base".into()), None, true, true, Some("base.example"))
+            .unwrap();
+        let want = crate::build_info::MDB_GENERATION;
+        let meta_path = sb.mdb.user_root.join("base/meta.toml");
+        let text = fs::read_to_string(&meta_path).unwrap();
+        let stamp = format!("mdb-generation = {want}");
+        fs::write(&meta_path, text.replace(&stamp, &format!("mdb-generation = {}", want - 1))).unwrap();
+
+        create_machine(
+            &sb.db,
+            &sb.mdb,
+            Some("copy".into()),
+            Some(Some("base".into())),
+            true,
+            true,
+            Some("copy.example"),
+        )
+        .unwrap();
+        assert!(fs::read_to_string(&meta_path).unwrap().contains(&stamp));
+        assert_eq!(sb.mdb.load("copy").unwrap().meta.cactup.mdb_generation, Some(want));
+        let backup = sb.mdb.backup_root().join("base").join(format!("generation-{}", want - 1));
+        assert!(backup.join(".complete").is_file());
     }
 
     #[test]

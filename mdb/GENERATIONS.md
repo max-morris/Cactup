@@ -23,9 +23,26 @@ mdb-generation = 3
 ```
 
 `cactup machine create` writes that line. An overlay without it is assumed
-to match the running cactup's generation, with a warning. An overlay from an
-older generation is refused when it is loaded; the entry for each newer
-generation below says what to change to bring it forward.
+to match the running cactup's generation, with a warning. A cactup newer than
+an overlay brings it forward on its own the first time it loads it, and keeps
+a copy of the old files in `~/.cactup/machine-backups/<name>/generation-<N>/`
+(kept forever; the copy is for reading, or for a cactup still on the old
+generation: copied back, it is brought forward again by the next load). Each
+entry below says what that migration does for you and what it leaves to you.
+Where it cannot keep the machine behaving exactly as before, it stops and
+says what to change by hand: follow the recipe of that entry, then set
+`mdb-generation` to its number, and cactup goes on from there. If it could
+not update the machine just now (another cactup held it too long, or a file
+could not be read or written), nothing needs editing: clear that and run the
+command again. Changes marked optional are never made for you, and scripts
+are never edited. A generation-1 overlay is not migrated automatically:
+follow Generation 2's recipe by hand. An overlay newer than the running
+cactup is refused: run `cactup update`.
+
+A cactup older than this feature does not update overlays: it refuses an
+older one. To use it, apply the recipe of every entry below after the
+overlay's generation, in order, then set `mdb-generation` to the newest of
+them.
 
 ## Generation 1
 
@@ -41,6 +58,13 @@ submit, run and build-submit scripts are routed by queue and get tables named
 after their directories. Where a flavor's binary may run is grouped under
 `[cactup.runs-on]` in its optionlist. That table is checked only when the
 binary runs (`sim`, `test`), never for the queue a build is submitted to.
+
+Automatically: nothing. A generation-1 overlay is never migrated, because
+its script routing and flavor list rest on defaults that no longer exist, so
+there is no safe mechanical translation. cactup refuses it, untouched, and
+points here; follow the recipe below by hand. Once
+`mdb-generation = 2` is set, the later generations are brought forward
+automatically.
 
 To bring a generation-1 overlay forward:
 
@@ -136,7 +160,10 @@ telling whether a job is still alive.
   round, the submit universe's keys (the route's `universe`, else a
   declared `host` universe) now reach it, where before they did not. Put
   what the batch script needs in the machine's `submit-env-setup` (or the
-  submit universe's).
+  submit universe's). The same goes for `@ENV_SETUP@` written inline in a
+  `.sh` build-submit script: it expanded to the build universe's block and
+  now expands to the submit universe's (the block cactup puts at the top of
+  a `.sh` script was already the submit universe's).
 - New, optional, in `[scheduler]`: `job-ids = "scheduler" | "pids"` (default
   `"scheduler"`; `"pids"` declares that a job id is the pid of a process on
   the host the job was submitted from, as on a machine whose `get-status` is
@@ -154,6 +181,19 @@ telling whether a job is still alive.
   line for the job nor a line the pattern matches is a failed query, which
   `stop` and `delete` refuse on, so the pattern must match what the command
   really prints for a job the scheduler no longer knows.
+
+Automatically: cactup renames the three phase setups in `[environment]` and
+in every `[universes.*]` table, in place and keeping comments (step 1). It
+adds no provisioning key and moves no line out of a setup, so each setup runs
+where it did; if a setup looks like it makes or fetches something, the update
+prints a note naming it, and step 2 is yours to do. It stops, changing
+nothing, when one table has both the old and the new name of a setup (it
+cannot tell which you mean), when the renamed `meta.toml` would not load, or
+when a build-submit script (a `.py` one that prints `ENV_SETUP`, or a `.sh`
+one with `@ENV_SETUP@` inline) would now get a different environment block
+for a build universe its route serves. Nothing is changed then, not even
+step 1's renames: follow the recipe below by hand, step 1 included, then set
+`mdb-generation = 3`. Step 4 is optional and never made for you.
 
 To bring a generation-2 overlay forward:
 
@@ -233,9 +273,9 @@ To bring a generation-2 overlay forward:
    moved into `provision`, `submit-provision` or `run-provision` now stops
    the submit or run script whenever it fails, in any shell. Make sure it
    succeeds wherever it runs, or end what may fail with `|| true`.
-3. If a `.py` build-submit script of yours prints `ENV_SETUP`: it now gets
-   the submit universe's block, as a `.sh` one always did, not the build
-   universe's. If it relied on a build universe's `env-setup` or
+3. If a `.py` build-submit script of yours prints `ENV_SETUP`, or a `.sh`
+   one has `@ENV_SETUP@` inline: it now gets the submit universe's block (the
+   one a `.sh` script always had at its top), not the build universe's. If it relied on a build universe's `env-setup` or
    `submit-env-setup` reaching it, move what the batch script needs into
    `submit-env-setup` (the machine's, or the submit universe's); and check
    that the submit universe (the route's `universe`, else a declared `host`
@@ -266,6 +306,10 @@ it and the home quota does not suffer.
 
 Nothing else changed: a generation-3 machine is a valid generation-4 machine
 once its `mdb-generation` says 4.
+
+Automatically: cactup only raises `mdb-generation`; it never adds
+`inputs-home`, so inputs keep going to `~/.cactup/inputs`. Step 1 is
+optional. This step never stops.
 
 To bring an overlay machine forward:
 
@@ -312,6 +356,11 @@ knob is set. The qbc and db1 runscripts pass `srun -A` only when an
 allocation is set, with a shell `${alloc:+-A "$alloc"}` over
 `alloc='@KNOB-OPTIONAL(allocation)@'`, since that `-A` sits in the middle of
 a line.
+
+Automatically: cactup only raises `mdb-generation`. Scripts are not edited:
+`@ALLOCATION@` and `ALLOCATION` keep working, and the new meaning of `-a`
+comes from the binary. The drop-line changes (steps 2 to 5) are optional and
+never made for you. This step never stops.
 
 To bring an overlay machine forward:
 

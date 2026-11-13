@@ -1,0 +1,5 @@
+# Generation 4, a .sh submit script with `#SBATCH -A @ALLOCATION@`: only the
+# number changes, the script is untouched.
+result-generation = "current"
+outcome = "migrated"
+findings = ["generation-number-only", "scripts-untouched"]
