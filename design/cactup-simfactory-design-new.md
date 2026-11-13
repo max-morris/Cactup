@@ -4721,6 +4721,12 @@ sides cannot drift apart silently. `src/cactarium.rs` is only transport:
 - **Generations:** every request says the API generation cactup speaks; an
   answer from a newer generation is refused with "run `cactup update`".
 - **Errors:** an error body's `message` is printed as the server wrote it.
+- **Kinds:** every `/resolve` says the kind of entry the command wants
+  (`kind=package` from `add`, `stack` from install and refetch, `sim` from
+  import), so a registry that knows the parameter refuses another kind
+  saying so (`owner/name is a sim, not a package`) before reading the rest of
+  the reference. An older one ignores it, and the client still checks
+  `Resolved::kind`.
 - **Tokens:** `cactup login [--token T]` stores one per registry in
   `~/.cactup/credentials`, written owner-only; `CACTARIUM_TOKEN` overrides.
   Never a knob: knob values are frozen into every restart's metadata (§5.1),

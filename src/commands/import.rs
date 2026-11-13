@@ -355,7 +355,7 @@ fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) ->
     // Resolved even for an exact version: that is how a yanked version is
     // told. An exact version already downloaded still imports offline, its
     // yank status unknown.
-    let resolved = match (client.resolve(req), &exact) {
+    let resolved = match (client.resolve(req, "sim"), &exact) {
         (Ok(resolved), _) => resolved,
         (Err(e), Some(v)) if cached(v).is_file() => {
             println!(
@@ -575,7 +575,7 @@ fn repo_source(ctx: &Ctx, sim: &SimFile, given: &[String]) -> Res<Option<crate::
             first.knob
         );
     };
-    let resolved = crate::cactarium::Client::new(&ctx.db.read()?).resolve(&slug.to_string())?;
+    let resolved = crate::cactarium::Client::new(&ctx.db.read()?).resolve(&slug.to_string(), "sim")?;
     let url = resolved.url.ok_or_else(|| anyhow!("The Cactarium names no repository for {slug}"))?;
     let commit = resolved.version.commit.ok_or_else(|| anyhow!("The Cactarium names no commit for {slug}"))?;
     Ok(Some(crate::inputs::RepoSource { url, commit }))
@@ -1242,9 +1242,9 @@ pub(crate) mod tests {
         assert_ne!(std::fs::read_to_string(&mag).unwrap(), text);
 
         let heads = heads.join().unwrap();
-        assert!(heads[0].starts_with("GET /api/v1/resolve?req=et/cottonmouth-sims/qc0-z4c%40~2026.5 "), "{}", heads[0]);
+        assert!(heads[0].starts_with("GET /api/v1/resolve?req=et/cottonmouth-sims/qc0-z4c%40~2026.5&kind=sim "), "{}", heads[0]);
         assert!(heads[1].starts_with("GET /api/v1/sims/et/cottonmouth-sims/2026.5.1/download?sim=qc0-z4c "), "{}", heads[1]);
-        assert!(heads[2].starts_with("GET /api/v1/resolve?req=et/cottonmouth-sims/mag-tov "), "{}", heads[2]);
+        assert!(heads[2].starts_with("GET /api/v1/resolve?req=et/cottonmouth-sims/mag-tov&kind=sim "), "{}", heads[2]);
         assert!(heads[3].starts_with("GET /api/v1/sims/et/cottonmouth-sims/2026.5.1/download?sim=mag-tov "), "{}", heads[3]);
     }
 
@@ -1418,7 +1418,7 @@ pub(crate) mod tests {
         let err = format!("{:#}", fetch_published(&client, tmp.path(), "et/s/a@:1.0.0").unwrap_err());
         assert!(err.contains("answered with version mixed:1.0.0"), "the default track is another track: {err}");
         let heads = heads.join().unwrap();
-        assert!(heads[0].starts_with("GET /api/v1/resolve?req=et/s/a%40mixed%3A%3D1.0.0 "), "{}", heads[0]);
+        assert!(heads[0].starts_with("GET /api/v1/resolve?req=et/s/a%40mixed%3A%3D1.0.0&kind=sim "), "{}", heads[0]);
         assert!(heads[1].starts_with("GET /api/v1/sims/et/s/mixed:1.0.0/download?sim=a "), "{}", heads[1]);
         let gone = crate::cactarium::Client::at(client.base());
         assert_eq!(fetch_published(&gone, tmp.path(), "et/s/a@mixed:1.0.0").unwrap(), path);

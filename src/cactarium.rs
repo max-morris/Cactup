@@ -86,8 +86,13 @@ impl Client {
 
     /// The newest release (or `@head`/`@master`, or an exact version)
     /// matching `req`, which is `owner/name[@…]` as a user writes it.
-    pub fn resolve(&self, req: &str) -> Res<Resolved> {
-        let url = format!("{}?req={}", self.url("/resolve"), query_escape(req));
+    /// `kind` is the kind of entry the caller wants (`package`, `stack` or
+    /// `sim`): a Cactarium that knows the parameter refuses an entry of
+    /// another kind saying so, before reading the rest of the reference; an
+    /// older one ignores it, and the caller's own check of `Resolved::kind`
+    /// still holds.
+    pub fn resolve(&self, req: &str, kind: &str) -> Res<Resolved> {
+        let url = format!("{}?req={}&kind={}", self.url("/resolve"), query_escape(req), query_escape(kind));
         json(self.send(crate::fetch::download::client().get(&url))?)
     }
 
@@ -334,13 +339,17 @@ pub struct StackRelease {
 /// typed at the terminal, or with `allow_untrusted`
 /// (`--risky-allow-untrusted-artifacts`), which still prints the warning.
 pub fn stack_release_text(db: &Database, req: &str, allow_untrusted: bool) -> Res<StackRelease> {
+    stack_release_from(&Client::new(db), req, allow_untrusted)
+}
+
+/// [`stack_release_text`], from the registry `client` talks to.
+fn stack_release_from(client: &Client, req: &str, allow_untrusted: bool) -> Res<StackRelease> {
     use cactup_ecosystem_common::slug::Slug;
     let slug: Slug = req.parse().map_err(|e| anyhow!("\"{req}\" is not a stack (owner/name[@version]): {e}"))?;
-    let client = Client::new(db);
     let version = match slug.tip() {
         Some(_) => slug.at.clone().expect("a tip is an @ form"),
         None => {
-            let resolved = client.resolve(req)?;
+            let resolved = client.resolve(req, "stack")?;
             if resolved.kind != "stack" {
                 bail!("{} is a {}, not a stack", resolved.slug, resolved.kind);
             }
@@ -569,10 +578,10 @@ mod tests {
             "version":"1.4.0","track":"mixed-precision","tag":"mixed-precision/v1.4.0","commit":"3f2c","tree":null,
             "yanked":false,"yank-reason":null,"state":"published","curated":false,"published":0}"#;
         let (base, heads) = serve_with(1, move |_| ("200 OK", "api-generation: 1\r\n".into(), answer.as_bytes().to_vec()));
-        let resolved = Client::at(&base).resolve("max-morris/carpetx@mixed-precision:^1.2").unwrap();
+        let resolved = Client::at(&base).resolve("max-morris/carpetx@mixed-precision:^1.2", "package").unwrap();
         assert_eq!(resolved.version.tag.as_deref(), Some("mixed-precision/v1.4.0"));
         let head = &heads.join().unwrap()[0];
-        assert!(head.starts_with("GET /api/v1/resolve?req=max-morris/carpetx%40mixed-precision%3A%5E1.2 "), "{head}");
+        assert!(head.starts_with("GET /api/v1/resolve?req=max-morris/carpetx%40mixed-precision%3A%5E1.2&kind=package "), "{head}");
         assert!(head.to_ascii_lowercase().contains("api-generation: 1"), "{head}");
     }
 
@@ -580,11 +589,11 @@ mod tests {
     fn errors_carry_the_registrys_message_and_newer_generations_are_refused() {
         let body = r#"{"error":{"code":"not-found","message":"No sim mmorris/nope"}}"#;
         let (base, _) = serve_with(1, move |_| ("404 Not Found", String::new(), body.as_bytes().to_vec()));
-        let err = format!("{:#}", Client::at(&base).resolve("mmorris/nope").unwrap_err());
+        let err = format!("{:#}", Client::at(&base).resolve("mmorris/nope", "sim").unwrap_err());
         assert_eq!(err, "No sim mmorris/nope");
 
         let (base, _) = serve_with(1, |_| ("200 OK", "api-generation: 99\r\n".into(), b"{}".to_vec()));
-        let err = format!("{:#}", Client::at(&base).resolve("a/b").unwrap_err());
+        let err = format!("{:#}", Client::at(&base).resolve("a/b", "package").unwrap_err());
         assert!(err.contains("generation 99") && err.contains("cactup update"), "{err}");
     }
 
@@ -603,7 +612,7 @@ mod tests {
         // A port nothing listens on: bound, then let go.
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let base = format!("http://127.0.0.1:{port}");
-        let err = format!("{:#}", Client::at(&base).resolve("a/b").unwrap_err());
+        let err = format!("{:#}", Client::at(&base).resolve("a/b", "package").unwrap_err());
         assert!(err.starts_with(&format!("The Cactarium at {base} isn't reachable (")), "{err}");
         assert!(err.contains("cactarium-url") && !err.contains("error sending request"), "{err}");
     }
@@ -662,6 +671,37 @@ mod tests {
         assert!(heads[0].starts_with("GET /api/v1/sims/et/sims/1.0.0/download?sim=qc0-z4c "), "{}", heads[0]);
         assert!(heads[1].starts_with("GET /api/v1/sims/et/sims/1.0.0/download?sim=mag-tov "), "{}", heads[1]);
         assert!(heads[4].starts_with("GET /api/v1/sims/et/one/1.0.0/download "), "{}", heads[4]);
+    }
+
+    /// A stack install asks `/resolve` for a stack (`kind=stack`), so a
+    /// Cactarium that knows the parameter can say when the entry is another
+    /// kind; an answer of another kind is refused here too.
+    #[test]
+    fn a_stack_is_resolved_as_a_stack() {
+        let release = r#"{"format":1,"stack":"et/et-stack@1.0.0","root":"Cactus","repo":[],
+            "thornlist":{"filename":"et.th","text":"!CRL_VERSION = 1.0\n"}}"#;
+        let answer = |kind: &str| {
+            format!(
+                r#"{{"slug":"et/et-stack@1.0.0","kind":"{kind}","url":null,"contact":null,"version":"1.0.0","track":null,
+                "tag":"v1.0.0","commit":null,"tree":null,"yanked":false,"yank-reason":null,"state":"ok","curated":false,"published":0}}"#
+            )
+        };
+        let (base, heads) = serve_with(3, move |path| {
+            let body = match path {
+                p if p.contains("/resolve?req=et/et-stack%40") => answer("stack"),
+                p if p.contains("/resolve?") => answer("package"),
+                _ => release.to_owned(),
+            };
+            ("200 OK", "api-generation: 1\r\nx-cactarium-untrusted: false\r\n".into(), body.into_bytes())
+        });
+        let client = Client::at(&base);
+        let stack = stack_release_from(&client, "et/et-stack@1", false).unwrap_or_else(|e| panic!("{e:#}"));
+        assert_eq!(stack.slug, "et/et-stack@1.0.0");
+        let err = format!("{:#}", stack_release_from(&client, "et/carpetx", false).err().unwrap());
+        assert!(err.contains("is a package, not a stack"), "{err}");
+        let heads = heads.join().unwrap();
+        assert!(heads[0].starts_with("GET /api/v1/resolve?req=et/et-stack%401&kind=stack "), "{}", heads[0]);
+        assert!(heads[2].starts_with("GET /api/v1/resolve?req=et/carpetx&kind=stack "), "{}", heads[2]);
     }
 
     /// A tip asked for, answered with neither header, is untrusted: the
