@@ -1,5 +1,10 @@
 {
   "about": "--ignore-claim naming any alternative of an any-of drops the dependency",
+  "packages": [
+    "max--z4c--anyof",
+    "et--carpet",
+    "et--cactuspugh"
+  ],
   "specs": [
     "max/z4c"
   ],

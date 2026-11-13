@@ -1,5 +1,12 @@
 {
   "about": "A commit need no version names reads the package there; an untrusted snapshot is returned to confirm",
+  "packages": [
+    "max--z4c--carpetx-snapshot",
+    "et--carpetx"
+  ],
+  "snapshots": [
+    "et--carpetx--at-4444"
+  ],
   "specs": [
     "max/z4c"
   ],

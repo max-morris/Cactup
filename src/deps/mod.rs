@@ -8,17 +8,16 @@
 //! only global state read is the interrupt flag, polled once per step.
 //!
 //! - [`resolve`]: named specs plus the installation's present packages → a [`Plan`] of steps
-//!   (add, add thorns, upgrade, replace, keep), each with why, or a typed [`Refusal`] that names
-//!   its way past.
+//!   (add, re-add, add thorns, upgrade, replace, keep), each with why, or a typed [`Refusal`]
+//!   that names its way past.
 //! - [`plan_remove`]: the dependents that block a removal, and the packages it orphans.
 //!
 //! Determinism: every map is a `BTreeMap`/`BTreeSet` (or keeps insertion order), and any-of
 //! dependencies are decided in a fixed order, so the same inputs give the same plan whatever the
 //! order a hash map, the server or the caller happened to list them in.
 
-// Wired into `add`/`remove` by the next phase (P3); until then only the tests call it, and
-// not all of it. Drop this once P3 uses the module.
-#![allow(dead_code, unused_imports)]
+// Wired into `add`/`remove` by the next phase (P3); until then only the tests call it.
+#![cfg_attr(not(test), allow(dead_code))]
 
 mod conflict;
 mod overrides;
@@ -41,10 +40,18 @@ use cactup_ecosystem_common::version::{TrackedReq, TrackedVersion};
 use crate::Res;
 use anyhow::{anyhow, bail};
 
+// The module's API, for P3 (re-exports, so nothing in this module uses them).
+#[allow(unused_imports)]
 pub use overrides::{ClaimKind, ClaimPattern, Override, Rules};
-pub use plan::{Choice, ChoiceRule, Library, Placement, Plan, Record, Step, Untrusted};
+#[allow(unused_imports)]
+pub use plan::{
+    Choice, ChoiceKey, ChoiceRule, Library, LineKind, Placement, Plan, Record, Replaced, Step, Untrusted,
+};
+#[allow(unused_imports)]
 pub use refusal::{Live, Refusal, Unmet};
+#[allow(unused_imports)]
 pub use remove::{is_requested, plan_remove, AddedFor, Orphan, RemovePlan};
+#[allow(unused_imports)]
 pub use resolve::resolve;
 
 /// A package: `owner/name`, or `repo:<name>` for a repo of the installation's base that no
@@ -89,12 +96,13 @@ impl PkgId {
         if self.is_repo() {
             return None;
         }
-        let text = match req {
-            Req::Range(q) => format!("{self}@{q}"),
-            Req::Commit(sha) => format!("{self}#{sha}"),
+        match req {
+            Req::Range(q) => target_text(self.as_str(), Some(&q.to_string()), None),
+            Req::Commit(sha) => target_text(self.as_str(), None, Some(sha)),
             Req::Tip(_) => return None,
-        };
-        text.parse().ok()
+        }
+        .parse()
+        .ok()
     }
 }
 
@@ -104,14 +112,39 @@ impl fmt::Display for PkgId {
     }
 }
 
+/// A claim's target as written: `owner/name`, `owner/name@range` or `owner/name#sha`.
+fn target_text(target: &str, range: Option<&str>, sha: Option<&str>) -> String {
+    match (range, sha) {
+        (_, Some(sha)) => format!("{target}#{sha}"),
+        (Some(r), None) => format!("{target}@{r}"),
+        (None, None) => target.to_owned(),
+    }
+}
+
+/// A claim's (or an alternative's) target and what it asks of the target's release.
+fn claim_target(target: &str, range: Option<&str>, sha: Option<&str>) -> Result<(PkgId, Req), String> {
+    let id = PkgId::parse(target).map_err(|e| e.to_string())?;
+    if id.is_repo() {
+        return Err(format!("\"{target}\" is not a registered package"));
+    }
+    Ok((id, Req::from_claim(range, sha)?))
+}
+
+/// Whether `r` declares itself a fork of `upstream`.
+fn forks(r: &Release, upstream: &PkgId) -> bool {
+    r.claims.iter().any(|c| c.kind == "fork-of" && c.target == upstream.as_str())
+}
+
 /// Where a release sits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum At {
     /// A published version.
     Version(TrackedVersion),
-    /// The registry's read of the package at a commit no version froze (a `#sha` or a branch tip:
-    /// a snapshot the dependency check never ran on).
+    /// The registry's read of the package at a commit no version froze (`#sha`): a snapshot the
+    /// dependency check never ran on.
     Commit(String),
+    /// The registry's read of a branch tip (`head`, `master`) at the commit it found then.
+    Tip { name: String, commit: String },
     /// Installed at a commit no version froze and that the registry was not asked about (a base
     /// repo at a commit the pin lookup maps to no version, or a pseudo-package).
     Unknown(String),
@@ -126,9 +159,9 @@ impl At {
     }
 }
 
-/// The first 12 hex digits of a commit, as people read one.
+/// The first 12 characters of a commit, as people read one (whatever the server sent).
 fn short(commit: &str) -> &str {
-    &commit[..commit.len().min(12)]
+    commit.get(..12).unwrap_or(commit)
 }
 
 /// One release of a package: what the resolver chooses among. Built from the Cactarium's
@@ -139,7 +172,13 @@ pub struct Release {
     pub at: At,
     /// The full commit the release is at.
     pub commit: String,
+    /// The git tag the version was frozen from (`None` for curated versions and snapshots).
+    pub tag: Option<String>,
     pub url: String,
+    /// Where to report problems. The versions answer does not carry it yet (asked of the
+    /// Cactarium session), so this is `None` until the crate has it; P3 takes a named spec's
+    /// from `/resolve`.
+    pub contact: Option<String>,
     pub flesh: bool,
     pub library: bool,
     pub yanked: bool,
@@ -152,23 +191,35 @@ pub struct Release {
 }
 
 impl Release {
-    /// A release as the Cactarium serves it. `pending`: the version is awaiting review (the
-    /// crate's `VersionInfo` at 2f2c8f4 has no `review` field yet, so the caller reads it).
+    /// A release as the Cactarium serves it: a version, a commit no version froze (the version
+    /// is the full commit), or a tip (`head`/`master`). `pending`: the version is awaiting review
+    /// (the crate's `VersionInfo` at 2f2c8f4 has no `review` field yet, so the caller reads it).
     pub fn from_served(id: &PkgId, v: &PackageVersion, pending: bool) -> Res<Release> {
         let info = &v.version;
-        let commit =
-            info.commit.clone().ok_or_else(|| anyhow!("The Cactarium gave {id}@{} no commit", info.version))?;
-        let at = if is_commit_id(&info.version) {
-            At::Commit(commit.clone())
-        } else {
-            let v = info.version.parse().map_err(|e| anyhow!("The Cactarium gave {id} a version that is none: {e}"))?;
-            At::Version(v)
+        let commit = info.commit.clone().unwrap_or_default();
+        if !is_commit_id(&commit) {
+            bail!("The Cactarium gave {id}@{} \"{}\" as its commit, which is none", info.version, commit.escape_debug());
+        }
+        let at = match info.version.as_str() {
+            "head" | "master" => At::Tip { name: info.version.clone(), commit: commit.clone() },
+            version if is_commit_id(version) => {
+                if version != commit {
+                    bail!("The Cactarium read {id} at {version} and answered with commit {commit}");
+                }
+                At::Commit(commit.clone())
+            }
+            version => {
+                let v = version.parse().map_err(|e| anyhow!("The Cactarium gave {id} a version that is none: {e}"))?;
+                At::Version(v)
+            }
         };
         Ok(Release {
             id: id.clone(),
             at,
             commit,
+            tag: info.tag.clone(),
             url: v.url.clone(),
+            contact: None,
             flesh: v.flesh,
             library: v.library,
             yanked: info.yanked,
@@ -179,10 +230,12 @@ impl Release {
         })
     }
 
-    /// `owner/name@1.2.0`, or `owner/name#0123456789ab` at a commit no version names.
+    /// `owner/name@1.2.0`, `owner/name@head`, or `owner/name#0123456789ab` at a commit no version
+    /// names.
     pub fn label(&self) -> String {
         match &self.at {
             At::Version(v) => format!("{}@{v}", self.id),
+            At::Tip { name, .. } => format!("{}@{name}", self.id),
             At::Commit(c) | At::Unknown(c) => format!("{}#{}", self.id, short(c)),
         }
     }
@@ -212,12 +265,24 @@ pub enum Origin {
     Added,
 }
 
+/// A library an added package has placed (an `[[added.libraries]]` entry).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstalledLibrary {
+    pub id: PkgId,
+    pub commit: String,
+    pub into: String,
+    /// The library whose clone it goes inside; `None`: the package's own.
+    pub inside: Option<PkgId>,
+}
+
 /// A package the installation has, with the thorns of it that are enabled.
 #[derive(Clone, Debug)]
 pub struct Present {
     pub release: Release,
     pub enabled: BTreeSet<String>,
     pub origin: Origin,
+    /// The libraries it placed, held where they are while it does not change.
+    pub libraries: Vec<InstalledLibrary>,
 }
 
 /// What a need asks of its target's release.
@@ -231,12 +296,16 @@ pub enum Req {
 }
 
 impl Req {
-    /// A claim's `range`/`sha` as a requirement: `#sha` a commit, a range a range, `@<hex>` that
-    /// names no range a commit (as the crate's `Slug::commit_fallback` reads it), nothing any
-    /// version on the default track.
+    /// A claim's `range`/`sha` as a requirement: `#sha` a commit (7 to 64 lowercase hex digits),
+    /// a range a range, `@<hex>` that names no range a commit (as the crate's
+    /// `Slug::commit_fallback` reads it), nothing any version on the default track.
     pub fn from_claim(range: Option<&str>, sha: Option<&str>) -> Result<Req, String> {
         if let Some(sha) = sha {
-            return Ok(Req::Commit(sha.to_ascii_lowercase()));
+            let sha = sha.to_ascii_lowercase();
+            if !is_commit_prefix(&sha) {
+                return Err(format!("\"{}\" is not a commit", sha.escape_debug()));
+            }
+            return Ok(Req::Commit(sha));
         }
         match range {
             None => Ok(Req::Range(TrackedReq::any())),
@@ -264,15 +333,10 @@ impl Req {
             Req::Range(q) => match &r.at {
                 At::Version(v) if q.matches(v) => Fit::Yes,
                 At::Version(_) => Fit::No,
-                At::Commit(_) | At::Unknown(_) => Fit::ByNote,
+                At::Commit(_) | At::Tip { .. } | At::Unknown(_) => Fit::ByNote,
             },
-            Req::Commit(sha) => {
-                if r.commit.starts_with(sha.as_str()) {
-                    Fit::Yes
-                } else {
-                    Fit::No
-                }
-            }
+            Req::Commit(sha) if !sha.is_empty() && r.commit.starts_with(sha.as_str()) => Fit::Yes,
+            Req::Commit(_) => Fit::No,
             // Resolved to a commit before it becomes a constraint.
             Req::Tip(_) => Fit::No,
         }
@@ -331,17 +395,22 @@ impl NamedSpec {
 /// The flags that change what a plan may do.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Options {
-    /// `--upgrade`: a present package the plan touches moves to its newest release that fits.
+    /// `--upgrade`: a present package the plan touches moves, when its release no longer fits,
+    /// to its newest release that does.
     pub upgrade: bool,
-    /// `--upgrade-all`: every present package does.
+    /// `--upgrade-all`: every present package moves to its newest release that fits.
     pub upgrade_all: bool,
-    /// `--no-deps`: nothing beyond the named specs (libraries are still placed).
+    /// `--no-deps`: nothing beyond the named specs (libraries are still placed); a present
+    /// package's declared range the plan breaks becomes a note.
     pub no_deps: bool,
-    /// `--replace`: a planned package whose thorns collide with a base repo's replaces that repo.
+    /// `--replace`: a planned package whose thorns collide with a base repo's replaces those
+    /// checkouts (all of the repo when it upgrades or forks the repo's package).
     pub replace: bool,
 }
 
-/// What [`resolve`] works from.
+/// What [`resolve`] works from. The caller asks `/resolve` for each named spec first, as `add`
+/// does today (the entry's kind, the server's own error text, the contact); the resolver then
+/// reads versions through [`Facts`].
 pub struct Request<'a> {
     pub specs: &'a [NamedSpec],
     pub present: &'a [Present],
@@ -359,8 +428,7 @@ pub enum Why {
         /// `owner/name@version` of the dependent.
         by: String,
         by_id: PkgId,
-        /// The dependency as people read it (`Dependency::label()`): `et/carpet`, or
-        /// `any of et/carpet, et/cactuspugh`.
+        /// The dependency as people read it: `et/carpet@^1`, or `any of et/carpet, et/cactuspugh`.
         claim: String,
         /// What it asks of this package's release.
         req: String,
@@ -438,22 +506,27 @@ pub struct Provider {
 #[derive(Clone, Debug)]
 pub struct Snapshot {
     pub release: Release,
-    /// Nobody vouches for it (an untrusted package's tip or unreviewed commit): the caller
-    /// confirms it before anything is fetched.
+    /// Nobody vouches for it (an untrusted package's tip or unreviewed commit). Only reported:
+    /// the plan lists the snapshots it chose ([`Plan::untrusted`]) for the caller to confirm.
     pub untrusted: bool,
 }
 
 /// Everything the resolver asks the registry. The caller's implementation does the requests (in
-/// waves, in parallel, with progress, polling the interrupt flag) and applies nothing: overrides
-/// and ignores are applied by the resolver as releases are loaded.
+/// waves, in parallel, with progress) and applies nothing: overrides and ignores are applied by
+/// the resolver as releases are loaded. Named specs are not resolved here: the caller asks
+/// `/resolve` for each first (see [`Request`]).
 pub trait Facts {
     /// Fetches the served versions of these packages: one wave. Packages already loaded, and
-    /// pseudo-packages, are never asked for.
+    /// pseudo-packages, are never asked for. Returns an error when interrupted (the flag is
+    /// polled per package), never a partial load: a package missing from a finished load is one
+    /// the Cactarium does not have.
     fn load(&mut self, ids: &[PkgId]) -> Res<()>;
     /// A loaded package's releases, newest first within each track; `None` when the Cactarium
     /// has no such package.
     fn releases(&self, id: &PkgId) -> Option<&[Release]>;
-    /// The package read at a commit (full or abbreviated) or a tip (`head`, `master`).
+    /// The package read at a commit (full or abbreviated) or a tip (`head`, `master`). Never
+    /// asks the user anything: an untrusted snapshot is only marked, and confirmed by the caller
+    /// once the plan is known.
     fn snapshot(&mut self, id: &PkgId, at: &str) -> Res<Snapshot>;
     /// The registered thorns meeting a requirement (to list in a refusal; never planned).
     fn providers(&mut self, requirement: &Requirement) -> Res<Vec<Provider>>;

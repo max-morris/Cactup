@@ -1,5 +1,10 @@
 {
   "about": "The first listed alternative conflicts with a base repo's thorn, so the next one is taken",
+  "packages": [
+    "max--z4c--anyof",
+    "et--carpet",
+    "et--cactuspugh"
+  ],
   "specs": [
     "max/z4c"
   ],
@@ -8,24 +13,7 @@
       "package": "repo:carpet-legacy",
       "unknown": "1111111111111111111111111111111111111111",
       "thorns": [
-        {
-          "arrangement": "Carpet-legacy",
-          "thorn": "CarpetSlab",
-          "repo-path": "$1/$2",
-          "facts": {
-            "implements": "CarpetSlab",
-            "inherits": [],
-            "friends": [],
-            "requires-functions": [],
-            "uses-functions": [],
-            "provides-functions": [],
-            "uses-includes": [],
-            "requires": [],
-            "requires-thorns": [],
-            "optional": [],
-            "provides": []
-          }
-        }
+        "CarpetSlab"
       ],
       "base": "carpet-legacy",
       "enabled": [

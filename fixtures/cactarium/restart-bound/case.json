@@ -1,5 +1,10 @@
 {
   "about": "Constraints that keep displacing each other end, past the budget, in a deterministic refusal",
+  "packages": [
+    "max--x--needs-p-q",
+    "et--p--swings",
+    "et--q--swings"
+  ],
   "specs": [
     "max/x"
   ],

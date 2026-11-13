@@ -1,5 +1,9 @@
 {
   "about": "An incompatible-with whose range misses the present release is no conflict",
+  "packages": [
+    "max--a--incompatible-b2",
+    "et--b"
+  ],
   "specs": [
     "max/a"
   ],

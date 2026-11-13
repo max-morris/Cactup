@@ -1,5 +1,9 @@
 {
   "about": "An exact constraint may take a yanked release",
+  "packages": [
+    "max--z4c--arith-exact",
+    "et--arith--yanked"
+  ],
   "specs": [
     "max/z4c"
   ],

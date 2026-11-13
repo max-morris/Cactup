@@ -1,5 +1,8 @@
 {
   "about": "Several providers: refused, each named",
+  "packages": [
+    "max--z4c--hyperslab"
+  ],
   "specs": [
     "max/z4c"
   ],

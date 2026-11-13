@@ -1,0 +1,26 @@
+{
+  "about": "An added flesh package holds the flesh: a flesh need it does not meet replaces it",
+  "packages": [
+    "max--z4c--cactus",
+    "et--cactus",
+    "max--cactus-mp--covers-2026-4"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "present": [
+    {
+      "package": "max/cactus-mp",
+      "version": "1.0.0",
+      "enabled": []
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named",
+      "add et/cactus@2026.5.0 needed by max/z4c@1.2.0, ^2026.5",
+      "replace max/cactus-mp with et/cactus",
+      "The flesh changes: every config of this installation needs a rebuild"
+    ]
+  }
+}

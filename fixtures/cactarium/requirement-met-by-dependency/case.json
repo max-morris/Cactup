@@ -1,5 +1,9 @@
 {
   "about": "A requirement met by a dependency's needs",
+  "packages": [
+    "max--z4c--carpet-hyperslab",
+    "et--carpet--hyperslab"
+  ],
   "specs": [
     "max/z4c"
   ],

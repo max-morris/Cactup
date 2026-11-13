@@ -1,5 +1,8 @@
 {
   "about": "A library is never named",
+  "packages": [
+    "et--fuka"
+  ],
   "specs": [
     "et/fuka"
   ],

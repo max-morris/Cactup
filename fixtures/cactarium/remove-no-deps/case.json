@@ -1,5 +1,11 @@
 {
   "about": "--no-deps removes exactly what was named",
+  "packages": [
+    "max--z4c--carpetx-plain",
+    "et--carpetx--arith-1",
+    "et--arith--one",
+    "et--admbase"
+  ],
   "present": [
     {
       "package": "max/z4c",

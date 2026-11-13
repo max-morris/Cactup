@@ -1,5 +1,9 @@
 {
   "about": "A needs override adds thorns to a dependency's needs",
+  "packages": [
+    "max--z4c--carpetx",
+    "et--carpetx"
+  ],
   "specs": [
     "max/z4c"
   ],

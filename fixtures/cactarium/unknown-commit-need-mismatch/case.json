@@ -1,5 +1,9 @@
 {
   "about": "A present package at an unknown commit meets a commit need only at that commit",
+  "packages": [
+    "max--z4c--carpetx-sha",
+    "et--carpetx"
+  ],
   "specs": [
     "max/z4c"
   ],
@@ -8,42 +12,8 @@
       "package": "et/carpetx",
       "unknown": "3333333333333333333333333333333333333333",
       "thorns": [
-        {
-          "arrangement": "Carpetx",
-          "thorn": "CarpetX",
-          "repo-path": "$1/$2",
-          "facts": {
-            "implements": "CarpetX",
-            "inherits": [],
-            "friends": [],
-            "requires-functions": [],
-            "uses-functions": [],
-            "provides-functions": [],
-            "uses-includes": [],
-            "requires": [],
-            "requires-thorns": [],
-            "optional": [],
-            "provides": []
-          }
-        },
-        {
-          "arrangement": "Carpetx",
-          "thorn": "Loop",
-          "repo-path": "$1/$2",
-          "facts": {
-            "implements": "Loop",
-            "inherits": [],
-            "friends": [],
-            "requires-functions": [],
-            "uses-functions": [],
-            "provides-functions": [],
-            "uses-includes": [],
-            "requires": [],
-            "requires-thorns": [],
-            "optional": [],
-            "provides": []
-          }
-        }
+        "CarpetX",
+        "Loop"
       ],
       "base": "carpetx",
       "enabled": [

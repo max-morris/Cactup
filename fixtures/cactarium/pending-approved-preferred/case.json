@@ -1,5 +1,9 @@
 {
   "about": "An approved release wins over a newer one awaiting review",
+  "packages": [
+    "max--z4c--carpetx",
+    "et--carpetx--pending"
+  ],
   "specs": [
     "max/z4c"
   ],

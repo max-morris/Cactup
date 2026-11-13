@@ -1,5 +1,10 @@
 {
   "about": "Two packages placing one library share the newest release both accept",
+  "packages": [
+    "max--kadath",
+    "max--fuka-gw--fuka-1-1",
+    "et--fuka"
+  ],
   "specs": [
     "max/kadath",
     "max/fuka-gw"
@@ -10,7 +15,7 @@
       "add max/fuka-gw@1.0.0 FukaGW named"
     ],
     "libraries": [
-      "et/fuka@1.1.5 into src/fuka by max/kadath@1.0.0; into lib/fuka by max/fuka-gw@1.0.0"
+      "et/fuka@1.1.5: lib/fuka by max/fuka-gw; src/fuka by max/kadath"
     ]
   }
 }

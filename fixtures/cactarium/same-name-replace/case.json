@@ -1,5 +1,8 @@
 {
-  "about": "--replace drops the colliding base repo in favor of the package",
+  "about": "--replace takes over the colliding checkouts; with none left, the whole base repo",
+  "packages": [
+    "et--carpetx"
+  ],
   "specs": [
     "et/carpetx"
   ],
@@ -8,42 +11,8 @@
       "package": "repo:carpetx",
       "unknown": "2222222222222222222222222222222222222222",
       "thorns": [
-        {
-          "arrangement": "Carpetx",
-          "thorn": "CarpetX",
-          "repo-path": "$1/$2",
-          "facts": {
-            "implements": "CarpetX",
-            "inherits": [],
-            "friends": [],
-            "requires-functions": [],
-            "uses-functions": [],
-            "provides-functions": [],
-            "uses-includes": [],
-            "requires": [],
-            "requires-thorns": [],
-            "optional": [],
-            "provides": []
-          }
-        },
-        {
-          "arrangement": "Carpetx",
-          "thorn": "Loop",
-          "repo-path": "$1/$2",
-          "facts": {
-            "implements": "Loop",
-            "inherits": [],
-            "friends": [],
-            "requires-functions": [],
-            "uses-functions": [],
-            "provides-functions": [],
-            "uses-includes": [],
-            "requires": [],
-            "requires-thorns": [],
-            "optional": [],
-            "provides": []
-          }
-        }
+        "CarpetX",
+        "Loop"
       ],
       "base": "carpetx",
       "enabled": [

@@ -1,5 +1,9 @@
 {
   "about": "No flesh release meets the flesh dependency",
+  "packages": [
+    "max--z4c--cactus",
+    "et--cactus--old"
+  ],
   "specs": [
     "max/z4c"
   ],

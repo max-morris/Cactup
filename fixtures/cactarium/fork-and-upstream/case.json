@@ -1,5 +1,9 @@
 {
   "about": "A fork named beside its present upstream",
+  "packages": [
+    "et--carpetx",
+    "max--carpetx-mp--covers-2026-5-1"
+  ],
   "specs": [
     "max/carpetx-mp"
   ],

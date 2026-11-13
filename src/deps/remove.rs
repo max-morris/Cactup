@@ -5,17 +5,18 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use super::plan::{table, ChoiceKey, LineKind};
 use super::refusal::Refusal;
 use super::resolve::claim_label;
-use super::{Origin, PkgId, Present, Rules};
+use super::{forks, Origin, PkgId, Present, Rules};
 
 /// An `added-for` entry of `installation.toml`, as read.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AddedFor {
     pub requested: bool,
     pub by: Vec<String>,
-    /// The any-of choice that chose it: `any of a, b: the first listed`.
-    pub choice: Option<String>,
+    /// The any-of dependencies that chose it.
+    pub choices: Vec<ChoiceKey>,
     /// The `[[added]]` commit the entry was written for.
     pub for_commit: Option<String>,
 }
@@ -54,13 +55,41 @@ impl Orphan {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RemovePlan {
     pub removed: Vec<PkgId>,
+    /// `owner/name@version` of each removed package, as the installation has it.
+    pub removed_labels: Vec<String>,
     /// Removed too, once confirmed (none under `--no-deps`).
     pub orphans: Vec<Orphan>,
 }
 
+impl RemovePlan {
+    /// Whether the plan goes beyond what was named, so it is shown and confirmed.
+    pub fn beyond_named(&self) -> bool {
+        !self.orphans.is_empty()
+    }
+
+    /// The plan as people read it, each line with its kind.
+    pub fn lines(&self, command: &str) -> Vec<(LineKind, String)> {
+        let mut rows: Vec<[String; 4]> = Vec::new();
+        for label in &self.removed_labels {
+            rows.push(["remove".into(), label.clone(), String::new(), "named".into()]);
+        }
+        for o in &self.orphans {
+            rows.push(["remove".into(), o.label.clone(), String::new(), o.why()]);
+        }
+        let mut out = vec![(LineKind::Header, format!("Plan for {command}:"))];
+        out.extend(table(&rows).into_iter().map(|l| (LineKind::Step, l)));
+        out
+    }
+
+    pub fn render(&self, command: &str) -> String {
+        self.lines(command).into_iter().map(|(_, l)| l + "\n").collect()
+    }
+}
+
 /// Plans removing `targets`: refuses while a remaining package depends on one of them (unless
 /// `no_deps`), and lists the added packages, never named, that only the removed ones needed
-/// (to a fixpoint, cycles included).
+/// (to a fixpoint, cycles included). A package nothing reached before the removal (one an
+/// earlier `--no-deps` left behind) counts as named: it is never swept, nor what it needs.
 pub fn plan_remove(
     present: &[Present],
     added_for: &BTreeMap<PkgId, AddedFor>,
@@ -69,14 +98,16 @@ pub fn plan_remove(
     no_deps: bool,
 ) -> Result<RemovePlan, Refusal> {
     let removed: Vec<PkgId> = targets.to_vec();
-    if no_deps {
-        return Ok(RemovePlan { removed, orphans: Vec::new() });
-    }
     let mut all: BTreeMap<PkgId, Present> = BTreeMap::new();
     for p in present {
         let mut p = p.clone();
         rules.apply(&mut p.release);
         all.insert(p.release.id.clone(), p);
+    }
+    let removed_labels =
+        removed.iter().map(|id| all.get(id).map_or_else(|| id.to_string(), |p| p.release.label())).collect();
+    if no_deps {
+        return Ok(RemovePlan { removed, removed_labels, orphans: Vec::new() });
     }
     let gone: BTreeSet<&PkgId> = removed.iter().collect();
     let remaining: BTreeSet<&PkgId> = all.keys().filter(|id| !gone.contains(id)).collect();
@@ -97,18 +128,20 @@ pub fn plan_remove(
         return Err(Refusal::HasDependents { removed, dependents });
     }
 
-    let reached_before = g.reach(&everything);
-    let reached_after = g.reach(&remaining);
+    let reached_before = g.reach(&everything, &BTreeSet::new());
+    let stray: BTreeSet<PkgId> =
+        remaining.iter().filter(|id| !reached_before.contains(**id)).map(|id| (*id).clone()).collect();
+    let reached_after = g.reach(&remaining, &stray);
     let orphans = remaining
         .iter()
-        .filter(|id| reached_before.contains(**id) && !reached_after.contains(**id))
+        .filter(|id| !reached_after.contains(**id))
         .map(|id| Orphan {
             id: (*id).clone(),
             label: all[*id].release.label(),
             by: added_for.get(*id).map(|a| a.by.clone()).unwrap_or_default(),
         })
         .collect();
-    Ok(RemovePlan { removed, orphans })
+    Ok(RemovePlan { removed, removed_labels, orphans })
 }
 
 struct Graph<'a> {
@@ -125,22 +158,18 @@ impl Graph<'_> {
         if let Some(id) = set.iter().find(|id| id.as_str() == target) {
             return Some(id);
         }
-        if let Ok(t) = PkgId::parse(target) {
-            for x in self.rules.satisfiers(&t) {
-                if let Some(id) = set.iter().find(|id| **id == x) {
-                    return Some(id);
-                }
+        let t = PkgId::parse(target).ok()?;
+        for x in self.rules.satisfiers(&t) {
+            if let Some(id) = set.iter().find(|id| **id == x) {
+                return Some(id);
             }
         }
-        let forks = |id: &&&PkgId| {
-            self.all[**id].release.claims.iter().any(|c| c.kind == "fork-of" && c.target == target)
-        };
-        set.iter().find(forks).copied()
+        set.iter().find(|id| forks(&self.all[**id].release, &t)).copied()
     }
 
     /// For each dependency of `p` that applies to its enabled thorns (libraries aside), the
     /// packages in `set` holding it: the single target's taker, or for an any-of the alternative
-    /// recorded as chosen, else the first one present.
+    /// recorded as its choice, else the first one present.
     fn holders<'s>(&self, p: &Present, set: &BTreeSet<&'s PkgId>) -> Vec<(String, Vec<&'s PkgId>)> {
         let mut out = Vec::new();
         for c in p.release.claims.iter().filter(|c| c.kind == "dependency" && c.into.is_none()) {
@@ -153,13 +182,15 @@ impl Graph<'_> {
             let held: Vec<&PkgId> = if c.alternatives.is_empty() {
                 self.taker(&c.target, set).into_iter().collect()
             } else {
+                let alternatives: Option<Vec<PkgId>> =
+                    c.alternatives.iter().map(|a| PkgId::parse(&a.target).ok()).collect();
+                let dependent = p.release.id.clone();
+                let key = alternatives.map(|alternatives| ChoiceKey { dependent, alternatives });
                 let takers: Vec<&PkgId> =
                     c.alternatives.iter().filter_map(|a| self.taker(&a.target, set)).collect();
                 let recorded = takers.iter().find(|id| {
-                    self.added_for
-                        .get(**id)
-                        .and_then(|a| a.choice.as_deref())
-                        .is_some_and(|choice| choice.starts_with(&format!("{label}: ")))
+                    let choices = self.added_for.get(**id).map(|a| a.choices.as_slice()).unwrap_or_default();
+                    key.as_ref().is_some_and(|k| choices.contains(k))
                 });
                 recorded.or(takers.first()).copied().into_iter().collect()
             };
@@ -177,17 +208,18 @@ impl Graph<'_> {
         self.holders(p, set).into_iter().filter(|(l, _)| l == label).flat_map(|(_, h)| h).collect()
     }
 
-    /// The packages of `set` reachable from its roots (base repos, and added packages the user
-    /// named) through the dependencies they hold.
-    fn reach(&self, set: &BTreeSet<&PkgId>) -> BTreeSet<PkgId> {
+    /// The packages of `set` reachable from its roots (base repos, added packages the user named,
+    /// and `extra`) through the dependencies they hold.
+    fn reach(&self, set: &BTreeSet<&PkgId>, extra: &BTreeSet<PkgId>) -> BTreeSet<PkgId> {
         let mut reached: BTreeSet<PkgId> = BTreeSet::new();
         let mut queue: VecDeque<&PkgId> = VecDeque::new();
         for id in set {
             let p = &self.all[*id];
-            let root = match p.origin {
-                Origin::Base { .. } => true,
-                Origin::Added => is_requested(self.added_for.get(*id), &p.release.commit),
-            };
+            let root = extra.contains(*id)
+                || match p.origin {
+                    Origin::Base { .. } => true,
+                    Origin::Added => is_requested(self.added_for.get(*id), &p.release.commit),
+                };
             if root && reached.insert((*id).clone()) {
                 queue.push_back(id);
             }

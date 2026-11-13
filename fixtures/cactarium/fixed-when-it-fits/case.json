@@ -1,5 +1,9 @@
 {
   "about": "Without --upgrade a present package that fits stays at its release",
+  "packages": [
+    "max--z4c--admbase-2026-4",
+    "et--admbase"
+  ],
   "specs": [
     "max/z4c"
   ],

@@ -1,0 +1,35 @@
+{
+  "about": "A library an unchanged package installed stays at its commit; a new placement takes that release",
+  "packages": [
+    "max--kadath",
+    "max--fuka-gw--fuka-1",
+    "et--fuka"
+  ],
+  "specs": [
+    "max/fuka-gw"
+  ],
+  "present": [
+    {
+      "package": "max/kadath",
+      "version": "1.0.0",
+      "enabled": [
+        "Kadath"
+      ],
+      "libraries": [
+        {
+          "package": "et/fuka",
+          "commit": "547817e775491964edcb9d9e2c8cde37b1742b80",
+          "into": "src/fuka"
+        }
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/fuka-gw@1.0.0 FukaGW named"
+    ],
+    "libraries": [
+      "et/fuka@1.1.5: lib/fuka by max/fuka-gw; src/fuka by max/kadath (installed)"
+    ]
+  }
+}

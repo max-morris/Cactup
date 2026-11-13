@@ -1,0 +1,24 @@
+{
+  "about": "A named package is what its newest release has: a thorn it dropped goes, when nothing needs it",
+  "packages": [
+    "et--admbase--dropped-sc"
+  ],
+  "specs": [
+    "et/admbase"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "version": "2026.4.0",
+      "enabled": [
+        "ADMBase",
+        "StaticConformal"
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "upgrade et/admbase 2026.4.0 -> 2026.5.1 ADMBase named"
+    ]
+  }
+}

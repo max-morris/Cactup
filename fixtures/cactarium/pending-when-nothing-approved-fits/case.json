@@ -1,5 +1,9 @@
 {
   "about": "A release awaiting review is taken when no approved one fits, and listed",
+  "packages": [
+    "max--z4c--carpetx-2026-6",
+    "et--carpetx--pending"
+  ],
   "specs": [
     "max/z4c"
   ],

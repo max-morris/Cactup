@@ -1,12 +1,14 @@
-//! Table tests: every directory under `fixtures/cactarium/` is one case.
+//! Table tests: every directory under `fixtures/cactarium/` holding a `case.json` is one case.
 //!
-//! - `versions/*.json`: `GET /packages/{o}/{n}/versions` answers (`PackageVersions`), as the
-//!   Cactarium serves them. A version may carry `"review": "pending"` (S6, plan §6), which the
-//!   crate's `VersionInfo` at 2f2c8f4 does not model yet and so ignores; this reads it.
-//! - `snapshots/*.json` (optional): `GET /packages/{o}/{n}/versions/{commit|head|master}`
-//!   answers, as `{"slug", "at", "untrusted", "served": PackageVersion}`.
-//! - `case.json`: the request (specs, present packages, options, ignores, overrides, the
-//!   providers `GET /providers` answers with) or a removal, and what must come out.
+//! - `fixtures/cactarium/pool/*.json`: `GET /packages/{o}/{n}/versions` answers
+//!   (`PackageVersions`), as the Cactarium serves them, shared by the cases; `pool/snapshots/`
+//!   holds `GET …/versions/{commit|head|master}` answers as `{"slug", "at", "untrusted",
+//!   "served"}`. `fixtures/cactarium/generate.py` writes the pool. A version may carry
+//!   `"review": "pending"` (S6, plan §6), which the crate's `VersionInfo` at 2f2c8f4 does not
+//!   model yet and so ignores; this reads it.
+//! - `<case>/case.json`, edited by hand: the pool files it uses, the request (specs, present
+//!   packages, options, ignores, overrides, the providers `GET /providers` answers with) or a
+//!   removal, and what must come out.
 //!
 //! `ServerRules` mirrors the Cactarium's dependency check (`deps.rs`: `Need`, `needs_of`,
 //! `meets`) until the crate carries it (S7).
@@ -93,6 +95,10 @@ impl Facts for FixtureFacts {
 struct Case {
     #[allow(dead_code)]
     about: String,
+    /// Pool files (`pool/<name>.json`) whose packages the Cactarium serves.
+    packages: Vec<String>,
+    #[serde(default)]
+    snapshots: Vec<String>,
     #[serde(default)]
     command: Option<String>,
     #[serde(default)]
@@ -116,22 +122,68 @@ struct Case {
 #[serde(deny_unknown_fields)]
 struct PresentSpec {
     package: String,
-    /// The served version it is at (looked up in `versions/`)...
+    /// The served version it is at (looked up among the case's packages)...
     #[serde(default)]
     version: Option<String>,
-    /// ...or a commit no version names (`At::Unknown`), with its thorns and claims given here.
+    /// ...or a commit no version names (`At::Unknown`), with its thorns given here.
     #[serde(default)]
     unknown: Option<String>,
     #[serde(default)]
-    thorns: Vec<ThornInfo>,
-    #[serde(default)]
-    claims: Vec<ClaimInfo>,
-    #[serde(default)]
-    flesh: bool,
+    thorns: Vec<ThornSpec>,
     /// The base repo it is (absent: an `[[added]]` package).
     #[serde(default)]
     base: Option<String>,
     enabled: Vec<String>,
+    #[serde(default)]
+    libraries: Vec<LibrarySpec>,
+}
+
+/// A present thorn: its name (default facts), or its name with the facts that differ.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ThornSpec {
+    Name(String),
+    Full {
+        thorn: String,
+        #[serde(default)]
+        arrangement: Option<String>,
+        #[serde(default)]
+        facts: serde_json::Map<String, Value>,
+    },
+}
+
+impl ThornSpec {
+    fn info(&self) -> ThornInfo {
+        let (thorn, arrangement, given) = match self {
+            ThornSpec::Name(n) => (n.clone(), None, serde_json::Map::new()),
+            ThornSpec::Full { thorn, arrangement, facts } => (thorn.clone(), arrangement.clone(), facts.clone()),
+        };
+        let mut facts = serde_json::json!({
+            "implements": thorn, "inherits": [], "friends": [], "requires-functions": [],
+            "uses-functions": [], "provides-functions": [], "uses-includes": [], "requires": [],
+            "requires-thorns": [], "optional": [], "provides": []
+        });
+        for (k, v) in given {
+            assert!(facts.get(&k).is_some(), "{k} is no fact");
+            facts[k] = v;
+        }
+        ThornInfo {
+            arrangement: arrangement.unwrap_or_else(|| "Base".into()),
+            thorn,
+            repo_path: "$1/$2".into(),
+            facts: serde_json::from_value(facts).expect("facts"),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LibrarySpec {
+    package: String,
+    commit: String,
+    into: String,
+    #[serde(default)]
+    inside: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -182,10 +234,17 @@ struct AddedForSpec {
     #[serde(default)]
     by: Vec<String>,
     #[serde(default)]
-    choice: Option<String>,
+    choices: Vec<ChoiceKeySpec>,
     /// `"current"`: the commit the package is at; anything else is taken as written (stale).
     #[serde(default)]
     for_commit: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChoiceKeySpec {
+    dependent: String,
+    alternatives: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -229,14 +288,6 @@ fn read_json(path: &Path) -> Value {
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
-fn json_files(dir: &Path) -> Vec<PathBuf> {
-    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut v: Vec<PathBuf> =
-        rd.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
-    v.sort();
-    v
-}
-
 /// A served version, with the review state the crate does not model yet.
 fn served(id: &PkgId, v: &Value) -> Release {
     let pending = v.get("review").and_then(Value::as_str) == Some("pending");
@@ -254,18 +305,22 @@ struct Loaded {
 fn load(dir: &Path) -> Loaded {
     let case: Case = serde_json::from_value(read_json(&dir.join("case.json")))
         .unwrap_or_else(|e| panic!("{}/case.json: {e}", dir.display()));
+    let pool = cases_dir().join("pool");
     let mut facts = FixtureFacts::default();
-    for path in json_files(&dir.join("versions")) {
+    for name in &case.packages {
+        let path = pool.join(format!("{name}.json"));
         let v = read_json(&path);
         // The real shape, whole: it must parse as the crate's type.
         let _: cactup_ecosystem_common::api::PackageVersions =
             serde_json::from_value(v.clone()).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         let id = PkgId::parse(v["slug"].as_str().expect("a slug")).unwrap();
         let releases = v["versions"].as_array().expect("versions").iter().map(|x| served(&id, x)).collect();
-        facts.releases.insert(id, releases);
+        if facts.releases.insert(id.clone(), releases).is_some() {
+            panic!("{}: two pool files serve {id}", dir.display());
+        }
     }
-    for path in json_files(&dir.join("snapshots")) {
-        let v = read_json(&path);
+    for name in &case.snapshots {
+        let v = read_json(&pool.join("snapshots").join(format!("{name}.json")));
         let id = PkgId::parse(v["slug"].as_str().expect("a slug")).unwrap();
         let release = served(&id, &v["served"]);
         let untrusted = v["untrusted"].as_bool().unwrap_or(false);
@@ -290,20 +345,22 @@ fn load(dir: &Path) -> Loaded {
             (Some(v), None) => facts.releases[&id]
                 .iter()
                 .find(|r| r.at.version().is_some_and(|x| x.to_string() == *v))
-                .unwrap_or_else(|| panic!("{}: no {id}@{v} in versions/", dir.display()))
+                .unwrap_or_else(|| panic!("{}: no {id}@{v} among its packages", dir.display()))
                 .clone(),
             (None, Some(commit)) => Release {
                 id: id.clone(),
                 at: At::Unknown(commit.clone()),
                 commit: commit.clone(),
+                tag: None,
                 url: String::new(),
-                flesh: p.flesh,
+                contact: None,
+                flesh: false,
                 library: false,
                 yanked: false,
                 pending: false,
                 usable: true,
-                thorns: p.thorns.clone(),
-                claims: p.claims.clone(),
+                thorns: p.thorns.iter().map(ThornSpec::info).collect(),
+                claims: Vec::new(),
             },
             _ => panic!("{}: {id} needs one of version and unknown", dir.display()),
         };
@@ -311,7 +368,17 @@ fn load(dir: &Path) -> Loaded {
             Some(repo) => Origin::Base { repo: repo.clone() },
             None => Origin::Added,
         };
-        present.push(Present { release, enabled: p.enabled.iter().cloned().collect(), origin });
+        let libraries = p
+            .libraries
+            .iter()
+            .map(|l| InstalledLibrary {
+                id: PkgId::parse(&l.package).unwrap(),
+                commit: l.commit.clone(),
+                into: l.into.clone(),
+                inside: l.inside.as_deref().map(|i| PkgId::parse(i).unwrap()),
+            })
+            .collect();
+        present.push(Present { release, enabled: p.enabled.iter().cloned().collect(), origin, libraries });
     }
     let mut rules = Rules::default();
     for i in &case.ignore {
@@ -363,6 +430,10 @@ fn check_refusal(expect: &Expect, refusal: Option<&Refusal>, other: Option<Strin
             if text.contains('§') {
                 errors.push(format!("a spec ref in user-visible text: {text}"));
             }
+            // Until P4 adds the command, no refusal may name it.
+            if text.contains("claims override") {
+                errors.push(format!("names a command that does not exist yet: {text}"));
+            }
         }
         (Some(want), None) => errors.push(format!("expected a {want} refusal, got {}", other.unwrap_or("a plan".into()))),
         (None, Some(r)) => errors.push(format!("refused: {r}")),
@@ -375,22 +446,53 @@ fn check_refusal(expect: &Expect, refusal: Option<&Refusal>, other: Option<Strin
 }
 
 fn record_text(r: &Record) -> String {
-    let mut s = format!("{} {} by [{}]", r.id, if r.requested { "requested" } else { "brought in" }, r.by.join(", "));
-    if let Some(c) = &r.choice {
-        s.push_str(&format!(" choice: {c}"));
+    let requested = match r.requested {
+        Some(true) => "requested",
+        Some(false) => "brought in",
+        None => "as recorded",
+    };
+    let mut s = format!("{} {requested} by [{}]", r.id, r.by.join(", "));
+    for c in &r.choices {
+        let alts: Vec<String> = c.alternatives.iter().map(ToString::to_string).collect();
+        s.push_str(&format!(" choice {}: {}", c.dependent, alts.join(", ")));
     }
     s
 }
 
 fn library_text(l: &Library) -> String {
-    let places: Vec<String> = l.placements.iter().map(|p| format!("into {} by {}", p.into, p.by)).collect();
-    format!("{} {}", l.release.label(), places.join("; "))
+    let places: Vec<String> = l
+        .placements
+        .iter()
+        .map(|p| {
+            let inside = p.inside.as_ref().map(|i| format!(" inside {i}")).unwrap_or_default();
+            let installed = if p.new { "" } else { " (installed)" };
+            format!("{} by {}{inside}{installed}", p.into, p.by)
+        })
+        .collect();
+    format!("{}: {}", l.release.label(), places.join("; "))
+}
+
+fn untrusted_text(u: &Untrusted) -> String {
+    match &u.tip {
+        Some(tip) => format!("{}#{} (tip {tip})", u.id, u.commit),
+        None => format!("{}#{}", u.id, u.commit),
+    }
+}
+
+fn options_of(case: &Case) -> Options {
+    let o = &case.options;
+    Options { upgrade: o.upgrade, upgrade_all: o.upgrade_all, no_deps: o.no_deps, replace: o.replace }
+}
+
+fn specs_of(case: &Case) -> Vec<NamedSpec> {
+    case.specs.iter().map(|s| NamedSpec::parse(s).unwrap()).collect()
 }
 
 /// Runs one case; the problems found, empty when it passes.
 fn run(dir: &Path) -> Vec<String> {
     let Loaded { case, mut facts, present, rules } = load(dir);
     let mut errors = Vec::new();
+    let command = case.command.clone().unwrap_or_else(|| format!("cactup add {}", case.specs.join(" ")));
     if let Some(rm) = &case.remove {
         let targets: Vec<PkgId> = rm.targets.iter().map(|t| PkgId::parse(t).unwrap()).collect();
         let mut added_for = BTreeMap::new();
@@ -398,7 +500,15 @@ fn run(dir: &Path) -> Vec<String> {
             let id = PkgId::parse(id).unwrap();
             let commit = present.iter().find(|p| p.release.id == id).map(|p| p.release.commit.clone()).unwrap_or_default();
             let for_commit = a.for_commit.as_ref().map(|c| if c == "current" { commit.clone() } else { c.clone() });
-            added_for.insert(id, AddedFor { requested: a.requested, by: a.by.clone(), choice: a.choice.clone(), for_commit });
+            let choices = a
+                .choices
+                .iter()
+                .map(|c| ChoiceKey {
+                    dependent: PkgId::parse(&c.dependent).unwrap(),
+                    alternatives: c.alternatives.iter().map(|x| PkgId::parse(x).unwrap()).collect(),
+                })
+                .collect();
+            added_for.insert(id, AddedFor { requested: a.requested, by: a.by.clone(), choices, for_commit });
         }
         match plan_remove(&present, &added_for, &targets, &rules, rm.no_deps) {
             Ok(plan) => {
@@ -406,19 +516,18 @@ fn run(dir: &Path) -> Vec<String> {
                 compare("removed", &case.expect.removed, plan.removed.iter().map(ToString::to_string).collect(), &mut errors);
                 let orphans = plan.orphans.iter().map(|o| format!("{}: {}", o.label, o.why())).collect();
                 compare("orphans", &case.expect.orphans, orphans, &mut errors);
+                let rendered = plan.render("cactup remove");
+                compare("plan", &case.expect.plan, rendered.lines().skip(1).map(str::to_owned).collect(), &mut errors);
             }
             Err(r) => check_refusal(&case.expect, Some(&r), None, &mut errors),
         }
         return errors;
     }
-    let specs: Vec<NamedSpec> = case.specs.iter().map(|s| NamedSpec::parse(s).unwrap()).collect();
-    let o = &case.options;
-    let options = Options { upgrade: o.upgrade, upgrade_all: o.upgrade_all, no_deps: o.no_deps, replace: o.replace };
-    let request = Request { specs: &specs, present: &present, rules: &rules, options };
+    let specs = specs_of(&case);
+    let request = Request { specs: &specs, present: &present, rules: &rules, options: options_of(&case) };
     match resolve(&request, &mut facts, &ServerRules) {
         Ok(plan) => {
             check_refusal(&case.expect, None, None, &mut errors);
-            let command = case.command.clone().unwrap_or_else(|| format!("cactup add {}", case.specs.join(" ")));
             let rendered = plan.render(&command);
             let mut lines = rendered.lines();
             if lines.next() != Some(format!("Plan for {command}:").as_str()) {
@@ -428,8 +537,7 @@ fn run(dir: &Path) -> Vec<String> {
             compare("choices", &case.expect.choices, plan.choices.iter().map(ToString::to_string).collect(), &mut errors);
             compare("records", &case.expect.records, plan.records.iter().map(record_text).collect(), &mut errors);
             compare("libraries", &case.expect.libraries, plan.libraries.iter().map(library_text).collect(), &mut errors);
-            let untrusted = plan.untrusted.iter().map(|u| format!("{}#{}", u.id, u.commit)).collect();
-            compare("untrusted", &case.expect.untrusted, untrusted, &mut errors);
+            compare("untrusted", &case.expect.untrusted, plan.untrusted.iter().map(untrusted_text).collect(), &mut errors);
             compare("pending", &case.expect.pending, plan.pending.clone(), &mut errors);
         }
         Err(e) => match e.downcast_ref::<Refusal>() {
@@ -454,7 +562,7 @@ fn case_dirs() -> Vec<PathBuf> {
 #[test]
 fn resolver_tables() {
     let dirs = case_dirs();
-    assert!(dirs.len() >= 40, "only {} cases under fixtures/cactarium", dirs.len());
+    assert!(dirs.len() >= 90, "only {} cases under fixtures/cactarium", dirs.len());
     let mut failed = Vec::new();
     for dir in &dirs {
         let errors = run(dir);
@@ -466,40 +574,56 @@ fn resolver_tables() {
     assert!(failed.is_empty(), "{} of {} cases failed:\n\n{}", failed.len(), dirs.len(), failed.join("\n\n"));
 }
 
-/// The same request with the present packages and the specs listed in other orders gives the
-/// same plan: nothing depends on the order a map or the caller produced.
+/// What a resolution decided, whatever order its steps come in.
+fn outcome(dir: &Path, reverse: bool) -> String {
+    let Loaded { case, mut facts, mut present, rules } = load(dir);
+    let mut specs = specs_of(&case);
+    if reverse {
+        present.reverse();
+        specs.reverse();
+    }
+    let request = Request { specs: &specs, present: &present, rules: &rules, options: options_of(&case) };
+    match resolve(&request, &mut facts, &ServerRules) {
+        Ok(plan) => {
+            let mut lines: Vec<String> = plan.render("x").lines().map(collapse).collect();
+            lines.extend(plan.choices.iter().map(|c| format!("choice {} {c}", c.dependent)));
+            lines.extend(plan.records.iter().map(record_text));
+            lines.extend(plan.libraries.iter().map(library_text));
+            lines.sort();
+            lines.join("\n")
+        }
+        Err(e) => match e.downcast_ref::<Refusal>() {
+            Some(r) => format!("refused: {}", variant(r)),
+            None => format!("failed: {e:#}"),
+        },
+    }
+}
+
+/// Every case gives the same decisions with its present packages and specs listed the other way
+/// round: nothing depends on the order a map, the server or the caller produced, nor on the order
+/// needs arrive in (passive constraints of packages that move later in a pass included).
 #[test]
 fn plans_do_not_depend_on_input_order() {
-    for name in ["any-of-order", "transitive-closure", "any-of-first-without-conflict", "upgrade-moves-touched"] {
-        let dir = cases_dir().join(name);
-        let render = |reverse: bool| {
-            let Loaded { case, mut facts, mut present, rules } = load(&dir);
-            let mut specs: Vec<NamedSpec> = case.specs.iter().map(|s| NamedSpec::parse(s).unwrap()).collect();
-            if reverse {
-                present.reverse();
-                specs.reverse();
-            }
-            let o = &case.options;
-            let options = Options { upgrade: o.upgrade, upgrade_all: o.upgrade_all, no_deps: o.no_deps, replace: o.replace };
-            let request = Request { specs: &specs, present: &present, rules: &rules, options };
-            let plan = resolve(&request, &mut facts, &ServerRules).unwrap();
-            let choices: Vec<String> = plan.choices.iter().map(ToString::to_string).collect();
-            // Specs in another order are steps in another order; the decisions are the same.
-            let mut lines: Vec<String> = plan.render("x").lines().map(str::to_owned).collect();
-            lines.sort();
-            (lines, choices)
-        };
-        assert_eq!(render(false), render(true), "{name}");
+    let mut differ = Vec::new();
+    for dir in case_dirs() {
+        if load(&dir).case.remove.is_some() {
+            continue;
+        }
+        let (forward, reverse) = (outcome(&dir, false), outcome(&dir, true));
+        if forward != reverse {
+            let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+            differ.push(format!("{name}:\n--- forward\n{forward}\n--- reversed\n{reverse}"));
+        }
     }
+    assert!(differ.is_empty(), "{}", differ.join("\n\n"));
 }
 
 /// Versions are asked for in waves: the named packages, then each set of targets that comes
 /// due together (both alternatives of an any-of in one request).
 #[test]
 fn versions_are_loaded_in_waves() {
-    let dir = cases_dir().join("any-of-first-listed");
-    let Loaded { case, mut facts, present, rules } = load(&dir);
-    let specs: Vec<NamedSpec> = case.specs.iter().map(|s| NamedSpec::parse(s).unwrap()).collect();
+    let Loaded { case, mut facts, present, rules } = load(&cases_dir().join("any-of-first-listed"));
+    let specs = specs_of(&case);
     let request = Request { specs: &specs, present: &present, rules: &rules, options: Options::default() };
     resolve(&request, &mut facts, &ServerRules).unwrap();
     let waves: Vec<Vec<String>> = facts.waves.iter().map(|w| w.iter().map(ToString::to_string).collect()).collect();
@@ -508,10 +632,8 @@ fn versions_are_loaded_in_waves() {
 
 fn plan_of(name: &str) -> Plan {
     let Loaded { case, mut facts, present, rules } = load(&cases_dir().join(name));
-    let specs: Vec<NamedSpec> = case.specs.iter().map(|s| NamedSpec::parse(s).unwrap()).collect();
-    let o = &case.options;
-    let options = Options { upgrade: o.upgrade, upgrade_all: o.upgrade_all, no_deps: o.no_deps, replace: o.replace };
-    let request = Request { specs: &specs, present: &present, rules: &rules, options };
+    let specs = specs_of(&case);
+    let request = Request { specs: &specs, present: &present, rules: &rules, options: options_of(&case) };
     resolve(&request, &mut facts, &ServerRules).unwrap()
 }
 
@@ -520,10 +642,56 @@ fn plan_of(name: &str) -> Plan {
 fn plans_say_when_they_go_beyond_what_was_named() {
     assert!(!plan_of("fixed-when-it-fits").beyond_named());
     assert!(!plan_of("fork-stands-in-by-range").beyond_named(), "a keep line is no change");
+    assert!(!plan_of("named-present-readd").beyond_named(), "a re-add of what was named");
+    assert!(!plan_of("named-base-add-thorns").beyond_named());
+    assert!(!plan_of("same-name-replace").beyond_named(), "--replace on a named package");
+    assert!(!plan_of("named-base-upgrade").beyond_named(), "a named base package replacing its repo");
     assert!(plan_of("transitive-closure").beyond_named());
-    assert!(plan_of("same-name-replace").beyond_named(), "a replaced base repo");
+    assert!(plan_of("flesh-replace").beyond_named(), "a flesh a dependency replaces");
     assert!(plan_of("upgrade-all").beyond_named());
     assert!(Plan::default().is_empty() && !plan_of("fixed-when-it-fits").is_empty());
+    assert!(plan_of("named-base-already").is_empty());
+}
+
+#[test]
+fn plan_lines_say_what_they_are() {
+    let lines = plan_of("pending-when-nothing-approved-fits").lines("cactup add max/z4c");
+    let kinds: Vec<LineKind> = lines.iter().map(|(k, _)| *k).collect();
+    assert_eq!(kinds, [LineKind::Header, LineKind::Step, LineKind::Step, LineKind::Pending]);
+    let lines = plan_of("flesh-replace").lines("x");
+    assert!(lines.iter().any(|(k, _)| *k == LineKind::Rebuild));
+    let lines = plan_of("unknown-meets-range-with-note").lines("x");
+    assert_eq!(lines.last().map(|(k, _)| *k), Some(LineKind::Note));
+}
+
+/// What a record writes over an existing `added-for` entry.
+#[test]
+fn records_merge_into_added_for() {
+    let (old_commit, new_commit) = ("1".repeat(40), "2".repeat(40));
+    let key = ChoiceKey { dependent: PkgId::parse("max/z4c").unwrap(), alternatives: vec![] };
+    let record = |requested| Record {
+        id: PkgId::parse("et/a").unwrap(),
+        commit: new_commit.clone(),
+        requested,
+        by: vec!["max/b@1.0.0".into()],
+        choices: vec![key.clone()],
+    };
+    let brought = AddedFor {
+        requested: false,
+        by: vec!["max/z4c@1.2.0".into()],
+        choices: vec![],
+        for_commit: Some(old_commit.clone()),
+    };
+    let merged = record(None).merge(Some(&brought), Some(&old_commit));
+    assert!(!merged.requested, "still brought in");
+    assert_eq!(merged.by, ["max/z4c@1.2.0", "max/b@1.0.0"]);
+    assert_eq!(merged.choices, [key.clone()]);
+    assert_eq!(merged.for_commit.as_deref(), Some(new_commit.as_str()), "written for the new commit");
+    assert!(record(None).merge(None, Some(&old_commit)).requested, "no entry: requested");
+    let stale = AddedFor { for_commit: Some("3".repeat(40)), ..brought.clone() };
+    assert!(record(None).merge(Some(&stale), Some(&old_commit)).requested, "a stale entry: requested");
+    assert!(record(Some(true)).merge(Some(&brought), Some(&old_commit)).requested, "named now");
+    assert!(!record(Some(false)).merge(None, None).requested, "brought in now");
 }
 
 #[test]
@@ -535,6 +703,95 @@ fn a_missing_or_stale_added_for_means_requested() {
     assert!(is_requested(Some(&mine), "fedcba9876543210fedcba9876543210fedcba98"), "re-added by an older binary");
     let legacy = AddedFor { requested: false, for_commit: None, ..AddedFor::default() };
     assert!(is_requested(Some(&legacy), c));
+}
+
+/// Data from the server that would make a slice or a match go wrong is refused, never a panic.
+#[test]
+fn bad_server_data_is_refused() {
+    assert_eq!(short("abc"), "abc");
+    let odd = "aéééééééé";
+    assert!(odd.starts_with(short(odd)), "no slicing inside a character");
+    assert!(Req::from_claim(None, Some("")).is_err(), "an empty sha");
+    assert!(Req::from_claim(None, Some("xyz1234")).is_err());
+    assert!(Req::from_claim(None, Some("ABCDEF1")).is_ok_and(|r| r == Req::Commit("abcdef1".into())));
+    let empty = Req::Commit(String::new());
+    let mut v: Value = read_json(&cases_dir().join("pool/et--carpetx.json"))["versions"][0].clone();
+    let id = PkgId::parse("et/carpetx").unwrap();
+    assert_eq!(empty.fit(&served(&id, &v)), Fit::No, "an empty commit matches nothing");
+    for bad in [Value::Null, "".into(), "zz".into(), "abc".into()] {
+        v["commit"] = bad;
+        let pv: PackageVersion = serde_json::from_value(v.clone()).unwrap();
+        assert!(Release::from_served(&id, &pv, false).is_err(), "{}", v["commit"]);
+    }
+}
+
+#[test]
+fn tips_and_commits_are_read_from_the_version() {
+    let id = PkgId::parse("et/carpetx").unwrap();
+    let v = read_json(&cases_dir().join("pool/snapshots/et--carpetx--at-head.json"));
+    let r = served(&id, &v["served"]);
+    assert!(matches!(&r.at, At::Tip { name, .. } if name == "head"), "{:?}", r.at);
+    assert_eq!(r.label(), "et/carpetx@head");
+    let v = read_json(&cases_dir().join("pool/snapshots/et--carpetx--at-4444.json"));
+    assert!(matches!(served(&id, &v["served"]).at, At::Commit(_)));
+    let v = read_json(&cases_dir().join("pool/et--carpetx.json"));
+    let r = served(&id, &v["versions"][0]);
+    assert_eq!((r.tag.as_deref(), r.url.as_str(), r.contact.as_deref()), (Some("v2026.5.1"), "https://github.com/et/carpetx.git", None));
+    assert_eq!(PkgId::repo("carpetx").as_str(), "repo:carpetx");
+}
+
+/// The structured parts of a plan, which P3 executes from (no label parsing).
+#[test]
+fn plan_steps_are_structured() {
+    let plan = plan_of("named-base-add-thorns");
+    assert!(matches!(&plan.steps[..], [Step::AddThorns { id, .. }] if id.as_str() == "et/admbase"));
+    let plan = plan_of("replace-subset");
+    let replaced = plan.steps.iter().find_map(|s| match s {
+        Step::Replace { replaced, by, thorns, flesh, explicit } => Some((replaced.clone(), by.clone(), thorns.clone(), *flesh, *explicit)),
+        _ => None,
+    });
+    let base = Replaced::Base { repo: "carpetx".into() };
+    assert_eq!(replaced, Some((base, PkgId::parse("max/carpetx-mp").unwrap(), vec!["CarpetX".to_owned()], false, true)));
+    let plan = plan_of("library-installed-held");
+    let p = &plan.libraries[0].placements;
+    assert_eq!((p[0].by_label.as_str(), p[0].new, p[1].by_label.as_str(), p[1].new), ("max/fuka-gw@1.0.0", true, "max/kadath@1.0.0", false));
+    let plan = plan_of("any-of-first-listed");
+    let c: &Choice = &plan.choices[0];
+    assert_eq!((c.claim, c.dependent_label.as_str(), c.chosen.as_str()), (0, "max/z4c@1.2.0", "et/carpet"));
+    let kind = ClaimKind::Dependency;
+    assert_eq!(kind.as_str(), "dependency");
+}
+
+/// A refusal's parts, for a caller that wants more than the text.
+#[test]
+fn refusals_carry_their_constraints() {
+    let Loaded { case, mut facts, present, rules } = load(&cases_dir().join("unclaimed-one-provider"));
+    let specs = specs_of(&case);
+    let request = Request { specs: &specs, present: &present, rules: &rules, options: options_of(&case) };
+    let e = resolve(&request, &mut facts, &ServerRules).unwrap_err();
+    let Some(Refusal::Unclaimed(unmet)) = e.downcast_ref::<Refusal>() else { panic!("{e}") };
+    let u: &Unmet = &unmet[0];
+    assert_eq!((u.thorn.as_str(), u.package.as_str(), u.providers.len()), ("Z4c", "max/z4c", 1));
+    let Loaded { case, mut facts, present, rules } = load(&cases_dir().join("no-release-fits"));
+    let specs = specs_of(&case);
+    let request = Request { specs: &specs, present: &present, rules: &rules, options: options_of(&case) };
+    let e = resolve(&request, &mut facts, &ServerRules).unwrap_err();
+    let Some(Refusal::NoReleaseFits { constraints, .. }) = e.downcast_ref::<Refusal>() else { panic!("{e}") };
+    let first: &Live = &constraints[0];
+    assert_eq!(first.ignore.as_deref(), Some("max/z4c:dependency:et/carpetx"));
+}
+
+#[test]
+fn remove_plans_render() {
+    let plan = RemovePlan {
+        removed: vec![PkgId::parse("max/z4c").unwrap()],
+        removed_labels: vec!["max/z4c@1.2.0".into()],
+        orphans: vec![Orphan { id: PkgId::parse("et/a").unwrap(), label: "et/a@1.0.0".into(), by: vec!["max/z4c@1.2.0".into()] }],
+    };
+    assert!(plan.beyond_named());
+    let lines = plan.lines("cactup remove max/z4c");
+    assert_eq!(lines[0], (LineKind::Header, "Plan for cactup remove max/z4c:".to_owned()));
+    assert_eq!(collapse(&lines[2].1), "remove et/a@1.0.0 brought in by max/z4c@1.2.0, nothing else needs it");
 }
 
 #[test]

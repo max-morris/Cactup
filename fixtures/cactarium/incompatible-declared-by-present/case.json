@@ -1,5 +1,9 @@
 {
   "about": "A present package declares itself incompatible with a planned one: the other direction",
+  "packages": [
+    "max--a",
+    "et--b--incompatible-a"
+  ],
   "specs": [
     "max/a"
   ],

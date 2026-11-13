@@ -7,7 +7,7 @@ use cactup_ecosystem_common::ccl::ThornFacts;
 
 use super::refusal::Refusal;
 use super::resolve::Entry;
-use super::{Fit, PkgId, Release, Req, Requirement, Requirements};
+use super::{forks, Fit, PkgId, Release, Req, Requirement, Requirements};
 
 /// Whether `a` declares itself incompatible with `b`'s release. A release at no version is taken
 /// to match a range (it may be any version).
@@ -19,12 +19,9 @@ pub(super) fn incompatible(a: &Release, b: &Release) -> bool {
         .any(|q| q.map_or(true, |q| q.fit(b) != Fit::No))
 }
 
-fn fork_of(r: &Release, upstream: &PkgId) -> bool {
-    r.claims.iter().any(|c| c.kind == "fork-of" && c.target == upstream.as_str())
-}
-
-/// The first conflict in the final set that involves something this command changes (two
-/// unchanged present packages are the installation's business, not this plan's), the most
+/// The first conflict in the final set that involves something this command changes (brings
+/// in, moves, or gives thorns; two unchanged present packages are the installation's business,
+/// not this plan's), the most
 /// specific kind first (a fork usually shares its upstream's thorn names):
 /// - a fork and its upstream;
 /// - an `incompatible-with`, whichever of the two declares it;
@@ -33,18 +30,19 @@ fn fork_of(r: &Release, upstream: &PkgId) -> bool {
 pub(super) fn conflicts(chosen: &BTreeMap<PkgId, Entry>) -> Option<Refusal> {
     for (id, e) in chosen {
         for (up, eu) in chosen {
-            if id != up && fork_of(&e.release, up) && (e.is_new() || eu.is_new()) {
+            if id != up && forks(&e.release, up) && (e.changed() || eu.changed()) {
                 return Some(Refusal::ForkAndUpstream {
                     fork: id.clone(),
                     fork_label: e.release.label(),
                     upstream: up.clone(),
+                    upstream_base_repo: eu.base_repo().map(str::to_owned),
                 });
             }
         }
     }
     for (a, ea) in chosen {
         for (b, eb) in chosen {
-            if a != b && (ea.is_new() || eb.is_new()) && incompatible(&ea.release, &eb.release) {
+            if a != b && (ea.changed() || eb.changed()) && incompatible(&ea.release, &eb.release) {
                 return Some(Refusal::Incompatible {
                     by: a.clone(),
                     by_label: ea.release.label(),
@@ -69,10 +67,7 @@ pub(super) fn conflicts(chosen: &BTreeMap<PkgId, Entry>) -> Option<Refusal> {
                 }
                 // The newcomer is the one changing; the other may be a base repo to replace.
                 let (newcomer, other) = if b_new { (*b, *ea) } else { (*a, *eb) };
-                let base_repo = match other.present.as_ref().map(|p| &p.origin) {
-                    Some(super::Origin::Base { repo }) if !other.is_new() => Some(repo.clone()),
-                    _ => None,
-                };
+                let base_repo = other.base_repo().map(str::to_owned);
                 return Some(Refusal::SameThorn {
                     thorn: ta.to_string(),
                     first: ea.release.label(),

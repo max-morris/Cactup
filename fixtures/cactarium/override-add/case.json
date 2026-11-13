@@ -1,5 +1,9 @@
 {
   "about": "An add override supplies a dependency the manifest lacks",
+  "packages": [
+    "max--z4c",
+    "et--carpetx"
+  ],
   "specs": [
     "max/z4c"
   ],

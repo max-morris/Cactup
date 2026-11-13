@@ -1,5 +1,10 @@
 {
   "about": "A present fork whose fork-of range covers a version the dependency accepts takes the need",
+  "packages": [
+    "max--z4c--carpetx-loop",
+    "et--carpetx",
+    "max--carpetx-mp--covers-2026-5-1"
+  ],
   "specs": [
     "max/z4c"
   ],

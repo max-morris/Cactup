@@ -1,5 +1,9 @@
 {
   "about": "A range on a track takes that track's newest, never a newer version on another track",
+  "packages": [
+    "max--z4c--tracked-carpetx",
+    "max--carpetx--tracks"
+  ],
   "specs": [
     "max/z4c"
   ],

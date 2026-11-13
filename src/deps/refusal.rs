@@ -1,5 +1,6 @@
 //! Every way resolution refuses, each with its way past.
-// Plan §4.5. The text is user-visible: no spec refs in any string here.
+// Plan §4.5. The text is user-visible: no spec refs in any string here, and no command that does
+// not exist yet (`cactup claims override …` comes with P4; each place it belongs says so).
 
 use std::fmt;
 
@@ -52,18 +53,24 @@ pub enum Refusal {
     /// `by` declares itself incompatible with `target`.
     Incompatible { by: PkgId, by_label: String, target: PkgId, target_label: String },
     /// A fork and its upstream are both in the plan.
-    ForkAndUpstream { fork: PkgId, fork_label: String, upstream: PkgId },
+    ForkAndUpstream { fork: PkgId, fork_label: String, upstream: PkgId, upstream_base_repo: Option<String> },
     /// A chosen fork of a dependency's target does not stand in for the versions it asks.
     ForkDoesNotStandIn { fork: PkgId, fork_label: String, live: Live },
     /// No release meets every constraint on a package.
     NoReleaseFits { target: PkgId, constraints: Vec<Live> },
     /// No flesh release meets every flesh constraint.
     FleshUnmet { target: PkgId, constraints: Vec<Live> },
+    /// The plan would need two fleshes.
+    TwoFleshes { first: String, second: String },
     /// The constraints kept displacing each other past the step budget.
     NoConsistentSet { constraints: Vec<Live> },
     /// Whoever takes a need lacks thorns it names.
     MissingThorns { taker: String, thorns: Vec<String>, live: Live },
-    /// Two packages place one library at versions no single release meets.
+    /// Under `--replace`, a package taking over a base repo whose package it upgrades or forks
+    /// lacks thorns the installation has enabled from that repo.
+    ReplacementLacksThorns { by: PkgId, by_label: String, base_repo: String, thorns: Vec<String> },
+    /// Two packages place one library at versions no single release meets, or a new placement
+    /// does not accept the release an installed one holds.
     LibraryClash { library: PkgId, placements: Vec<Live> },
     /// Hard CCL requirements that nothing in the final set meets.
     Unclaimed(Vec<Unmet>),
@@ -87,39 +94,45 @@ impl Refusal {
                     None => "Pass --upgrade to move it".to_owned(),
                 }
             }
-            Refusal::SameThorn { newcomer, base_repo: Some(repo), .. } => format!(
-                "Pass --replace to use {newcomer} in place of base repo {repo}, or run \
-                 `cactup claims override satisfies repo:{repo} {newcomer}`"
-            ),
+            // P4: or `cactup claims override satisfies repo:<repo> <newcomer>`.
+            Refusal::SameThorn { newcomer, base_repo: Some(repo), .. } => {
+                format!("Pass --replace to use {newcomer} in place of base repo {repo}")
+            }
             Refusal::SameThorn { .. } => {
                 "Install only one of them: name single thorns (owner/pkg/Thorn) to leave the other's out, \
                  or drop the claim that brings it in with --ignore-claim"
                     .to_owned()
             }
-            Refusal::Incompatible { by, target, .. } => format!(
-                "Pass --ignore-claim {by}:incompatible-with:{target} (this command), or run \
-                 `cactup claims override drop {by}:incompatible-with:{target}` (for good)"
+            // P4: or `cactup claims override drop <by>:incompatible-with:<target>` (for good).
+            Refusal::Incompatible { by, target, .. } => {
+                format!("Pass --ignore-claim {by}:incompatible-with:{target}")
+            }
+            Refusal::ForkAndUpstream { fork, upstream, upstream_base_repo: Some(repo), .. } => format!(
+                "Pass --replace to use {fork} in place of base repo {repo}, or --ignore-claim {fork}:fork-of:{upstream}"
             ),
             Refusal::ForkAndUpstream { fork, upstream, .. } => {
                 format!("Remove one of them, or pass --ignore-claim {fork}:fork-of:{upstream}")
             }
-            Refusal::ForkDoesNotStandIn { fork, live, .. } => {
-                let satisfies = format!("`cactup claims override satisfies {fork} {}`", live.target);
-                match &live.ignore {
-                    Some(ignore) => format!("Pass --ignore-claim {ignore}, or run {satisfies}"),
-                    None => format!("Name another version, or run {satisfies}"),
-                }
-            }
+            // P4: or `cactup claims override satisfies <fork> <target>`.
+            Refusal::ForkDoesNotStandIn { live, .. } => match &live.ignore {
+                Some(ignore) => format!("Pass --ignore-claim {ignore}"),
+                None => "Name a version the fork stands in for".to_owned(),
+            },
             Refusal::NoReleaseFits { constraints, .. }
             | Refusal::FleshUnmet { constraints, .. }
             | Refusal::NoConsistentSet { constraints }
             | Refusal::LibraryClash { placements: constraints, .. } => ignore_one(constraints),
+            Refusal::TwoFleshes { .. } => {
+                "Drop one of the dependencies on a flesh with --ignore-claim, or name one flesh".to_owned()
+            }
+            // P4: or `cactup claims override needs …` to correct the claim for good.
             Refusal::MissingThorns { live, .. } => match &live.ignore {
-                Some(ignore) => {
-                    format!("Pass --ignore-claim {ignore}, or run `cactup claims override needs …` to correct it")
-                }
+                Some(ignore) => format!("Pass --ignore-claim {ignore}"),
                 None => "Name thorns the package has".to_owned(),
             },
+            Refusal::ReplacementLacksThorns { .. } => {
+                "Leave out --replace, or install a release that has those thorns".to_owned()
+            }
             Refusal::Unclaimed(unmet) => {
                 let mut s =
                     String::from("Cactup adds only what a manifest declares. Add a provider yourself first");
@@ -210,6 +223,9 @@ impl fmt::Display for Refusal {
                 "The installation's flesh does not meet a flesh dependency, and no release of {target} does:{}",
                 list(constraints)
             )?,
+            Refusal::TwoFleshes { first, second } => {
+                write!(f, "The plan needs two fleshes, {first} and {second}, and an installation has one")?
+            }
             Refusal::NoConsistentSet { constraints } => write!(
                 f,
                 "No consistent set of releases: these constraints keep displacing each other:{}",
@@ -218,6 +234,12 @@ impl fmt::Display for Refusal {
             Refusal::MissingThorns { taker, thorns, live } => {
                 write!(f, "{taker} has no {}, which {} needs", thorns.join(", "), live.source)?
             }
+            Refusal::ReplacementLacksThorns { by_label, base_repo, thorns, .. } => write!(
+                f,
+                "{by_label} would take the place of base repo {base_repo}, but has no {}, which the \
+                 installation has enabled from it",
+                thorns.join(", ")
+            )?,
             Refusal::LibraryClash { library, placements } => write!(
                 f,
                 "No release of the library {library} meets every package that places it:{}",

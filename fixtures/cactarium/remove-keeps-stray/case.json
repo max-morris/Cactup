@@ -1,0 +1,105 @@
+{
+  "about": "A package an earlier --no-deps left unreachable is a root: never swept, nor what it needs",
+  "packages": [
+    "max--z4c--carpetx-plain",
+    "et--carpetx--arith-1",
+    "et--arith--one",
+    "et--admbase",
+    "et--dd--needs-o",
+    "et--o"
+  ],
+  "present": [
+    {
+      "package": "max/z4c",
+      "version": "1.2.0",
+      "enabled": [
+        "Z4c",
+        "Z4cTest"
+      ]
+    },
+    {
+      "package": "et/carpetx",
+      "version": "2026.5.1",
+      "enabled": [
+        "CarpetX"
+      ]
+    },
+    {
+      "package": "et/arith",
+      "version": "1.3.0",
+      "enabled": [
+        "Arith"
+      ]
+    },
+    {
+      "package": "et/admbase",
+      "version": "2026.5.1",
+      "enabled": [
+        "ADMBase"
+      ]
+    },
+    {
+      "package": "et/dd",
+      "version": "1.0.0",
+      "enabled": [
+        "DD"
+      ]
+    },
+    {
+      "package": "et/o",
+      "version": "1.0.0",
+      "enabled": [
+        "O"
+      ]
+    }
+  ],
+  "remove": {
+    "targets": [
+      "max/z4c"
+    ],
+    "added-for": {
+      "max/z4c": {
+        "requested": true,
+        "for-commit": "current"
+      },
+      "et/carpetx": {
+        "requested": false,
+        "by": [
+          "max/z4c@1.2.0"
+        ],
+        "for-commit": "current"
+      },
+      "et/arith": {
+        "requested": false,
+        "by": [
+          "et/carpetx@2026.5.1"
+        ],
+        "for-commit": "current"
+      },
+      "et/admbase": {
+        "requested": true,
+        "for-commit": "current"
+      },
+      "et/dd": {
+        "requested": false,
+        "for-commit": "current"
+      },
+      "et/o": {
+        "requested": false,
+        "by": [
+          "et/dd@1.0.0"
+        ],
+        "for-commit": "current"
+      }
+    }
+  },
+  "expect": {
+    "removed": [
+      "max/z4c"
+    ],
+    "orphans": [
+      "et/arith@1.3.0: brought in by et/carpetx@2026.5.1, nothing else needs it",
+      "et/carpetx@2026.5.1: brought in by max/z4c@1.2.0, nothing else needs it"
+    ]
+  }
+}

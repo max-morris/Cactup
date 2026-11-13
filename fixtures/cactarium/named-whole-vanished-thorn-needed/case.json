@@ -1,0 +1,32 @@
+{
+  "about": "...and stays when a present package needs it",
+  "packages": [
+    "et--admbase--dropped-sc",
+    "max--needs-sc"
+  ],
+  "specs": [
+    "et/admbase"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "version": "2026.4.0",
+      "enabled": [
+        "ADMBase",
+        "StaticConformal"
+      ]
+    },
+    {
+      "package": "max/needs-sc",
+      "version": "1.0.0",
+      "enabled": [
+        "NeedsSC"
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "upgrade et/admbase 2026.4.0 -> 2026.5.0 ADMBase, StaticConformal named"
+    ]
+  }
+}

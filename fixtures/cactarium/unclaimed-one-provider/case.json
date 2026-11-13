@@ -1,5 +1,8 @@
 {
   "about": "One provider is never filled in: the requirement refuses, naming it",
+  "packages": [
+    "max--z4c--hyperslab"
+  ],
   "specs": [
     "max/z4c"
   ],

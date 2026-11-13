@@ -1,5 +1,10 @@
 {
   "about": "An any-of still met by another present alternative does not block the removal",
+  "packages": [
+    "max--z4c--anyof",
+    "et--carpet",
+    "et--cactuspugh"
+  ],
   "present": [
     {
       "package": "max/z4c",
@@ -39,7 +44,15 @@
           "max/z4c@1.2.0"
         ],
         "for-commit": "current",
-        "choice": "any of et/carpet, et/cactuspugh: the first listed"
+        "choices": [
+          {
+            "dependent": "max/z4c",
+            "alternatives": [
+              "et/carpet",
+              "et/cactuspugh"
+            ]
+          }
+        ]
       },
       "et/cactuspugh": {
         "requested": false,

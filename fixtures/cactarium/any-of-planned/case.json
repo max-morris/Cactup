@@ -1,5 +1,10 @@
 {
   "about": "An any-of takes an alternative the rest of the plan brings in (single dependencies are decided first)",
+  "packages": [
+    "max--z4c--anyof-and-pugh",
+    "et--carpet",
+    "et--cactuspugh"
+  ],
   "specs": [
     "max/z4c"
   ],
@@ -13,7 +18,7 @@
     ],
     "records": [
       "max/z4c requested by []",
-      "et/cactuspugh brought in by [max/z4c@1.2.0] choice: any of et/carpet, et/cactuspugh: already in the plan"
+      "et/cactuspugh brought in by [max/z4c@1.2.0] choice max/z4c: et/carpet, et/cactuspugh"
     ]
   }
 }

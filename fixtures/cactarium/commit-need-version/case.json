@@ -1,5 +1,9 @@
 {
   "about": "A commit need that a served version was frozen at takes that version",
+  "packages": [
+    "max--z4c--carpetx-sha",
+    "et--carpetx"
+  ],
   "specs": [
     "max/z4c"
   ],

@@ -1,5 +1,9 @@
 {
   "about": "--upgrade-all moves every present package to its newest release on its track",
+  "packages": [
+    "et--admbase",
+    "et--hydrobase"
+  ],
   "command": "cactup add --upgrade-all",
   "present": [
     {

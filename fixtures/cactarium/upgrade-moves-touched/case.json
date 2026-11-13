@@ -1,5 +1,10 @@
 {
-  "about": "--upgrade moves a base package the plan touches to its newest release that fits, carrying its enabled thorns; one it does not touch stays",
+  "about": "--upgrade moves a base package the plan touches, once it no longer fits, to its newest release that fits, carrying its enabled thorns; one it does not touch stays",
+  "packages": [
+    "max--z4c--admbase-2026-5",
+    "et--admbase",
+    "et--hydrobase"
+  ],
   "specs": [
     "max/z4c"
   ],
@@ -28,12 +33,12 @@
   "expect": {
     "plan": [
       "add max/z4c@1.2.0 Z4c, Z4cTest named",
-      "upgrade et/admbase 2026.4.0 -> 2026.5.1 ADMBase, StaticConformal needed by max/z4c@1.2.0, ^2026.4 (--upgrade)",
+      "upgrade et/admbase 2026.4.0 -> 2026.5.1 ADMBase, StaticConformal needed by max/z4c@1.2.0, ^2026.5 (--upgrade)",
       "replace base repo admbase with et/admbase"
     ],
     "records": [
       "max/z4c requested by []",
-      "et/admbase brought in by [max/z4c@1.2.0]"
+      "et/admbase as recorded by [max/z4c@1.2.0]"
     ]
   }
 }

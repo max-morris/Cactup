@@ -1,5 +1,10 @@
 {
-  "about": "A flesh fork that does not stand in is replaced by the upstream flesh",
+  "about": "A base flesh fork that does not stand in is replaced by the upstream flesh",
+  "packages": [
+    "max--z4c--cactus",
+    "et--cactus",
+    "max--cactus-mp--covers-2026-4"
+  ],
   "specs": [
     "max/z4c"
   ],

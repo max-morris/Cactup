@@ -1,0 +1,66 @@
+{
+  "about": "Packages that need only each other go together",
+  "packages": [
+    "max--z4c--cyc",
+    "et--cyc-a",
+    "et--cyc-b"
+  ],
+  "present": [
+    {
+      "package": "max/z4c",
+      "version": "1.2.0",
+      "enabled": [
+        "Z4c",
+        "Z4cTest"
+      ]
+    },
+    {
+      "package": "et/cyc-a",
+      "version": "1.0.0",
+      "enabled": [
+        "CycA"
+      ]
+    },
+    {
+      "package": "et/cyc-b",
+      "version": "1.0.0",
+      "enabled": [
+        "CycB"
+      ]
+    }
+  ],
+  "remove": {
+    "targets": [
+      "max/z4c"
+    ],
+    "added-for": {
+      "max/z4c": {
+        "requested": true,
+        "for-commit": "current"
+      },
+      "et/cyc-a": {
+        "requested": false,
+        "by": [
+          "max/z4c@1.2.0"
+        ],
+        "for-commit": "current"
+      },
+      "et/cyc-b": {
+        "requested": false,
+        "by": [
+          "et/cyc-a@1.0.0"
+        ],
+        "for-commit": "current"
+      }
+    }
+  },
+  "expect": {
+    "removed": [
+      "max/z4c"
+    ],
+    "orphans": [
+      "et/cyc-a@1.0.0: brought in by max/z4c@1.2.0, nothing else needs it",
+      "et/cyc-b@1.0.0: brought in by et/cyc-a@1.0.0, nothing else needs it"
+    ]
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "about": "--replace with a fork of a base package takes the whole repo",
+  "packages": [
+    "et--carpetx",
+    "max--carpetx-mp--whole"
+  ],
+  "specs": [
+    "max/carpetx-mp"
+  ],
+  "present": [
+    {
+      "package": "et/carpetx",
+      "version": "2026.5.1",
+      "base": "carpetx",
+      "enabled": [
+        "Arith",
+        "CarpetX",
+        "Loop"
+      ]
+    }
+  ],
+  "options": {
+    "replace": true
+  },
+  "expect": {
+    "plan": [
+      "add max/carpetx-mp@1.0.0 Arith, CarpetX, Loop named",
+      "replace base repo carpetx with max/carpetx-mp"
+    ]
+  }
+}

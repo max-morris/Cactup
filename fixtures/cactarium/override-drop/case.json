@@ -1,5 +1,9 @@
 {
   "about": "A drop override removes a dependency for good",
+  "packages": [
+    "max--z4c--carpetx",
+    "et--carpetx"
+  ],
   "specs": [
     "max/z4c"
   ],

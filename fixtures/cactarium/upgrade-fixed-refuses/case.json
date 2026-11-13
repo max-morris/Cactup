@@ -1,5 +1,9 @@
 {
   "about": "A present package outside a new range stays put without --upgrade",
+  "packages": [
+    "max--z4c--admbase-2026-5",
+    "et--admbase"
+  ],
   "specs": [
     "max/z4c"
   ],

@@ -1,5 +1,9 @@
 {
   "about": "A satisfies override lets an unregistered base repo stand in for a package",
+  "packages": [
+    "max--z4c--carpetx",
+    "et--carpetx"
+  ],
   "specs": [
     "max/z4c"
   ],
@@ -8,42 +12,8 @@
       "package": "repo:carpetx",
       "unknown": "2222222222222222222222222222222222222222",
       "thorns": [
-        {
-          "arrangement": "Carpetx",
-          "thorn": "CarpetX",
-          "repo-path": "$1/$2",
-          "facts": {
-            "implements": "CarpetX",
-            "inherits": [],
-            "friends": [],
-            "requires-functions": [],
-            "uses-functions": [],
-            "provides-functions": [],
-            "uses-includes": [],
-            "requires": [],
-            "requires-thorns": [],
-            "optional": [],
-            "provides": []
-          }
-        },
-        {
-          "arrangement": "Carpetx",
-          "thorn": "Loop",
-          "repo-path": "$1/$2",
-          "facts": {
-            "implements": "Loop",
-            "inherits": [],
-            "friends": [],
-            "requires-functions": [],
-            "uses-functions": [],
-            "provides-functions": [],
-            "uses-includes": [],
-            "requires": [],
-            "requires-thorns": [],
-            "optional": [],
-            "provides": []
-          }
-        }
+        "CarpetX",
+        "Loop"
       ],
       "base": "carpetx",
       "enabled": [

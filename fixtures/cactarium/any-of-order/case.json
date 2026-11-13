@@ -1,5 +1,11 @@
 {
   "about": "Any-of dependencies are decided in dependent order, whatever order the specs came in",
+  "packages": [
+    "max--a--anyof-p-q",
+    "max--b--anyof-q-p",
+    "et--p",
+    "et--q"
+  ],
   "specs": [
     "max/b",
     "max/a"

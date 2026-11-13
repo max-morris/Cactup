@@ -1,14 +1,20 @@
 {
-  "about": "A named tip reads the package at the tip",
+  "about": "A named tip reads the package at the tip, answered as version head",
+  "packages": [
+    "et--carpetx"
+  ],
+  "snapshots": [
+    "et--carpetx--at-head"
+  ],
   "specs": [
     "et/carpetx@head"
   ],
   "expect": {
     "plan": [
-      "add et/carpetx#444444444444 CarpetX, Loop named"
+      "add et/carpetx@head CarpetX, Loop named"
     ],
     "untrusted": [
-      "et/carpetx#4444444444444444444444444444444444444444"
+      "et/carpetx#4444444444444444444444444444444444444444 (tip head)"
     ]
   }
 }

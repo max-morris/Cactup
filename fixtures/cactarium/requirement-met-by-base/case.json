@@ -1,5 +1,8 @@
 {
   "about": "Requirements met by base thorns (local facts), compared case-insensitively",
+  "packages": [
+    "max--z4c--grid"
+  ],
   "specs": [
     "max/z4c"
   ],
@@ -9,41 +12,17 @@
       "unknown": "5555555555555555555555555555555555555555",
       "thorns": [
         {
-          "arrangement": "Cactusbase",
           "thorn": "CartGrid3D",
-          "repo-path": "$1/$2",
           "facts": {
-            "implements": "grid",
-            "inherits": [],
-            "friends": [],
-            "requires-functions": [],
-            "uses-functions": [],
-            "provides-functions": [],
-            "uses-includes": [],
-            "requires": [],
-            "requires-thorns": [],
-            "optional": [],
-            "provides": []
+            "implements": "grid"
           }
         },
         {
-          "arrangement": "Cactusbase",
           "thorn": "Boundary",
-          "repo-path": "$1/$2",
           "facts": {
-            "implements": "Boundary",
-            "inherits": [],
-            "friends": [],
-            "requires-functions": [],
-            "uses-functions": [],
             "provides-functions": [
               "getboundary"
-            ],
-            "uses-includes": [],
-            "requires": [],
-            "requires-thorns": [],
-            "optional": [],
-            "provides": []
+            ]
           }
         }
       ],

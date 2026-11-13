@@ -1,5 +1,11 @@
 {
   "about": "Removing a package another one depends on refuses, naming the dependent",
+  "packages": [
+    "max--z4c--carpetx-plain",
+    "et--carpetx--arith-1",
+    "et--arith--one",
+    "et--admbase"
+  ],
   "present": [
     {
       "package": "max/z4c",

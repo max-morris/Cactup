@@ -1,5 +1,9 @@
 {
   "about": "An unmet flesh dependency plans the base flesh's replacement",
+  "packages": [
+    "max--z4c--cactus",
+    "et--cactus"
+  ],
   "specs": [
     "max/z4c"
   ],

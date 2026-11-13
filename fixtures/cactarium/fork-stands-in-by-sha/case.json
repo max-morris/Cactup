@@ -1,5 +1,10 @@
 {
   "about": "A dependency on one commit is met by a fork of that same commit",
+  "packages": [
+    "max--z4c--carpetx-sha",
+    "et--carpetx",
+    "max--carpetx-mp--sha"
+  ],
   "specs": [
     "max/z4c"
   ],

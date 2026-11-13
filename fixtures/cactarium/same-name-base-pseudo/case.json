@@ -1,5 +1,8 @@
 {
   "about": "A planned package's thorn has the name of a thorn in an unmapped base repo",
+  "packages": [
+    "et--carpetx"
+  ],
   "specs": [
     "et/carpetx"
   ],
@@ -8,42 +11,8 @@
       "package": "repo:carpetx",
       "unknown": "2222222222222222222222222222222222222222",
       "thorns": [
-        {
-          "arrangement": "Carpetx",
-          "thorn": "CarpetX",
-          "repo-path": "$1/$2",
-          "facts": {
-            "implements": "CarpetX",
-            "inherits": [],
-            "friends": [],
-            "requires-functions": [],
-            "uses-functions": [],
-            "provides-functions": [],
-            "uses-includes": [],
-            "requires": [],
-            "requires-thorns": [],
-            "optional": [],
-            "provides": []
-          }
-        },
-        {
-          "arrangement": "Carpetx",
-          "thorn": "Loop",
-          "repo-path": "$1/$2",
-          "facts": {
-            "implements": "Loop",
-            "inherits": [],
-            "friends": [],
-            "requires-functions": [],
-            "uses-functions": [],
-            "provides-functions": [],
-            "uses-includes": [],
-            "requires": [],
-            "requires-thorns": [],
-            "optional": [],
-            "provides": []
-          }
-        }
+        "CarpetX",
+        "Loop"
       ],
       "base": "carpetx",
       "enabled": [
@@ -56,7 +25,7 @@
     "refusal": "SameThorn",
     "message": [
       "both have a thorn CarpetX",
-      "Pass --replace to use et/carpetx in place of base repo carpetx, or run `cactup claims override satisfies repo:carpetx et/carpetx`"
+      "Pass --replace to use et/carpetx in place of base repo carpetx"
     ]
   }
 }

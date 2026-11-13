@@ -97,7 +97,8 @@ impl fmt::Display for ClaimPattern {
 /// One durable override of the claims the registry serves.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Override {
-    /// Drop a claim (`OWNER/PKG:KIND:TARGET`).
+    /// Drop a claim (`OWNER/PKG:KIND:TARGET`), or every claim of a package (`OWNER/PKG`), as
+    /// `--ignore-claim` does.
     Drop(ClaimPattern),
     /// Add a claim the package's manifest lacks (a dependency, usually).
     Add { package: PkgId, claim: ClaimInfo },
@@ -128,8 +129,7 @@ impl Rules {
             }
         }
         let dropped = |c: &ClaimInfo| {
-            let drops =
-                |o: &Override| matches!(o, Override::Drop(p) if p.kind.is_some() && p.matches(&r.id, c));
+            let drops = |o: &Override| matches!(o, Override::Drop(p) if p.matches(&r.id, c));
             self.ignore.iter().any(|p| p.matches(&r.id, c)) || self.overrides.iter().any(drops)
         };
         let kept: Vec<ClaimInfo> = r.claims.iter().filter(|c| !dropped(c)).cloned().collect();

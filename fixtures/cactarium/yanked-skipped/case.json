@@ -1,5 +1,9 @@
 {
   "about": "A yanked release is skipped by a range",
+  "packages": [
+    "max--z4c--arith-1",
+    "et--arith--yanked"
+  ],
   "specs": [
     "max/z4c"
   ],

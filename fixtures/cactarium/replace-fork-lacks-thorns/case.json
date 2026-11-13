@@ -1,0 +1,31 @@
+{
+  "about": "A fork taking a base package's place must have every thorn the installation enabled from it",
+  "packages": [
+    "et--carpetx",
+    "max--carpetx-mp--carpetx-only"
+  ],
+  "specs": [
+    "max/carpetx-mp/CarpetX"
+  ],
+  "present": [
+    {
+      "package": "et/carpetx",
+      "version": "2026.5.1",
+      "base": "carpetx",
+      "enabled": [
+        "Arith",
+        "CarpetX",
+        "Loop"
+      ]
+    }
+  ],
+  "options": {
+    "replace": true
+  },
+  "expect": {
+    "refusal": "ReplacementLacksThorns",
+    "message": [
+      "max/carpetx-mp@1.0.0 would take the place of base repo carpetx, but has no Arith, Loop"
+    ]
+  }
+}

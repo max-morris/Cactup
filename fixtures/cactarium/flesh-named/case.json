@@ -1,0 +1,25 @@
+{
+  "about": "A named flesh is planned as the base flesh's replacement",
+  "packages": [
+    "et--cactus",
+    "max--cactus-mp--covers-2026-4"
+  ],
+  "specs": [
+    "max/cactus-mp"
+  ],
+  "present": [
+    {
+      "package": "et/cactus",
+      "version": "2026.4.0",
+      "base": "flesh",
+      "enabled": []
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/cactus-mp@1.0.0 named",
+      "replace base repo flesh with max/cactus-mp",
+      "The flesh changes: every config of this installation needs a rebuild"
+    ]
+  }
+}

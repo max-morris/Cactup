@@ -3,32 +3,46 @@
 
 use std::fmt;
 
+use super::remove::{is_requested, AddedFor};
 use super::{PkgId, Release, Req, Why};
+
+/// What a [`Step::Replace`] takes the place of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Replaced {
+    /// A repo of the base thornlist.
+    Base { repo: String },
+    /// An added package (a flesh package another flesh displaces).
+    Added { id: PkgId },
+}
 
 /// One thing the plan does.
 #[derive(Clone, Debug)]
 pub enum Step {
     /// A package the installation does not have.
     Add { release: Release, thorns: Vec<String>, why: Why },
+    /// A named added package at the release it is at: recorded and fetched again, as re-adding
+    /// does. `thorns`: every thorn enabled after.
+    Readd { release: Release, thorns: Vec<String> },
     /// More thorns of a present package, at the release it is at.
     AddThorns { id: PkgId, label: String, thorns: Vec<String>, why: Why },
-    /// A present package moved to another release. `thorns`: every thorn enabled after the move
-    /// (the present ones plus the new needs).
+    /// A present package moved to another release. `thorns`: every thorn enabled after the move.
     Upgrade { from: Release, to: Release, thorns: Vec<String>, why: Why, flag: Option<&'static str> },
-    /// A base repo dropped in favor of a package (shown after the step bringing it in). For the
-    /// flesh, every config of the installation needs a rebuild.
-    Replace { base_repo: String, by: PkgId, flesh: bool },
+    /// Something dropped in favor of a package (shown after the step bringing it in). `thorns`:
+    /// the base repo's checkouts it takes over; empty when it takes the whole repo. For the
+    /// flesh, every config of the installation needs a rebuild. `explicit`: the package taking
+    /// over was named (with `--replace`, or as the package the base repo is).
+    Replace { replaced: Replaced, by: PkgId, thorns: Vec<String>, flesh: bool, explicit: bool },
     /// A present package left as it is, with something worth saying (a fork standing in, a
-    /// release at no version taken to meet a range).
+    /// named base package already there).
     Keep { id: PkgId, note: String },
 }
 
 /// How an any-of dependency chose its alternative (the rules, in order).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChoiceRule {
-    /// An alternative the installation has.
+    /// An alternative the installation has, at a release that fits.
     Present,
-    /// One the rest of the plan brings in.
+    /// One the rest of the plan brings in, at a release that fits.
     Planned,
     /// The first listed (nothing else applied, or every alternative conflicts).
     FirstListed,
@@ -47,57 +61,125 @@ impl fmt::Display for ChoiceRule {
     }
 }
 
-/// One any-of decision.
+/// Which any-of dependency a choice answers: the dependent and the alternatives' targets (stable
+/// across the dependent's versions, unlike the claim's index).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ChoiceKey {
+    pub dependent: PkgId,
+    pub alternatives: Vec<PkgId>,
+}
+
+/// One any-of decision: one per dependency, whichever alternative it chose.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Choice {
-    /// The dependent, `owner/name@version`.
-    pub dependent: String,
+    pub dependent: PkgId,
+    /// `owner/name@version` of the dependent.
+    pub dependent_label: String,
+    /// The index of the dependency among the dependent release's claims.
+    pub claim: usize,
     /// `any of et/carpet, et/cactuspugh`.
     pub label: String,
+    pub alternatives: Vec<PkgId>,
     pub chosen: PkgId,
     pub rule: ChoiceRule,
 }
 
+impl Choice {
+    pub fn key(&self) -> ChoiceKey {
+        ChoiceKey { dependent: self.dependent.clone(), alternatives: self.alternatives.clone() }
+    }
+}
+
 impl fmt::Display for Choice {
-    /// As recorded in `added-for.*.choice`: `any of et/carpet, et/cactuspugh: the first listed`.
+    /// `any of et/carpet, et/cactuspugh: the first listed`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.label, self.rule)
     }
 }
 
-/// Where one package places a library.
+/// Where a package (or a library inside it) places a library.
 #[derive(Clone, Debug)]
 pub struct Placement {
-    /// The package (or library) whose dependency places it, `owner/name@version`.
-    pub by: String,
+    /// The added package whose clone (or whose library's clone) it goes in.
+    pub by: PkgId,
+    /// `owner/name@version` of the release whose dependency places it.
+    pub by_label: String,
+    /// The library whose clone it goes inside; `None`: `by`'s own.
+    pub inside: Option<PkgId>,
     pub into: String,
-    pub req: Req,
+    /// What the dependency asks; `None` for a placement already installed.
+    pub req: Option<Req>,
+    /// Placed by this plan, rather than already installed.
+    pub new: bool,
 }
 
-/// A library the final set builds against, at the one release every placement accepts.
+/// A library the plan places, at the one release every placement accepts (an installed one stays
+/// at its commit).
 #[derive(Clone, Debug)]
 pub struct Library {
     pub release: Release,
     pub placements: Vec<Placement>,
 }
 
-/// A snapshot nobody vouches for, which the caller confirms before anything is fetched.
+/// A snapshot nobody vouches for, chosen or placed by the plan, which the caller confirms before
+/// anything is fetched.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Untrusted {
     pub id: PkgId,
     pub commit: String,
+    /// The branch tip it was read at (`head`, `master`); `None` for a commit.
+    pub tip: Option<String>,
 }
 
-/// What to keep in `installation.toml`'s `added-for` for a package the plan adds or moves.
+/// What a plan says about a package's `added-for` entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
     pub id: PkgId,
-    /// Named on this command line. A caller merging into an existing entry keeps `true`.
-    pub requested: bool,
+    /// The commit the package ends up at: the entry's `for-commit`.
+    pub commit: String,
+    /// `Some(true)`: named on this command line. `Some(false)`: brought in by this plan.
+    /// `None`: present and not named, so whatever the existing entry says (see [`Record::merge`]).
+    pub requested: Option<bool>,
     /// The dependents whose dependencies brought it in, `owner/name@version`.
     pub by: Vec<String>,
-    /// The any-of choice, when one chose it.
-    pub choice: Option<String>,
+    /// The any-of dependencies that chose it.
+    pub choices: Vec<ChoiceKey>,
+}
+
+impl Record {
+    /// The entry to write, given the existing one (if any) and the `[[added]]` commit it stood
+    /// beside: `requested` stays true once true, and a missing or stale entry counts as
+    /// requested, so no orphan pass ever removes a package the user may have named.
+    pub fn merge(&self, old: Option<&AddedFor>, old_commit: Option<&str>) -> AddedFor {
+        let requested = match self.requested {
+            Some(true) => true,
+            Some(false) => false,
+            None => is_requested(old, old_commit.unwrap_or_default()),
+        };
+        let mut by: Vec<String> = old.map(|o| o.by.clone()).unwrap_or_default();
+        for b in &self.by {
+            if !by.contains(b) {
+                by.push(b.clone());
+            }
+        }
+        let mut choices: Vec<ChoiceKey> = old.map(|o| o.choices.clone()).unwrap_or_default();
+        for c in &self.choices {
+            if !choices.contains(c) {
+                choices.push(c.clone());
+            }
+        }
+        AddedFor { requested, by, choices, for_commit: Some(self.commit.clone()) }
+    }
+}
+
+/// What a rendered line is, for the caller to style (a release awaiting review in red).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineKind {
+    Header,
+    Step,
+    Pending,
+    Rebuild,
+    Note,
 }
 
 /// A resolution's result.
@@ -116,6 +198,7 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// Nothing to do but say something.
     pub fn is_empty(&self) -> bool {
         self.steps.iter().all(|s| matches!(s, Step::Keep { .. }))
     }
@@ -126,50 +209,65 @@ impl Plan {
             Step::Add { why, .. } | Step::AddThorns { why, .. } | Step::Upgrade { why, .. } => {
                 why != &Why::Named
             }
-            Step::Replace { .. } => true,
-            Step::Keep { .. } => false,
+            Step::Replace { explicit, .. } => !explicit,
+            Step::Readd { .. } | Step::Keep { .. } => false,
         })
     }
 
-    /// The plan as people read it, one line per step, then the notes:
+    /// The plan as people read it, each line with its kind: the header, one line per step, then
+    /// the releases awaiting review, the rebuild notice and the notes.
     /// ```text
     /// Plan for cactup add max/z4c:
     ///   add      max/z4c@1.2.0       Z4c, Z4cTest   named
     /// ```
-    pub fn render(&self, command: &str) -> String {
+    pub fn lines(&self, command: &str) -> Vec<(LineKind, String)> {
         let rows: Vec<[String; 4]> = self.steps.iter().map(row).collect();
-        // A replace line has no thorns or why, and does not widen those columns.
-        let four = |r: &&[String; 4]| !(r[2].is_empty() && r[3].is_empty());
-        let w0 = rows.iter().map(|r| r[0].len()).max().unwrap_or(0);
-        let w1 = rows.iter().filter(four).map(|r| r[1].len()).max().unwrap_or(0);
-        let w2 = rows.iter().filter(four).map(|r| r[2].len()).max().unwrap_or(0);
-        let mut out = format!("Plan for {command}:\n");
-        for r in &rows {
+        let mut out = vec![(LineKind::Header, format!("Plan for {command}:"))];
+        out.extend(table(&rows).into_iter().map(|l| (LineKind::Step, l)));
+        for p in &self.pending {
+            out.push((LineKind::Pending, format!("  {p} is awaiting review: nobody has approved it")));
+        }
+        if self.rebuild {
+            let text = "  The flesh changes: every config of this installation needs a rebuild";
+            out.push((LineKind::Rebuild, text.to_owned()));
+        }
+        for n in &self.notes {
+            out.push((LineKind::Note, format!("  note: {n}")));
+        }
+        out
+    }
+
+    /// [`Plan::lines`] as one text, unstyled.
+    pub fn render(&self, command: &str) -> String {
+        self.lines(command).into_iter().map(|(_, l)| l + "\n").collect()
+    }
+}
+
+/// Rows in aligned columns; a row with only two cells does not widen the others.
+pub(super) fn table(rows: &[[String; 4]]) -> Vec<String> {
+    let four = |r: &&[String; 4]| !(r[2].is_empty() && r[3].is_empty());
+    let w0 = rows.iter().map(|r| r[0].len()).max().unwrap_or(0);
+    let w1 = rows.iter().filter(four).map(|r| r[1].len()).max().unwrap_or(0);
+    let w2 = rows.iter().filter(four).map(|r| r[2].len()).max().unwrap_or(0);
+    rows.iter()
+        .map(|r| {
             let line = if r[2].is_empty() && r[3].is_empty() {
                 format!("  {:w0$}  {}", r[0], r[1])
             } else {
                 format!("  {:w0$}  {:w1$}  {:w2$}  {}", r[0], r[1], r[2], r[3])
             };
-            out.push_str(line.trim_end());
-            out.push('\n');
-        }
-        for p in &self.pending {
-            out.push_str(&format!("  {p} is awaiting review: nobody has approved it\n"));
-        }
-        if self.rebuild {
-            out.push_str("  The flesh changes: every config of this installation needs a rebuild\n");
-        }
-        for n in &self.notes {
-            out.push_str(&format!("  note: {n}\n"));
-        }
-        out
-    }
+            line.trim_end().to_owned()
+        })
+        .collect()
 }
 
 fn row(s: &Step) -> [String; 4] {
     match s {
         Step::Add { release, thorns, why } => {
             ["add".into(), release.label(), thorns.join(", "), why.to_string()]
+        }
+        Step::Readd { release, thorns } => {
+            ["re-add".into(), release.label(), thorns.join(", "), Why::Named.to_string()]
         }
         Step::AddThorns { label, thorns, why, .. } => {
             ["add".into(), label.clone(), thorns.join(", "), why.to_string()]
@@ -184,8 +282,13 @@ fn row(s: &Step) -> [String; 4] {
             }
             ["upgrade".into(), format!("{} {} -> {}", to.id, at(from), at(to)), thorns.join(", "), why]
         }
-        Step::Replace { base_repo, by, .. } => {
-            ["replace".into(), format!("base repo {base_repo} with {by}"), String::new(), String::new()]
+        Step::Replace { replaced, by, thorns, .. } => {
+            let what = match (replaced, thorns.is_empty()) {
+                (Replaced::Base { repo }, true) => format!("base repo {repo}"),
+                (Replaced::Base { repo }, false) => format!("{} of base repo {repo}", thorns.join(", ")),
+                (Replaced::Added { id }, _) => id.to_string(),
+            };
+            ["replace".into(), format!("{what} with {by}"), String::new(), String::new()]
         }
         Step::Keep { id, note } => ["keep".into(), id.to_string(), String::new(), note.clone()],
     }

@@ -1,5 +1,10 @@
 {
   "about": "A named package brings its dependency's needs, and that dependency's own, each at the newest release in range",
+  "packages": [
+    "max--z4c--carpetx-arith",
+    "et--carpetx--needs-arith",
+    "et--arith"
+  ],
   "specs": [
     "max/z4c"
   ],

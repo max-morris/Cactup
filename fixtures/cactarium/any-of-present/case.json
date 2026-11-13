@@ -1,5 +1,10 @@
 {
   "about": "An any-of takes an alternative the installation has",
+  "packages": [
+    "max--z4c--anyof",
+    "et--carpet",
+    "et--cactuspugh"
+  ],
   "specs": [
     "max/z4c"
   ],

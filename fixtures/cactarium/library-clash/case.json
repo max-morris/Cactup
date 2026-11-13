@@ -1,5 +1,10 @@
 {
   "about": "Two packages placing one library at versions no release meets together",
+  "packages": [
+    "max--kadath",
+    "max--fuka-gw--fuka-2",
+    "et--fuka"
+  ],
   "specs": [
     "max/kadath",
     "max/fuka-gw"

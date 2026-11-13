@@ -1,5 +1,8 @@
 {
   "about": "A dependency on a package the Cactarium does not know",
+  "packages": [
+    "max--z4c--nothere"
+  ],
   "specs": [
     "max/z4c"
   ],

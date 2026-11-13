@@ -1,0 +1,40 @@
+{
+  "about": "--replace takes over only the colliding checkout; the base repo keeps the rest, and they meet the newcomer's requirements",
+  "packages": [
+    "max--carpetx-mp--unrelated-arith"
+  ],
+  "specs": [
+    "max/carpetx-mp"
+  ],
+  "present": [
+    {
+      "package": "repo:carpetx",
+      "unknown": "2222222222222222222222222222222222222222",
+      "thorns": [
+        "CarpetX",
+        "Loop",
+        {
+          "thorn": "Arith",
+          "facts": {
+            "implements": "arith"
+          }
+        }
+      ],
+      "base": "carpetx",
+      "enabled": [
+        "Arith",
+        "CarpetX",
+        "Loop"
+      ]
+    }
+  ],
+  "options": {
+    "replace": true
+  },
+  "expect": {
+    "plan": [
+      "add max/carpetx-mp@1.0.0 CarpetX named",
+      "replace CarpetX of base repo carpetx with max/carpetx-mp"
+    ]
+  }
+}

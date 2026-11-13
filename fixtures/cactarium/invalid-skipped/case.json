@@ -1,5 +1,9 @@
 {
   "about": "An invalid release is never taken; a tag-moved one is",
+  "packages": [
+    "max--z4c--arith-1",
+    "et--arith--invalid"
+  ],
   "specs": [
     "max/z4c"
   ],

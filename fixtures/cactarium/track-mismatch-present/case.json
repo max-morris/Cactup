@@ -1,5 +1,9 @@
 {
   "about": "A present release on another track does not meet a default-track range",
+  "packages": [
+    "max--z4c--default-track-carpetx",
+    "max--carpetx--tracks"
+  ],
   "specs": [
     "max/z4c"
   ],

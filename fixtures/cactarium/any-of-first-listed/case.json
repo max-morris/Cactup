@@ -1,5 +1,10 @@
 {
   "about": "With nothing present or planned, an any-of takes the first listed",
+  "packages": [
+    "max--z4c--anyof",
+    "et--carpet",
+    "et--cactuspugh"
+  ],
   "specs": [
     "max/z4c"
   ],
