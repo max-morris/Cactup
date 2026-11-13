@@ -318,14 +318,22 @@ fn download_published(ctx: &Ctx, req: &str) -> Res<PathBuf> {
 /// The one version `slug` names exactly (`@=1.0.1`, or `@1.0.1` written out
 /// in full, on a track too: `@mixed:=1.0.1`, `@:1.0.1`), or `None` for a
 /// range (`@^1.0.1`, `@~2026.5.1`, `@>=1.0.0` included), or no version at
-/// all. Read from the parsed range, its track and its one exact comparator,
-/// never from the text again.
+/// all. Exactness is the parsed range's; the version is the text as typed
+/// when it reads as one (so build metadata, `@=1.0.0+b`, which a range's
+/// comparator drops, is kept), else the range's track and its one exact
+/// comparator. It names the cached copy an offline import looks for; the
+/// server's answer is checked against the range itself.
 fn exact_version(slug: &cactup_ecosystem_common::slug::Slug) -> Option<TrackedVersion> {
     let req = slug.req().ok().filter(|r| r.is_exact())?;
     let [alt] = req.alts.as_slice() else { return None };
+    let track = alt.track.as_ref().map(|t| format!("{t}:")).unwrap_or_default();
+    let at = slug.at.as_deref()?;
+    let typed = at.split_once(':').map_or(at, |(_, rest)| rest).trim().trim_start_matches('=').trim();
+    if let Ok(version) = format!("{track}{typed}").parse() {
+        return Some(version);
+    }
     let [c] = alt.req.comparators.as_slice() else { return None };
     let pre = if c.pre.is_empty() { String::new() } else { format!("-{}", c.pre) };
-    let track = alt.track.as_ref().map(|t| format!("{t}:")).unwrap_or_default();
     format!("{track}{}.{}.{}{pre}", c.major, c.minor?, c.patch?).parse().ok()
 }
 
@@ -402,10 +410,16 @@ fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) ->
         .map_err(|_| anyhow!("The Cactarium named sim version \"{}\"", resolved.version.version.escape_debug()))?;
     // An exact request answered with another version would import code the
     // user did not ask for; refuse rather than trust the server's matching.
-    if let Some(wanted) = &exact
-        && version != *wanted
+    // Checked with the range itself, as the server matches: build metadata
+    // (`=1.0.0` and `1.0.0+b`) does not tell versions apart.
+    if exact.is_some()
+        && let Ok(range) = slug.req()
+        && !range.matches(&version)
     {
-        bail!("Asked the Cactarium for {shown}@{wanted}, and it answered with version {version}");
+        bail!(
+            "Asked the Cactarium for {shown}@{}, and it answered with version {version}",
+            slug.at.as_deref().unwrap_or_default()
+        );
     }
     // Said, never refused: the version chosen is what was asked for, the
     // newest in range that has the sim.
@@ -576,6 +590,9 @@ fn repo_source(ctx: &Ctx, sim: &SimFile, given: &[String]) -> Res<Option<crate::
         );
     };
     let resolved = crate::cactarium::Client::new(&ctx.db.read()?).resolve(&slug.to_string(), "sim")?;
+    if resolved.kind != "sim" {
+        bail!("{} is a {}, not a sim", resolved.slug, resolved.kind);
+    }
     let url = resolved.url.ok_or_else(|| anyhow!("The Cactarium names no repository for {slug}"))?;
     let commit = resolved.version.commit.ok_or_else(|| anyhow!("The Cactarium names no commit for {slug}"))?;
     Ok(Some(crate::inputs::RepoSource { url, commit }))
@@ -1181,6 +1198,10 @@ pub(crate) mod tests {
         assert_eq!(exact("o/n@:1.0.0").as_deref(), Some("1.0.0"));
         assert_eq!(exact("o/n@:=1.0.0-rc.1").as_deref(), Some("1.0.0-rc.1"));
         assert_eq!(exact("o/n@mixed:^1.0.0"), None);
+        // Build metadata, which a range's comparator drops, is kept as typed.
+        assert_eq!(exact("o/n@=1.0.0+b").as_deref(), Some("1.0.0+b"));
+        assert_eq!(exact("o/n@1.0.0+b.2").as_deref(), Some("1.0.0+b.2"));
+        assert_eq!(exact("o/n@mixed:=1.0.0+b").as_deref(), Some("mixed:1.0.0+b"));
         for range in ["et/s/a@^1.0.0", "et/s/a@~2026.5.1", "et/s/a@>=1.0.0", "et/s/a@1", "et/s/a@1.0", "et/s/a"] {
             assert_eq!(exact(range), None, "{range}");
         }
@@ -1422,5 +1443,26 @@ pub(crate) mod tests {
         assert!(heads[1].starts_with("GET /api/v1/sims/et/s/mixed:1.0.0/download?sim=a "), "{}", heads[1]);
         let gone = crate::cactarium::Client::at(client.base());
         assert_eq!(fetch_published(&gone, tmp.path(), "et/s/a@mixed:1.0.0").unwrap(), path);
+    }
+
+    /// Build metadata: the server matches without it, so `@=1.0.0` answered
+    /// with `1.0.0+b` (and `@=1.0.0+b` with `1.0.0+b`) is what was asked
+    /// for; the copy is cached under the version answered, and an offline
+    /// `@=1.0.0+b` finds it. Another version is still refused.
+    #[test]
+    fn build_metadata_does_not_tell_versions_apart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (client, _) = cactarium(
+            4,
+            |_| ("200 OK", resolved("et/s/a@1.0.0+b", "1.0.0+b", Some("a"), None)),
+            |_| stamped("et/s/a@1.0.0+b"),
+        );
+        let path = fetch_published(&client, tmp.path(), "et/s/a@=1.0.0+b").unwrap_or_else(|e| panic!("{e:#}"));
+        assert_eq!(path, tmp.path().join("et/s/a/1.0.0+b.sim"));
+        assert_eq!(fetch_published(&client, tmp.path(), "et/s/a@=1.0.0").unwrap_or_else(|e| panic!("{e:#}")), path);
+        let err = format!("{:#}", fetch_published(&client, tmp.path(), "et/s/a@=1.0.1+b").unwrap_err());
+        assert!(err.contains("et/s/a@=1.0.1+b, and it answered with version 1.0.0+b"), "{err}");
+        let gone = crate::cactarium::Client::at(client.base());
+        assert_eq!(fetch_published(&gone, tmp.path(), "et/s/a@=1.0.0+b").unwrap(), path);
     }
 }
