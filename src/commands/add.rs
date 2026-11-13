@@ -528,6 +528,8 @@ fn resolve_all(
         }
         let slug: Slug =
             spec.parse().map_err(|e| anyhow!("\"{spec}\" is not a package (owner/name[/Thorn][@version|#commit]): {e}"))?;
+        // A slug's third segment also holds a sim name now; for a package it is a thorn.
+        slug.as_thorn().map_err(|e| anyhow!("\"{spec}\" is not a package (owner/name[/Thorn][@version|#commit]): {e}"))?;
         let entry = slug.entry();
         let req = match (&slug.at, slug.sha()) {
             (Some(at), _) => format!("{entry}@{at}"),
@@ -1393,6 +1395,20 @@ mod tests {
             .map(drop)
             .unwrap_err());
         assert!(err.contains("answered with max/carpetx@1.2.0"), "{err}");
+    }
+
+    /// A slug's third segment may hold a sim name (`owner/name/qc0-z4c`), but
+    /// for a package it is a thorn: anything else is refused before asking the
+    /// Cactarium (nothing listens at this address).
+    #[test]
+    fn a_package_spec_names_a_thorn_not_a_sim() {
+        let err = format!(
+            "{:#}",
+            resolve_all(&crate::cactarium::Client::at("http://127.0.0.1:9"), &["et/carpetx/Carpet-X".to_owned()], false, false)
+                .map(drop)
+                .unwrap_err()
+        );
+        assert!(err.contains("is not a package") && err.contains("not a thorn name"), "{err}");
     }
 
     /// A package sharing a clone the base keeps other thorns of must match
