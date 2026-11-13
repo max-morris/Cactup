@@ -1,0 +1,40 @@
+{
+  "slug": "et/oldflesh",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "9383ce9ac5b6baa1bb6c89456e99d51e9330b71b",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/oldflesh.git",
+      "flesh": true,
+      "thorns": [
+        {
+          "arrangement": "Oldflesh",
+          "thorn": "FT",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "FT",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    }
+  ]
+}

@@ -71,6 +71,8 @@ struct FixtureFacts {
     providers: BTreeMap<String, Vec<Provider>>,
     /// Each `load` call, in order.
     waves: Vec<Vec<PkgId>>,
+    /// The progress ticks heard.
+    ticks: Vec<usize>,
 }
 
 impl Facts for FixtureFacts {
@@ -91,6 +93,10 @@ impl Facts for FixtureFacts {
 
     fn providers(&mut self, r: &Requirement) -> Res<Vec<Provider>> {
         Ok(self.providers.get(&requirement_key(r)).cloned().unwrap_or_default())
+    }
+
+    fn tick(&mut self, steps: usize) {
+        self.ticks.push(steps);
     }
 }
 
@@ -900,32 +906,82 @@ fn claim_patterns_round_trip() {
     assert!("max/z4c:dependency".parse::<ClaimPattern>().is_err());
 }
 
-/// `owner/name` → `owner/eman`: a consistent rename (reversing is its own inverse) that reorders
-/// ids alphabetically almost everywhere.
-fn renamed(id: &PkgId) -> PkgId {
-    if id.is_repo() {
-        return id.clone();
-    }
-    let (owner, name) = id.as_str().split_once('/').expect("owner/name");
-    PkgId::parse(&format!("{owner}/{}", name.chars().rev().collect::<String>())).expect("a valid name")
-}
-
-fn renamed_str(s: &str) -> String {
-    PkgId::parse(s).map(|id| renamed(&id).to_string()).unwrap_or_else(|_| s.to_owned())
-}
-
-fn rename_release(r: &mut Release) {
-    r.id = renamed(&r.id);
-    for c in &mut r.claims {
-        c.target = renamed_str(&c.target);
-        for a in &mut c.alternatives {
-            a.target = renamed_str(&a.target);
+/// Every package id a case names (pseudo-packages aside), sorted.
+fn case_ids(facts: &FixtureFacts, present: &[Present], specs: &[NamedSpec], rules: &Rules) -> Vec<PkgId> {
+    let mut ids: std::collections::BTreeSet<PkgId> = std::collections::BTreeSet::new();
+    let mut add = |s: &str| {
+        if let Ok(id) = PkgId::parse(s)
+            && !id.is_repo()
+        {
+            ids.insert(id);
+        }
+    };
+    let releases = facts.releases.values().flatten().chain(facts.snapshots.values().map(|s| &s.release));
+    for r in releases.chain(present.iter().map(|p| &p.release)) {
+        add(r.id.as_str());
+        for c in &r.claims {
+            add(&c.target);
+            c.alternatives.iter().for_each(|a| add(&a.target));
         }
     }
+    present.iter().flat_map(|p| &p.libraries).for_each(|l| add(l.id.as_str()));
+    specs.iter().for_each(|s| add(s.id.as_str()));
+    facts.providers.values().flatten().for_each(|p| add(p.package.as_str()));
+    for o in &rules.overrides {
+        match o {
+            Override::Drop(p) => add(p.package.as_str()),
+            Override::Add { package, claim } => {
+                add(package.as_str());
+                add(&claim.target);
+            }
+            Override::Needs { package, target, .. } | Override::Satisfies { by: package, target } => {
+                add(package.as_str());
+                add(target.as_str());
+            }
+        }
+    }
+    rules.ignore.iter().for_each(|p| add(p.package.as_str()));
+    ids.into_iter().collect()
 }
 
-fn rename_pattern(p: &ClaimPattern) -> ClaimPattern {
-    ClaimPattern { package: renamed(&p.package), kind: p.kind.as_ref().map(|(k, t)| (*k, renamed(t))) }
+/// A consistent rename of a case's ids, and its inverse.
+struct Renaming {
+    to: BTreeMap<PkgId, PkgId>,
+    back: BTreeMap<PkgId, PkgId>,
+}
+
+impl Renaming {
+    fn new(ids: &[PkgId], f: impl Fn(usize, &PkgId) -> PkgId) -> Renaming {
+        let to: BTreeMap<PkgId, PkgId> = ids.iter().enumerate().map(|(k, id)| (id.clone(), f(k, id))).collect();
+        let back = to.iter().map(|(a, b)| (b.clone(), a.clone())).collect();
+        Renaming { to, back }
+    }
+
+    fn id(&self, id: &PkgId) -> PkgId {
+        self.to.get(id).cloned().unwrap_or_else(|| id.clone())
+    }
+
+    fn back(&self, id: &PkgId) -> PkgId {
+        self.back.get(id).cloned().unwrap_or_else(|| id.clone())
+    }
+
+    fn str(&self, s: &str) -> String {
+        PkgId::parse(s).map(|id| self.id(&id).to_string()).unwrap_or_else(|_| s.to_owned())
+    }
+
+    fn release(&self, r: &mut Release) {
+        r.id = self.id(&r.id);
+        for c in &mut r.claims {
+            c.target = self.str(&c.target);
+            for a in &mut c.alternatives {
+                a.target = self.str(&a.target);
+            }
+        }
+    }
+
+    fn pattern(&self, p: &ClaimPattern) -> ClaimPattern {
+        ClaimPattern { package: self.id(&p.package), kind: p.kind.as_ref().map(|(k, t)| (*k, self.id(t))) }
+    }
 }
 
 /// The decisions of a plan, ids put back through `back`, whatever order they come in.
@@ -971,77 +1027,92 @@ fn decisions(plan: &Plan, back: &dyn Fn(&PkgId) -> PkgId) -> std::collections::B
     out
 }
 
-/// Every case decides the same with every package renamed so that ids sort differently: no
-/// decision depends on the alphabetical order of ids (who stands in for whom included).
+fn decided(request: &Request, facts: &mut FixtureFacts, back: &dyn Fn(&PkgId) -> PkgId) -> std::collections::BTreeSet<String> {
+    match resolve(request, facts, &ServerRules) {
+        Ok(plan) => decisions(&plan, back),
+        Err(e) => [format!("refused {}", e.downcast_ref::<Refusal>().map(variant).unwrap_or_default())].into(),
+    }
+}
+
+/// Every case decides the same under three consistent renames of its ids: each name reversed (a
+/// scramble), every id in the order reversed (`o/p<N-k>` for the k-th, owners included, so every
+/// pair flips), and every id rotated by half. No decision depends on the order of ids (who stands
+/// in for whom included). One exception, by design: any-of dependencies are settled in the order
+/// of their dependents' ids (plan §2.2), and `any-of-order` shows the earlier one's choice winning.
 #[test]
 fn decisions_do_not_depend_on_ids() {
     let mut differ = Vec::new();
     for dir in case_dirs() {
         let Loaded { case, mut facts, present, rules } = load(&dir);
-        if case.remove.is_some() {
+        if case.remove.is_some() || dir.ends_with("any-of-order") {
             continue;
         }
         let specs = specs_of(&case);
         let options = options_of(&case);
+        let ids = case_ids(&facts, &present, &specs, &rules);
+        let n = ids.len();
         let request = Request { specs: &specs, present: &present, rules: &rules, options };
-        let original = match resolve(&request, &mut facts, &ServerRules) {
-            Ok(plan) => decisions(&plan, &|id| id.clone()),
-            Err(e) => [format!("refused {}", e.downcast_ref::<Refusal>().map(variant).unwrap_or_default())].into(),
-        };
-        // The same case, renamed throughout.
-        let Loaded { mut facts, mut present, rules, .. } = load(&dir);
-        facts.releases = std::mem::take(&mut facts.releases)
-            .into_iter()
-            .map(|(id, mut rs)| {
-                rs.iter_mut().for_each(rename_release);
-                (renamed(&id), rs)
-            })
-            .collect();
-        facts.snapshots = std::mem::take(&mut facts.snapshots)
-            .into_iter()
-            .map(|((id, at), mut s)| {
-                rename_release(&mut s.release);
-                ((renamed(&id), at), s)
-            })
-            .collect();
-        for ps in facts.providers.values_mut() {
-            ps.iter_mut().for_each(|p| p.package = renamed(&p.package));
-        }
-        for p in &mut present {
-            rename_release(&mut p.release);
-            p.libraries.iter_mut().for_each(|l| {
-                l.id = renamed(&l.id);
-                l.inside = l.inside.as_ref().map(renamed);
-            });
-        }
-        let specs: Vec<NamedSpec> = specs.iter().map(|s| NamedSpec { id: renamed(&s.id), ..s.clone() }).collect();
-        let rules = Rules {
-            ignore: rules.ignore.iter().map(rename_pattern).collect(),
-            overrides: rules
-                .overrides
-                .iter()
-                .map(|o| match o {
-                    Override::Drop(p) => Override::Drop(rename_pattern(p)),
-                    Override::Add { package, claim } => {
-                        let mut claim = claim.clone();
-                        claim.target = renamed_str(&claim.target);
-                        Override::Add { package: renamed(package), claim }
-                    }
-                    Override::Needs { package, target, thorns } => {
-                        Override::Needs { package: renamed(package), target: renamed(target), thorns: thorns.clone() }
-                    }
-                    Override::Satisfies { by, target } => Override::Satisfies { by: renamed(by), target: renamed(target) },
+        let original = decided(&request, &mut facts, &|id| id.clone());
+        let renamings = [
+            ("scrambled", Renaming::new(&ids, |_, id| {
+                let (owner, name) = id.as_str().split_once('/').expect("owner/name");
+                PkgId::parse(&format!("{owner}/{}", name.chars().rev().collect::<String>())).expect("a valid name")
+            })),
+            ("reversed", Renaming::new(&ids, |k, _| PkgId::parse(&format!("o/p{:04}", n - 1 - k)).unwrap())),
+            ("rotated", Renaming::new(&ids, |k, _| PkgId::parse(&format!("o/p{:04}", (k + n / 2) % n)).unwrap())),
+        ];
+        for (how, rn) in &renamings {
+            let Loaded { mut facts, mut present, rules, .. } = load(&dir);
+            facts.releases = std::mem::take(&mut facts.releases)
+                .into_iter()
+                .map(|(id, mut rs)| {
+                    rs.iter_mut().for_each(|r| rn.release(r));
+                    (rn.id(&id), rs)
                 })
-                .collect(),
-        };
-        let request = Request { specs: &specs, present: &present, rules: &rules, options };
-        let after = match resolve(&request, &mut facts, &ServerRules) {
-            Ok(plan) => decisions(&plan, &renamed),
-            Err(e) => [format!("refused {}", e.downcast_ref::<Refusal>().map(variant).unwrap_or_default())].into(),
-        };
-        if original != after {
-            let name = dir.file_name().unwrap().to_string_lossy().into_owned();
-            differ.push(format!("{name}:\n  original {original:?}\n  renamed  {after:?}"));
+                .collect();
+            facts.snapshots = std::mem::take(&mut facts.snapshots)
+                .into_iter()
+                .map(|((id, at), mut s)| {
+                    rn.release(&mut s.release);
+                    ((rn.id(&id), at), s)
+                })
+                .collect();
+            for ps in facts.providers.values_mut() {
+                ps.iter_mut().for_each(|p| p.package = rn.id(&p.package));
+            }
+            for p in &mut present {
+                rn.release(&mut p.release);
+                p.libraries.iter_mut().for_each(|l| {
+                    l.id = rn.id(&l.id);
+                    l.inside = l.inside.as_ref().map(|i| rn.id(i));
+                });
+            }
+            let specs: Vec<NamedSpec> = specs.iter().map(|s| NamedSpec { id: rn.id(&s.id), ..s.clone() }).collect();
+            let rules = Rules {
+                ignore: rules.ignore.iter().map(|p| rn.pattern(p)).collect(),
+                overrides: rules
+                    .overrides
+                    .iter()
+                    .map(|o| match o {
+                        Override::Drop(p) => Override::Drop(rn.pattern(p)),
+                        Override::Add { package, claim } => {
+                            let mut claim = claim.clone();
+                            claim.target = rn.str(&claim.target);
+                            Override::Add { package: rn.id(package), claim }
+                        }
+                        Override::Needs { package, target, thorns } => {
+                            Override::Needs { package: rn.id(package), target: rn.id(target), thorns: thorns.clone() }
+                        }
+                        Override::Satisfies { by, target } => Override::Satisfies { by: rn.id(by), target: rn.id(target) },
+                    })
+                    .collect(),
+            };
+            let request = Request { specs: &specs, present: &present, rules: &rules, options };
+            let after = decided(&request, &mut facts, &|id| rn.back(id));
+            if original != after {
+                let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+                differ.push(format!("{name} ({how}):\n  original {original:?}\n  renamed  {after:?}"));
+            }
         }
     }
     assert!(differ.is_empty(), "{}", differ.join("\n"));
@@ -1210,4 +1281,59 @@ fn a_clash_on_every_release_refuses_quickly() {
         // jumping back it is some 3,000 leaves).
         assert!(steps <= 60, "{clash}: {steps} steps");
     }
+}
+
+/// Where a fork could still take a conflicting package's place, the search may not jump back
+/// past anything: it goes on chronologically (slower, never wrong), and tells the caller it is
+/// still going.
+#[test]
+fn a_search_that_cannot_jump_back_still_finishes_and_ticks() {
+    let mut facts = FixtureFacts::default();
+    let base = |i: usize| {
+        let thorns = vec![(format!("T{i}x0"), sized_facts(&format!("T{i}x0"), &[]))];
+        let r = synthetic_release(&format!("base/pkg{i}"), "1.0.0", &thorns, vec![]);
+        let enabled = [format!("T{i}x0")].into_iter().collect();
+        Present { release: r, enabled, origin: Origin::Base { repo: format!("pkg{i}") }, libraries: vec![] }
+    };
+    let present = vec![base(0), base(1)];
+    let one = |name: &str| vec![(name.to_owned(), sized_facts(name, &[]))];
+    // d3's every release asks the base thorn T0x0: a clash. d2's oldest release brings a fork of
+    // d3 that never stands in, which is enough to make d3 displaceable.
+    for d in 1..=3 {
+        let id = format!("new/d{d}");
+        let thorns = if d == 3 { one("T0x0") } else { one(&format!("D{d}")) };
+        let releases = (0..3)
+            .rev()
+            .map(|v| {
+                let claims = if d == 2 && v == 0 { vec![dependency("new/f", "*", &["F"])] } else { vec![] };
+                synthetic_release(&id, &format!("1.{v}.0"), &thorns, claims)
+            })
+            .collect();
+        facts.releases.insert(PkgId::parse(&id).unwrap(), releases);
+    }
+    let mut fork = synthetic_release("new/f", "1.0.0", &one("F"), vec![]);
+    fork.claims.push(ClaimInfo {
+        kind: "fork-of".into(),
+        target: "new/d3".into(),
+        range: Some("=9.9.9".into()),
+        sha: None,
+        needs: vec![],
+        into: None,
+        needed_by: vec![],
+        alternatives: vec![],
+        note: None,
+    });
+    facts.releases.insert(PkgId::parse("new/f").unwrap(), vec![fork]);
+    let claims = vec![dependency("new/d1", "^1", &["D1"]), dependency("new/d2", "^1", &["D2"]), dependency("new/d3", "^1", &["T0x0"])];
+    let releases = (0..3).rev().map(|v| synthetic_release("new/top", &format!("1.{v}.0"), &one("Top"), claims.clone())).collect();
+    facts.releases.insert(PkgId::parse("new/top").unwrap(), releases);
+    let specs = vec![NamedSpec::parse("new/top").unwrap()];
+    let rules = Rules::default();
+    let request = Request { specs: &specs, present: &present, rules: &rules, options: Options::default() };
+    let e = resolve(&request, &mut facts, &ServerRules).unwrap_err();
+    let steps = super::resolve::STEPS.with(|s| s.get());
+    assert_eq!(e.downcast_ref::<Refusal>().map(variant).as_deref(), Some("SameThorn"), "{e}");
+    assert!(steps > 64, "{steps} steps: no chronological search?");
+    assert_eq!(facts.ticks.len(), steps / 64, "a tick every 64 steps: {:?}", facts.ticks);
+    assert!(facts.ticks.iter().enumerate().all(|(i, t)| *t == 64 * (i + 1)));
 }

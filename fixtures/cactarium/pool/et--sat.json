@@ -1,0 +1,39 @@
+{
+  "slug": "et/sat",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "88ceee70e01c0c7e6a992228271ad3f8056b3791",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/sat.git",
+      "thorns": [
+        {
+          "arrangement": "Sat",
+          "thorn": "Up",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Up",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    }
+  ]
+}

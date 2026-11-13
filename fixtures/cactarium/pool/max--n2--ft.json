@@ -1,0 +1,49 @@
+{
+  "slug": "max/n2",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "bd9c66b5392659d9ac3055c37f20d26411c04e04",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/n2.git",
+      "thorns": [
+        {
+          "arrangement": "N2",
+          "thorn": "FT",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "FT",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/zf",
+          "range": null,
+          "needs": [
+            "Z"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

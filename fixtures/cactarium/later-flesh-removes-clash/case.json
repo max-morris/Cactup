@@ -1,0 +1,31 @@
+{
+  "about": "n2's thorn collides with one the installation's flesh carries; only zf 1.0.0 brings a flesh that replaces it",
+  "packages": [
+    "max--n2--ft",
+    "et--zf",
+    "et--newflesh",
+    "et--oldflesh"
+  ],
+  "specs": [
+    "max/n2"
+  ],
+  "present": [
+    {
+      "package": "et/oldflesh",
+      "version": "1.0.0",
+      "base": "flesh",
+      "enabled": [
+        "FT"
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/n2@1.0.0 FT named",
+      "add et/zf@1.0.0 Z needed by max/n2@1.0.0",
+      "add et/newflesh@1.0.0 needed by et/zf@1.0.0",
+      "replace base repo flesh with et/newflesh",
+      "The flesh changes: every config of this installation needs a rebuild"
+    ]
+  }
+}

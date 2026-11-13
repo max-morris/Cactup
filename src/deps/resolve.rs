@@ -52,10 +52,14 @@ use super::{
 use crate::Res;
 use anyhow::bail;
 
-/// Search steps before giving up, at the least; more with more packages.
-pub(super) const MIN_STEPS: usize = 20_000;
-/// Wall time before giving up.
-pub(super) const WALL_TIME: Duration = Duration::from_secs(2);
+/// The step budget: about this many package-steps (a step costs time in proportion to the
+/// packages in play), so the budget binds long before the wall-time net on any machine (some
+/// 4 s in a release build with 80 packages), and the result never depends on the machine.
+pub(super) const PACKAGE_STEPS: usize = 1_000_000;
+/// The fewest steps, however many packages.
+pub(super) const MIN_STEPS: usize = 2_000;
+/// A safety net past the step budget: reported as giving up after it, with the closest refusal.
+pub(super) const WALL_TIME: Duration = Duration::from_secs(30);
 /// How often (in steps) the caller hears that the search is still going.
 const TICK: usize = 64;
 
@@ -83,7 +87,7 @@ pub fn resolve(request: &Request, facts: &mut dyn Facts, ccl: &dyn Requirements)
         }
     }
     let present_rel = present.iter().map(|(id, p)| (id.clone(), Rc::new(p.release.clone()))).collect();
-    let budget = MIN_STEPS.max(2_000 * (present.len() + request.specs.len() + 1));
+    let budget = MIN_STEPS.max(PACKAGE_STEPS / (present.len() + request.specs.len() + 1));
     #[cfg(test)]
     let budget = BUDGET.with(|b| b.get()).unwrap_or(budget);
     let mut s = Search {
@@ -98,10 +102,13 @@ pub fn resolve(request: &Request, facts: &mut dyn Facts, ccl: &dyn Requirements)
         parsed: RefCell::new(HashMap::new()),
         need_cache: RefCell::new(HashMap::new()),
         fork_cache: RefCell::new(HashMap::new()),
-        forkable: RefCell::new((usize::MAX, BTreeSet::new())),
+        universe: Vec::new(),
+        forkable: BTreeSet::new(),
+        flesh_possible: false,
         steps: 0,
         budget,
-        deadline: Instant::now() + WALL_TIME,
+        started: Instant::now(),
+        timed_out: false,
         exhausted: false,
         best: None,
         present,
@@ -120,6 +127,7 @@ pub fn resolve(request: &Request, facts: &mut dyn Facts, ccl: &dyn Requirements)
         s.specs.push(NamedSpec { id: spec.id.clone(), req, thorns: spec.thorns.clone() });
     }
     s.prepare();
+    s.build_universe()?;
     let mut assign = Assign::default();
     let outcome = s.search(&mut assign)?;
     #[cfg(test)]
@@ -354,6 +362,8 @@ struct Need {
     thorns: Thorns,
     /// The claim as people read it, and its `needed-by`.
     claim: Option<(String, Vec<String>)>,
+    /// The claim's index among its release's claims (`usize::MAX` for a spec).
+    index: usize,
     any_of: Option<FromAnyOf>,
 }
 
@@ -617,11 +627,19 @@ struct Search<'a> {
     parsed: RefCell<HashMap<*const Release, Rc<Vec<Parsed>>>>,
     need_cache: RefCell<HashMap<(*const Release, usize, usize), Rc<Need>>>,
     fork_cache: RefCell<HashMap<*const Release, Rc<Vec<(PkgId, ForkOf)>>>>,
-    /// The packages some known release claims to fork, for the catalog size it was computed at.
-    forkable: RefCell<(usize, BTreeSet<PkgId>)>,
+    /// Every release that could come into play: the present ones, and every version of every
+    /// package reachable from them or the named specs through dependency claims (any
+    /// alternative, any version, commits read), all loaded before the search.
+    universe: Vec<Rel>,
+    /// The packages some release of the universe claims to fork: a fork could take their place.
+    forkable: BTreeSet<PkgId>,
+    /// Some package the plan could bring in is a flesh: the installation's flesh could be replaced.
+    flesh_possible: bool,
     steps: usize,
     budget: usize,
-    deadline: Instant,
+    started: Instant,
+    /// The wall-time net was reached (rather than the step budget).
+    timed_out: bool,
     exhausted: bool,
     /// The failure to report: (specific, depth, failure); the first of the best wins.
     best: Option<(bool, usize, Failure)>,
@@ -747,6 +765,7 @@ impl Search<'_> {
             req,
             thorns,
             claim: Some((p.label.clone(), p.needed_by.clone())),
+            index: p.index,
             any_of,
         });
         self.need_cache.borrow_mut().insert(key, need.clone());
@@ -759,7 +778,8 @@ impl Search<'_> {
         for spec in &self.specs {
             let thorns = spec.thorns.clone().map_or(Thorns::All, Thorns::Some);
             let (target, req) = (spec.id.clone(), spec.req.clone());
-            let need = Need { source: Source::Named, target, req, thorns, claim: None, any_of: None };
+            let (claim, index, any_of) = (None, usize::MAX, None);
+            let need = Need { source: Source::Named, target, req, thorns, claim, index, any_of };
             self.named_needs.push(Rc::new(need));
         }
         if self.request.options.upgrade_all {
@@ -770,7 +790,9 @@ impl Search<'_> {
                 req.alts[0].track = v.track.clone();
                 let thorns = Thorns::Some(p.enabled.iter().cloned().collect());
                 let (target, req) = (id.clone(), Req::Range(req));
-                let need = Need { source: Source::UpgradeAll, target, req, thorns, claim: None, any_of: None };
+                let index = usize::MAX;
+                let (claim, any_of) = (None, None);
+                let need = Need { source: Source::UpgradeAll, target, req, thorns, claim, index, any_of };
                 self.upgrade_needs.push(Rc::new(need));
             }
         }
@@ -827,22 +849,95 @@ impl Search<'_> {
         out
     }
 
-    /// The packages some known release (served or present) claims to fork: the ones a fork could
-    /// still displace.
-    fn displaceable(&self, id: &PkgId) -> bool {
-        if self.request.rules.satisfiers(id).next().is_some() {
-            return true;
+    /// Loads every release that could come into play, in waves: the packages the named specs
+    /// name, the present packages that may move, and whatever any version of those (or a present
+    /// release) depends on, through every alternative and every commit a claim names; then notes
+    /// which packages a fork could displace and whether a flesh could come in.
+    fn build_universe(&mut self) -> Res<()> {
+        let mut releases: Vec<Rel> = self.present_rel.values().cloned().collect();
+        let mut frontier: BTreeSet<PkgId> = self.specs.iter().map(|s| s.id.clone()).collect();
+        frontier.extend(self.present.keys().filter(|id| self.may_move(id)).cloned());
+        let mut commits: Vec<(PkgId, String)> = (self.specs.iter())
+            .filter_map(|s| match &s.req {
+                Req::Commit(sha) => Some((s.id.clone(), sha.clone())),
+                _ => None,
+            })
+            .collect();
+        for r in releases.clone() {
+            self.follow(&r, &mut frontier, &mut commits);
         }
-        let size = self.cat.loaded.len() + self.cat.snapshots.len();
-        if self.forkable.borrow().0 != size {
-            let mut set = BTreeSet::new();
-            let releases = self.cat.loaded.values().flatten().flatten().chain(self.present_rel.values());
-            for r in releases {
-                set.extend(self.fork_claims_of(r).iter().map(|(up, _)| up.clone()));
+        let mut seen: BTreeSet<PkgId> = BTreeSet::new();
+        loop {
+            // A present package that cannot move is only its present release.
+            let wave: Vec<PkgId> = (frontier.iter())
+                .filter(|id| !seen.contains(*id) && !id.is_repo())
+                .filter(|id| !self.present.contains_key(*id) || self.may_move(id))
+                .cloned()
+                .collect();
+            let reads: Vec<(PkgId, String)> = std::mem::take(&mut commits);
+            if wave.is_empty() && reads.is_empty() {
+                break;
             }
-            *self.forkable.borrow_mut() = (size, set);
+            frontier.clear();
+            seen.extend(wave.iter().cloned());
+            self.cat.ensure(wave.iter().cloned())?;
+            for id in &wave {
+                for r in self.cat.releases(id).to_vec() {
+                    self.follow(&r, &mut frontier, &mut commits);
+                    releases.push(r);
+                }
+            }
+            for (id, sha) in reads {
+                self.cat.ensure([id.clone()])?;
+                let served = self.cat.releases(&id).iter().any(|r| r.commit.starts_with(sha.as_str()));
+                if !self.cat.known(&id) || served {
+                    continue;
+                }
+                if let Ok(r) = self.cat.snapshot(&id, &sha)? {
+                    self.follow(&r, &mut frontier, &mut commits);
+                    releases.push(r);
+                }
+            }
         }
-        self.forkable.borrow().1.contains(id)
+        for r in &releases {
+            self.forkable.extend(self.fork_claims_of(r).iter().map(|(up, _)| up.clone()));
+        }
+        self.flesh_possible = releases.iter().any(|r| r.flesh && !self.present.contains_key(&r.id));
+        self.universe = releases;
+        Ok(())
+    }
+
+    /// The packages `r`'s dependency claims name (every alternative), and the commits they ask.
+    fn follow(&self, r: &Rel, frontier: &mut BTreeSet<PkgId>, commits: &mut Vec<(PkgId, String)>) {
+        for c in self.parsed(r).iter() {
+            let targets: Vec<(&PkgId, &Req)> = match &c.body {
+                Body::Single(t, q, _) => vec![(t, q)],
+                Body::AnyOf(alts) => alts.iter().map(|(t, q, _)| (t, q)).collect(),
+                Body::Bad(_) => Vec::new(),
+            };
+            for (t, q) in targets {
+                if let Req::Commit(sha) = q {
+                    commits.push((t.clone(), sha.clone()));
+                }
+                frontier.insert(t.clone());
+            }
+        }
+    }
+
+    /// Whether a fork, or a package an override names, could take this package's place.
+    fn displaceable(&self, id: &PkgId) -> bool {
+        self.request.rules.satisfiers(id).next().is_some() || self.forkable.contains(id)
+    }
+
+    /// Whether some decision other than this package's own could take it out of play, or change
+    /// what it holds: a package the plan brings in that could be displaced; a present flesh, when
+    /// a flesh could come in; a base package under `--replace`; a present package not decided
+    /// that may still move. A failure involving one is not jumped back past anything.
+    fn removable(&self, id: &PkgId, d: &Derived) -> bool {
+        let Some(p) = self.present.get(id) else { return self.displaceable(id) };
+        (self.present_rel[id].flesh && self.flesh_possible)
+            || (self.request.options.replace && matches!(p.origin, Origin::Base { .. }))
+            || (!d.chosen.get(id).is_some_and(|e| e.decided) && self.may_move(id))
     }
 
     fn record(&mut self, depth: usize, f: Failure) {
@@ -859,7 +954,7 @@ impl Search<'_> {
         if self.exhausted && !specific {
             return Ok(Refusal::NoConsistentSet { constraints: f.lives });
         }
-        Ok(match f.refusal {
+        let best = match f.refusal {
             Pending::Refusal(r) => r,
             Pending::Unclaimed(unmet) => {
                 let mut out: Vec<Unmet> = Vec::new();
@@ -877,12 +972,18 @@ impl Search<'_> {
                 }
                 Refusal::Unclaimed(out)
             }
-        })
+        };
+        if self.timed_out {
+            return Ok(Refusal::GaveUp { seconds: WALL_TIME.as_secs(), best: Box::new(best) });
+        }
+        Ok(best)
     }
 
     /// The decisions a failure depends on: those of the packages it is about and of the needs it
     /// reads, and, through every need a package takes, of the packages (and any-ofs) that brought
     /// it in and of the forks looked at for those needs, all the way up.
+    /// Every decision, when some package in that closure is [`Self::removable`] (another decision
+    /// could take it out of play, so the failure may vanish without any of the decisions named).
     fn involved(&self, d: &Derived, a: &Assign, parties: &[PkgId], needs: &[usize]) -> BTreeSet<DKey> {
         let mut out = BTreeSet::new();
         let mut queue: VecDeque<PkgId> = parties.iter().cloned().collect();
@@ -900,6 +1001,9 @@ impl Search<'_> {
         while let Some(p) = queue.pop_front() {
             if !seen.insert(p.clone()) {
                 continue;
+            }
+            if self.removable(&p, d) {
+                return a.keys();
             }
             if a.releases.contains_key(&p) {
                 out.insert(DKey::Pkg(p.clone()));
@@ -927,8 +1031,12 @@ impl Search<'_> {
         if self.steps % TICK == 0 {
             self.cat.facts.tick(self.steps);
         }
-        if self.steps > self.budget || Instant::now() > self.deadline {
+        if self.steps > self.budget {
             self.exhausted = true;
+            return Ok(Outcome::Failed(a.keys()));
+        }
+        if self.started.elapsed() > WALL_TIME {
+            (self.exhausted, self.timed_out) = (true, true);
             return Ok(Outcome::Failed(a.keys()));
         }
         let depth = a.depth();
@@ -1472,7 +1580,15 @@ impl Search<'_> {
         let settled = |id: &PkgId| {
             d.chosen.get(id).is_some_and(|e| {
                 (e.decided || (e.present.is_some() && !self.may_move(id)))
-                    && (e.present.is_some() || self.named(id).is_some() || !self.displaceable(id))
+                    && match &e.present {
+                        None => self.named(id).is_some() || !self.displaceable(id),
+                        // A present flesh a planned one could replace, a base repo --replace could
+                        // take over: neither stays for sure.
+                        Some(p) => {
+                            !(e.release.flesh && self.flesh_possible)
+                                && !(self.request.options.replace && matches!(p.origin, Origin::Base { .. }))
+                        }
+                    }
             })
         };
         let same_thorn = !self.request.options.replace;
@@ -1533,9 +1649,7 @@ impl Search<'_> {
     }
 
     /// A requirement of a settled package's new thorn that nothing in play meets and that no
-    /// release in play, or reachable from one through dependency claims (any alternative, any
-    /// version), offers: no deeper decision can meet it. Nothing is concluded when that walk meets
-    /// a package not loaded.
+    /// release of the universe offers: no deeper decision can meet it.
     fn prune_unclaimed(&self, d: &Derived, settled: &dyn Fn(&PkgId) -> bool) -> Option<Failure> {
         let unmet: Vec<(String, PkgId, Requirement)> = (conflict::unmet_requirements(&d.chosen, self.ccl))
             .into_iter()
@@ -1544,41 +1658,12 @@ impl Search<'_> {
         if unmet.is_empty() {
             return None;
         }
-        // The thorns of every release that could come into play (present packages' thorns, enabled
-        // or not, included).
-        let mut thorns: Vec<(String, ThornFacts)> = Vec::new();
-        let mut queue: VecDeque<PkgId> = d.chosen.keys().chain(d.required.iter()).cloned().collect();
-        let mut seen: BTreeSet<PkgId> = BTreeSet::new();
-        while let Some(p) = queue.pop_front() {
-            if !seen.insert(p.clone()) {
-                continue;
-            }
-            let mut releases: Vec<Rel> = self.cat.releases(&p).to_vec();
-            if let Some(pr) = self.present_rel.get(&p) {
-                // A present package only gains thorns; what its claims bring is not followed.
-                thorns.extend(pr.thorns.iter().map(|t| (t.thorn.clone(), t.facts.clone())));
-                if !d.chosen.get(&p).is_some_and(|e| e.is_new()) {
-                    continue;
-                }
-                releases.push(pr.clone());
-            }
-            if !p.is_repo() && !self.cat.loaded(&p) {
-                return None;
-            }
-            for r in &releases {
-                thorns.extend(r.thorns.iter().map(|t| (t.thorn.clone(), t.facts.clone())));
-                for c in self.parsed(r).iter() {
-                    match &c.body {
-                        Body::Single(t, _, _) => queue.push_back(t.clone()),
-                        Body::AnyOf(alts) => queue.extend(alts.iter().map(|(t, _, _)| t.clone())),
-                        Body::Bad(_) => {}
-                    }
-                }
-            }
-        }
-        let hopeless: Vec<(String, PkgId, Requirement)> = (unmet.into_iter())
-            .filter(|(_, _, r)| !thorns.iter().any(|(n, f)| self.ccl.meets(n, f, r)))
-            .collect();
+        // Any thorn of any release that could come into play (enabled or not).
+        let offered = |r: &Requirement| {
+            self.universe.iter().any(|rel| rel.thorns.iter().any(|t| self.ccl.meets(&t.thorn, &t.facts, r)))
+        };
+        let hopeless: Vec<(String, PkgId, Requirement)> =
+            unmet.into_iter().filter(|(_, _, r)| !offered(r)).collect();
         if hopeless.is_empty() {
             return None;
         }
@@ -1705,6 +1790,7 @@ impl Search<'_> {
                 req: req.clone(),
                 thorns: Thorns::All,
                 claim: None,
+                index: usize::MAX,
                 any_of: None,
             };
             match self.taker(&need, Kind::Active, d, &d.required).0 {
@@ -1779,8 +1865,10 @@ impl Search<'_> {
 
     /// The order of the plan's steps: the named packages, then what their single-target
     /// dependencies bring, breadth first, then what each any-of brings (by dependent and
-    /// declaration order); with each package's reason (the first need reaching it) and the
-    /// dependents that brought it in.
+    /// declaration order); with each package's reason and the dependents that brought it in. The
+    /// reason is, of the needs reaching it from the shallowest depth, a named one, else a
+    /// single-target claim before an any-of, then the dependent first by id, then the claim's
+    /// index: never the order claims were declared in.
     #[allow(clippy::type_complexity)]
     fn order(
         &self,
@@ -1794,11 +1882,12 @@ impl Search<'_> {
             active.iter().filter(|(r, _)| r.need.source_id() == Some(id)).cloned().collect()
         };
         let mut order: IndexSet<PkgId> = IndexSet::new();
-        let mut why: BTreeMap<PkgId, Why> = BTreeMap::new();
+        let mut depth: BTreeMap<PkgId, usize> = BTreeMap::new();
         let mut queue: VecDeque<PkgId> = VecDeque::new();
         let mut reach = |r: &Rec, t: &PkgId, order: &mut IndexSet<PkgId>, queue: &mut VecDeque<PkgId>| {
             if order.insert(t.clone()) {
-                why.insert(t.clone(), r.need.why(r.rule));
+                let below = r.need.source_id().and_then(|s| depth.get(s)).map_or(0, |d| d + 1);
+                depth.insert(t.clone(), below);
                 queue.push_back(t.clone());
             }
         };
@@ -1818,6 +1907,23 @@ impl Search<'_> {
             match next_any_of.next() {
                 Some((r, t)) => reach(r, &t, &mut order, &mut queue),
                 None => break,
+            }
+        }
+        let mut why: BTreeMap<PkgId, Why> = BTreeMap::new();
+        for t in &order {
+            let from_depth = |r: &&(&Rec, PkgId)| match r.0.need.source_id() {
+                None => depth[t] == 0,
+                Some(s) => depth.get(s).is_some_and(|d| d + 1 == depth[t]),
+            };
+            let reason = (active.iter())
+                .filter(|(_, taker)| taker == t)
+                .filter(from_depth)
+                .min_by_key(|(r, _)| {
+                    let n = &r.need;
+                    (n.source_id().is_some(), n.any_of.is_some(), n.source_id(), n.index)
+                });
+            if let Some((r, _)) = reason {
+                why.insert(t.clone(), r.need.why(r.rule));
             }
         }
         // The dependents in id order, not in the order the specs were named.

@@ -66,6 +66,8 @@ pub enum Refusal {
     TwoFleshes { first: String, second: String, ignore: Option<String> },
     /// No combination of releases meets these together (or the search gave up before finding one).
     NoConsistentSet { constraints: Vec<Live> },
+    /// The search ran past its wall-time safety net; `best` is the closest it came.
+    GaveUp { seconds: u64, best: Box<Refusal> },
     /// A commit or tip the Cactarium cannot read.
     NotAvailable { target: PkgId, at: String, by: Option<Live>, detail: String },
     /// Whoever takes a need lacks thorns it names.
@@ -172,6 +174,7 @@ impl Refusal {
                 format!("Pass --ignore-claim {ignore}")
             }
             Refusal::NotAvailable { .. } => "Name a commit or version the Cactarium has".to_owned(),
+            Refusal::GaveUp { best, .. } => best.way_past(),
             Refusal::BadClaim { ignore, .. } => {
                 format!("Pass --ignore-claim {ignore} (and tell the package's authors)")
             }
@@ -203,7 +206,12 @@ fn list(constraints: &[Live]) -> String {
 
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Refusal::GaveUp { seconds, best } = self {
+            // The closest refusal carries its own way past.
+            return write!(f, "Gave up after {seconds} s looking for a plan. The closest it came:\n{best}");
+        }
         match self {
+            Refusal::GaveUp { .. } => unreachable!("written above"),
             Refusal::PresentOutsideRange { installed, live } => write!(
                 f,
                 "The installation has {installed}, outside {} which {} asks",

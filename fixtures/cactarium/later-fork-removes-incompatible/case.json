@@ -1,0 +1,22 @@
+{
+  "about": "app is incompatible with et/upstream, which b needs; only z 1.0.0 brings the fork that takes et/upstream's place. Neither the prune (et/upstream decided before z) nor a jump back past z may refuse",
+  "packages": [
+    "max--app--c1",
+    "et--b--c1",
+    "et--z--c1",
+    "et--upstream",
+    "max--fork"
+  ],
+  "specs": [
+    "max/app"
+  ],
+  "expect": {
+    "plan": [
+      "add max/app@1.0.0 App named",
+      "add et/b@1.0.0 B needed by max/app@1.0.0",
+      "add et/z@1.0.0 Z needed by max/app@1.0.0",
+      "add max/fork@1.0.0 Up needed by et/b@1.0.0",
+      "note: max/fork@1.0.0 stands in for et/upstream"
+    ]
+  }
+}
