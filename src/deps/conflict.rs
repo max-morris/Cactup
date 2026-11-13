@@ -21,8 +21,8 @@ pub(super) fn incompatible(a: &Release, b: &Release) -> bool {
 
 /// The first conflict in the final set that involves something this command changes (brings
 /// in, moves, or gives thorns; two unchanged present packages are the installation's business,
-/// not this plan's), the most
-/// specific kind first (a fork usually shares its upstream's thorn names):
+/// not this plan's), the most specific kind first (a fork usually shares its upstream's thorn
+/// names):
 /// - a fork and its upstream;
 /// - an `incompatible-with`, whichever of the two declares it;
 /// - two enabled thorns of one name (case-insensitive) in different packages, pseudo-packages
@@ -74,6 +74,7 @@ pub(super) fn conflicts(chosen: &BTreeMap<PkgId, Entry>) -> Option<Refusal> {
                     second: eb.release.label(),
                     newcomer: newcomer.clone(),
                     base_repo,
+                    ignore: None,
                 });
             }
         }

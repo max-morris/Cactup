@@ -130,9 +130,20 @@ fn claim_target(target: &str, range: Option<&str>, sha: Option<&str>) -> Result<
     Ok((id, Req::from_claim(range, sha)?))
 }
 
-/// Whether `r` declares itself a fork of `upstream`.
+/// `r`'s claims to be a fork of `upstream`, as the crate reads them; a claim whose target does
+/// not read as one (a bad range or sha) is no claim.
+fn fork_claims(r: &Release, upstream: &PkgId) -> Vec<cactup_ecosystem_common::manifest::ForkOf> {
+    r.claims
+        .iter()
+        .filter(|c| c.kind == "fork-of" && c.target == upstream.as_str())
+        .filter_map(|c| target_text(&c.target, c.range.as_deref(), c.sha.as_deref()).parse().ok())
+        .map(|target| cactup_ecosystem_common::manifest::ForkOf { target, note: None })
+        .collect()
+}
+
+/// Whether `r` declares itself a fork of `upstream` (with a claim that reads).
 fn forks(r: &Release, upstream: &PkgId) -> bool {
-    r.claims.iter().any(|c| c.kind == "fork-of" && c.target == upstream.as_str())
+    !fork_claims(r, upstream).is_empty()
 }
 
 /// Where a release sits.

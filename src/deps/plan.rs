@@ -147,10 +147,13 @@ pub struct Record {
 }
 
 impl Record {
-    /// The entry to write, given the existing one (if any) and the `[[added]]` commit it stood
-    /// beside: `requested` stays true once true, and a missing or stale entry counts as
-    /// requested, so no orphan pass ever removes a package the user may have named.
+    /// The entry to write, given the existing one and the `[[added]]` commit it stood beside. A
+    /// caller passes `old = None` for a package with no `[[added]]` entry (an entry an older
+    /// binary's `remove` left behind is no entry). `requested` stays true once true, and a
+    /// missing or stale entry counts as requested, so no orphan pass ever removes a package the
+    /// user may have named. A package this plan brings in (`Some(false)`) starts afresh.
     pub fn merge(&self, old: Option<&AddedFor>, old_commit: Option<&str>) -> AddedFor {
+        let old = old.filter(|_| self.requested != Some(false));
         let requested = match self.requested {
             Some(true) => true,
             Some(false) => false,
@@ -273,8 +276,10 @@ fn row(s: &Step) -> [String; 4] {
             ["add".into(), label.clone(), thorns.join(", "), why.to_string()]
         }
         Step::Upgrade { from, to, thorns, why, flag } => {
-            let at = |r: &Release| {
-                r.label().trim_start_matches(r.id.as_str()).trim_start_matches('@').to_owned()
+            // A tip shows the commit it was read at: `head (0123456789ab)`.
+            let at = |r: &Release| match &r.at {
+                super::At::Tip { name, commit } => format!("{name} ({})", super::short(commit)),
+                _ => r.label().trim_start_matches(r.id.as_str()).trim_start_matches('@').to_owned(),
             };
             let mut why = why.to_string();
             if let Some(flag) = flag {

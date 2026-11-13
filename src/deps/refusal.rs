@@ -49,6 +49,8 @@ pub enum Refusal {
         second: String,
         newcomer: PkgId,
         base_repo: Option<String>,
+        /// The claim that brings the newcomer in, when one does.
+        ignore: Option<String>,
     },
     /// `by` declares itself incompatible with `target`.
     Incompatible { by: PkgId, by_label: String, target: PkgId, target_label: String },
@@ -60,15 +62,21 @@ pub enum Refusal {
     NoReleaseFits { target: PkgId, constraints: Vec<Live> },
     /// No flesh release meets every flesh constraint.
     FleshUnmet { target: PkgId, constraints: Vec<Live> },
-    /// The plan would need two fleshes.
-    TwoFleshes { first: String, second: String },
+    /// The plan would need two fleshes. `ignore`: the claim that brings the second, when one does.
+    TwoFleshes { first: String, second: String, ignore: Option<String> },
     /// The constraints kept displacing each other past the step budget.
     NoConsistentSet { constraints: Vec<Live> },
     /// Whoever takes a need lacks thorns it names.
     MissingThorns { taker: String, thorns: Vec<String>, live: Live },
     /// Under `--replace`, a package taking over a base repo whose package it upgrades or forks
     /// lacks thorns the installation has enabled from that repo.
-    ReplacementLacksThorns { by: PkgId, by_label: String, base_repo: String, thorns: Vec<String> },
+    ReplacementLacksThorns {
+        by: PkgId,
+        by_label: String,
+        upstream: PkgId,
+        base_repo: String,
+        thorns: Vec<String>,
+    },
     /// Two packages place one library at versions no single release meets, or a new placement
     /// does not accept the release an installed one holds.
     LibraryClash { library: PkgId, placements: Vec<Live> },
@@ -98,10 +106,12 @@ impl Refusal {
             Refusal::SameThorn { newcomer, base_repo: Some(repo), .. } => {
                 format!("Pass --replace to use {newcomer} in place of base repo {repo}")
             }
-            Refusal::SameThorn { .. } => {
+            Refusal::SameThorn { ignore: Some(ignore), .. } => format!(
                 "Install only one of them: name single thorns (owner/pkg/Thorn) to leave the other's out, \
-                 or drop the claim that brings it in with --ignore-claim"
-                    .to_owned()
+                 or pass --ignore-claim {ignore}"
+            ),
+            Refusal::SameThorn { .. } => {
+                "Install only one of them: name single thorns (owner/pkg/Thorn) to leave the other's out".to_owned()
             }
             // P4: or `cactup claims override drop <by>:incompatible-with:<target>` (for good).
             Refusal::Incompatible { by, target, .. } => {
@@ -122,16 +132,15 @@ impl Refusal {
             | Refusal::FleshUnmet { constraints, .. }
             | Refusal::NoConsistentSet { constraints }
             | Refusal::LibraryClash { placements: constraints, .. } => ignore_one(constraints),
-            Refusal::TwoFleshes { .. } => {
-                "Drop one of the dependencies on a flesh with --ignore-claim, or name one flesh".to_owned()
-            }
+            Refusal::TwoFleshes { ignore: Some(ignore), .. } => format!("Pass --ignore-claim {ignore}"),
+            Refusal::TwoFleshes { .. } => "Name one flesh".to_owned(),
             // P4: or `cactup claims override needs …` to correct the claim for good.
             Refusal::MissingThorns { live, .. } => match &live.ignore {
                 Some(ignore) => format!("Pass --ignore-claim {ignore}"),
                 None => "Name thorns the package has".to_owned(),
             },
-            Refusal::ReplacementLacksThorns { .. } => {
-                "Leave out --replace, or install a release that has those thorns".to_owned()
+            Refusal::ReplacementLacksThorns { by, upstream, .. } => {
+                format!("Pass --ignore-claim {by}:fork-of:{upstream} to install it as a package of its own")
             }
             Refusal::Unclaimed(unmet) => {
                 let mut s =
@@ -223,7 +232,7 @@ impl fmt::Display for Refusal {
                 "The installation's flesh does not meet a flesh dependency, and no release of {target} does:{}",
                 list(constraints)
             )?,
-            Refusal::TwoFleshes { first, second } => {
+            Refusal::TwoFleshes { first, second, .. } => {
                 write!(f, "The plan needs two fleshes, {first} and {second}, and an installation has one")?
             }
             Refusal::NoConsistentSet { constraints } => write!(

@@ -1,0 +1,30 @@
+{
+  "about": "The first listed alternative conflicts only at its newest release: an older one makes the rest succeed, so it is still the first listed",
+  "packages": [
+    "max--z4c--anyof",
+    "et--carpet--newest-incompatible",
+    "et--cactuspugh",
+    "et--b"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "present": [
+    {
+      "package": "et/b",
+      "version": "1.5.0",
+      "enabled": [
+        "B"
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named",
+      "add et/carpet@2026.5.0 CarpetSlab max/z4c@1.2.0: any of et/carpet, et/cactuspugh (the first listed)"
+    ],
+    "choices": [
+      "any of et/carpet, et/cactuspugh: the first listed"
+    ]
+  }
+}

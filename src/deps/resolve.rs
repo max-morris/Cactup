@@ -1,83 +1,86 @@
-//! The resolver: named specs plus the installation's present packages → a [`Plan`].
+//! The resolver: named specs plus the installation's present packages → a [`Plan`], by a
+//! deterministic backtracking search.
 //!
-//! A pass seeds the chosen set with the present packages (their declared dependencies become
-//! passive constraints) and works off a queue of needs, the named specs first: single-target
-//! dependencies to a fixpoint, then any-of dependencies one at a time in a fixed order
-//! (dependent, then declaration order), the fixpoint re-run after each. Each need is taken by
-//! its target itself, a package an override says satisfies it, or a chosen fork that stands in
-//! for it; its range joins the target's constraints, and the target keeps its release if that
-//! meets them all, else moves to the newest release that does (when it may move).
+//! The search state is an assignment: a release for each package decided so far, and an
+//! alternative for each any-of decided so far. Everything else (which packages are in play, the
+//! needs and their takers, the enabled thorns, the constraints) is derived from the assignment
+//! alone, every time, so nothing stale survives a change of mind:
+//! - needs come from the named specs and from the claims of the releases in play; a present
+//!   package that is not changing turns its claims into passive constraints (binding a package
+//!   that moves; a present package that never comes up is checked against them only once the
+//!   assignment is complete);
+//! - a need is taken by its target, a package an override says satisfies it, or a fork in play
+//!   that stands in for it; a target nobody takes is required, and has to be decided.
 //!
-//! Restarts keep the result independent of the order needs arrive in:
-//! - a release that changes after its dependencies were pushed restarts the pass;
-//! - so does a dropped constraint (its release changed) that a decision or a failure used;
-//! - a release picked at a restart is reused while it fits, and dropped (with another pass)
-//!   once a constraint it was picked under is gone; a present package with a pick seeds no
-//!   passive constraints, since it is about to move;
-//! - a fork that comes in after its upstream was planned, and stands in for it, leaves a hint:
-//!   the next pass holds the upstream's needs until the fork is chosen.
+//! Decisions, in a fixed order: packages first (named ones, then the rest, each group by id),
+//! then any-of dependencies (by dependent, then declaration order). A package's candidates come
+//! in order of preference: a present package that may stay tries its present release first;
+//! otherwise newest first, approved before awaiting review; yanked only for an exact constraint.
+//! An any-of tries its alternatives in the order of its rules: one present at a release that
+//! fits, one already in play, then the listed order ("conflicts with nothing" being "the rest of
+//! the search succeeds").
 //!
-//! A refusal found during a pass waits for the pass to finish, since a restart may take away
-//! the constraint behind it. Passes scale with the number of packages; steps are bounded.
-// Plan §2.2. Greedy: no backtracking into other packages' choices beyond the restarts.
+//! Fork stand-ins, conflicts, `--replace`, libraries and the CCL check are checks on the state;
+//! a failure backtracks. When the search fails, the refusal is the one found deepest (a specific
+//! one over a bare "these do not fit together"); past a step budget scaled with the number of
+//! packages, it is "no consistent set" with the constraints of that failure.
+// Plan §2.2.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use cactup_ecosystem_common::api::ClaimInfo;
-use cactup_ecosystem_common::manifest::ForkOf;
+use cactup_ecosystem_common::api::{AlternativeInfo, ClaimInfo};
 use cactup_ecosystem_common::version::{TrackedReq, TrackedVersion};
-use indexmap::IndexSet;
+use indexmap::{IndexMap, IndexSet};
 
 use super::plan::{Choice, ChoiceRule, Library, Placement, Plan, Record, Replaced, Step, Untrusted};
 use super::refusal::{Live, Refusal, Unmet};
 use super::{
-    claim_target, conflict, forks, short, target_text, At, Facts, Fit, Origin, PkgId, Present, Release, Req,
-    Request, Requirement, Requirements, Rules, Why,
+    claim_target, conflict, fork_claims, forks, short, target_text, At, Facts, Fit, NamedSpec, Origin, PkgId,
+    Present, Release, Req, Request, Requirement, Requirements, Rules, Why,
 };
 use crate::Res;
 use anyhow::bail;
 
-/// Passes (restarts) before "no consistent set", at the least; more with more packages, since
-/// a restart settles at most one package.
-pub(super) const MIN_PASSES: usize = 32;
-/// Needs and decisions processed over every pass before "no consistent set".
-pub(super) const MAX_STEPS: usize = 50_000;
+/// Search steps before "no consistent set", at the least; more with more packages.
+pub(super) const MIN_STEPS: usize = 20_000;
 
 /// Resolves `request` against the registry `facts` gives, checking CCL requirements with `ccl`.
 /// A refusal comes back as a [`Refusal`] inside the error (downcast to read it); anything else
 /// is a failure of `facts` or an interrupt.
 pub fn resolve(request: &Request, facts: &mut dyn Facts, ccl: &dyn Requirements) -> Res<Plan> {
-    let mut present: Vec<Present> = request.present.to_vec();
-    for p in &mut present {
+    let mut present: BTreeMap<PkgId, Present> = BTreeMap::new();
+    for p in request.present {
+        let mut p = p.clone();
         request.rules.apply(&mut p.release);
+        present.insert(p.release.id.clone(), p);
     }
-    present.sort_by(|a, b| a.release.id.cmp(&b.release.id));
-    let mut r = Resolver {
+    let mut s = Search {
         request,
-        present,
         cat: Catalog::new(facts, request.rules),
         ccl,
-        picks: BTreeMap::new(),
-        hints: BTreeMap::new(),
+        specs: Vec::new(),
+        holders: BTreeMap::new(),
         steps: 0,
-        restarted: BTreeSet::new(),
-        s: Pass::default(),
+        budget: MIN_STEPS.max(2_000 * (present.len() + request.specs.len() + 1)),
+        exhausted: false,
+        best: None,
+        present,
     };
-    r.cat.ensure(request.specs.iter().map(|s| s.id.clone()))?;
-    let mut passes = 0;
-    loop {
-        passes += 1;
-        if passes > r.max_passes() {
-            return Err(r.no_consistent_set().into());
-        }
-        match r.pass()? {
-            Outcome::Done => break,
-            Outcome::Restart(t) => {
-                r.restarted.insert(t);
-            }
-        }
+    s.cat.ensure(request.specs.iter().map(|x| x.id.clone()))?;
+    // A named tip is read once, up front: the need is for the commit it is at now.
+    for spec in request.specs {
+        let req = match &spec.req {
+            Req::Tip(tip) if s.cat.known(&spec.id) => Req::Commit(s.cat.snapshot(&spec.id, tip)?.commit),
+            req => req.clone(),
+        };
+        s.specs.push(NamedSpec { id: spec.id.clone(), req, thorns: spec.thorns.clone() });
     }
-    r.finish()
+    s.holders = s.present_holders();
+    let mut assign = Assign::default();
+    if let Some(plan) = s.search(&mut assign)? {
+        return Ok(plan);
+    }
+    Err(s.refusal()?.into())
 }
 
 /// The releases among `candidates` that meet every requirement: usable (or `present`, which is
@@ -91,27 +94,12 @@ fn eligible<'r>(candidates: &'r [Release], reqs: &[Req], present: Option<&Releas
         .collect()
 }
 
-/// Approved releases, or (when none) the ones awaiting review.
-fn approved_first(ok: Vec<&Release>) -> Vec<&Release> {
-    let approved: Vec<&Release> = ok.iter().copied().filter(|r| !r.pending).collect();
-    if approved.is_empty() { ok } else { approved }
-}
-
-/// The newest: versions by semver (within a range, tracks are the range's to choose), above any
-/// release at no version; ties go to the one listed first.
-fn newest<'r>(pool: &[&'r Release]) -> Option<&'r Release> {
-    let newer = |a: &Release, b: &Release| match (&a.at, &b.at) {
-        (At::Version(x), At::Version(y)) => x.version > y.version,
-        (At::Version(_), _) => true,
-        _ => false,
-    };
-    let mut best: Option<&Release> = None;
-    for r in pool {
-        if best.is_none_or(|b| newer(r, b)) {
-            best = Some(r);
-        }
-    }
-    best
+/// In order of preference: approved before awaiting review, then newest first (versions by
+/// semver, above any release at no version); ties keep the order they came in.
+fn preferred(mut rs: Vec<&Release>) -> Vec<&Release> {
+    let rank = |r: &Release| (r.pending, std::cmp::Reverse(r.at.version().map(|v| v.version.clone())));
+    rs.sort_by_key(|r| rank(r));
+    rs
 }
 
 /// The registry as the resolver sees it: releases with the rules applied, loaded once.
@@ -159,6 +147,10 @@ impl<'a> Catalog<'a> {
         Ok(())
     }
 
+    fn loaded(&self, id: &PkgId) -> bool {
+        id.is_repo() || self.loaded.contains_key(id)
+    }
+
     fn releases(&self, id: &PkgId) -> &[Release] {
         self.loaded.get(id).and_then(|r| r.as_deref()).unwrap_or(&[])
     }
@@ -203,15 +195,38 @@ impl<'a> Catalog<'a> {
         self.snapshots.insert(key, release.clone());
         Ok(release)
     }
+
+    /// The served releases of `t`, plus the read at each commit `reqs` name that no served
+    /// release is at.
+    fn candidates(&mut self, t: &PkgId, reqs: &[Req]) -> Res<Vec<Release>> {
+        let mut candidates: Vec<Release> = self.releases(t).to_vec();
+        for q in reqs {
+            if let Req::Commit(sha) = q
+                && self.known(t)
+                && !candidates.iter().any(|r| r.commit.starts_with(sha.as_str()))
+            {
+                candidates.push(self.snapshot(t, sha)?);
+            }
+        }
+        Ok(candidates)
+    }
 }
 
-enum Outcome {
-    Done,
-    /// This package's decision has to be made again, with what this pass learned.
-    Restart(PkgId),
+/// What has been decided.
+#[derive(Clone, Debug, Default)]
+struct Assign {
+    releases: BTreeMap<PkgId, Release>,
+    /// (dependent, index of the claim) → (alternative, the rule that put it first).
+    any_of: BTreeMap<(PkgId, usize), (usize, ChoiceRule)>,
 }
 
-/// Where a constraint comes from: the key it is dropped by.
+impl Assign {
+    fn depth(&self) -> usize {
+        self.releases.len() + self.any_of.len()
+    }
+}
+
+/// Where a need comes from.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Source {
     Named,
@@ -220,15 +235,16 @@ enum Source {
     Release { label: String, id: PkgId },
 }
 
-#[derive(Clone, Debug)]
-struct Constraint {
-    source: Source,
-    req: Req,
-    thorns: Vec<String>,
-    /// From a present package that is not changing: it narrows what a moving package may take,
-    /// but a package that may not move is not refused over it (that predates this command).
-    /// Under `--no-deps` it narrows nothing, and a plan that breaks it says so in a note.
-    passive: bool,
+/// How a need binds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// It brings its target in, enables thorns, and constrains.
+    Active,
+    /// A claim of a present package that is not changing: it constrains a package that moves (it
+    /// never refuses one that may not: that predates the command). Under `--no-deps`, a note.
+    Passive,
+    /// The same, of a present package not decided at all: checked once the assignment is complete.
+    PassiveFinal,
 }
 
 #[derive(Clone, Debug)]
@@ -237,47 +253,55 @@ enum Thorns {
     Some(Vec<String>),
 }
 
+fn thorns_of(needs: &[String]) -> Thorns {
+    if needs.is_empty() { Thorns::All } else { Thorns::Some(needs.to_vec()) }
+}
+
+/// The any-of an answering need comes from.
+#[derive(Clone, Debug)]
+struct FromAnyOf {
+    key: (PkgId, usize),
+    label: String,
+    alternatives: Vec<PkgId>,
+    rule: ChoiceRule,
+}
+
 #[derive(Clone, Debug)]
 struct Need {
+    source: Source,
     target: PkgId,
     req: Req,
     thorns: Thorns,
     why: Why,
-    source: Source,
-    /// Held once for a hinted fork; never again.
-    held: bool,
+    kind: Kind,
+    any_of: Option<FromAnyOf>,
+    /// Its source is decided (or named): it stays while the source does.
+    stable: bool,
 }
 
-#[derive(Clone, Debug)]
-struct AnyOf {
-    claim: ClaimInfo,
-    index: usize,
-    dependent: PkgId,
-    label: String,
+/// Who takes a need.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Taker {
+    Itself,
+    /// A package in play standing in (a fork, or one an override names).
+    Other { taker: PkgId, note: String },
+    /// A fork the plan requires but has not decided yet.
+    Fork(PkgId),
+    /// Forks in play, none of which stands in for what the need asks.
+    NotStandIn { fork: PkgId },
 }
 
-/// A release decided on at a restart, with the constraints live on its package then.
-#[derive(Clone, Debug)]
-struct Pick {
-    release: Release,
-    sources: BTreeSet<Source>,
-}
-
-/// A package in the chosen set.
+/// A package in play.
 #[derive(Clone, Debug)]
 pub(super) struct Entry {
     pub(super) release: Release,
     pub(super) enabled: BTreeSet<String>,
     /// What the installation has; `None` for a package the plan brings in.
     pub(super) present: Option<Present>,
-    /// When the pass first touched it (`usize::MAX`: never): the order of the steps.
+    /// Its place in the plan (`usize::MAX`: no step).
     pub(super) order: usize,
-    why: Option<Why>,
-    /// Its dependencies were pushed in this pass.
-    expanded: bool,
-    /// Every thorn of whichever release it ends up at.
-    whole: bool,
-    keep: Vec<String>,
+    /// Its release was decided (rather than a present one nothing has come to yet).
+    decided: bool,
 }
 
 impl Entry {
@@ -305,59 +329,69 @@ impl Entry {
     }
 }
 
-/// A failure found during a pass, with the constraints it was found under.
-struct Failure {
-    refusal: Refusal,
-    on: Option<(PkgId, BTreeSet<Source>)>,
+/// An any-of waiting for a decision.
+#[derive(Clone, Debug)]
+struct OpenAnyOf {
+    key: (PkgId, usize),
+    claim: ClaimInfo,
+    label: String,
 }
 
-/// One pass's state, thrown away on a restart.
-#[derive(Default)]
-struct Pass {
+/// Everything the assignment implies.
+#[derive(Clone, Debug, Default)]
+struct Derived {
     chosen: BTreeMap<PkgId, Entry>,
-    next_order: usize,
-    constraints: BTreeMap<PkgId, Vec<Constraint>>,
-    singles: VecDeque<Need>,
-    /// Needs held until a hinted fork is chosen.
-    held: Vec<Need>,
-    any_of: BTreeMap<(PkgId, usize), AnyOf>,
-    /// Claims already pushed: (dependent, index of the claim).
-    pushed: BTreeSet<(PkgId, usize)>,
-    /// What was dropped in favor of whom: (what, by, the base thorns taken over, flesh).
-    replaced: Vec<(Replaced, PkgId, Vec<String>, bool)>,
-    failure: Option<Failure>,
-    notes: IndexSet<String>,
-    choices: Vec<Choice>,
-    brought_by: BTreeMap<PkgId, IndexSet<String>>,
-    named: BTreeSet<PkgId>,
+    needs: Vec<(Need, Taker)>,
+    /// The packages the plan brings in (decided or not): every taker that is not present.
+    required: BTreeSet<PkgId>,
+    /// Thorns needs give each taker (`""`: all of them).
+    given: BTreeMap<PkgId, BTreeSet<String>>,
     touched: BTreeSet<PkgId>,
-    /// Moving packages that already took their newest release in this pass.
-    settled: BTreeSet<PkgId>,
-    /// Constraints a decision or a failure read: (target, source).
-    used: BTreeSet<(PkgId, Source)>,
-    /// Present packages whose passive constraints were not seeded, because of a pick.
-    unseeded: BTreeSet<PkgId>,
+    open: Vec<PkgId>,
+    open_any_of: Vec<OpenAnyOf>,
+    replaced: Vec<(Replaced, PkgId, Vec<String>, bool)>,
+    /// Packages whose versions are needed and not loaded yet.
+    want: BTreeSet<PkgId>,
+    failure: Option<Failure>,
 }
 
-struct Resolver<'a> {
+/// A refusal waiting to be chosen as the one to report.
+#[derive(Clone, Debug)]
+enum Pending {
+    Refusal(Refusal),
+    /// Providers are asked for only if this is the one reported.
+    Unclaimed(Vec<(String, PkgId, Requirement)>),
+}
+
+#[derive(Clone, Debug)]
+struct Failure {
+    refusal: Pending,
+    /// The constraints behind it.
+    lives: Vec<Live>,
+    /// "These do not fit together", where another release would have met every constraint.
+    weak: bool,
+}
+
+impl Failure {
+    fn of(refusal: Refusal, lives: Vec<Live>) -> Failure {
+        Failure { refusal: Pending::Refusal(refusal), lives, weak: false }
+    }
+}
+
+struct Search<'a> {
     request: &'a Request<'a>,
-    present: Vec<Present>,
+    present: BTreeMap<PkgId, Present>,
     cat: Catalog<'a>,
     ccl: &'a dyn Requirements,
-    picks: BTreeMap<PkgId, Pick>,
-    /// Upstream → the fork that stood in for it in an earlier pass.
-    hints: BTreeMap<PkgId, PkgId>,
+    /// The named specs, tips read.
+    specs: Vec<NamedSpec>,
+    /// For each present package's any-of (dependent, claim index), the alternative it holds.
+    holders: BTreeMap<(PkgId, usize), usize>,
     steps: usize,
-    /// Packages whose decision restarted a pass.
-    restarted: BTreeSet<PkgId>,
-    s: Pass,
-}
-
-/// Who takes a need.
-enum Identity {
-    Itself,
-    Other { taker: PkgId, note: String },
-    NotStandIn { fork: PkgId },
+    budget: usize,
+    exhausted: bool,
+    /// The failure to report: (depth, specific, failure); the first of the deepest wins.
+    best: Option<(usize, bool, Failure)>,
 }
 
 /// The dependency as people read it: `et/carpet@^1.2`, or `any of et/carpet, et/cactuspugh`.
@@ -365,926 +399,984 @@ pub(super) fn claim_label(c: &ClaimInfo) -> String {
     if c.alternatives.is_empty() {
         target_text(&c.target, c.range.as_deref(), c.sha.as_deref())
     } else {
-        let text = |a: &cactup_ecosystem_common::api::AlternativeInfo| {
-            target_text(&a.target, a.range.as_deref(), a.sha.as_deref())
-        };
+        let text = |a: &AlternativeInfo| target_text(&a.target, a.range.as_deref(), a.sha.as_deref());
         let alts: Vec<String> = c.alternatives.iter().map(text).collect();
         format!("any of {}", alts.join(", "))
     }
-}
-
-/// `r`'s claim to be a fork of `upstream`, as the crate reads one.
-fn fork_claim(r: &Release, upstream: &PkgId) -> Option<ForkOf> {
-    let c = r.claims.iter().find(|c| c.kind == "fork-of" && c.target == upstream.as_str())?;
-    let target = target_text(&c.target, c.range.as_deref(), c.sha.as_deref()).parse().ok()?;
-    Some(ForkOf { target, note: None })
-}
-
-/// Whether a dependency applies to these thorns: `needed-by` names one of them, or (when the
-/// package first enters) it names none.
-fn applies(c: &ClaimInfo, scope: &BTreeSet<String>, first: bool) -> bool {
-    if c.needed_by.is_empty() {
-        return first;
-    }
-    c.needed_by.iter().any(|n| scope.iter().any(|t| t.eq_ignore_ascii_case(n)))
 }
 
 fn contains(set: &BTreeSet<String>, name: &str) -> bool {
     set.iter().any(|t| t.eq_ignore_ascii_case(name))
 }
 
-fn thorns_of(needs: &[String]) -> Thorns {
-    if needs.is_empty() { Thorns::All } else { Thorns::Some(needs.to_vec()) }
+fn intersects(names: &[String], set: &BTreeSet<String>) -> bool {
+    names.iter().any(|n| contains(set, n))
 }
 
-impl Resolver<'_> {
-    fn max_passes(&self) -> usize {
-        MIN_PASSES.max(4 * (self.present.len() + self.cat.loaded.len()))
-    }
+/// The thorns a need names that `r` lacks.
+fn missing_thorns(r: &Release, n: &Need) -> Vec<String> {
+    n.names().into_iter().filter(|th| r.thorn(th).is_none()).collect()
+}
 
-    fn fail(&mut self, r: Refusal) {
-        if self.s.failure.is_none() {
-            self.s.failure = Some(Failure { refusal: r, on: None });
-        }
-    }
+/// Whether `r` fails a need: outside its range, or without a thorn it names.
+fn violates(r: &Release, n: &Need) -> bool {
+    n.req.fit(r) == Fit::No || !missing_thorns(r, n).is_empty()
+}
 
-    /// A failure over the constraints on `t`: dropped if one of them goes.
-    fn fail_on(&mut self, t: &PkgId, r: Refusal) {
-        if self.s.failure.is_none() {
-            let sources = self.live_sources(t);
-            self.s.failure = Some(Failure { refusal: r, on: Some((t.clone(), sources)) });
-        }
-    }
+/// The ids of the entries `keep` accepts.
+fn ids_where(chosen: &BTreeMap<PkgId, Entry>, keep: impl Fn(&PkgId, &Entry) -> bool) -> Vec<PkgId> {
+    chosen.iter().filter(|(id, e)| keep(id, e)).map(|(id, _)| id.clone()).collect()
+}
 
-    fn pass(&mut self) -> Res<Outcome> {
-        self.s = Pass::default();
-        for p in &self.present {
-            let entry = Entry {
-                release: p.release.clone(),
-                enabled: p.enabled.clone(),
-                present: Some(p.clone()),
-                order: usize::MAX,
-                why: None,
-                expanded: false,
-                whole: false,
-                keep: Vec::new(),
-            };
-            self.s.chosen.insert(p.release.id.clone(), entry);
-        }
-        self.seed_passive();
-        for spec in self.request.specs {
-            self.s.named.insert(spec.id.clone());
-            let thorns = spec.thorns.clone().map_or(Thorns::All, Thorns::Some);
-            let (target, req) = (spec.id.clone(), spec.req.clone());
-            let need = Need { target, req, thorns, why: Why::Named, source: Source::Named, held: false };
-            self.s.singles.push_back(need);
-        }
-        if self.request.options.upgrade_all {
-            for p in &self.present {
-                let At::Version(v) = &p.release.at else { continue };
-                // Any version on the track it is on.
-                let mut req = TrackedReq::any();
-                req.alts[0].track = v.track.clone();
-                let thorns = Thorns::Some(p.enabled.iter().cloned().collect());
-                let target = p.release.id.clone();
-                let (req, why, source) = (Req::Range(req), Why::UpgradeAll, Source::UpgradeAll);
-                self.s.singles.push_back(Need { target, req, thorns, why, source, held: false });
-            }
-        }
-        loop {
-            if gix::interrupt::is_triggered() {
-                bail!("Interrupted");
-            }
-            self.steps += 1;
-            if self.steps > MAX_STEPS {
-                return Err(self.no_consistent_set().into());
-            }
-            if let Some(need) = self.s.singles.pop_front() {
-                self.load_wave(&need)?;
-                if let Some(t) = self.process(need)? {
-                    return Ok(Outcome::Restart(t));
-                }
-                continue;
-            }
-            // Needs held for a fork that has come in since.
-            let chosen = &self.s.chosen;
-            let hints = &self.hints;
-            let (ready, wait): (Vec<Need>, Vec<Need>) = std::mem::take(&mut self.s.held)
-                .into_iter()
-                .partition(|n| hints.get(&n.target).is_some_and(|f| chosen.contains_key(f)));
-            self.s.held = wait;
-            if !ready.is_empty() {
-                self.s.singles.extend(ready);
-                continue;
-            }
-            if let Some(key) = self.s.any_of.keys().next().cloned() {
-                let a = self.s.any_of.remove(&key).expect("the key was just read");
-                self.decide(a)?;
-                continue;
-            }
-            if !self.s.held.is_empty() {
-                // The fork never came: the upstream takes its needs after all.
-                self.s.singles.extend(std::mem::take(&mut self.s.held));
-                continue;
-            }
-            break;
-        }
-        if let Some(t) = self.stale_pick() {
-            return Ok(Outcome::Restart(t));
-        }
-        if let Some(f) = self.s.failure.take() {
-            if let Some((t, sources)) = &f.on
-                && !sources.is_subset(&self.live_sources(t))
-            {
-                return Ok(Outcome::Restart(t.clone()));
-            }
-            return Err(f.refusal.into());
-        }
-        Ok(Outcome::Done)
-    }
-
-    /// The present packages' declared dependencies, as passive constraints: a single target's,
-    /// and an any-of's on the alternative holding it. None for a package with a pick (it is about
-    /// to move, and its present claims would mislead every decision before it does).
-    fn seed_passive(&mut self) {
-        let present: Vec<Present> = self.present.clone();
-        for p in &present {
-            let id = &p.release.id;
-            if self.picks.get(id).is_some_and(|pick| !pick.release.same(&p.release)) {
-                self.s.unseeded.insert(id.clone());
-                continue;
-            }
-            let source = Source::Release { label: p.release.label(), id: id.clone() };
-            for c in p.release.claims.iter().filter(|c| c.kind == "dependency") {
-                if c.into.is_some() || !applies(c, &p.enabled, true) {
-                    continue;
-                }
-                let target = if c.alternatives.is_empty() {
-                    let target = claim_target(&c.target, c.range.as_deref(), c.sha.as_deref()).ok();
-                    target.map(|t| (t, c.needs.clone()))
-                } else {
-                    c.alternatives
-                        .iter()
-                        .filter_map(|a| {
-                            let target = claim_target(&a.target, a.range.as_deref(), a.sha.as_deref()).ok()?;
-                            Some((target, a.needs.clone()))
-                        })
-                        .find(|((alt, req), _)| self.holds_itself(alt, req, true))
-                };
-                let Some(((target, req), thorns)) = target else { continue };
-                let c = Constraint { source: source.clone(), req, thorns, passive: true };
-                self.s.constraints.entry(target).or_default().push(c);
-            }
-        }
-    }
-
-    /// Whether `t` itself is chosen (present or planned, as asked) at a release meeting `req`.
-    fn holds_itself(&self, t: &PkgId, req: &Req, present: bool) -> bool {
-        self.s.chosen.get(t).is_some_and(|e| e.present.is_some() == present && req.fit(&e.release) != Fit::No)
-    }
-
-    /// Loads, in one wave, the need's target and every target still queued.
-    fn load_wave(&mut self, need: &Need) -> Res<()> {
-        let mut ids = vec![need.target.clone()];
-        ids.extend(self.s.singles.iter().map(|n| n.target.clone()));
-        for a in self.s.any_of.values() {
-            ids.extend(a.claim.alternatives.iter().filter_map(|alt| PkgId::parse(&alt.target).ok()));
-        }
-        self.cat.ensure(ids)
-    }
-
-    /// Whether a constraint narrows anything: a passive one does not under `--no-deps`.
-    fn counts(&self, c: &Constraint) -> bool {
-        !(c.passive && self.request.options.no_deps)
-    }
-
-    fn live_sources(&self, t: &PkgId) -> BTreeSet<Source> {
-        let all = self.s.constraints.get(t).into_iter().flatten();
-        all.filter(|c| self.counts(c)).map(|c| c.source.clone()).collect()
-    }
-
-    fn live(&self, target: &PkgId, c: &Constraint) -> Live {
-        let (source, ignore) = match &c.source {
+impl Need {
+    fn live(&self) -> Live {
+        let (source, ignore) = match &self.source {
             Source::Named => ("the command line".to_owned(), None),
             Source::UpgradeAll => ("--upgrade-all".to_owned(), None),
             Source::Release { label, id } => {
-                let source = if c.passive { format!("installed {label}") } else { label.clone() };
-                (source, Some(format!("{id}:dependency:{target}")))
+                let source = if self.kind == Kind::Active { label.clone() } else { format!("installed {label}") };
+                (source, Some(format!("{id}:dependency:{}", self.target)))
             }
         };
-        Live { target: target.clone(), req: c.req.to_string(), source, ignore }
+        Live { target: self.target.clone(), req: self.req.to_string(), source, ignore }
     }
 
-    fn lives(&self, target: &PkgId) -> Vec<Live> {
-        let mut out: Vec<Live> = Vec::new();
-        for c in self.s.constraints.get(target).into_iter().flatten().filter(|c| self.counts(c)) {
-            let l = self.live(target, c);
-            if !out.contains(&l) {
-                out.push(l);
+    fn names(&self) -> Vec<String> {
+        match &self.thorns {
+            Thorns::All => Vec::new(),
+            Thorns::Some(v) => v.clone(),
+        }
+    }
+
+    fn label(&self) -> Option<&str> {
+        match &self.source {
+            Source::Release { label, .. } => Some(label),
+            _ => None,
+        }
+    }
+}
+
+impl Search<'_> {
+    fn named(&self, id: &PkgId) -> Option<&NamedSpec> {
+        self.specs.iter().find(|s| &s.id == id)
+    }
+
+    /// For each any-of of each present package, the first alternative a present package holds at
+    /// a release that fits (or a present fork stands in for): its passive constraint goes there.
+    fn present_holders(&self) -> BTreeMap<(PkgId, usize), usize> {
+        let mut out = BTreeMap::new();
+        for (id, p) in &self.present {
+            for (i, c) in p.release.claims.iter().enumerate() {
+                if c.kind != "dependency" || c.alternatives.is_empty() {
+                    continue;
+                }
+                let held = c.alternatives.iter().position(|a| {
+                    let target = claim_target(&a.target, a.range.as_deref(), a.sha.as_deref());
+                    let Ok((target, req)) = target else { return false };
+                    match self.present.get(&target) {
+                        Some(t) => req.fit(&t.release) != Fit::No,
+                        None => self.present.values().any(|f| {
+                            let published = self.cat.published(&target);
+                            let stands = |fork: &cactup_ecosystem_common::manifest::ForkOf| {
+                                target.slug(&req).is_some_and(|dep| fork.stands_in_for(&dep, &published))
+                            };
+                            fork_claims(&f.release, &target).iter().any(stands)
+                        }),
+                    }
+                });
+                if let Some(alt) = held {
+                    out.insert((id.clone(), i), alt);
+                }
             }
         }
         out
     }
 
-    /// The live constraints of the packages that kept restarting (of every package, if none did).
-    fn no_consistent_set(&self) -> Refusal {
-        let mut constraints: Vec<Live> = self.restarted.iter().flat_map(|t| self.lives(t)).collect();
-        if constraints.is_empty() {
-            constraints = self.s.constraints.keys().flat_map(|t| self.lives(t)).collect();
-        }
-        Refusal::NoConsistentSet { constraints }
-    }
-
-    fn no_release(&self, t: &PkgId) -> Refusal {
-        if self.cat.is_flesh(t) {
-            Refusal::FleshUnmet { target: t.clone(), constraints: self.lives(t) }
-        } else {
-            Refusal::NoReleaseFits { target: t.clone(), constraints: self.lives(t) }
+    fn record(&mut self, depth: usize, f: Failure) {
+        let specific = !f.weak;
+        if self.best.as_ref().is_none_or(|(d, s, _)| (depth, specific) > (*d, *s)) {
+            self.best = Some((depth, specific, f));
         }
     }
 
-    fn need_live(&self, need: &Need) -> Live {
-        let (source, req) = (need.source.clone(), need.req.clone());
-        let c = Constraint { source, req, thorns: Vec::new(), passive: false };
-        self.live(&need.target, &c)
-    }
-
-    /// Records that a decision on `t` read the constraints on it now.
-    fn note_used(&mut self, t: &PkgId) {
-        for s in self.live_sources(t) {
-            self.s.used.insert((t.clone(), s));
+    fn refusal(&mut self) -> Res<Refusal> {
+        let Some((_, _, f)) = self.best.take() else {
+            return Ok(Refusal::NoConsistentSet { constraints: Vec::new() });
+        };
+        if self.exhausted {
+            return Ok(Refusal::NoConsistentSet { constraints: f.lives });
         }
-    }
-
-    /// Whether a package may move to another release: brought in by the plan, named, touched
-    /// under `--upgrade`, any present package under `--upgrade-all`, or a flesh (an unmet flesh
-    /// dependency plans the flesh's replacement). Never a pseudo-package.
-    fn movable(&self, t: &PkgId) -> bool {
-        let Some(e) = self.s.chosen.get(t) else { return true };
-        if t.is_repo() {
-            return false;
-        }
-        e.present.is_none()
-            || self.s.named.contains(t)
-            || self.request.options.upgrade_all
-            || (self.request.options.upgrade && self.s.touched.contains(t))
-            || e.release.flesh
-    }
-
-    /// Whether `r` meets the constraints on `t`'s versions (`active_only`: leaving out those of
-    /// present packages that are not changing), and the thorns they name that it lacks.
-    fn fits(&mut self, t: &PkgId, r: &Release, active_only: bool) -> (bool, Vec<String>) {
-        self.note_used(t);
-        let mut version_ok = true;
-        let mut missing: Vec<String> = Vec::new();
-        for c in self.s.constraints.get(t).into_iter().flatten().filter(|c| self.counts(c)) {
-            if active_only && c.passive {
-                continue;
-            }
-            if c.req.fit(r) == Fit::No {
-                version_ok = false;
-            }
-            for th in &c.thorns {
-                if r.thorn(th).is_none() && !missing.iter().any(|m| m.eq_ignore_ascii_case(th)) {
-                    missing.push(th.clone());
+        Ok(match f.refusal {
+            Pending::Refusal(r) => r,
+            Pending::Unclaimed(unmet) => {
+                let mut out: Vec<Unmet> = Vec::new();
+                let mut asked: BTreeMap<Requirement, Vec<super::Provider>> = BTreeMap::new();
+                for (thorn, package, requirement) in unmet {
+                    if gix::interrupt::is_triggered() {
+                        bail!("Interrupted");
+                    }
+                    if !asked.contains_key(&requirement) {
+                        let found = self.cat.facts.providers(&requirement)?;
+                        asked.insert(requirement.clone(), found);
+                    }
+                    let providers = asked[&requirement].clone();
+                    out.push(Unmet { thorn, package, requirement, providers });
                 }
+                Refusal::Unclaimed(out)
             }
-        }
-        (version_ok, missing)
+        })
     }
 
-    /// The served releases of `t`, plus the read at each commit `reqs` name that no served
-    /// release is at.
-    fn candidates(&mut self, t: &PkgId, reqs: &[Req]) -> Res<Vec<Release>> {
-        let mut candidates: Vec<Release> = self.cat.releases(t).to_vec();
-        for q in reqs {
-            if let Req::Commit(sha) = q
-                && !t.is_repo()
-                && self.cat.known(t)
-                && !candidates.iter().any(|r| r.commit.starts_with(sha.as_str()))
-            {
-                candidates.push(self.cat.snapshot(t, sha)?);
-            }
+    /// One node of the search: `Some(plan)` once a complete assignment passes every check.
+    fn search(&mut self, a: &mut Assign) -> Res<Option<Plan>> {
+        if self.exhausted {
+            return Ok(None);
         }
-        Ok(candidates)
-    }
-
-    /// The newest release of `t` meeting every constraint on it (and `extra`), with every thorn
-    /// they name (and, for a present package moving unnamed, every thorn it has enabled):
-    /// approved releases first, one awaiting review only when none fits; a yanked one only for an
-    /// exact constraint; never an invalid one. A release picked at a restart wins while it meets
-    /// them, even one awaiting review over an approved one: the constraint that forced it may not
-    /// have come back yet in this pass, and [`Self::stale_pick`] drops it at the end of the pass
-    /// once that constraint is gone for good.
-    fn select(&mut self, t: &PkgId, extra: Option<&Req>) -> Res<Option<Release>> {
-        if extra.is_none() {
-            self.note_used(t);
+        if gix::interrupt::is_triggered() {
+            bail!("Interrupted");
         }
-        let constraints: Vec<Constraint> =
-            self.s.constraints.get(t).into_iter().flatten().filter(|c| self.counts(c)).cloned().collect();
-        let mut reqs: Vec<Req> = constraints.iter().map(|c| c.req.clone()).collect();
-        reqs.extend(extra.cloned());
-        let mut required: Vec<String> = constraints.iter().flat_map(|c| c.thorns.iter().cloned()).collect();
-        let present = self.s.chosen.get(t).and_then(|e| e.present.clone());
-        if let Some(p) = &present
-            && !self.s.named.contains(t)
-        {
-            required.extend(p.enabled.iter().cloned());
+        self.steps += 1;
+        if self.steps > self.budget {
+            self.exhausted = true;
+            return Ok(None);
         }
-        let mut candidates = self.candidates(t, &reqs)?;
-        if let Some(p) = &present
-            && !candidates.iter().any(|r| r.same(&p.release))
-        {
-            candidates.push(p.release.clone());
+        let depth = a.depth();
+        let d = self.derive_loaded(a)?;
+        if let Some(f) = self.check(&d, false) {
+            self.record(depth, f);
+            return Ok(None);
         }
-        let ok = eligible(&candidates, &reqs, present.as_ref().map(|p| &p.release));
-        let has_required = |r: &&Release| required.iter().all(|th| r.thorn(th).is_some());
-        let ok: Vec<&Release> = ok.into_iter().filter(has_required).collect();
-        if let Some(p) = self.picks.get(t)
-            && ok.iter().any(|r| r.same(&p.release))
-        {
-            return Ok(Some(p.release.clone()));
-        }
-        Ok(newest(&approved_first(ok)).cloned())
-    }
-
-    /// Who takes a need for `t`: `t` itself when chosen, a package an override says satisfies it,
-    /// a chosen fork that stands in for the versions asked, or (to be brought in) `t` itself.
-    fn identity(&self, t: &PkgId, req: &Req) -> Identity {
-        if self.s.chosen.contains_key(t) {
-            return Identity::Itself;
-        }
-        for x in self.request.rules.satisfiers(t) {
-            if self.s.chosen.contains_key(x) {
-                let note = format!("{x} stands in for {t} (a claims override)");
-                return Identity::Other { taker: x.clone(), note };
-            }
-        }
-        for (id, e) in &self.s.chosen {
-            let Some(fork) = fork_claim(&e.release, t) else { continue };
-            let published = self.cat.published(t);
-            if t.slug(req).is_some_and(|dep| fork.stands_in_for(&dep, &published)) {
-                let note = format!("{} stands in for {t}", e.release.label());
-                return Identity::Other { taker: id.clone(), note };
-            }
-            return Identity::NotStandIn { fork: id.clone() };
-        }
-        Identity::Itself
-    }
-
-    fn touch(&mut self, t: &PkgId, why: &Why) {
-        let next = self.s.next_order;
-        if let Some(e) = self.s.chosen.get_mut(t)
-            && e.order == usize::MAX
-        {
-            e.order = next;
-            e.why = Some(why.clone());
-            self.s.next_order += 1;
-        }
-    }
-
-    fn source_label(source: &Source) -> Option<String> {
-        match source {
-            Source::Release { label, .. } => Some(label.clone()),
-            _ => None,
-        }
-    }
-
-    /// One need. `Some(t)`: the pass restarts, `t`'s decision to be made again.
-    fn process(&mut self, mut need: Need) -> Res<Option<PkgId>> {
-        let t = need.target.clone();
-        if let Req::Tip(tip) = &need.req {
-            if t.is_repo() || !self.cat.known(&t) {
-                self.fail(Refusal::NotRegistered { target: t, by: None });
-                return Ok(None);
-            }
-            let snap = self.cat.snapshot(&t, tip)?;
-            need.req = Req::Commit(snap.commit);
-        }
-        match self.identity(&t, &need.req) {
-            Identity::Itself => {}
-            Identity::Other { taker, note } => {
-                self.take_by(&taker, &need, note);
-                return Ok(None);
-            }
-            Identity::NotStandIn { fork } => {
-                // An unmet flesh dependency plans the flesh's replacement instead.
-                if !self.cat.is_flesh(&t) {
-                    let fork_label = self.s.chosen[&fork].release.label();
-                    let live = self.need_live(&need);
-                    self.fail(Refusal::ForkDoesNotStandIn { fork, fork_label, live });
+        if let Some(t) = d.open.first().cloned() {
+            let candidates = match self.candidates(&t, &d)? {
+                Ok(c) => c,
+                Err(f) => {
+                    self.record(depth, f);
                     return Ok(None);
                 }
-            }
-        }
-        if !self.s.chosen.contains_key(&t) {
-            if !need.held
-                && let Some(f) = self.hints.get(&t)
-                && !self.s.chosen.contains_key(f)
-            {
-                need.held = true;
-                self.s.held.push(need);
-                return Ok(None);
-            }
-            if !self.cat.known(&t) {
-                let by = (need.source != Source::Named).then(|| self.need_live(&need));
-                self.fail(Refusal::NotRegistered { target: t, by });
-                return Ok(None);
-            }
-        }
-        let thorns = match &need.thorns {
-            Thorns::Some(v) => v.clone(),
-            Thorns::All => Vec::new(),
-        };
-        let (source, req) = (need.source.clone(), need.req.clone());
-        let c = Constraint { source, req, thorns, passive: false };
-        self.s.constraints.entry(t.clone()).or_default().push(c);
-        if matches!(need.source, Source::Release { .. }) {
-            self.s.touched.insert(t.clone());
-        }
-        self.touch(&t, &need.why);
-        if let Some(e) = self.s.chosen.get(&t) {
-            let current = e.release.clone();
-            let origin = e.present.as_ref().map(|p| p.origin.clone());
-            let movable = self.movable(&t);
-            let (version_ok, missing) = self.fits(&t, &current, !movable);
-            let fits = version_ok && missing.is_empty();
-            let options = self.request.options;
-            let named = self.s.named.contains(&t);
-            // A named added package re-resolves to its newest release, as re-adding does; a
-            // named base package only under --upgrade; --upgrade alone moves only what no longer
-            // fits; --upgrade-all moves everything.
-            let wants_newest = movable
-                && !current.flesh
-                && !self.s.settled.contains(&t)
-                && match origin {
-                    None => false,
-                    Some(Origin::Added) => named || options.upgrade_all,
-                    Some(Origin::Base { .. }) => (named && options.upgrade) || options.upgrade_all,
-                };
-            if wants_newest || (movable && !fits) {
-                self.s.settled.insert(t.clone());
-                match self.select(&t, None)? {
-                    Some(new) if !new.same(&current) => {
-                        if let Some(restart) = self.change(&t, new) {
-                            return Ok(Some(restart));
-                        }
-                    }
-                    Some(_) => {}
-                    None if fits => {}
-                    None => {
-                        let r = self.no_release(&t);
-                        self.fail_on(&t, r);
-                        return Ok(None);
-                    }
-                }
-            } else if !fits {
-                let installed = current.label();
-                let live = self.need_live(&need);
-                if version_ok {
-                    self.fail_on(&t, Refusal::PresentLacksThorns { installed, thorns: missing, live });
-                } else {
-                    self.fail_on(&t, Refusal::PresentOutsideRange { installed, live });
-                }
-                return Ok(None);
-            }
-        } else {
-            let Some(release) = self.select(&t, None)? else {
-                let r = self.no_release(&t);
-                self.fail_on(&t, r);
-                return Ok(None);
             };
-            if release.library {
-                if let Source::Release { label, id } = &need.source {
-                    let (by, ignore) = (label.clone(), format!("{id}:dependency:{t}"));
-                    let detail =
-                        format!("{t} is a library, and the dependency does not say where it goes (into)");
-                    self.fail(Refusal::BadClaim { by, claim: t.to_string(), detail, ignore });
-                } else {
-                    self.fail(Refusal::NamedLibrary { target: t });
+            for c in candidates {
+                a.releases.insert(t.clone(), c);
+                let found = self.search(a)?;
+                a.releases.remove(&t);
+                if found.is_some() || self.exhausted {
+                    return Ok(found);
                 }
-                return Ok(None);
             }
-            let flesh = release.flesh;
-            let entry = Entry {
-                release,
-                enabled: BTreeSet::new(),
-                present: None,
-                order: self.s.next_order,
-                why: Some(need.why.clone()),
-                expanded: false,
-                whole: false,
-                keep: Vec::new(),
+            return Ok(None);
+        }
+        if let Some(open) = d.open_any_of.first().cloned() {
+            let order = match self.alternatives(&open, &d)? {
+                Ok(o) => o,
+                Err(f) => {
+                    self.record(depth, f);
+                    return Ok(None);
+                }
             };
-            self.s.next_order += 1;
-            self.s.chosen.insert(t.clone(), entry);
-            if flesh && let Some(restart) = self.replace_flesh(&t) {
-                return Ok(Some(restart));
+            for (i, rule) in order {
+                a.any_of.insert(open.key.clone(), (i, rule));
+                let found = self.search(a)?;
+                a.any_of.remove(&open.key);
+                if found.is_some() || self.exhausted {
+                    return Ok(found);
+                }
+            }
+            return Ok(None);
+        }
+        match self.complete(d)? {
+            Ok(plan) => Ok(Some(plan)),
+            Err(f) => {
+                self.record(depth, f);
+                Ok(None)
             }
         }
-        self.enable(&t, &need, None);
-        if self.request.options.replace
-            && self.s.chosen.get(&t).is_some_and(Entry::is_new)
-            && let Some(restart) = self.absorb(&t)
-        {
-            return Ok(Some(restart));
-        }
-        Ok(self.hint_for(&t))
     }
 
-    /// Enables a need's thorns in `taker` (the target itself, or whoever stands in for it), and
-    /// pushes the dependencies the newly enabled thorns bring.
-    fn enable(&mut self, taker: &PkgId, need: &Need, note: Option<String>) {
-        let e = &self.s.chosen[taker];
-        let names: Vec<String> = match &need.thorns {
-            Thorns::All => e.release.thorns.iter().map(|t| t.thorn.clone()).collect(),
-            Thorns::Some(list) => {
-                let mut names = Vec::new();
-                let mut missing = Vec::new();
-                for want in list {
-                    match e.release.thorn(want) {
-                        Some(t) => names.push(t.thorn.clone()),
-                        None => missing.push(want.clone()),
-                    }
-                }
-                if !missing.is_empty() {
-                    let (taker, live) = (e.release.label(), self.need_live(need));
-                    self.fail(Refusal::MissingThorns { taker, thorns: missing, live });
-                    return;
-                }
-                names
+    /// [`Self::derive`], loading what it finds it needs, in waves, until it needs nothing more.
+    fn derive_loaded(&mut self, a: &Assign) -> Res<Derived> {
+        loop {
+            let d = self.derive(a);
+            if d.want.is_empty() {
+                return Ok(d);
             }
-        };
-        if matches!(need.thorns, Thorns::All) && taker == &need.target {
-            self.s.chosen.get_mut(taker).expect("the taker is chosen").whole = true;
+            self.cat.ensure(d.want.iter().cloned())?;
         }
-        self.enable_names(taker, names, Self::source_label(&need.source), note);
     }
 
-    fn enable_names(&mut self, taker: &PkgId, names: Vec<String>, by: Option<String>, note: Option<String>) {
-        let e = self.s.chosen.get_mut(taker).expect("the taker is chosen");
-        let newly: BTreeSet<String> = names.into_iter().filter(|n| !contains(&e.enabled, n)).collect();
-        e.enabled.extend(newly.iter().cloned());
-        let first = !e.expanded && e.is_new();
-        if let Some(note) = note {
-            if e.present.is_some() && !e.is_new() {
-                if !e.keep.contains(&note) {
-                    e.keep.push(note);
-                }
+    /// The state the assignment implies: a fixpoint over which packages are required and which
+    /// thorns are enabled, since each feeds the other.
+    fn derive(&self, a: &Assign) -> Derived {
+        let mut required = BTreeSet::new();
+        let mut given = BTreeMap::new();
+        let mut d = Derived::default();
+        for _ in 0..64 {
+            d = self.derive_once(a, &required, &given);
+            if d.required == required && d.given == given {
+                break;
+            }
+            required = d.required.clone();
+            given = d.given.clone();
+        }
+        let named_first = |id: &PkgId| (self.named(id).is_none(), id.clone());
+        d.open.sort_by_key(|id| named_first(id));
+        d
+    }
+
+    fn derive_once(
+        &self,
+        a: &Assign,
+        required: &BTreeSet<PkgId>,
+        given: &BTreeMap<PkgId, BTreeSet<String>>,
+    ) -> Derived {
+        let options = self.request.options;
+        let mut d = Derived::default();
+        // The packages in play, and the thorns they have.
+        for (id, p) in &self.present {
+            let (release, decided) = match a.releases.get(id) {
+                Some(r) => (r.clone(), true),
+                None => (p.release.clone(), false),
+            };
+            let whole = self.named(id).is_some_and(|s| s.thorns.is_none());
+            let enabled = if p.release.same(&release) {
+                p.enabled.clone()
+            } else if whole {
+                release.thorn_names()
             } else {
-                self.s.notes.insert(note);
+                p.enabled.iter().filter_map(|n| release.thorn(n).map(|t| t.thorn.clone())).collect()
+            };
+            let entry = Entry { release, enabled, present: Some(p.clone()), order: usize::MAX, decided };
+            d.chosen.insert(id.clone(), entry);
+        }
+        for id in required {
+            if let (None, Some(r)) = (self.present.get(id), a.releases.get(id)) {
+                let (release, enabled) = (r.clone(), BTreeSet::new());
+                let entry = Entry { release, enabled, present: None, order: usize::MAX, decided: true };
+                d.chosen.insert(id.clone(), entry);
             }
         }
-        if let Some(label) = by {
-            self.s.brought_by.entry(taker.clone()).or_default().insert(label);
+        for (id, names) in given {
+            let Some(e) = d.chosen.get_mut(id) else { continue };
+            let all = names.contains("");
+            let add: Vec<String> = (e.release.thorns.iter())
+                .filter(|t| all || contains(names, &t.thorn))
+                .map(|t| t.thorn.clone())
+                .collect();
+            e.enabled.extend(add);
         }
-        if !newly.is_empty() || first {
-            self.expand(taker, &newly, first);
+        self.replace_fleshes(&mut d);
+        if options.replace {
+            self.absorb(&mut d);
         }
-    }
-
-    /// A need taken by a fork or an override's stand-in.
-    fn take_by(&mut self, taker: &PkgId, need: &Need, note: String) {
-        self.touch(taker, &need.why);
-        self.enable(taker, need, Some(note));
-    }
-
-    /// Moves `t` to `new`. `Some`: restart (its dependencies were pushed already, or a constraint
-    /// the old release made was read by a decision).
-    fn change(&mut self, t: &PkgId, new: Release) -> Option<PkgId> {
-        let sources = self.live_sources(t);
-        self.picks.insert(t.clone(), Pick { release: new.clone(), sources });
-        let e = self.s.chosen.get_mut(t).expect("a chosen package changes");
-        if e.expanded {
-            return Some(t.clone());
-        }
-        let old = std::mem::replace(&mut e.release, new);
-        // A whole package is all of its new release; otherwise the enabled thorns carry over
-        // where the new release has them (an unnamed move made sure it has them all).
-        e.enabled = if e.whole {
-            e.release.thorn_names()
-        } else {
-            e.enabled.iter().filter_map(|n| e.release.thorn(n).map(|t| t.thorn.clone())).collect()
-        };
-        let flesh = e.release.flesh;
-        if let Some(restart) = self.drop_source(&old.label()) {
-            return Some(restart);
-        }
-        if flesh {
-            return self.replace_flesh(t);
-        }
-        None
-    }
-
-    /// Drops the constraints a release made. `Some(t)` when a decision on `t` read one of them.
-    fn drop_source(&mut self, label: &str) -> Option<PkgId> {
-        let mut hit: Option<PkgId> = None;
-        let used = &self.s.used;
-        for (t, cs) in self.s.constraints.iter_mut() {
-            cs.retain(|c| {
-                let gone = matches!(&c.source, Source::Release { label: l, .. } if l == label);
-                if gone && hit.is_none() && used.contains(&(t.clone(), c.source.clone())) {
-                    hit = Some(t.clone());
-                }
-                !gone
+        // The needs, in a fixed order: named, --upgrade-all, then each package's claims.
+        let mut needs: Vec<Need> = Vec::new();
+        for spec in &self.specs {
+            let thorns = spec.thorns.clone().map_or(Thorns::All, Thorns::Some);
+            let (target, req) = (spec.id.clone(), spec.req.clone());
+            needs.push(Need {
+                source: Source::Named,
+                target,
+                req,
+                thorns,
+                why: Why::Named,
+                kind: Kind::Active,
+                any_of: None,
+                stable: true,
             });
         }
-        hit
+        if options.upgrade_all {
+            for (id, p) in &self.present {
+                let (At::Version(v), true) = (&p.release.at, d.chosen.contains_key(id)) else { continue };
+                // Any version on the track it is on.
+                let mut req = TrackedReq::any();
+                req.alts[0].track = v.track.clone();
+                let thorns = Thorns::Some(p.enabled.iter().cloned().collect());
+                needs.push(Need {
+                    source: Source::UpgradeAll,
+                    target: id.clone(),
+                    req: Req::Range(req),
+                    thorns,
+                    why: Why::UpgradeAll,
+                    kind: Kind::Active,
+                    any_of: None,
+                    stable: true,
+                });
+            }
+        }
+        let (mut open_any_of, mut failure) = (Vec::new(), d.failure.take());
+        for (id, e) in &d.chosen {
+            self.claim_needs(a, id, e, &mut needs, &mut open_any_of, &mut failure);
+        }
+        d.open_any_of = open_any_of;
+        d.failure = failure;
+        // Who takes each need.
+        let mut new_required: BTreeSet<PkgId> = BTreeSet::new();
+        let mut new_given: BTreeMap<PkgId, BTreeSet<String>> = BTreeMap::new();
+        for need in needs {
+            let taker = self.taker(&need, &d, required);
+            let give = |given: &mut BTreeMap<PkgId, BTreeSet<String>>, who: &PkgId| {
+                let names = match &need.thorns {
+                    Thorns::All => BTreeSet::from([String::new()]),
+                    Thorns::Some(v) => v.iter().cloned().collect(),
+                };
+                given.entry(who.clone()).or_default().extend(names);
+            };
+            if need.kind == Kind::Active {
+                match &taker {
+                    Taker::Itself => {
+                        if !self.present.contains_key(&need.target) {
+                            new_required.insert(need.target.clone());
+                        }
+                        if d.chosen.get(&need.target).is_some_and(|e| e.present.is_some() && !e.decided) {
+                            d.touched.insert(need.target.clone());
+                        }
+                        give(&mut new_given, &need.target);
+                        if !d.chosen.contains_key(&need.target) && !self.cat.loaded(&need.target) {
+                            d.want.insert(need.target.clone());
+                        }
+                    }
+                    Taker::Other { taker, .. } => {
+                        if d.chosen.get(taker).is_some_and(|e| e.present.is_some() && !e.decided) {
+                            d.touched.insert(taker.clone());
+                        }
+                        give(&mut new_given, taker);
+                    }
+                    Taker::Fork(f) => {
+                        new_required.insert(f.clone());
+                        give(&mut new_given, f);
+                    }
+                    Taker::NotStandIn { .. } => {}
+                }
+            }
+            let stands_in = matches!(taker, Taker::Other { .. } | Taker::NotStandIn { .. });
+            if stands_in && !self.cat.loaded(&need.target) {
+                d.want.insert(need.target.clone());
+            }
+            d.needs.push((need, taker));
+        }
+        d.required = new_required;
+        d.given = new_given;
+        // The claim that brings the second flesh in, when one does.
+        if let Some(Failure { refusal: Pending::Refusal(Refusal::TwoFleshes { second, ignore, .. }), .. }) =
+            &mut d.failure
+        {
+            *ignore = (d.needs.iter())
+                .find(|(n, _)| {
+                    n.kind == Kind::Active
+                        && n.label().is_some()
+                        && d.chosen.get(&n.target).is_some_and(|e| &e.release.label() == second)
+                })
+                .and_then(|(n, _)| n.live().ignore);
+        }
+        // What is still to be decided.
+        for id in &d.required {
+            if !a.releases.contains_key(id) && !self.present.contains_key(id) {
+                d.open.push(id.clone());
+            }
+        }
+        for (id, e) in &d.chosen {
+            let open = !e.decided
+                && e.present.is_some()
+                && (d.touched.contains(id) || self.named(id).is_some() || options.upgrade_all);
+            if open {
+                d.open.push(id.clone());
+            }
+        }
+        d
     }
 
-    /// `t`, a flesh, comes in: the flesh the installation has (a base repo, or an added flesh
-    /// package) is replaced; a second planned flesh is refused.
-    fn replace_flesh(&mut self, t: &PkgId) -> Option<PkgId> {
-        let others: Vec<PkgId> = (self.s.chosen.iter())
-            .filter(|(id, e)| *id != t && e.release.flesh)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in others {
-            let e = self.s.chosen.remove(&id).expect("listed above");
-            let replaced = match e.present.as_ref().map(|p| &p.origin) {
-                Some(Origin::Base { repo }) => Replaced::Base { repo: repo.clone() },
-                Some(Origin::Added) => Replaced::Added { id: id.clone() },
-                None => {
-                    let (first, second) = (e.release.label(), self.s.chosen[t].release.label());
-                    self.fail(Refusal::TwoFleshes { first, second });
+    /// The needs one package's claims make: active ones (a package brought in or moved: every
+    /// claim that applies to its thorns; a present one not changing: those for the thorns new to
+    /// it), and passive ones from a present package's other claims.
+    fn claim_needs(
+        &self,
+        a: &Assign,
+        id: &PkgId,
+        e: &Entry,
+        needs: &mut Vec<Need>,
+        open_any_of: &mut Vec<OpenAnyOf>,
+        failure: &mut Option<Failure>,
+    ) {
+        let options = self.request.options;
+        let label = e.release.label();
+        let source = Source::Release { label: label.clone(), id: id.clone() };
+        let is_new = e.is_new();
+        let new_thorns: BTreeSet<String> = e.enabled.iter().filter(|t| e.thorn_is_new(t)).cloned().collect();
+        for (i, c) in e.release.claims.iter().enumerate() {
+            if c.kind != "dependency" || c.into.is_some() {
+                continue;
+            }
+            let applies = c.needed_by.is_empty() || intersects(&c.needed_by, &e.enabled);
+            let for_new_thorns = !c.needed_by.is_empty() && intersects(&c.needed_by, &new_thorns);
+            let active = !options.no_deps && if is_new { applies } else { for_new_thorns };
+            let passive = !active && applies && !is_new && e.present.is_some();
+            if !active && !passive {
+                continue;
+            }
+            let kind = match () {
+                _ if active => Kind::Active,
+                _ if e.decided => Kind::Passive,
+                _ => Kind::PassiveFinal,
+            };
+            let ignore = format!("{id}:dependency:{}", c.target);
+            let (alt, any_of) = if c.alternatives.is_empty() {
+                (None, None)
+            } else if active {
+                let key = (id.clone(), i);
+                let Some((alt, rule)) = a.any_of.get(&key) else {
+                    open_any_of.push(OpenAnyOf { key, claim: c.clone(), label: label.clone() });
                     continue;
+                };
+                let alternatives =
+                    c.alternatives.iter().filter_map(|x| PkgId::parse(&x.target).ok()).collect();
+                let from = FromAnyOf { key, label: claim_label(c), alternatives, rule: *rule };
+                (Some(&c.alternatives[*alt]), Some(from))
+            } else {
+                match self.holders.get(&(id.clone(), i)) {
+                    Some(alt) => (Some(&c.alternatives[*alt]), None),
+                    None => continue,
                 }
             };
-            self.s.replaced.push((replaced, t.clone(), Vec::new(), true));
-            if let Some(restart) = self.drop_source(&e.release.label()) {
-                return Some(restart);
-            }
-        }
-        None
-    }
-
-    /// Under `--replace`, `n` takes the place of every unchanged base package it forks: it takes
-    /// the needs that package served (if it stands in for them) and every thorn the installation
-    /// has enabled from it.
-    fn absorb(&mut self, n: &PkgId) -> Option<PkgId> {
-        let release = self.s.chosen[n].release.clone();
-        let related: Vec<PkgId> = (self.s.chosen.iter())
-            .filter(|(id, e)| *id != n && e.base_repo().is_some() && forks(&release, id))
-            .map(|(id, _)| id.clone())
-            .collect();
-        for u in related {
-            let fork = fork_claim(&release, &u).expect("a fork-of claim on it");
-            let published = self.cat.published(&u);
-            let active: Vec<Constraint> =
-                self.s.constraints.get(&u).into_iter().flatten().filter(|c| !c.passive).cloned().collect();
-            for c in &active {
-                if !u.slug(&c.req).is_some_and(|dep| fork.stands_in_for(&dep, &published)) {
-                    let live = self.live(&u, c);
-                    let (fork, fork_label) = (n.clone(), release.label());
-                    self.fail(Refusal::ForkDoesNotStandIn { fork, fork_label, live });
-                    return None;
-                }
-            }
-            let ue = self.s.chosen.remove(&u).expect("listed above");
-            let repo = ue.base_repo().unwrap_or_default().to_owned();
-            let missing: Vec<String> =
-                ue.enabled.iter().filter(|t| release.thorn(t).is_none()).cloned().collect();
-            if !missing.is_empty() {
-                let (by, by_label) = (n.clone(), release.label());
-                self.fail(Refusal::ReplacementLacksThorns { by, by_label, base_repo: repo, thorns: missing });
-                return None;
-            }
-            self.s.replaced.push((Replaced::Base { repo }, n.clone(), Vec::new(), false));
-            if let Some(restart) = self.drop_source(&ue.release.label()) {
-                return Some(restart);
-            }
-            let names = ue.enabled.iter().filter_map(|t| release.thorn(t).map(|x| x.thorn.clone())).collect();
-            self.enable_names(n, names, None, None);
-        }
-        None
-    }
-
-    /// When `f`, just brought in, forks an upstream the plan brought in unnamed and stands in for
-    /// every need on it, records that (`Some(upstream)`: restart), so the next pass holds the
-    /// upstream's needs until the fork is chosen, whichever order they come in.
-    fn hint_for(&mut self, f: &PkgId) -> Option<PkgId> {
-        let e = self.s.chosen.get(f)?;
-        if !e.is_new() {
-            return None;
-        }
-        let release = e.release.clone();
-        for c in release.claims.iter().filter(|c| c.kind == "fork-of") {
-            let Ok(u) = PkgId::parse(&c.target) else { continue };
-            let Some(ue) = self.s.chosen.get(&u) else { continue };
-            if ue.present.is_some() || self.s.named.contains(&u) || self.hints.get(&u) == Some(f) {
-                continue;
-            }
-            let Some(fork) = fork_claim(&release, &u) else { continue };
-            let published = self.cat.published(&u);
-            let stands_in = (self.s.constraints.get(&u).into_iter().flatten())
-                .all(|c| u.slug(&c.req).is_some_and(|dep| fork.stands_in_for(&dep, &published)));
-            if stands_in && ue.enabled.iter().all(|t| release.thorn(t).is_some()) {
-                self.hints.insert(u.clone(), f.clone());
-                return Some(u);
-            }
-        }
-        None
-    }
-
-    /// Pushes `t`'s dependencies that the thorns enabled now bring (all of its enabled thorns
-    /// when its release first enters). Libraries are placement, never needs.
-    fn expand(&mut self, t: &PkgId, newly: &BTreeSet<String>, first: bool) {
-        if self.request.options.no_deps {
-            return;
-        }
-        let e = self.s.chosen.get_mut(t).expect("a chosen package expands");
-        e.expanded = true;
-        let release = e.release.clone();
-        let scope = if first { e.enabled.clone() } else { newly.clone() };
-        let label = release.label();
-        for (i, c) in release.claims.iter().enumerate() {
-            if c.kind != "dependency" || c.into.is_some() || !applies(c, &scope, first) {
-                continue;
-            }
-            if !self.s.pushed.insert((t.clone(), i)) {
-                continue;
-            }
-            if !c.alternatives.is_empty() {
-                let a = AnyOf { claim: c.clone(), index: i, dependent: t.clone(), label: label.clone() };
-                self.s.any_of.insert((t.clone(), i), a);
-                continue;
-            }
-            let (target, req) = match claim_target(&c.target, c.range.as_deref(), c.sha.as_deref()) {
+            let (target, range, sha, thorns) = match alt {
+                Some(x) => (&x.target, x.range.as_deref(), x.sha.as_deref(), &x.needs),
+                None => (&c.target, c.range.as_deref(), c.sha.as_deref(), &c.needs),
+            };
+            let (target, req) = match claim_target(target, range, sha) {
                 Ok(x) => x,
                 Err(detail) => {
-                    let (by, claim, ignore) = (label.clone(), claim_label(c), format!("{t}:dependency:{}", c.target));
-                    self.fail(Refusal::BadClaim { by, claim, detail, ignore });
+                    // A passive claim nobody can read predates this command; an active one stops it.
+                    if active && failure.is_none() {
+                        let (by, claim) = (label.clone(), claim_label(c));
+                        let r = Refusal::BadClaim { by, claim, detail, ignore };
+                        *failure = Some(Failure::of(r, Vec::new()));
+                    }
                     continue;
                 }
             };
             let why = Why::Needed {
                 by: label.clone(),
-                by_id: t.clone(),
+                by_id: id.clone(),
                 claim: claim_label(c),
                 req: req.to_string(),
                 needed_by: c.needed_by.clone(),
-                rule: None,
+                rule: any_of.as_ref().map(|f| f.rule),
             };
-            let source = Source::Release { label: label.clone(), id: t.clone() };
-            let thorns = thorns_of(&c.needs);
-            self.s.singles.push_back(Need { target, req, thorns, why, source, held: false });
+            let thorns = thorns_of(thorns);
+            let (source, stable) = (source.clone(), e.decided);
+            needs.push(Need { source, target, req, thorns, why, kind, any_of, stable });
         }
     }
 
-    /// Decides one any-of dependency: an alternative present at a release that fits it; else one
-    /// already in the plan at a release that fits; else the first listed that conflicts with
-    /// nothing present or planned; else the first listed.
-    fn decide(&mut self, a: AnyOf) -> Res<()> {
-        let label = claim_label(&a.claim);
-        let mut alts: Vec<(PkgId, Req, Thorns)> = Vec::new();
-        for alt in &a.claim.alternatives {
-            match claim_target(&alt.target, alt.range.as_deref(), alt.sha.as_deref()) {
-                Ok((id, req)) => alts.push((id, req, thorns_of(&alt.needs))),
-                Err(detail) => {
-                    let (by, ignore) = (a.label.clone(), format!("{}:dependency:{}", a.dependent, alt.target));
-                    self.fail(Refusal::BadClaim { by, claim: label, detail, ignore });
-                    return Ok(());
-                }
+    /// Who takes a need: a named spec its own target; else the target when in play; else a
+    /// package an override says satisfies it; else a fork in play that stands in (any of its
+    /// fork-of claims, the forks in id order); else an undecided fork the plan requires; else the
+    /// target itself (also when the forks in play do not stand in for a flesh: the flesh is
+    /// replaced).
+    fn taker(&self, need: &Need, d: &Derived, required: &BTreeSet<PkgId>) -> Taker {
+        let t = &need.target;
+        if need.source == Source::Named || d.chosen.contains_key(t) {
+            return Taker::Itself;
+        }
+        for x in self.request.rules.satisfiers(t) {
+            if d.chosen.contains_key(x) {
+                let note = format!("{x} stands in for {t} (a claims override)");
+                return Taker::Other { taker: x.clone(), note };
             }
         }
-        self.cat.ensure(alts.iter().map(|(id, _, _)| id.clone()))?;
-        let held = |me: &Self, (id, req, _): &(PkgId, Req, Thorns), present: bool| {
-            let is_present = |e: &Entry| e.present.is_some() == present;
-            match me.identity(id, req) {
-                Identity::Itself => me.holds_itself(id, req, present),
-                Identity::Other { taker, .. } => me.s.chosen.get(&taker).is_some_and(is_present),
-                Identity::NotStandIn { .. } => false,
-            }
-        };
-        let present = alts.iter().position(|alt| held(self, alt, true));
-        let mut pick = present.map(|i| (i, ChoiceRule::Present));
-        if pick.is_none() {
-            let planned = alts.iter().position(|alt| held(self, alt, false));
-            pick = planned.map(|i| (i, ChoiceRule::Planned));
-        }
-        if pick.is_none() {
-            for (i, alt) in alts.iter().enumerate() {
-                if !self.conflicts(alt)? {
-                    let rule =
-                        if i == 0 { ChoiceRule::FirstListed } else { ChoiceRule::FirstWithoutConflict };
-                    pick = Some((i, rule));
-                    break;
-                }
-            }
-        }
-        let (i, rule) = pick.unwrap_or((0, ChoiceRule::FirstListed));
-        let alternatives: Vec<PkgId> = alts.iter().map(|(id, _, _)| id.clone()).collect();
-        let (target, req, thorns) = alts.swap_remove(i);
-        self.s.choices.push(Choice {
-            dependent: a.dependent.clone(),
-            dependent_label: a.label.clone(),
-            claim: a.index,
-            label: label.clone(),
-            alternatives,
-            chosen: target.clone(),
-            rule,
-        });
-        let why = Why::Needed {
-            by: a.label.clone(),
-            by_id: a.dependent.clone(),
-            claim: label,
-            req: req.to_string(),
-            needed_by: a.claim.needed_by.clone(),
-            rule: Some(rule),
-        };
-        let source = Source::Release { label: a.label, id: a.dependent };
-        self.s.singles.push_back(Need { target, req, thorns, why, source, held: false });
-        Ok(())
-    }
-
-    /// Whether an any-of alternative would conflict with what is present or planned: no release
-    /// of it fits, a thorn it needs is enabled in another package, an `incompatible-with` either
-    /// way, or a fork relation either way.
-    fn conflicts(&mut self, (id, req, thorns): &(PkgId, Req, Thorns)) -> Res<bool> {
-        if !self.cat.known(id) {
-            return Ok(true);
-        }
-        let Some(candidate) = self.select(id, Some(req))? else { return Ok(true) };
-        let names: Vec<String> = match thorns {
-            Thorns::All => candidate.thorns.iter().map(|t| t.thorn.clone()).collect(),
-            Thorns::Some(v) => v.clone(),
-        };
-        for (other, e) in &self.s.chosen {
-            if other == id {
+        let published = self.cat.published(t);
+        let mut not_standing: Option<PkgId> = None;
+        for (id, e) in &d.chosen {
+            let claims = fork_claims(&e.release, t);
+            if claims.is_empty() {
                 continue;
             }
-            let incompatible = |a, b| conflict::incompatible(a, b);
-            if names.iter().any(|n| contains(&e.enabled, n))
-                || incompatible(&candidate, &e.release)
-                || incompatible(&e.release, &candidate)
-                || forks(&candidate, other)
-                || forks(&e.release, id)
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    /// A pick to drop at the end of a pass: one in use whose constraints are not all live any
-    /// more (it may no longer be what fits best), or one that kept a present package's passive
-    /// constraints out of a pass in which that package did not move after all.
-    fn stale_pick(&mut self) -> Option<PkgId> {
-        let mut stale: Option<PkgId> = None;
-        for (t, pick) in &self.picks {
-            let in_use = self.s.chosen.get(t).is_some_and(|e| e.release.same(&pick.release));
-            let gone = if in_use {
-                !pick.sources.is_subset(&self.live_sources(t))
-            } else {
-                self.s.unseeded.contains(t)
+            let stands = |fork: &cactup_ecosystem_common::manifest::ForkOf| {
+                t.slug(&need.req).is_some_and(|dep| fork.stands_in_for(&dep, &published))
             };
-            if gone {
-                stale = Some(t.clone());
-                break;
+            if claims.iter().any(stands) {
+                let note = format!("{} stands in for {t}", e.release.label());
+                return Taker::Other { taker: id.clone(), note };
+            }
+            not_standing.get_or_insert_with(|| id.clone());
+        }
+        if need.kind == Kind::Active {
+            for f in required.iter().filter(|f| !d.chosen.contains_key(*f)) {
+                if self.cat.releases(f).iter().any(|r| forks(r, t)) {
+                    return Taker::Fork(f.clone());
+                }
             }
         }
-        if let Some(t) = &stale {
-            self.picks.remove(t);
+        match not_standing {
+            Some(_) if self.cat.is_flesh(t) => Taker::Itself,
+            Some(fork) => Taker::NotStandIn { fork },
+            None => Taker::Itself,
         }
-        stale
     }
 
-    /// After the last pass: replacements, conflicts, libraries, the CCL check, then the plan.
-    fn finish(mut self) -> Res<Plan> {
+    /// A flesh the plan brings in replaces the flesh the installation has (a base repo, or an
+    /// added flesh package); two fleshes brought in are refused.
+    fn replace_fleshes(&self, d: &mut Derived) {
+        let planned = ids_where(&d.chosen, |_, e| e.present.is_none() && e.release.flesh);
+        match planned.as_slice() {
+            [] => {}
+            [by] => {
+                let fleshes = ids_where(&d.chosen, |id, e| id != by && e.release.flesh);
+                for id in fleshes {
+                    let e = d.chosen.remove(&id).expect("listed above");
+                    let replaced = match e.present.map(|p| p.origin) {
+                        Some(Origin::Base { repo }) => Replaced::Base { repo },
+                        _ => Replaced::Added { id },
+                    };
+                    d.replaced.push((replaced, by.clone(), Vec::new(), true));
+                }
+            }
+            [first, second, ..] => {
+                let (first, second) = (d.chosen[first].release.label(), d.chosen[second].release.label());
+                let r = Refusal::TwoFleshes { first, second, ignore: None };
+                d.failure.get_or_insert(Failure::of(r, Vec::new()));
+            }
+        }
+    }
+
+    /// Under `--replace`, a package the plan brings in or moves takes the place of every unchanged
+    /// base package it forks, with every thorn the installation has enabled from it.
+    fn absorb(&self, d: &mut Derived) {
+        let newcomers = ids_where(&d.chosen, |_, e| e.is_new());
+        for n in newcomers {
+            let Some(release) = d.chosen.get(&n).map(|e| e.release.clone()) else { continue };
+            let forked_base = |id: &PkgId, e: &Entry| *id != n && e.base_repo().is_some() && forks(&release, id);
+            let related = ids_where(&d.chosen, forked_base);
+            for u in related {
+                let ue = d.chosen.remove(&u).expect("listed above");
+                let repo = ue.base_repo().unwrap_or_default().to_owned();
+                let missing: Vec<String> =
+                    ue.enabled.iter().filter(|t| release.thorn(t).is_none()).cloned().collect();
+                if !missing.is_empty() {
+                    let (by, by_label) = (n.clone(), release.label());
+                    let (upstream, base_repo, thorns) = (u, repo, missing);
+                    let r = Refusal::ReplacementLacksThorns { by, by_label, upstream, base_repo, thorns };
+                    d.failure.get_or_insert(Failure::of(r, Vec::new()));
+                    return;
+                }
+                let names: Vec<String> =
+                    ue.enabled.iter().filter_map(|t| release.thorn(t).map(|x| x.thorn.clone())).collect();
+                d.chosen.get_mut(&n).expect("a newcomer").enabled.extend(names);
+                d.replaced.push((Replaced::Base { repo }, n.clone(), Vec::new(), false));
+            }
+        }
+    }
+
+    /// Whether a present package may move: named, under `--upgrade-all`, touched under
+    /// `--upgrade`, or a flesh. Never a pseudo-package.
+    fn movable(&self, t: &PkgId, d: &Derived) -> bool {
+        let options = self.request.options;
+        !t.is_repo()
+            && (self.named(t).is_some()
+                || options.upgrade_all
+                || (options.upgrade && (d.touched.contains(t) || d.chosen.get(t).is_some_and(|e| e.decided)))
+                || d.chosen.get(t).is_some_and(|e| e.release.flesh))
+    }
+
+    /// Whether a need binds in this check: active ones always; passive ones of decided packages
+    /// (not under `--no-deps`); those of packages never decided only once the assignment is
+    /// complete.
+    fn binds(&self, need: &Need, last: bool) -> bool {
+        match need.kind {
+            Kind::Active => true,
+            Kind::Passive => !self.request.options.no_deps,
+            Kind::PassiveFinal => last && !self.request.options.no_deps,
+        }
+    }
+
+    /// The first failure in the state: one found while deriving it, a fork that does not stand
+    /// in, a stand-in lacking thorns, or a decided package outside its constraints.
+    fn check(&self, d: &Derived, last: bool) -> Option<Failure> {
+        if let Some(f) = &d.failure {
+            return Some(f.clone());
+        }
+        for (need, taker) in &d.needs {
+            if !self.binds(need, last) {
+                continue;
+            }
+            match taker {
+                Taker::NotStandIn { fork } => {
+                    let Some(e) = d.chosen.get(fork) else { continue };
+                    let (fork, fork_label, live) = (fork.clone(), e.release.label(), need.live());
+                    let r = Refusal::ForkDoesNotStandIn { fork, fork_label, live };
+                    return Some(Failure::of(r, vec![need.live()]));
+                }
+                Taker::Other { taker, .. } => {
+                    let Some(e) = d.chosen.get(taker) else { continue };
+                    let missing = missing_thorns(&e.release, need);
+                    if !missing.is_empty() {
+                        let (taker, live) = (e.release.label(), need.live());
+                        let r = Refusal::MissingThorns { taker, thorns: missing, live };
+                        return Some(Failure::of(r, vec![need.live()]));
+                    }
+                }
+                Taker::Itself | Taker::Fork(_) => {}
+            }
+        }
+        for (t, e) in &d.chosen {
+            if !e.decided {
+                continue;
+            }
+            let fixed = e.present.is_some() && !self.movable(t, d);
+            let on_t: Vec<&Need> = (d.needs.iter())
+                .filter(|(n, k)| &n.target == t && *k == Taker::Itself && self.binds(n, last))
+                .filter(|(n, _)| !(fixed && n.kind != Kind::Active))
+                .map(|(n, _)| n)
+                .collect();
+            let Some(first) = on_t.iter().find(|n| violates(&e.release, n)) else { continue };
+            let lives: Vec<Live> = on_t.iter().map(|n| n.live()).collect();
+            if fixed {
+                let (installed, live) = (e.release.label(), first.live());
+                let missing = missing_thorns(&e.release, first);
+                let r = if first.req.fit(&e.release) != Fit::No && !missing.is_empty() {
+                    Refusal::PresentLacksThorns { installed, thorns: missing, live }
+                } else {
+                    Refusal::PresentOutsideRange { installed, live }
+                };
+                return Some(Failure::of(r, lives));
+            }
+            // Would another release have met them all? Then this is only a wrong turn.
+            let mut releases: Vec<Release> = self.cat.releases(t).to_vec();
+            if let Some(p) = &e.present {
+                releases.push(p.release.clone());
+            }
+            releases.push(e.release.clone());
+            let reqs: Vec<Req> = on_t.iter().map(|n| n.req.clone()).collect();
+            let fits_all = eligible(&releases, &reqs, e.present.as_ref().map(|p| &p.release))
+                .into_iter()
+                .any(|r| on_t.iter().all(|n| !violates(r, n)));
+            if fits_all {
+                let r = Refusal::NoConsistentSet { constraints: lives.clone() };
+                return Some(Failure { refusal: Pending::Refusal(r), lives, weak: true });
+            }
+            return Some(Failure::of(self.no_release(t, lives.clone()), lives));
+        }
+        None
+    }
+
+    fn no_release(&self, t: &PkgId, constraints: Vec<Live>) -> Refusal {
+        if self.cat.is_flesh(t) {
+            Refusal::FleshUnmet { target: t.clone(), constraints }
+        } else {
+            Refusal::NoReleaseFits { target: t.clone(), constraints }
+        }
+    }
+
+    /// The releases to try for `t`, in order of preference, or why there are none. Only needs
+    /// from decided sources narrow them (the others may still change); every need is checked.
+    fn candidates(&mut self, t: &PkgId, d: &Derived) -> Res<Result<Vec<Release>, Failure>> {
+        let on_t: Vec<&Need> =
+            d.needs.iter().filter(|(n, k)| &n.target == t && *k == Taker::Itself).map(|(n, _)| n).collect();
+        let lives: Vec<Live> = on_t.iter().map(|n| n.live()).collect();
+        let narrowing: Vec<&Need> =
+            on_t.iter().copied().filter(|n| n.stable && self.binds(n, false)).collect();
+        let reqs: Vec<Req> = narrowing.iter().map(|n| n.req.clone()).collect();
+        let mut required: Vec<String> = narrowing.iter().flat_map(|n| n.names()).collect();
+        let named = self.named(t).cloned();
+        let present = self.present.get(t).cloned();
+        if let Some(p) = &present {
+            if !self.movable(t, d) {
+                return Ok(Ok(vec![p.release.clone()]));
+            }
+            // An unnamed move carries every thorn the package has enabled.
+            if named.is_none() {
+                required.extend(p.enabled.iter().cloned());
+            }
+        }
+        if let Some(Req::Tip(_)) = named.as_ref().map(|s| &s.req) {
+            return Ok(Err(Failure::of(Refusal::NotRegistered { target: t.clone(), by: None }, lives)));
+        }
+        self.cat.ensure([t.clone()])?;
+        if present.is_none() && !self.cat.known(t) {
+            let by = on_t.iter().find(|n| n.source != Source::Named).map(|n| n.live());
+            return Ok(Err(Failure::of(Refusal::NotRegistered { target: t.clone(), by }, lives)));
+        }
+        let mut all = self.cat.candidates(t, &reqs)?;
+        if let Some(p) = &present
+            && !all.iter().any(|r| r.same(&p.release))
+        {
+            all.push(p.release.clone());
+        }
+        let ok = eligible(&all, &reqs, present.as_ref().map(|p| &p.release));
+        let has_required = |r: &&Release| required.iter().all(|th| r.thorn(th).is_some());
+        let ok: Vec<&Release> = ok.into_iter().filter(has_required).collect();
+        if !ok.is_empty() && ok.iter().all(|r| r.library) {
+            let r = match on_t.iter().find_map(|n| match &n.source {
+                Source::Release { label, id } => Some((label.clone(), id.clone())),
+                _ => None,
+            }) {
+                Some((by, id)) => Refusal::BadClaim {
+                    by,
+                    claim: t.to_string(),
+                    detail: format!("{t} is a library, and the dependency does not say where it goes (into)"),
+                    ignore: format!("{id}:dependency:{t}"),
+                },
+                None => Refusal::NamedLibrary { target: t.clone() },
+            };
+            return Ok(Err(Failure::of(r, lives)));
+        }
+        let ok: Vec<&Release> = preferred(ok.into_iter().filter(|r| !r.library).collect());
+        if ok.is_empty() {
+            return Ok(Err(Failure::of(self.no_release(t, lives.clone()), lives)));
+        }
+        // A present package that may stay tries its present release first, unless it re-resolves
+        // to its newest (a named added package, or --upgrade-all).
+        let newest_first = match present.as_ref().map(|p| &p.origin) {
+            None => true,
+            Some(Origin::Added) => named.is_some() || self.request.options.upgrade_all,
+            Some(Origin::Base { .. }) => {
+                (named.is_some() && self.request.options.upgrade) || self.request.options.upgrade_all
+            }
+        };
+        let flesh = ok.iter().any(|r| r.flesh);
+        let mut out: Vec<Release> = Vec::new();
+        if let Some(p) = present.as_ref().filter(|_| !newest_first || flesh)
+            && let Some(r) = ok.iter().find(|r| r.same(&p.release))
+        {
+            out.push((*r).clone());
+        }
+        let rest: Vec<Release> = ok.into_iter().filter(|r| !out.iter().any(|o| o.same(r))).cloned().collect();
+        out.extend(rest);
+        Ok(Ok(out))
+    }
+
+    /// The alternatives of an any-of in the order its rules try them, each with its rule.
+    fn alternatives(
+        &mut self,
+        open: &OpenAnyOf,
+        d: &Derived,
+    ) -> Res<Result<Vec<(usize, ChoiceRule)>, Failure>> {
+        let mut alts: Vec<(PkgId, Req)> = Vec::new();
+        for alt in &open.claim.alternatives {
+            match claim_target(&alt.target, alt.range.as_deref(), alt.sha.as_deref()) {
+                Ok(x) => alts.push(x),
+                Err(detail) => {
+                    let (by, claim) = (open.label.clone(), claim_label(&open.claim));
+                    let ignore = format!("{}:dependency:{}", open.key.0, alt.target);
+                    return Ok(Err(Failure::of(Refusal::BadClaim { by, claim, detail, ignore }, Vec::new())));
+                }
+            }
+        }
+        self.cat.ensure(alts.iter().map(|(id, _)| id.clone()))?;
+        // Present: a present package at a release that fits (or a present fork standing in);
+        // planned: one in play or required.
+        let class = |(id, req): &(PkgId, Req)| -> Option<ChoiceRule> {
+            let need = Need {
+                source: Source::Release { label: open.label.clone(), id: open.key.0.clone() },
+                target: id.clone(),
+                req: req.clone(),
+                thorns: Thorns::All,
+                why: Why::Named,
+                kind: Kind::Active,
+                any_of: None,
+                stable: true,
+            };
+            match self.taker(&need, d, &d.required) {
+                Taker::Itself => match d.chosen.get(id) {
+                    Some(e) if req.fit(&e.release) == Fit::No => None,
+                    Some(e) if e.present.is_some() => Some(ChoiceRule::Present),
+                    Some(_) => Some(ChoiceRule::Planned),
+                    None if d.required.contains(id) => Some(ChoiceRule::Planned),
+                    None => None,
+                },
+                Taker::Other { taker, .. } => {
+                    let present = d.chosen.get(&taker).is_some_and(|e| e.present.is_some());
+                    Some(if present { ChoiceRule::Present } else { ChoiceRule::Planned })
+                }
+                Taker::Fork(_) => Some(ChoiceRule::Planned),
+                Taker::NotStandIn { .. } => None,
+            }
+        };
+        let classes: Vec<Option<ChoiceRule>> = alts.iter().map(class).collect();
+        let mut order: Vec<(usize, ChoiceRule)> = Vec::new();
+        for want in [ChoiceRule::Present, ChoiceRule::Planned] {
+            let these = classes.iter().enumerate().filter(|(_, c)| **c == Some(want));
+            order.extend(these.map(|(i, _)| (i, want)));
+        }
+        for i in 0..alts.len() {
+            if !order.iter().any(|(j, _)| *j == i) {
+                let rule = if i == 0 { ChoiceRule::FirstListed } else { ChoiceRule::FirstWithoutConflict };
+                order.push((i, rule));
+            }
+        }
+        Ok(Ok(order))
+    }
+
+    /// The checks on a complete assignment, then the plan.
+    fn complete(&mut self, d: Derived) -> Res<Result<Plan, Failure>> {
+        if let Some(f) = self.check(&d, true) {
+            return Ok(Err(f));
+        }
+        let mut chosen = d.chosen.clone();
+        let mut replaced = d.replaced.clone();
+        let (order, why, brought_by) = self.order(&d);
+        for (i, id) in order.iter().enumerate() {
+            if let Some(e) = chosen.get_mut(id) {
+                e.order = i;
+            }
+        }
         if self.request.options.replace {
-            self.replace_colliding();
+            replace_colliding(&mut chosen, &mut replaced);
         }
-        if let Some(r) = conflict::conflicts(&self.s.chosen) {
-            return Err(r.into());
+        if let Some(mut r) = conflict::conflicts(&chosen) {
+            // The claim that brings the newcomer in, for the generic same-thorn refusal.
+            if let Refusal::SameThorn { newcomer, base_repo: None, ignore, .. } = &mut r {
+                *ignore = (d.needs.iter())
+                    .find(|(n, _)| n.kind == Kind::Active && &n.target == newcomer && n.label().is_some())
+                    .and_then(|(n, _)| n.live().ignore);
+            }
+            return Ok(Err(Failure::of(r, Vec::new())));
         }
-        let libraries = self.place_libraries()?;
-        self.check_requirements()?;
-        let mut entries: Vec<(&PkgId, &Entry)> =
-            self.s.chosen.iter().filter(|(_, e)| e.order != usize::MAX).collect();
-        entries.sort_by_key(|(_, e)| e.order);
+        let libraries = match self.place_libraries(&chosen)? {
+            Ok(l) => l,
+            Err(f) => return Ok(Err(f)),
+        };
+        let unmet = conflict::unmet_requirements(&chosen, self.ccl);
+        if !unmet.is_empty() {
+            return Ok(Err(Failure { refusal: Pending::Unclaimed(unmet), lives: Vec::new(), weak: false }));
+        }
+        Ok(Ok(self.plan(&d, chosen, replaced, libraries, &order, &why, &brought_by)))
+    }
+
+    /// The order of the plan's steps: the named packages, then what their single-target
+    /// dependencies bring, breadth first, then what each any-of brings (by dependent and
+    /// declaration order); with each package's reason (the first need reaching it) and the
+    /// dependents that brought it in.
+    #[allow(clippy::type_complexity)]
+    fn order(
+        &self,
+        d: &Derived,
+    ) -> (IndexSet<PkgId>, BTreeMap<PkgId, Why>, BTreeMap<PkgId, IndexSet<String>>) {
+        let active: Vec<(&Need, PkgId)> = (d.needs.iter())
+            .filter(|(n, _)| n.kind == Kind::Active)
+            .filter_map(|(n, t)| match t {
+                Taker::Itself => Some((n, n.target.clone())),
+                Taker::Other { taker, .. } => Some((n, taker.clone())),
+                Taker::Fork(f) => Some((n, f.clone())),
+                Taker::NotStandIn { .. } => None,
+            })
+            .collect();
+        let by_source = |id: &PkgId| -> Vec<(&Need, PkgId)> {
+            let from = |n: &Need| matches!(&n.source, Source::Release { id: s, .. } if s == id);
+            active.iter().filter(|(n, _)| from(n)).cloned().collect()
+        };
+        let mut order: IndexSet<PkgId> = IndexSet::new();
+        let mut why: BTreeMap<PkgId, Why> = BTreeMap::new();
+        let mut queue: VecDeque<PkgId> = VecDeque::new();
+        let mut reach = |n: &Need, t: &PkgId, order: &mut IndexSet<PkgId>, queue: &mut VecDeque<PkgId>| {
+            if order.insert(t.clone()) {
+                why.insert(t.clone(), n.why.clone());
+                queue.push_back(t.clone());
+            }
+        };
+        for (n, t) in active.iter().filter(|(n, _)| !matches!(n.source, Source::Release { .. })) {
+            reach(n, t, &mut order, &mut queue);
+        }
+        let mut any_ofs: Vec<(&Need, PkgId)> =
+            active.iter().filter(|(n, _)| n.any_of.is_some()).cloned().collect();
+        any_ofs.sort_by_key(|(n, _)| n.any_of.as_ref().map(|f| f.key.clone()));
+        let mut next_any_of = any_ofs.into_iter();
+        loop {
+            while let Some(p) = queue.pop_front() {
+                for (n, t) in by_source(&p).iter().filter(|(n, _)| n.any_of.is_none()) {
+                    reach(n, t, &mut order, &mut queue);
+                }
+            }
+            match next_any_of.next() {
+                Some((n, t)) => reach(n, &t, &mut order, &mut queue),
+                None => break,
+            }
+        }
+        // The dependents in id order, not in the order the specs were named.
+        let mut brought_by: BTreeMap<PkgId, IndexSet<String>> = BTreeMap::new();
+        let mut sources: Vec<&PkgId> = order.iter().collect();
+        sources.sort();
+        for p in sources {
+            for (n, t) in by_source(p) {
+                brought_by.entry(t).or_default().insert(n.label().unwrap_or_default().to_owned());
+            }
+        }
+        (order, why, brought_by)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn plan(
+        &self,
+        d: &Derived,
+        chosen: BTreeMap<PkgId, Entry>,
+        replaced: Vec<(Replaced, PkgId, Vec<String>, bool)>,
+        libraries: Vec<Library>,
+        order: &IndexSet<PkgId>,
+        why: &BTreeMap<PkgId, Why>,
+        brought_by: &BTreeMap<PkgId, IndexSet<String>>,
+    ) -> Plan {
+        let options = self.request.options;
         let mut notes: IndexSet<String> = IndexSet::new();
         // A release at no version is taken to meet a range, with a note.
-        for (id, e) in &entries {
-            if e.release.at.version().is_some() {
-                continue;
-            }
-            for c in self.s.constraints.get(*id).into_iter().flatten() {
-                if c.passive || !matches!(&c.req, Req::Range(q) if *q != TrackedReq::any()) {
-                    continue;
+        for id in order {
+            let Some(e) = chosen.get(id).filter(|e| e.release.at.version().is_none()) else { continue };
+            let on_id =
+                |(n, k): &&(Need, Taker)| &n.target == id && *k == Taker::Itself && n.kind == Kind::Active;
+            for (n, _) in d.needs.iter().filter(on_id) {
+                if matches!(&n.req, Req::Range(q) if *q != TrackedReq::any()) {
+                    let l = n.live();
+                    notes.insert(format!("{} is at a commit no version names; taken to meet {} (from {})", e.release.label(), l.req, l.source));
                 }
-                let l = self.live(id, c);
-                let label = e.release.label();
-                notes.insert(format!("{label} is at a commit no version names; taken to meet {} (from {})", l.req, l.source));
             }
         }
-        notes.extend(self.no_deps_notes());
-        notes.extend(self.s.notes.iter().cloned());
-        let options = self.request.options;
-        let mut plan = Plan { notes: notes.into_iter().collect(), ..Plan::default() };
-        for (id, e) in &entries {
-            let id: &PkgId = id;
-            let named = self.s.named.contains(id);
-            let why = e.why.clone().unwrap_or(Why::Named);
+        // Under --no-deps, each present package's declared range or thorns the plan breaks.
+        if options.no_deps {
+            for (n, k) in &d.needs {
+                let Some(e) = chosen.get(&n.target).filter(|e| e.is_new() && *k == Taker::Itself) else {
+                    continue;
+                };
+                if n.kind != Kind::Active && violates(&e.release, n) {
+                    notes.insert(format!("{} needs {} {}; --no-deps leaves it unmet", n.label().unwrap_or_default(), n.target, n.req));
+                }
+            }
+        }
+        // Who stands in for whom: a keep line for a present package, a note otherwise.
+        let mut keep: IndexMap<PkgId, IndexSet<String>> = IndexMap::new();
+        for (n, k) in &d.needs {
+            let Taker::Other { taker, note } = k else { continue };
+            if n.kind != Kind::Active {
+                continue;
+            }
+            match chosen.get(taker) {
+                Some(e) if e.present.is_some() && !e.is_new() => {
+                    keep.entry(taker.clone()).or_default().insert(note.clone());
+                }
+                _ => {
+                    notes.insert(note.clone());
+                }
+            }
+        }
+        let mut plan = Plan::default();
+        let mut choices: Vec<Choice> = (d.needs.iter())
+            .filter_map(|(n, k)| {
+                let f = n.any_of.as_ref()?;
+                let chosen = match k {
+                    Taker::Other { taker, .. } => taker.clone(),
+                    _ => n.target.clone(),
+                };
+                Some(Choice {
+                    dependent: f.key.0.clone(),
+                    dependent_label: n.label().unwrap_or_default().to_owned(),
+                    claim: f.key.1,
+                    label: f.label.clone(),
+                    alternatives: f.alternatives.clone(),
+                    chosen,
+                    rule: f.rule,
+                })
+            })
+            .collect();
+        choices.sort_by(|a, b| (&a.dependent, a.claim).cmp(&(&b.dependent, b.claim)));
+        for id in order {
+            let Some(e) = chosen.get(id) else { continue };
+            let named = self.named(id).is_some();
+            let why = why.get(id).cloned().unwrap_or(Why::Named);
             let enabled: Vec<String> = e.enabled.iter().cloned().collect();
             let mut recorded = true;
             match &e.present {
@@ -1302,8 +1394,7 @@ impl Resolver<'_> {
                     plan.steps.push(Step::Upgrade { from, to, thorns: enabled, why, flag });
                     if let Origin::Base { repo } = &p.origin {
                         let replaced = Replaced::Base { repo: repo.clone() };
-                        let (by, flesh) = (id.clone(), e.release.flesh);
-                        let thorns = Vec::new();
+                        let (by, flesh, thorns) = (id.clone(), e.release.flesh, Vec::new());
                         plan.steps.push(Step::Replace { replaced, by, thorns, flesh, explicit: named });
                     }
                 }
@@ -1327,19 +1418,19 @@ impl Resolver<'_> {
                     }
                 }
             }
-            for (replaced, by, thorns, flesh) in &self.s.replaced {
+            for (what, by, thorns, flesh) in &replaced {
                 if by == id {
-                    let (replaced, by) = (replaced.clone(), by.clone());
+                    let (replaced, by) = (what.clone(), by.clone());
                     let (thorns, flesh) = (thorns.clone(), *flesh);
                     plan.steps.push(Step::Replace { replaced, by, thorns, flesh, explicit: named });
                 }
             }
-            for note in &e.keep {
+            for note in keep.get(id).into_iter().flatten() {
                 plan.steps.push(Step::Keep { id: id.clone(), note: note.clone() });
             }
             if recorded {
-                let choices = self.s.choices.iter().filter(|c| &c.chosen == id).map(Choice::key).collect();
-                let by = self.s.brought_by.get(id).map(|b| b.iter().cloned().collect()).unwrap_or_default();
+                let choices = choices.iter().filter(|c| &c.chosen == id).map(Choice::key).collect();
+                let by = brought_by.get(id).map(|b| b.iter().cloned().collect()).unwrap_or_default();
                 let requested = match () {
                     _ if named => Some(true),
                     _ if e.present.is_none() => Some(false),
@@ -1363,14 +1454,15 @@ impl Resolver<'_> {
                 plan.untrusted.extend(self.untrusted(&l.release));
             }
         }
+        plan.notes = notes.into_iter().collect();
         plan.libraries = libraries;
         plan.rebuild = plan.steps.iter().any(|s| match s {
             Step::Add { release, .. } | Step::Upgrade { to: release, .. } => release.flesh,
             Step::Replace { flesh, .. } => *flesh,
             _ => false,
         });
-        plan.choices = self.s.choices.clone();
-        Ok(plan)
+        plan.choices = choices;
+        plan
     }
 
     /// The snapshot `r` is, when nobody vouches for it.
@@ -1385,66 +1477,14 @@ impl Resolver<'_> {
         Some(Untrusted { id: r.id.clone(), commit: r.commit.clone(), tip })
     }
 
-    /// Under `--no-deps`, each present package's declared range or thorns that the plan breaks.
-    fn no_deps_notes(&self) -> Vec<String> {
-        if !self.request.options.no_deps {
-            return Vec::new();
-        }
-        let mut out = Vec::new();
-        for (t, cs) in &self.s.constraints {
-            let Some(e) = self.s.chosen.get(t).filter(|e| e.is_new()) else { continue };
-            for c in cs.iter().filter(|c| c.passive) {
-                let lacks = c.thorns.iter().any(|th| e.release.thorn(th).is_none());
-                if c.req.fit(&e.release) == Fit::No || lacks {
-                    let by = Self::source_label(&c.source).unwrap_or_default();
-                    out.push(format!("{by} needs {t} {}; --no-deps leaves it unmet", c.req));
-                }
-            }
-        }
-        out
-    }
-
-    /// Under `--replace`, a base repo sharing a thorn name with a package the plan brings in or
-    /// moves gives up those checkouts (the whole repo, once none is left), as `compose` drops only
-    /// the checkouts an added package claims. (A base package the newcomer forks went whole,
-    /// during the pass.)
-    fn replace_colliding(&mut self) {
-        let mut newcomers: Vec<(usize, PkgId)> = (self.s.chosen.iter())
-            .filter(|(_, e)| e.changed())
-            .map(|(id, e)| (e.order, id.clone()))
-            .collect();
-        newcomers.sort();
-        for (_, by) in newcomers {
-            let Some(e) = self.s.chosen.get(&by) else { continue };
-            let new: BTreeSet<String> = e.enabled.iter().filter(|t| e.thorn_is_new(t)).cloned().collect();
-            let bases: Vec<PkgId> = (self.s.chosen.iter())
-                .filter(|(id, b)| *id != &by && b.base_repo().is_some())
-                .filter(|(_, b)| b.enabled.iter().any(|t| contains(&new, t)))
-                .map(|(id, _)| id.clone())
-                .collect();
-            for id in bases {
-                let b = self.s.chosen.get_mut(&id).expect("listed above");
-                let repo = b.base_repo().unwrap_or_default().to_owned();
-                let taken: Vec<String> = b.enabled.iter().filter(|t| contains(&new, t)).cloned().collect();
-                b.enabled.retain(|t| !contains(&new, t));
-                let thorns = if b.enabled.is_empty() {
-                    self.s.chosen.remove(&id);
-                    Vec::new()
-                } else {
-                    taken
-                };
-                self.s.replaced.push((Replaced::Base { repo }, by.clone(), thorns, false));
-            }
-        }
-    }
-
     /// Every library the plan places: the libraries of packages it brings in or moves (and the
-    /// libraries those go inside), at one release every placement accepts. A library installed
-    /// by an unchanged package stays at its commit, and a new placement must accept it. Placement
-    /// goes on under `--no-deps`.
-    fn place_libraries(&mut self) -> Res<Vec<Library>> {
-        let mut installed: BTreeMap<PkgId, (String, Vec<(Placement, Live)>)> = BTreeMap::new();
-        for (id, e) in &self.s.chosen {
+    /// libraries those go inside), at one release every placement accepts. A library an unchanged
+    /// package installed stays at its commit, and a new placement must accept it (and when
+    /// unchanged packages hold it at different commits, nothing can). Placement goes on under
+    /// `--no-deps`.
+    fn place_libraries(&mut self, chosen: &BTreeMap<PkgId, Entry>) -> Res<Result<Vec<Library>, Failure>> {
+        let mut installed: BTreeMap<PkgId, Vec<(String, Placement, Live)>> = BTreeMap::new();
+        for (id, e) in chosen {
             let Some(p) = e.present.as_ref().filter(|_| !e.is_new()) else { continue };
             for l in &p.libraries {
                 let placement = Placement {
@@ -1457,11 +1497,10 @@ impl Resolver<'_> {
                 };
                 let source = format!("installed {}", e.release.label());
                 let live = Live { target: l.id.clone(), req: format!("#{}", short(&l.commit)), source, ignore: None };
-                let slot = installed.entry(l.id.clone()).or_insert_with(|| (l.commit.clone(), Vec::new()));
-                slot.1.push((placement, live));
+                installed.entry(l.id.clone()).or_default().push((l.commit.clone(), placement, live));
             }
         }
-        let mut roots: Vec<&Entry> = self.s.chosen.values().filter(|e| e.is_new()).collect();
+        let mut roots: Vec<&Entry> = chosen.values().filter(|e| e.is_new()).collect();
         roots.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.release.id.cmp(&b.release.id)));
         let roots: Vec<(PkgId, Release)> =
             roots.iter().map(|e| (e.release.id.clone(), e.release.clone())).collect();
@@ -1482,7 +1521,8 @@ impl Resolver<'_> {
                         Ok(x) => x,
                         Err(detail) => {
                             let claim = claim_label(c);
-                            return Err(Refusal::BadClaim { by: label, claim, detail, ignore }.into());
+                            let r = Refusal::BadClaim { by: label, claim, detail, ignore };
+                            return Ok(Err(Failure::of(r, Vec::new())));
                         }
                     };
                     let (target, source) = (lib.clone(), label.clone());
@@ -1511,9 +1551,11 @@ impl Resolver<'_> {
                 let reqs: Vec<Req> = ps.iter().filter_map(|(p, _)| p.req.clone()).collect();
                 let mut lives: Vec<Live> = ps.iter().map(|(_, l)| l.clone()).collect();
                 let target = lib.clone();
-                if let Some((commit, held)) = installed.get(lib) {
-                    lives.extend(held.iter().map(|(_, l)| l.clone()));
-                    let release = self.cat.releases(lib).iter().find(|r| &r.commit == commit).cloned();
+                if let Some(held) = installed.get(lib) {
+                    lives.extend(held.iter().map(|(_, _, l)| l.clone()));
+                    let commits: BTreeSet<&String> = held.iter().map(|(c, _, _)| c).collect();
+                    let commit = held[0].0.clone();
+                    let release = self.cat.releases(lib).iter().find(|r| r.commit == commit).cloned();
                     let release = release.unwrap_or_else(|| Release {
                         id: lib.clone(),
                         at: At::Unknown(commit.clone()),
@@ -1529,25 +1571,25 @@ impl Resolver<'_> {
                         thorns: Vec::new(),
                         claims: Vec::new(),
                     });
-                    if reqs.iter().any(|q| q.fit(&release) == Fit::No) {
-                        return Err(Refusal::LibraryClash { library: target, placements: lives }.into());
+                    if commits.len() > 1 || reqs.iter().any(|q| q.fit(&release) == Fit::No) {
+                        let r = Refusal::LibraryClash { library: target, placements: lives.clone() };
+                        return Ok(Err(Failure::of(r, lives)));
                     }
                     next.insert(lib.clone(), release);
                     continue;
                 }
-                let candidates = self.candidates(lib, &reqs)?;
+                let candidates = self.cat.candidates(lib, &reqs)?;
                 let ok: Vec<&Release> =
                     eligible(&candidates, &reqs, None).into_iter().filter(|r| r.library).collect();
-                let Some(best) = newest(&approved_first(ok)).cloned() else {
-                    if !self.cat.known(lib) {
-                        let by = lives.into_iter().next();
-                        return Err(Refusal::NotRegistered { target, by }.into());
-                    }
-                    let sources: BTreeSet<&PkgId> = ps.iter().map(|(p, _)| &p.by).collect();
-                    if sources.len() > 1 {
-                        return Err(Refusal::LibraryClash { library: target, placements: lives }.into());
-                    }
-                    return Err(Refusal::NoReleaseFits { target, constraints: lives }.into());
+                let Some(best) = preferred(ok).first().map(|r| (*r).clone()) else {
+                    let r = if !self.cat.known(lib) {
+                        Refusal::NotRegistered { target, by: lives.first().cloned() }
+                    } else if ps.iter().map(|(p, _)| &p.by).collect::<BTreeSet<_>>().len() > 1 {
+                        Refusal::LibraryClash { library: target, placements: lives.clone() }
+                    } else {
+                        Refusal::NoReleaseFits { target, constraints: lives.clone() }
+                    };
+                    return Ok(Err(Failure::of(r, lives)));
                 };
                 next.insert(lib.clone(), best);
             }
@@ -1558,42 +1600,52 @@ impl Resolver<'_> {
                 for (lib, release) in selected {
                     let new = placements.remove(&lib).unwrap_or_default();
                     let mut ps: Vec<Placement> = new.into_iter().map(|(p, _)| p).collect();
-                    if let Some((_, held)) = installed.remove(&lib) {
-                        ps.extend(held.into_iter().map(|(p, _)| p));
+                    if let Some(held) = installed.remove(&lib) {
+                        ps.extend(held.into_iter().map(|(_, p, _)| p));
                     }
                     // New placements first, then by package: not in the order specs were named.
                     let key = |p: &Placement| (!p.new, p.by.clone(), p.inside.clone(), p.into.clone());
                     ps.sort_by_key(key);
                     out.push(Library { release, placements: ps });
                 }
-                return Ok(out);
+                return Ok(Ok(out));
             }
             selected = next;
         }
         bail!("Libraries placed inside each other without end")
     }
+}
 
-    /// Every hard CCL requirement of every thorn the plan enables is met by the final set;
-    /// otherwise a refusal, whatever the number of providers (cactup never fills in a
-    /// dependency nobody declared).
-    fn check_requirements(&mut self) -> Res<()> {
-        let unmet = conflict::unmet_requirements(&self.s.chosen, self.ccl);
-        if unmet.is_empty() {
-            return Ok(());
+/// Under `--replace`, a base repo sharing a thorn name with a package the plan brings in or moves
+/// gives up those checkouts (the whole repo, once none is left), as `compose` drops only the
+/// checkouts an added package claims.
+fn replace_colliding(
+    chosen: &mut BTreeMap<PkgId, Entry>,
+    replaced: &mut Vec<(Replaced, PkgId, Vec<String>, bool)>,
+) {
+    let mut newcomers: Vec<(usize, PkgId)> =
+        chosen.iter().filter(|(_, e)| e.changed()).map(|(id, e)| (e.order, id.clone())).collect();
+    newcomers.sort();
+    for (_, by) in newcomers {
+        let Some(e) = chosen.get(&by) else { continue };
+        let new: BTreeSet<String> = e.enabled.iter().filter(|t| e.thorn_is_new(t)).cloned().collect();
+        let bases: Vec<PkgId> = (chosen.iter())
+            .filter(|(id, b)| *id != &by && b.base_repo().is_some())
+            .filter(|(_, b)| b.enabled.iter().any(|t| contains(&new, t)))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in bases {
+            let b = chosen.get_mut(&id).expect("listed above");
+            let repo = b.base_repo().unwrap_or_default().to_owned();
+            let taken: Vec<String> = b.enabled.iter().filter(|t| contains(&new, t)).cloned().collect();
+            b.enabled.retain(|t| !contains(&new, t));
+            let thorns = if b.enabled.is_empty() {
+                chosen.remove(&id);
+                Vec::new()
+            } else {
+                taken
+            };
+            replaced.push((Replaced::Base { repo }, by.clone(), thorns, false));
         }
-        let mut out: Vec<Unmet> = Vec::new();
-        let mut asked: BTreeMap<Requirement, Vec<super::Provider>> = BTreeMap::new();
-        for (thorn, package, requirement) in unmet {
-            if gix::interrupt::is_triggered() {
-                bail!("Interrupted");
-            }
-            if !asked.contains_key(&requirement) {
-                let found = self.cat.facts.providers(&requirement)?;
-                asked.insert(requirement.clone(), found);
-            }
-            let providers = asked[&requirement].clone();
-            out.push(Unmet { thorn, package, requirement, providers });
-        }
-        Err(Refusal::Unclaimed(out).into())
     }
 }

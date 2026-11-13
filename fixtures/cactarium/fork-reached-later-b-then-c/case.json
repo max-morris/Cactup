@@ -16,8 +16,8 @@
       "add max/app@1.0.0 App named",
       "add et/lib-b@1.0.0 B needed by max/app@1.0.0",
       "add et/lib-c@1.0.0 C needed by max/app@1.0.0",
+      "add max/fork@1.0.0 Up needed by et/lib-b@1.0.0",
       "add et/lib-d@1.0.0 D needed by et/lib-c@1.0.0",
-      "add max/fork@1.0.0 Up needed by et/lib-d@1.0.0",
       "note: max/fork@1.0.0 stands in for et/upstream"
     ]
   }

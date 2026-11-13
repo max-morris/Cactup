@@ -12,8 +12,8 @@
     "refusal": "NoConsistentSet",
     "message": [
       "these constraints keep displacing each other",
-      "et/p * (from max/x@1.0.0)",
-      "et/q * (from max/x@1.0.0)"
+      "et/p ^1 (from et/q@1.0.0)",
+      "et/p * (from max/x@1.0.0)"
     ]
   }
 }

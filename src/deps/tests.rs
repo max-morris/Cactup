@@ -18,10 +18,14 @@ use std::path::{Path, PathBuf};
 
 use cactup_ecosystem_common::api::{ClaimInfo, PackageVersion, ThornInfo};
 use cactup_ecosystem_common::ccl::ThornFacts;
+use cactup_ecosystem_common::version::TrackedVersion;
 use serde::Deserialize;
 use serde_json::Value;
 
 use super::*;
+
+/// et/carpetx 2026.5.1's commit in the pool (the sha1 of "et/carpetx@2026.5.1").
+const C551: &str = "ba20bf7e830f893466fceda170ebf5b844c342ba";
 
 /// The Cactarium's requirement semantics today: implementations inherited or befriended,
 /// capabilities and thorns required, functions required; names compared case-insensitively.
@@ -562,7 +566,7 @@ fn case_dirs() -> Vec<PathBuf> {
 #[test]
 fn resolver_tables() {
     let dirs = case_dirs();
-    assert!(dirs.len() >= 90, "only {} cases under fixtures/cactarium", dirs.len());
+    assert!(dirs.len() >= 100, "only {} cases under fixtures/cactarium", dirs.len());
     let mut failed = Vec::new();
     for dir in &dirs {
         let errors = run(dir);
@@ -574,6 +578,15 @@ fn resolver_tables() {
     assert!(failed.is_empty(), "{} of {} cases failed:\n\n{}", failed.len(), dirs.len(), failed.join("\n\n"));
 }
 
+/// A release's claims the other way round, except any-of dependencies, whose declaration order
+/// decides which is settled first: they keep their order among themselves (after the rest).
+fn reverse_claims(r: &mut Release) {
+    let (any_of, mut rest): (Vec<ClaimInfo>, Vec<ClaimInfo>) =
+        r.claims.drain(..).partition(|c| !c.alternatives.is_empty());
+    rest.reverse();
+    r.claims = rest.into_iter().chain(any_of).collect();
+}
+
 /// What a resolution decided, whatever order its steps come in.
 fn outcome(dir: &Path, reverse: bool) -> String {
     let Loaded { case, mut facts, mut present, rules } = load(dir);
@@ -581,6 +594,15 @@ fn outcome(dir: &Path, reverse: bool) -> String {
     if reverse {
         present.reverse();
         specs.reverse();
+        for p in &mut present {
+            reverse_claims(&mut p.release);
+        }
+        for rs in facts.releases.values_mut() {
+            rs.iter_mut().for_each(reverse_claims);
+        }
+        for s in facts.snapshots.values_mut() {
+            reverse_claims(&mut s.release);
+        }
     }
     let request = Request { specs: &specs, present: &present, rules: &rules, options: options_of(&case) };
     match resolve(&request, &mut facts, &ServerRules) {
@@ -599,9 +621,9 @@ fn outcome(dir: &Path, reverse: bool) -> String {
     }
 }
 
-/// Every case gives the same decisions with its present packages and specs listed the other way
-/// round: nothing depends on the order a map, the server or the caller produced, nor on the order
-/// needs arrive in (passive constraints of packages that move later in a pass included).
+/// Every case gives the same decisions with its present packages, its specs and each release's
+/// claims (any-of dependencies aside) listed the other way round: nothing depends on the order a
+/// map, the server or the caller produced, nor on the order needs arrive in.
 #[test]
 fn plans_do_not_depend_on_input_order() {
     let mut differ = Vec::new();
@@ -692,6 +714,9 @@ fn records_merge_into_added_for() {
     assert!(record(None).merge(Some(&stale), Some(&old_commit)).requested, "a stale entry: requested");
     assert!(record(Some(true)).merge(Some(&brought), Some(&old_commit)).requested, "named now");
     assert!(!record(Some(false)).merge(None, None).requested, "brought in now");
+    // A package brought in now starts afresh: a leftover entry passes nothing on.
+    let fresh = record(Some(false)).merge(Some(&brought), Some(&old_commit));
+    assert_eq!((fresh.requested, fresh.by.as_slice()), (false, &["max/b@1.0.0".to_owned()][..]));
 }
 
 #[test]
@@ -723,6 +748,17 @@ fn bad_server_data_is_refused() {
         let pv: PackageVersion = serde_json::from_value(v.clone()).unwrap();
         assert!(Release::from_served(&id, &pv, false).is_err(), "{}", v["commit"]);
     }
+    // A fork-of claim whose sha or range does not read is no claim (never a panic later).
+    let fork = read_json(&cases_dir().join("pool/max--carpetx-mp--bad-sha.json"))["versions"][0].clone();
+    let fork = served(&PkgId::parse("max/carpetx-mp").unwrap(), &fork);
+    assert!(fork_claims(&fork, &id).is_empty() && !forks(&fork, &id));
+    let mut bad_range = fork.clone();
+    bad_range.claims[0].sha = None;
+    bad_range.claims[0].range = Some("not a range".into());
+    // The crate keeps what follows `@` raw: still a fork, standing in for no version.
+    let dep: cactup_ecosystem_common::slug::Slug = "et/carpetx@^2026.5".parse().unwrap();
+    let published = [(TrackedVersion::from_tag("v2026.5.1").unwrap(), Some(C551.to_owned()))];
+    assert!(fork_claims(&bad_range, &id).iter().all(|f| !f.stands_in_for(&dep, &published)));
 }
 
 #[test]
@@ -738,6 +774,42 @@ fn tips_and_commits_are_read_from_the_version() {
     let r = served(&id, &v["versions"][0]);
     assert_eq!((r.tag.as_deref(), r.url.as_str(), r.contact.as_deref()), (Some("v2026.5.1"), "https://github.com/et/carpetx.git", None));
     assert_eq!(PkgId::repo("carpetx").as_str(), "repo:carpetx");
+}
+
+/// A tip that moves shows the commits, not "head -> head".
+#[test]
+fn a_moving_tip_shows_its_commits() {
+    let id = PkgId::parse("et/carpetx").unwrap();
+    let v = read_json(&cases_dir().join("pool/snapshots/et--carpetx--at-head.json"));
+    let to = served(&id, &v["served"]);
+    let from = Release { at: At::Tip { name: "head".into(), commit: "1".repeat(40) }, commit: "1".repeat(40), ..to.clone() };
+    let step = Step::Upgrade { from, to, thorns: vec![], why: Why::Named, flag: None };
+    let plan = Plan { steps: vec![step], ..Plan::default() };
+    assert!(plan.render("x").contains("et/carpetx head (111111111111) -> head (444444444444)"), "{}", plan.render("x"));
+}
+
+/// Every pool file is some case's: the pool does not drift from what the cases use.
+#[test]
+fn every_pool_file_is_used() {
+    let mut used: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for dir in case_dirs() {
+        let case = load(&dir).case;
+        used.extend(case.packages.iter().map(|p| format!("{p}.json")));
+        used.extend(case.snapshots.iter().map(|s| format!("snapshots/{s}.json")));
+    }
+    let pool = cases_dir().join("pool");
+    let mut unused = Vec::new();
+    for sub in ["", "snapshots"] {
+        for e in std::fs::read_dir(pool.join(sub)).unwrap().filter_map(Result::ok) {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let rel = if sub.is_empty() { name.clone() } else { format!("{sub}/{name}") };
+            if name.ends_with(".json") && !used.contains(&rel) {
+                unused.push(rel);
+            }
+        }
+    }
+    unused.sort();
+    assert!(unused.is_empty(), "pool files no case uses: {unused:?}");
 }
 
 /// The structured parts of a plan, which P3 executes from (no label parsing).
@@ -777,8 +849,8 @@ fn refusals_carry_their_constraints() {
     let request = Request { specs: &specs, present: &present, rules: &rules, options: options_of(&case) };
     let e = resolve(&request, &mut facts, &ServerRules).unwrap_err();
     let Some(Refusal::NoReleaseFits { constraints, .. }) = e.downcast_ref::<Refusal>() else { panic!("{e}") };
-    let first: &Live = &constraints[0];
-    assert_eq!(first.ignore.as_deref(), Some("max/z4c:dependency:et/carpetx"));
+    let ignores: Vec<Option<&str>> = constraints.iter().map(|l: &Live| l.ignore.as_deref()).collect();
+    assert_eq!(ignores, [Some("max/grhydro:dependency:et/carpetx"), Some("max/z4c:dependency:et/carpetx")]);
 }
 
 #[test]
