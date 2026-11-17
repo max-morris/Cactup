@@ -32,45 +32,20 @@ const ASK: &str = "ask the Cactarium";
 const SEARCH: &str = "look for a plan";
 /// How many search steps go by between two updates of the search line.
 const TICK_EVERY: usize = 1024;
-/// How often a request in flight checks for Ctrl-C.
-const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// The thorns read from the installed tree: checkout → its `.ccl` facts
 /// (`None`: unreadable). What [`crate::sim::trim::thorn_facts`] gives, keyed
 /// by checkout.
 pub(crate) type LocalFacts = BTreeMap<String, Option<ThornFacts>>;
 
-/// Runs `request` on a thread of its own and waits for it, checking `stop`
-/// every [`POLL`]: once it is set, fails with "interrupted" at once and
-/// leaves the request to finish (or time out) on its own. Blocking reqwest
-/// cannot be cancelled, and a version list can take a while on a slow link.
-pub(crate) fn interruptibly<T: Send + 'static>(
-    request: impl FnOnce() -> Res<T> + Send + 'static,
-    stop: &std::sync::atomic::AtomicBool,
-) -> Res<T> {
-    let (send, receive) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = send.send(request());
-    });
-    loop {
-        if stop.load(std::sync::atomic::Ordering::Relaxed) {
-            bail!("Interrupted");
-        }
-        match receive.recv_timeout(POLL) {
-            Ok(answer) => return answer,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => bail!("A request to the Cactarium died"),
-        }
-    }
-}
-
 /// The Cactarium, as [`deps::resolve`] reads it: every package's versions
 /// loaded once, in parallel waves, each request on a line under a headline;
 /// snapshots and provider searches one at a time, each on its line too. One
 /// renderer for the whole conversation, shut down by [`Registry::finish`] (or
 /// on drop), so nothing may print to the terminal while one is alive. Every
-/// request gives way to Ctrl-C at once ([`interruptibly`]); none has a limit
-/// on its whole length, only the client's on connecting and on each stall.
+/// request gives way to Ctrl-C at once (the client's own doing); none has a
+/// limit on its whole length, only the patient client's on the head of each
+/// answer and on each stall.
 pub(crate) struct Registry {
     client: Client,
     loaded: BTreeMap<PkgId, Option<Vec<Release>>>,
@@ -92,7 +67,7 @@ impl Registry {
         let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
         let layout = Layout::for_names([ASK, SEARCH].into_iter().chain(names));
         Registry {
-            client: client.clone(),
+            client: client.clone().patient(),
             loaded: BTreeMap::new(),
             contacts: BTreeMap::new(),
             progress,
@@ -122,11 +97,6 @@ impl Registry {
         Headline::over(self.progress.add_child(ASK), ASK, total, unit, self.layout.clone())
     }
 
-    /// One request, interruptibly, with a clone of the client.
-    fn ask<T: Send + 'static>(&self, request: impl FnOnce(Client) -> Res<T> + Send + 'static) -> Res<T> {
-        let client = self.client.clone();
-        interruptibly(move || request(client), &gix::interrupt::IS_INTERRUPTED)
-    }
 
     /// One request on a line of its own under the headline, `name` naming
     /// it and `phase` saying what it asks.
@@ -142,7 +112,7 @@ impl Registry {
         let mut headline = self.headline(1, "requests");
         let line = Line::over(headline.add_child(name.to_owned()), name, self.layout.clone());
         line.phase(phase.to_owned());
-        let answer = self.ask(request);
+        let answer = request(self.client.clone());
         drop(line);
         headline.inc();
         answer
@@ -170,7 +140,7 @@ impl Registry {
             let line = Line::over(headline.lock().expect("progress poisoned").add_child(label.clone()), &label, self.layout.clone());
             line.phase(phase.to_owned());
             let job = request(item, self.client.clone());
-            let answer = interruptibly(job, &gix::interrupt::IS_INTERRUPTED);
+            let answer = job();
             drop(line);
             headline.lock().expect("progress poisoned").inc();
             answer
@@ -222,9 +192,7 @@ impl Registry {
             // Rate-limited, or not served to this caller: that package is
             // unread, the command goes on.
             let refused = |e: &anyhow::Error| {
-                (e.downcast_ref::<crate::cactarium::Refused>())
-                    .filter(|r| r.status == 429 || r.status == 403)
-                    .map(|r| r.message.clone())
+                (e.downcast_ref::<crate::cactarium::Refused>()).filter(|r| r.is_unanswered()).map(|r| r.message.clone())
             };
             out.push(match answer {
                 Ok(Some((version, _))) => Read::Found(Box::new(Release::from_served(id, &version, self.contact(id))?)),
@@ -847,36 +815,5 @@ pub(crate) fn refusal_text(e: anyhow::Error, finished: &Finished) -> anyhow::Err
         }
         Ok(r) => anyhow!("{r}"),
         Err(e) => e,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    /// A request that would hang gives way to the stop flag within a poll
-    /// or two, its thread left to finish on its own.
-    #[test]
-    fn a_request_in_flight_gives_way_to_ctrl_c() {
-        let stop = std::sync::Arc::new(AtomicBool::new(false));
-        let setter = stop.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            setter.store(true, Ordering::Relaxed);
-        });
-        let started = std::time::Instant::now();
-        let err = interruptibly(
-            || {
-                std::thread::sleep(std::time::Duration::from_secs(30));
-                Ok(())
-            },
-            &stop,
-        )
-        .unwrap_err();
-        assert_eq!(err.to_string(), "Interrupted");
-        assert!(started.elapsed() < std::time::Duration::from_secs(1), "{:?}", started.elapsed());
-        // And an answer comes back as it is.
-        assert_eq!(interruptibly(|| Ok(7), &AtomicBool::new(false)).unwrap(), 7);
     }
 }

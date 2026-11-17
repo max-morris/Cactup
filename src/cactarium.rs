@@ -48,19 +48,20 @@ pub fn validate_url(value: &str) -> Res<String> {
     }
 }
 
-/// How long a request to the registry may wait for the head of its answer
-/// (connecting, sending, the server's own work: a cold read of a package at
-/// a commit fetches its repository) and for each further piece of the body.
-/// Generous: Ctrl-C ends any wait at once (`resolution::interruptibly`).
+/// How long a request made to resolve dependencies may wait for the head of
+/// its answer (connecting, sending, the server's own work: a cold read of a
+/// package at a commit fetches its repository) and for each further piece of
+/// the body. Generous: Ctrl-C ends any wait at once ([`interruptibly`]).
 const WAIT: std::time::Duration = std::time::Duration::from_secs(120);
 /// How long connecting may take, within [`WAIT`].
 const CONNECT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// The registry's HTTP client: cactup's `User-Agent`, and [`WAIT`] on the
-/// head of each answer and on each stall of its body, rather than reqwest's
-/// 30 s default (blocking reqwest's timeout bounds the whole wait for the
-/// head).
-static HTTP: std::sync::LazyLock<reqwest::blocking::Client> = std::sync::LazyLock::new(|| {
+/// The HTTP client for resolving dependencies ([`Client::patient`]):
+/// cactup's `User-Agent`, and [`WAIT`] on the head of each answer and on each
+/// stall of its body, rather than reqwest's 30 s default (blocking reqwest's
+/// timeout bounds the whole wait for the head). Every other request uses the
+/// shared download client and its 30 s.
+static PATIENT: std::sync::LazyLock<reqwest::blocking::Client> = std::sync::LazyLock::new(|| {
     reqwest::blocking::Client::builder()
         .user_agent(crate::build_info::USER_AGENT)
         .timeout(WAIT)
@@ -69,19 +70,43 @@ static HTTP: std::sync::LazyLock<reqwest::blocking::Client> = std::sync::LazyLoc
         .expect("failed to build the HTTP client")
 });
 
-fn http() -> &'static reqwest::blocking::Client {
-    &HTTP
+/// Runs `request` on a thread of its own and waits for it, checking `stop`
+/// every 50 ms: once it is set, fails with "interrupted" at once and leaves
+/// the request to finish (or time out) on its own. Blocking reqwest cannot be
+/// cancelled, and an answer can take a while on a slow link.
+pub(crate) fn interruptibly<T: Send + 'static>(
+    request: impl FnOnce() -> Res<T> + Send + 'static,
+    stop: &std::sync::atomic::AtomicBool,
+) -> Res<T> {
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = send.send(request());
+    });
+    loop {
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            bail!("Interrupted");
+        }
+        match receive.recv_timeout(std::time::Duration::from_millis(50)) {
+            Ok(answer) => return answer,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => bail!("A request to the Cactarium died"),
+        }
+    }
 }
 
 /// A connection to one registry: its base URL and, for writes, the token.
 #[derive(Clone, Debug)]
 pub struct Client {
     base: String,
-    /// A limit on each whole request, the answer's body included: set for
-    /// lookups a command makes in passing (`inst show`), so a registry that
-    /// cannot be reached, or answers slowly, costs seconds. Without it, only
-    /// [`WAIT`] bounds each wait.
+    /// A limit on each whole request, the answer's body included (reqwest's
+    /// per-request timeout): set for lookups a command makes in passing (`inst
+    /// show`), so a registry that cannot be reached, or answers slowly, costs
+    /// seconds. Without it, the client's own waits bound each wait.
     timeout: Option<std::time::Duration>,
+    /// Waits as resolving dependencies may ([`PATIENT`]).
+    patient: bool,
+    /// What interrupts a request in flight: Ctrl-C (a test's own flag).
+    stop: &'static std::sync::atomic::AtomicBool,
 }
 
 impl Client {
@@ -97,7 +122,28 @@ impl Client {
     }
 
     pub fn at(base: &str) -> Client {
-        Client { base: base.trim_end_matches('/').to_owned(), timeout: None }
+        Client {
+            base: base.trim_end_matches('/').to_owned(),
+            timeout: None,
+            patient: false,
+            stop: &gix::interrupt::IS_INTERRUPTED,
+        }
+    }
+
+    /// This client, waiting as long as resolving dependencies may: a read of
+    /// a package at a commit can make the server fetch its repository.
+    pub fn patient(self) -> Client {
+        Client { patient: true, ..self }
+    }
+
+    /// This client, stopped by `stop` rather than Ctrl-C (tests).
+    #[cfg(test)]
+    pub fn stopped_by(self, stop: &'static std::sync::atomic::AtomicBool) -> Client {
+        Client { stop, ..self }
+    }
+
+    fn http(&self) -> &'static reqwest::blocking::Client {
+        if self.patient { &PATIENT } else { crate::fetch::download::client() }
     }
 
     /// This client, giving up on any request, its whole answer read, after
@@ -123,14 +169,14 @@ impl Client {
     /// still holds.
     pub fn resolve(&self, req: &str, kind: &str) -> Res<Resolved> {
         let url = format!("{}?req={}&kind={}", self.url("/resolve"), query_escape(req), query_escape(kind));
-        self.send(http().get(&url))?.json()
+        self.send(self.http().get(&url))?.json()
     }
 
     /// A stack release (`version` exact, or `head`/`master`), with what the
     /// server's headers say about it.
     pub fn stack_release(&self, owner: &str, name: &str, version: &str) -> Res<StackResponse> {
         let url = self.url(&format!("/stacks/{owner}/{name}/releases/{version}"));
-        let response = self.send(http().get(&url))?;
+        let response = self.send(self.http().get(&url))?;
         let flag = |header: &str| response.headers().get(header).map(|v| v.as_bytes() == b"true");
         let unpinned = flag(UNPINNED_HEADER).unwrap_or(false);
         // A tip without the trust header (a registry that predates it, or
@@ -149,14 +195,14 @@ impl Client {
 
     pub fn package_versions(&self, owner: &str, name: &str) -> Res<PackageVersions> {
         let url = self.url(&format!("/packages/{owner}/{name}/versions"));
-        self.send(http().get(&url))?.json()
+        self.send(self.http().get(&url))?.json()
     }
 
     /// [`Client::package_versions`], or `None` when the Cactarium has no
     /// such package.
     pub fn package_versions_if_any(&self, owner: &str, name: &str) -> Res<Option<PackageVersions>> {
         let url = self.url(&format!("/packages/{owner}/{name}/versions"));
-        self.send_found(http().get(&url), &[reqwest::StatusCode::NOT_FOUND])?.ok().map(Answer::json).transpose()
+        self.send_found(self.http().get(&url), &[reqwest::StatusCode::NOT_FOUND])?.ok().map(Answer::json).transpose()
     }
 
     /// A package read at something no published version names: a branch
@@ -166,7 +212,7 @@ impl Client {
     /// package or cannot find that commit in its repository.
     pub fn package_at_if_any(&self, owner: &str, name: &str, at: &str) -> Res<Option<(PackageVersion, bool)>> {
         let url = self.url(&format!("/packages/{owner}/{name}/versions/{at}"));
-        let Ok(response) = self.send_found(http().get(&url), &[reqwest::StatusCode::NOT_FOUND])? else {
+        let Ok(response) = self.send_found(self.http().get(&url), &[reqwest::StatusCode::NOT_FOUND])? else {
             return Ok(None);
         };
         let untrusted = response.headers().get(UNTRUSTED_HEADER).is_none_or(|v| v.as_bytes() == b"true");
@@ -186,7 +232,7 @@ impl Client {
             let request = LookupRequest { pins: chunk.to_vec(), downloads: Vec::new() };
             request.validate().map_err(|e| anyhow!("Cannot ask the Cactarium about these repos: {e}"))?;
             let body = serde_json::to_vec(&request).context("Failed to encode the lookup request")?;
-            let request = http()
+            let request = self.http()
                 .post(self.url("/lookup"))
                 .header("content-type", "application/json")
                 .body(body);
@@ -226,7 +272,7 @@ impl Client {
             .to_query_string()
             .map_err(|e| anyhow!("Cannot ask the Cactarium what provides {need}: {e}"))?;
         let url = format!("{}?{query}", self.url("/providers"));
-        let response = self.send_found(http().get(&url), MISSING_ROUTE)?.map_err(|m| self.missing("/providers", m))?;
+        let response = self.send_found(self.http().get(&url), MISSING_ROUTE)?.map_err(|m| self.missing("/providers", m))?;
         response.json()
     }
 
@@ -252,7 +298,7 @@ impl Client {
     /// Every release of a stack, each with whether it has been yanked.
     pub fn stack_releases(&self, owner: &str, name: &str) -> Res<StackReleases> {
         let url = self.url(&format!("/stacks/{owner}/{name}/releases"));
-        self.send(http().get(&url))?.json()
+        self.send(self.http().get(&url))?.json()
     }
 
     /// Whether `version` of package or stack `owner/name` has been yanked
@@ -282,7 +328,7 @@ impl Client {
         if let Some(sim) = sim {
             url.push_str(&format!("?{SIM_QUERY}={}", query_escape(sim)));
         }
-        let response = self.send(http().get(&url))?;
+        let response = self.send(self.http().get(&url))?;
         let expected = response.headers().get(SHA256_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
         let bytes = response.bytes().with_context(|| format!("Failed to download {url}"))?;
         if let Some(expected) = expected {
@@ -315,7 +361,7 @@ impl Client {
             Some(v) => format!("/sims/{owner}/{name}?version={}", query_escape(v)),
             None => format!("/sims/{owner}/{name}"),
         };
-        let request = http()
+        let request = self.http()
             .post(self.url(&path))
             .bearer_auth(token)
             .header("content-type", "application/toml")
@@ -332,7 +378,7 @@ impl Client {
     ) -> Res<Published> {
         let token = token_for(&self.base)?;
         let body = serde_json::to_vec(request).context("Failed to encode the release request")?;
-        let request = http()
+        let request = self.http()
             .post(self.url(&format!("/stacks/{owner}/{name}/releases")))
             .bearer_auth(token)
             .header("content-type", "application/json")
@@ -344,7 +390,7 @@ impl Client {
     /// repository for new release tags now, rather than at its next poll.
     pub fn refresh(&self, owner: &str, name: &str) -> Res<Refreshed> {
         let token = token_for(&self.base)?;
-        let request = http()
+        let request = self.http()
             .post(self.url(&format!("/packages/{owner}/{name}/refresh")))
             .bearer_auth(token);
         self.send(request)?.json()
@@ -378,17 +424,28 @@ impl Client {
 
     /// [`Client::send`], but an answer with one of the `missing` statuses is
     /// `Err(Missing)`: the server has no such thing (a package, or a route).
+    /// The request, its whole answer read, runs [`interruptibly`]: Ctrl-C
+    /// stops it at once.
     fn send_found(
         &self,
         request: reqwest::blocking::RequestBuilder,
         missing: &[reqwest::StatusCode],
     ) -> Res<Result<Answer, Missing>> {
-        let deadline = self.timeout.map(|t| std::time::Instant::now() + t);
+        let client = self.clone();
+        let missing = missing.to_vec();
+        interruptibly(move || client.exchange(request, &missing), self.stop)
+    }
+
+    fn exchange(
+        &self,
+        request: reqwest::blocking::RequestBuilder,
+        missing: &[reqwest::StatusCode],
+    ) -> Res<Result<Answer, Missing>> {
         let request = match self.timeout {
             Some(timeout) => request.timeout(timeout),
             None => request,
         };
-        let response = request
+        let mut response = request
             .header(API_GENERATION_HEADER, API_GENERATION.to_string())
             .send()
             .map_err(|e| self.unreachable(e))?;
@@ -403,11 +460,17 @@ impl Client {
                 self.base
             );
         }
-        if response.status().is_success() {
-            let url = response.url().to_string();
-            return Ok(Ok(Answer { response, deadline, url, base: self.base.clone() }));
-        }
         let status = response.status();
+        if status.is_success() {
+            let url = response.url().to_string();
+            let headers = response.headers().clone();
+            // Through `Read`: the client's wait bounds each stall (and the
+            // per-request timeout, when set, the whole answer).
+            let mut body = Vec::new();
+            std::io::Read::read_to_end(&mut response, &mut body)
+                .map_err(|e| self.unreachable_read(e, &url))?;
+            return Ok(Ok(Answer { headers, body, url }));
+        }
         if missing.contains(&status) {
             return Ok(Err(Missing { status, generation: generation.is_some() }));
         }
@@ -423,6 +486,19 @@ impl Client {
             Err(_) => format!("The Cactarium at {} answered {status}", self.base),
         };
         Err(anyhow::Error::new(Refused { status: status.as_u16(), message }))
+    }
+
+    /// A body that stopped arriving: said as [`Client::unreachable`] says a
+    /// server that did not answer in time.
+    fn unreachable_read(&self, e: std::io::Error, url: &str) -> anyhow::Error {
+        if e.kind() == std::io::ErrorKind::TimedOut || e.to_string().contains("timed out") {
+            return anyhow!(
+                "The Cactarium at {} isn't reachable (it did not answer in time). Check the network, or point \
+                 cactup at another Cactarium with the {URL_KNOB} knob or CACTARIUM_URL",
+                self.base
+            );
+        }
+        anyhow::Error::new(e).context(format!("Failed to read the answer from {url}"))
     }
 }
 
@@ -453,42 +529,35 @@ impl std::fmt::Display for Refused {
 
 impl std::error::Error for Refused {}
 
-/// A successful answer, read within the client's whole-request limit when
-/// it has one.
+impl Refused {
+    /// Not answered now, rather than answered: rate-limited (429), not
+    /// served to this caller (403), or the server failing (5xx). A read
+    /// refused so leaves that one package unread; it never fails a command
+    /// on its own.
+    pub fn is_unanswered(&self) -> bool {
+        self.status == 429 || self.status == 403 || self.status >= 500
+    }
+}
+
+/// A successful answer, read whole.
 struct Answer {
-    response: reqwest::blocking::Response,
-    deadline: Option<std::time::Instant>,
+    headers: reqwest::header::HeaderMap,
+    body: Vec<u8>,
     url: String,
-    base: String,
 }
 
 impl Answer {
     fn headers(&self) -> &reqwest::header::HeaderMap {
-        self.response.headers()
+        &self.headers
     }
 
-    /// The body, read through `Read`: each stall bounded by [`WAIT`] (or the
-    /// whole-request limit), and the whole by that limit, checked between
-    /// pieces.
-    fn bytes(mut self) -> Res<Vec<u8>> {
-        let mut bytes = Vec::new();
-        let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            if self.deadline.is_some_and(|d| std::time::Instant::now() > d) {
-                bail!("The Cactarium at {} isn't reachable (it did not answer in time)", self.base);
-            }
-            let n = std::io::Read::read(&mut self.response, &mut buf)
-                .with_context(|| format!("Failed to read the answer from {}", self.url))?;
-            if n == 0 {
-                return Ok(bytes);
-            }
-            bytes.extend_from_slice(&buf[..n]);
-        }
+    fn bytes(self) -> Res<Vec<u8>> {
+        Ok(self.body)
     }
 
     fn text(self) -> Res<String> {
         let url = self.url.clone();
-        String::from_utf8(self.bytes()?).with_context(|| format!("The Cactarium's answer from {url} is not text"))
+        String::from_utf8(self.body).with_context(|| format!("The Cactarium's answer from {url} is not text"))
     }
 
     fn json<T: DeserializeOwned>(self) -> Res<T> {
@@ -1100,6 +1169,56 @@ mod tests {
         let client = Client::at(&base);
         assert!(client.package_versions_if_any("et", "x").is_err());
         assert!(client.package_at_if_any("et", "x", &"b".repeat(40)).is_err());
+    }
+
+    /// Every request gives way to Ctrl-C within a poll or two, the body
+    /// included: a server that never answers, and one that answers its head
+    /// and then trickles its body, are both left at once.
+    #[test]
+    fn a_request_in_flight_gives_way_to_ctrl_c() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static STOP: AtomicBool = AtomicBool::new(false);
+        for trickle in [false, true] {
+            STOP.store(false, Ordering::Relaxed);
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut head = [0u8; 1024];
+                let _ = stream.read(&mut head);
+                if trickle {
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\napi-generation: 1\r\nContent-Length: 400\r\n\r\n");
+                    for _ in 0..400 {
+                        if stream.write_all(b" ").and_then(|()| stream.flush()).is_err() {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                } else {
+                    std::thread::sleep(std::time::Duration::from_secs(40));
+                }
+            });
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                STOP.store(true, Ordering::Relaxed);
+            });
+            let started = std::time::Instant::now();
+            let err = Client::at(&base).stopped_by(&STOP).package_versions("et", "x").unwrap_err();
+            assert_eq!(err.to_string(), "Interrupted", "trickle {trickle}");
+            assert!(started.elapsed() < std::time::Duration::from_secs(1), "trickle {trickle}: {:?}", started.elapsed());
+        }
+        // An answer comes back as it is.
+        assert_eq!(interruptibly(|| Ok(7), &AtomicBool::new(false)).unwrap(), 7);
+    }
+
+    /// Rate limits, refusals to serve and failing servers are answers not
+    /// given now; anything else is an answer.
+    #[test]
+    fn unanswered_statuses() {
+        let refused = |status| Refused { status, message: String::new() }.is_unanswered();
+        assert!(refused(429) && refused(403) && refused(502) && refused(500));
+        assert!(!refused(404) && !refused(400) && !refused(401));
     }
 
     /// A client with a whole-request limit gives up on an answer whose body
