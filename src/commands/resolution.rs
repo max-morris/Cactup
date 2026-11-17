@@ -460,6 +460,7 @@ fn unknown(
         flesh,
         library: false,
         yanked: false,
+        yank_reason: None,
         pending: false,
         usable: true,
         thorns,

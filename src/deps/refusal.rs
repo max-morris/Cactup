@@ -88,6 +88,9 @@ pub enum Refusal {
     Unclaimed(Vec<Unmet>),
     /// A library was named; it comes with the package that builds against it.
     NamedLibrary { target: PkgId },
+    /// A dependency places `target` at `into` as a library, but it is a
+    /// package with thorns.
+    NotALibrary { target: PkgId, by: String, into: String, ignore: String },
     /// The Cactarium has no such package.
     NotRegistered { target: PkgId, by: Option<Live> },
     /// A claim cactup cannot read.
@@ -170,6 +173,9 @@ impl Refusal {
             }
             Refusal::NamedLibrary { .. } => {
                 "Add the package that builds against it, and the library comes with it".to_owned()
+            }
+            Refusal::NotALibrary { ignore, .. } => {
+                format!("Pass --ignore-claim {ignore} (and tell the package's authors)")
             }
             Refusal::NotRegistered { by: Some(live), .. } => match &live.ignore {
                 Some(ignore) => format!("Pass --ignore-claim {ignore}"),
@@ -294,6 +300,11 @@ impl fmt::Display for Refusal {
                 f,
                 "{target} is a library, which has no thorns: it is checked out where a package that builds against \
                  it says (the `into` of that package's dependency on it)"
+            )?,
+            Refusal::NotALibrary { target, by, into, .. } => write!(
+                f,
+                "{by} says where {target} goes (into = \"{into}\"), as for a library, but {target} is not a \
+                 library: it is a package with thorns, added as a package of its own"
             )?,
             Refusal::NotRegistered { target, by: Some(live) } => {
                 write!(f, "{} needs {target}, which the Cactarium does not know", live.source)?

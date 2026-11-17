@@ -699,6 +699,7 @@ fn held_release(cat: &Catalog, lib: &PkgId, commit: &str) -> Release {
         flesh: false,
         library: true,
         yanked: false,
+        yank_reason: None,
         pending: false,
         usable: true,
         thorns: Vec::new(),
@@ -2273,11 +2274,19 @@ impl Search<'_> {
                     continue;
                 }
                 let (candidates, _) = self.cat.candidates(lib, &reqs)?;
-                let ok: Vec<&Rel> =
-                    eligible(&candidates, &reqs, &reqs, None).into_iter().filter(|r| r.library).collect();
+                let fitting = eligible(&candidates, &reqs, &reqs, None);
+                let not_a_library = !fitting.is_empty() && fitting.iter().all(|r| !r.library);
+                let ok: Vec<&Rel> = fitting.into_iter().filter(|r| r.library).collect();
                 let Some(best) = preferred(ok).first().map(|r| (*r).clone()) else {
                     let r = if !self.cat.known(lib) {
                         Refusal::NotRegistered { target, by: lives.first().cloned() }
+                    } else if not_a_library {
+                        // Releases fit, but as packages with thorns: the claim
+                        // gives a place (`into`) to something that is no library.
+                        let (p, _) = &ps[0];
+                        let (by, into) = (p.by_label.clone(), p.into.clone());
+                        let ignore = lives.first().and_then(|l| l.ignore.clone()).unwrap_or_default();
+                        Refusal::NotALibrary { target, by, into, ignore }
                     } else if ps.iter().map(|(p, _)| &p.by).collect::<BTreeSet<_>>().len() > 1 {
                         Refusal::LibraryClash { library: target, placements: lives.clone() }
                     } else {

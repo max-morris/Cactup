@@ -336,6 +336,7 @@ fn load(dir: &Path) -> Loaded {
                 flesh: false,
                 library: false,
                 yanked: false,
+                yank_reason: None,
                 pending: false,
                 usable: true,
                 thorns: p.thorns.iter().map(ThornSpec::info).collect(),
@@ -1148,6 +1149,7 @@ fn synthetic_release(id: &str, version: &str, thorns: &[(String, ThornFacts)], c
         flesh: false,
         library: false,
         yanked: false,
+        yank_reason: None,
         pending: false,
         usable: true,
         thorns: thorns

@@ -187,6 +187,8 @@ pub struct Release {
     pub flesh: bool,
     pub library: bool,
     pub yanked: bool,
+    /// Why it was yanked, when it was and the author said.
+    pub yank_reason: Option<String>,
     /// Awaiting review: served only under `--risky-allow-untrusted-artifacts`.
     pub pending: bool,
     /// Its state is neither `invalid` nor `upstream-missing`.
@@ -228,6 +230,7 @@ impl Release {
             flesh: v.flesh,
             library: v.library,
             yanked: info.yanked,
+            yank_reason: info.yank_reason.clone().filter(|r| !r.is_empty()),
             pending: info.review.as_deref() == Some("pending"),
             usable: !matches!(info.state.as_str(), "invalid" | "upstream-missing"),
             thorns: v.thorns.clone(),

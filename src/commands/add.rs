@@ -1788,13 +1788,12 @@ mod tests {
         assert!(err.contains("places et/fuka at \"../../escape\"") && err.contains("not a plain folder name"), "{err}");
     }
 
-    /// `into` on a dependency whose target is no library is refused: no
-    /// release of it can be placed.
+    /// `into` on a dependency whose target is no library is refused as that.
     #[test]
     fn into_on_a_package_with_thorns_is_refused() {
         let base = serve_kadath("et/fuka", "src/fuka", false, 4);
         let err = wanted(&base, &["et/kadaththorn"]).map(drop).unwrap_err();
-        assert!(format!("{err:#}").contains("No release of et/fuka meets"), "{err:#}");
+        assert!(format!("{err:#}").contains("et/fuka is not a library"), "{err:#}");
     }
 
     /// `cactup add et/fuka`: a library on its own has nowhere to go; said
