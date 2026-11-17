@@ -98,18 +98,26 @@ pub fn compose(base: &str, added: &[AddedPackage]) -> Res<String> {
 }
 
 /// The base's clone an added package only adds thorns to, when it is one: a
-/// package that replaces nothing and whose clone the base list has (a name
-/// `place` gives a package only when the base clones that same repository).
-/// Its thorns live in that clone, at whatever the base has it at: `compose`
-/// writes them with the base's source for it (URL, branch, pin), and
-/// `present` reads them as the base package's. Libraries are never placed
-/// through one (a plan places libraries only for a release it brings in or
-/// moves, and more thorns of a base package move nothing).
+/// package that replaces nothing, whose clone the base list has under the
+/// same name, from the same repository (compared as the Cactarium compares
+/// them). Its thorns live in that clone, at whatever the base has it at:
+/// `compose` writes them with the base's source for it (URL, branch, pin),
+/// and `present` reads them there too (as the base package's, when the
+/// lookup says the clone is that package). A package from another repository
+/// that happens to share the clone's name is no such thing: it keeps its own
+/// source, and the fetch planner's conflict over the name says so loudly.
+/// Libraries are never placed through one (a plan places libraries only for
+/// a release it brings in or moves, and more thorns of a base package move
+/// nothing).
 pub(crate) fn base_clone_of<'l>(a: &AddedPackage, base: &'l thornlist::Thornlist) -> Option<&'l Component> {
     if !a.replaces.is_empty() {
         return None;
     }
-    base.components().iter().find(|c| c.repo == a.repo && c.ty == ComponentType::Git && c.url.is_some())
+    base.components().iter().find(|c| {
+        c.repo == a.repo
+            && c.ty == ComponentType::Git
+            && c.url.as_deref().is_some_and(|u| cactup_ecosystem_common::url::same_repo_lenient(u, &a.url))
+    })
 }
 
 /// Warnings for packages that only added thorns to a base clone the new
@@ -2000,6 +2008,25 @@ mod tests {
         // A tip over a pinned base clone: refused.
         let mut tip = wanted("head", "master", "e");
         assert!(share_base_clone(&base, &repo, "max/carpetx@head", &mut tip).is_err());
+    }
+
+    /// A package of another repository whose clone name a new base happens to
+    /// use (a user's fork, say, after a refetch) keeps its own source: never
+    /// re-pointed at the base's, and the clash is the fetch planner's loud
+    /// refusal.
+    #[test]
+    fn a_package_from_another_repository_keeps_its_source() {
+        let mut fork = package("carpetx", &[("CarpetX/Arith", "$2")], &[]);
+        fork.url = "https://elsewhere/someone/carpetx.git".into();
+        let text = compose(BASE, std::slice::from_ref(&fork)).unwrap();
+        let list = thornlist::parse(&text).unwrap();
+        let arith = list.components().iter().find(|c| c.checkout == "CarpetX/Arith").unwrap();
+        assert_eq!(arith.url.as_deref(), Some("https://elsewhere/someone/carpetx.git"));
+        assert_eq!(arith.commit.as_deref(), Some(&*"5".repeat(40)));
+        let tmp = tempfile::tempdir().unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("plan");
+        assert!(crate::fetch::plan(&list, tmp.path(), &mut progress).is_err(), "two sources for one clone");
+        assert!(base_clone_of(&fork, &thornlist::parse(BASE).unwrap()).is_none());
     }
 
     /// A base that no longer has the clone thorns were added to: said, as
