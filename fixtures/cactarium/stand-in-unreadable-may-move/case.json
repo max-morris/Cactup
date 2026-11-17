@@ -1,0 +1,34 @@
+{
+  "about": "Under --upgrade an unreadable base package may move to a release that has what the plan needs: no refusal",
+  "packages": [
+    "et--admbase",
+    "max--needs-sc"
+  ],
+  "specs": [
+    "max/needs-sc"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "unknown": "abababababababababababababababababababab",
+      "thorns": [
+        "ADMBase"
+      ],
+      "base": "admbase",
+      "enabled": [
+        "ADMBase"
+      ],
+      "stand_in": true
+    }
+  ],
+  "options": {
+    "upgrade": true
+  },
+  "expect": {
+    "plan": [
+      "add max/needs-sc@1.0.0 NeedsSC named",
+      "upgrade et/admbase #abababababab -> 2026.5.1 ADMBase, StaticConformal needed by max/needs-sc@1.0.0 (--upgrade)",
+      "replace base repo admbase with et/admbase"
+    ]
+  }
+}

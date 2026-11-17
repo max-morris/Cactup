@@ -1,0 +1,15 @@
+{
+  "about": "A dependency on a thorn a base package at an unfrozen commit has, not enabled: read there, given the thorn, not refused",
+  "packages": ["et--admbase", "max--needs-sc"],
+  "snapshots": ["et--admbase--at-abab"],
+  "specs": ["max/needs-sc"],
+  "present": [
+    {"package": "et/admbase", "unknown": "abababababababababababababababababababab", "thorns": ["ADMBase"], "base": "admbase", "enabled": ["ADMBase"], "stand_in": true}
+  ],
+  "expect": {
+    "plan": [
+      "add max/needs-sc@1.0.0 NeedsSC named",
+      "add et/admbase#abababababab StaticConformal needed by max/needs-sc@1.0.0"
+    ]
+  }
+}

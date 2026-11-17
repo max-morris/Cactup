@@ -1116,7 +1116,7 @@ fn records_of(
                 }
                 out.push(package);
             }
-            Step::AddThorns { id, thorns, .. } => {
+            Step::AddThorns { id, thorns, release, .. } => {
                 let p = present
                     .iter()
                     .find(|p| &p.release.id == id)
@@ -1131,7 +1131,9 @@ fn records_of(
                             .find(|a| a.package == id.as_str())
                             .cloned()
                             .ok_or_else(|| anyhow!("{id} has no record in this installation"))?;
-                        let more = record_of_release(&p.release, thorns, plan)?;
+                        // The release as the plan read it (a stand-in it read has
+                        // more thorns than the one the installation was taken with).
+                        let more = record_of_release(release, thorns, plan)?;
                         for t in more.thorns {
                             if !package.thorns.iter().any(|have| have.checkout == t.checkout) {
                                 package.thorns.push(t);
@@ -1149,7 +1151,7 @@ fn records_of(
                     Origin::Added => bail!("{id} has no record in this installation"),
                     // More thorns of a base repo's package, at the base's
                     // commit: they go into the base's own clone.
-                    Origin::Base { .. } => out.push(record_of_release(&p.release, thorns, plan)?),
+                    Origin::Base { .. } => out.push(record_of_release(release, thorns, plan)?),
                 }
             }
             Step::Replace { replaced: Replaced::Base { repo }, by, .. } => {

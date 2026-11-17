@@ -1,0 +1,12 @@
+{
+  "about": "A named thorn of a base package the Cactarium does not read now: refused, never an upgrade to the newest release without --upgrade",
+  "packages": ["et--admbase"],
+  "specs": ["et/admbase/StaticConformal"],
+  "present": [
+    {"package": "et/admbase", "unknown": "abababababababababababababababababababab", "thorns": ["ADMBase"], "base": "admbase", "enabled": ["ADMBase"], "stand_in": true}
+  ],
+  "expect": {
+    "refusal": "Unreadable",
+    "message": ["et/admbase#abababababab"]
+  }
+}

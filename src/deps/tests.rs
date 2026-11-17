@@ -113,6 +113,10 @@ struct PresentSpec {
     /// The base repo it is (absent: an `[[added]]` package).
     #[serde(default)]
     base: Option<String>,
+    /// Its release a stand-in, read (as a snapshot at its `unknown` commit) when the search
+    /// depends on it.
+    #[serde(default)]
+    stand_in: bool,
     enabled: Vec<String>,
     #[serde(default)]
     libraries: Vec<LibrarySpec>,
@@ -362,7 +366,8 @@ fn load(dir: &Path) -> Loaded {
                 inside: l.inside.as_deref().map(|i| PkgId::parse(i).unwrap()),
             })
             .collect();
-        present.push(Present { release, enabled: p.enabled.iter().cloned().collect(), origin, libraries });
+        let (enabled, stand_in) = (p.enabled.iter().cloned().collect(), p.stand_in);
+        present.push(Present { release, enabled, origin, libraries, stand_in });
     }
     let mut rules = Rules::default();
     for i in &case.ignore {
@@ -1204,14 +1209,14 @@ fn synthetic(clash: Option<&str>) -> (FixtureFacts, Vec<Present>, Vec<NamedSpec>
         let claims = if i > 0 { vec![dependency(&format!("base/pkg{}", i - 1), "^1", &[&format!("T{}x0", i - 1)])] } else { vec![] };
         let r = synthetic_release(&format!("base/pkg{i}"), "1.0.0", &thorns, claims);
         let enabled = thorns.iter().map(|(t, _)| t.clone()).collect();
-        present.push(Present { release: r, enabled, origin: Origin::Base { repo: format!("pkg{i}") }, libraries: vec![] });
+        present.push(Present { release: r, enabled, origin: Origin::Base { repo: format!("pkg{i}") }, libraries: vec![], stand_in: false });
     }
     for k in 0..4 {
         let thorns = vec![(format!("Added{k}"), sized_facts(&format!("Added{k}"), &["T3x1".to_owned()]))];
         let id = format!("add/a{k}");
         let releases: Vec<Release> = (0..5).rev().map(|v| synthetic_release(&id, &format!("1.{v}.0"), &thorns, vec![])).collect();
         let enabled = [format!("Added{k}")].into_iter().collect();
-        present.push(Present { release: releases[4].clone(), enabled, origin: Origin::Added, libraries: vec![] });
+        present.push(Present { release: releases[4].clone(), enabled, origin: Origin::Added, libraries: vec![], stand_in: false });
         facts.releases.insert(PkgId::parse(&id).unwrap(), releases);
     }
     let thorn = |name: &str, clashing: bool| {
@@ -1306,7 +1311,7 @@ fn a_search_that_cannot_jump_back_still_finishes_and_ticks() {
         let thorns = vec![(format!("T{i}x0"), sized_facts(&format!("T{i}x0"), &[]))];
         let r = synthetic_release(&format!("base/pkg{i}"), "1.0.0", &thorns, vec![]);
         let enabled = [format!("T{i}x0")].into_iter().collect();
-        Present { release: r, enabled, origin: Origin::Base { repo: format!("pkg{i}") }, libraries: vec![] }
+        Present { release: r, enabled, origin: Origin::Base { repo: format!("pkg{i}") }, libraries: vec![], stand_in: false }
     };
     let present = vec![base(0), base(1)];
     let one = |name: &str| vec![(name.to_owned(), sized_facts(name, &[]))];

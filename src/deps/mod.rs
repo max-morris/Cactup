@@ -291,6 +291,13 @@ pub struct Present {
     pub origin: Origin,
     /// The libraries it placed, held where they are while it does not change.
     pub libraries: Vec<InstalledLibrary>,
+    /// `release` stands in for one not read yet (a base package at a commit no version froze):
+    /// its enabled thorns as the tree has them, no other thorns, and only the claims known
+    /// without reading it. The resolver reads it at its commit ([`Facts::snapshot`]) when the
+    /// search comes to depend on it: a named spec or a need's thorns name it, or it may be a fork
+    /// of a package the plan could bring in. One it cannot read then refuses
+    /// ([`Refusal::Unreadable`]).
+    pub stand_in: bool,
 }
 
 /// What a need asks of its target's release.
@@ -512,6 +519,11 @@ pub trait Facts {
     /// for what should stop the command: the network, an interrupt. Never asks the user anything:
     /// an untrusted snapshot is only marked, and confirmed by the caller once the plan is known.
     fn snapshot(&mut self, id: &PkgId, at: &str) -> Res<Option<Snapshot>>;
+    /// Why a snapshot just answered `None` was not answered (rate-limited, not served to this
+    /// caller, the server failing), rather than not found; `None` when it was not found.
+    fn unanswered(&self, _id: &PkgId, _at: &str) -> Option<String> {
+        None
+    }
     /// The registered thorns meeting a requirement (to list in a refusal; never planned).
     fn providers(&mut self, requirement: &Requirement) -> Res<Vec<Provider>>;
     /// Called every few search steps with the number taken so far, so the caller can show that a

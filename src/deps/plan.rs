@@ -23,8 +23,8 @@ pub enum Step {
     /// A named added package at the release it is at: recorded and fetched again, as re-adding
     /// does. `thorns`: every thorn enabled after.
     Readd { release: Release, thorns: Vec<String> },
-    /// More thorns of a present package, at the release it is at.
-    AddThorns { id: PkgId, label: String, thorns: Vec<String>, why: Why },
+    /// More thorns of a present package, at the release it is at (`release`, as read).
+    AddThorns { id: PkgId, label: String, release: Release, thorns: Vec<String>, why: Why },
     /// A present package moved to another release. `thorns`: every thorn enabled after the move.
     Upgrade { from: Release, to: Release, thorns: Vec<String>, why: Why, flag: Option<&'static str> },
     /// Something dropped in favor of a package (shown after the step bringing it in). `thorns`:

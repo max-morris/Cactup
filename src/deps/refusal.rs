@@ -95,6 +95,9 @@ pub enum Refusal {
     NotRegistered { target: PkgId, by: Option<Live> },
     /// A claim cactup cannot read.
     BadClaim { by: String, claim: String, detail: String, ignore: String },
+    /// Present packages the plan depends on that the Cactarium would not read now: each as
+    /// installed, and why.
+    Unreadable { packages: Vec<(String, String)> },
     /// Removing these would leave dependents without what they need.
     HasDependents { removed: Vec<PkgId>, dependents: Vec<(String, String)> },
 }
@@ -190,6 +193,9 @@ impl Refusal {
             Refusal::GaveUp { best, .. } => best.way_past(),
             Refusal::BadClaim { ignore, .. } => {
                 format!("Pass --ignore-claim {ignore} (and tell the package's authors)")
+            }
+            Refusal::Unreadable { .. } => {
+                "Try again in a minute, or pass --no-deps to add exactly the packages named".to_owned()
             }
             Refusal::HasDependents { .. } => {
                 "Pass --no-deps to remove only what was named, leaving its dependents without it".to_owned()
@@ -313,6 +319,12 @@ impl fmt::Display for Refusal {
             Refusal::NotRegistered { target, by: None } => write!(f, "The Cactarium does not know {target}")?,
             Refusal::BadClaim { by, claim, detail, .. } => {
                 write!(f, "{by} has a claim cactup cannot read ({claim}): {detail}")?
+            }
+            Refusal::Unreadable { packages } => {
+                write!(f, "This plan depends on installed packages the Cactarium did not read just now:")?;
+                for (label, why) in packages {
+                    write!(f, "\n  {label} ({why})")?;
+                }
             }
             Refusal::HasDependents { removed, dependents } => {
                 let names: Vec<String> = removed.iter().map(ToString::to_string).collect();

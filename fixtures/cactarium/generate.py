@@ -322,6 +322,7 @@ POOL = {
                                                       [dep("max/lib", "^1.0", ["Lib"], needed_by=["Arith"])])]),
     "et--carpetx--needs-lib": ("et/carpetx", [V("2026.5.1", ["CarpetX", "Loop", "Arith"], [dep("max/lib", "^1.0", ["Lib"])])]),
     "max--lib": ("max/lib", [V("1.0.0", ["Lib"])]),
+    "max--d--carpetslab": ("max/d", [V("1.0.0", ["D"], [dep("et/carpet", "^2026.5", ["CarpetSlab"])])]),
     "max--kadath--into-carpetx": ("max/kadath", [V("1.0.0", ["Kadath"], [dep("et/carpetx", "^2026.5", into="src/carpetx")])]),
 
     # Remove.
@@ -335,8 +336,15 @@ POOL = {
     "et--cyc-b": ("et/cyc-b", [V("1.0.0", ["CycB"], [dep("et/cyc-a", None, ["CycA"])])]),
 }
 
+ADM_SNAP = "abababababababababababababababababababab"
+MP_SNAP = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
 SNAPSHOTS = {
     "et--carpetx--at-4444": snapshot("et/carpetx", CX_SNAP, CX_SNAP, ["CarpetX", "Loop"]),
+    # Base packages at commits no version froze, read when a plan depends on them.
+    "et--admbase--at-abab": snapshot("et/admbase", ADM_SNAP, ADM_SNAP, ["ADMBase", "ADMCoupling", "StaticConformal"],
+                                     untrusted=False),
+    "max--carpet-mp--at-cdcd": snapshot("max/carpet-mp", MP_SNAP, MP_SNAP, ["Carpet", "CarpetSlab"],
+                                        [fork_of("et/carpet", "=2026.5.0")], untrusted=False),
     "et--carpetx--at-head": snapshot("et/carpetx", "head", CX_SNAP, ["CarpetX", "Loop"]),
 }
 

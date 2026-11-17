@@ -1,0 +1,13 @@
+{
+  "about": "A named thorn of a base package at a commit no version froze: the package is read there, and keeps its commit, under --no-deps too",
+  "packages": ["et--admbase"],
+  "snapshots": ["et--admbase--at-abab"],
+  "specs": ["et/admbase/StaticConformal"],
+  "present": [
+    {"package": "et/admbase", "unknown": "abababababababababababababababababababab", "thorns": ["ADMBase"], "base": "admbase", "enabled": ["ADMBase"], "stand_in": true}
+  ],
+  "options": {"no-deps": true},
+  "expect": {
+    "plan": ["add et/admbase#abababababab StaticConformal named"]
+  }
+}

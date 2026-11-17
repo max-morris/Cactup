@@ -113,6 +113,8 @@ pub fn resolve(request: &Request, facts: &mut dyn Facts) -> Res<Plan> {
         best: None,
         present,
         present_rel,
+        unreadable: BTreeMap::new(),
+        tried: BTreeSet::new(),
     };
     s.cat.ensure(request.specs.iter().map(|x| x.id.clone()))?;
     // A named tip is read once, up front: the need is for the commit it is at now.
@@ -129,6 +131,10 @@ pub fn resolve(request: &Request, facts: &mut dyn Facts) -> Res<Plan> {
     // The universe first: which alternative a present fork holds is read
     // from its upstream's published versions, loaded with it.
     s.build_universe()?;
+    if !s.unreadable.is_empty() {
+        let packages = (s.unreadable.iter()).map(|(id, why)| (s.present[id].release.label(), why.clone())).collect();
+        return Err(Refusal::Unreadable { packages }.into());
+    }
     s.prepare();
     let mut assign = Assign::default();
     let outcome = s.search(&mut assign)?;
@@ -241,7 +247,7 @@ impl<'a> Catalog<'a> {
             return Ok(r.clone());
         }
         let read = match self.facts.snapshot(id, at)? {
-            None => Err("the Cactarium has no such commit".to_owned()),
+            None => Err(self.facts.unanswered(id, at).unwrap_or_else(|| "the Cactarium has no such commit".to_owned())),
             Some(snap) => {
                 let mut release = snap.release;
                 // What was asked must be what came back: a commit that id names (a version frozen
@@ -650,6 +656,10 @@ struct Search<'a> {
     exhausted: bool,
     /// The failure to report: (specific, depth, failure); the first of the best wins.
     best: Option<(bool, usize, Failure)>,
+    /// Present stand-ins the search depends on that could not be read, with why.
+    unreadable: BTreeMap<PkgId, String>,
+    /// Present stand-ins already read (or tried).
+    tried: BTreeSet<PkgId>,
 }
 
 /// The dependency as people read it: `et/carpet@^1.2`, or `any of et/carpet, et/cactuspugh`.
@@ -720,8 +730,105 @@ impl Search<'_> {
         let options = self.request.options;
         options.upgrade
             || options.upgrade_all
-            || self.named(id).is_some()
+            || (self.named(id).is_some() && !self.held_base(id))
             || self.present_rel.get(id).is_some_and(|r| r.flesh)
+    }
+
+    /// A base package that stays where the base has it, named or not: no `--upgrade`,
+    /// `--upgrade-all` or `--replace` says otherwise.
+    fn held_base(&self, id: &PkgId) -> bool {
+        let options = self.request.options;
+        !(options.upgrade || options.upgrade_all || options.replace)
+            && self.present.get(id).is_some_and(|p| matches!(p.origin, Origin::Base { .. }) && !p.release.flesh)
+    }
+
+    /// Reads a present stand-in at its commit, once: the release read takes its place (its
+    /// enabled thorns keep the facts the tree has), and what it claims joins the universe. One
+    /// that cannot be read, and cannot move, is noted, and refuses the plan.
+    fn read_stand_in(
+        &mut self,
+        id: &PkgId,
+        releases: &mut Vec<Rel>,
+        frontier: &mut BTreeSet<PkgId>,
+        commits: &mut Vec<(PkgId, String)>,
+    ) -> Res<()> {
+        let Some(p) = self.present.get(id).filter(|p| p.stand_in).cloned() else { return Ok(()) };
+        if !self.tried.insert(id.clone()) {
+            return Ok(());
+        }
+        let commit = p.release.commit.clone();
+        if commit.is_empty() {
+            self.unreadable.insert(id.clone(), "the commit it is at is not known".to_owned());
+            return Ok(());
+        }
+        match self.cat.snapshot(id, &commit)? {
+            Ok(read) => {
+                let mut release = (*read).clone();
+                for t in release.thorns.iter_mut().filter(|t| contains(&p.enabled, &t.thorn)) {
+                    if let Some(local) = p.release.thorn(&t.thorn) {
+                        t.facts = local.facts.clone();
+                    }
+                }
+                let read = Present { release, stand_in: false, ..(*p).clone() };
+                let rel = Rc::new(read.release.clone());
+                releases.retain(|r| r.id != *id);
+                self.present.insert(id.clone(), Rc::new(read));
+                self.present_rel.insert(id.clone(), rel.clone());
+                self.follow(&rel, frontier, commits);
+                releases.push(rel);
+            }
+            // One that may move can be left as it stands: a release read from its versions
+            // takes its place if the plan needs what it lacks. One that stays is what the plan
+            // hinges on.
+            Err(why) => {
+                if !self.may_move(id) {
+                    self.unreadable.insert(id.clone(), why);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The present stand-ins that `releases` depend on by thorn: a dependency (or an any-of
+    /// alternative) of one of them naming a thorn of a stand-in it does not have enabled.
+    fn needed_stand_ins(&self, releases: &[Rel]) -> BTreeSet<PkgId> {
+        let mut out = BTreeSet::new();
+        for r in releases {
+            for c in self.parsed(r).iter() {
+                let targets: Vec<(&PkgId, &Thorns)> = match &c.body {
+                    Body::Single(t, _, th) => vec![(t, th)],
+                    Body::AnyOf(alts) => alts.iter().map(|(t, _, th)| (t, th)).collect(),
+                    Body::Bad(_) => Vec::new(),
+                };
+                for (t, th) in targets {
+                    let Some(p) = self.present.get(t).filter(|p| p.stand_in) else { continue };
+                    if let Thorns::Some(names) = th
+                        && names.iter().any(|n| !contains(&p.enabled, n))
+                    {
+                        out.insert(t.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The present stand-ins that may be forks of a package the plan could bring in: no fork
+    /// claim known, and a thorn name shared with a release of a package not present.
+    fn fork_stand_ins(&self, releases: &[Rel]) -> BTreeSet<PkgId> {
+        let mut out = BTreeSet::new();
+        for (id, p) in self.present.iter().filter(|(_, p)| p.stand_in) {
+            if p.release.claims.iter().any(|c| c.kind == "fork-of") {
+                continue;
+            }
+            let shares = releases.iter().filter(|r| !self.present.contains_key(&r.id)).any(|r| {
+                r.thorns.iter().any(|t| p.release.thorns.iter().any(|mine| mine.thorn.eq_ignore_ascii_case(&t.thorn)))
+            });
+            if shares {
+                out.insert(id.clone());
+            }
+        }
+        out
     }
 
     fn parsed(&self, r: &Rel) -> Rc<Vec<Parsed>> {
@@ -874,9 +981,27 @@ impl Search<'_> {
         for r in releases.clone() {
             self.follow(&r, &mut frontier, &mut commits);
         }
+        // A named stand-in is read up front: what it has decides what naming it means.
+        let named: Vec<PkgId> = self.specs.iter().map(|s| s.id.clone()).collect();
+        for id in &named {
+            self.read_stand_in(id, &mut releases, &mut frontier, &mut commits)?;
+        }
+        let no_deps = self.request.options.no_deps;
         let mut seen: BTreeSet<PkgId> = BTreeSet::new();
         let mut read: BTreeSet<(PkgId, String)> = BTreeSet::new();
         loop {
+            // Stand-ins the universe so far depends on by thorn, then (once nothing else is
+            // left to load) those that may be forks of what it could bring in.
+            if !no_deps {
+                let wanted: BTreeSet<PkgId> =
+                    self.needed_stand_ins(&releases).into_iter().filter(|id| !self.tried.contains(id)).collect();
+                for id in wanted {
+                    if gix::interrupt::is_triggered() {
+                        bail!("Interrupted");
+                    }
+                    self.read_stand_in(&id, &mut releases, &mut frontier, &mut commits)?;
+                }
+            }
             // A present package that cannot move is only its present release.
             let wave: Vec<PkgId> = (frontier.iter())
                 .filter(|id| !seen.contains(*id) && !id.is_repo())
@@ -885,7 +1010,21 @@ impl Search<'_> {
                 .collect();
             let reads: Vec<(PkgId, String)> = std::mem::take(&mut commits);
             if wave.is_empty() && reads.is_empty() {
-                break;
+                // Nothing left to load: the stand-ins that may be forks of what the universe
+                // could bring in are read, and what they claim is followed in turn.
+                let forks: BTreeSet<PkgId> = (self.fork_stand_ins(&releases).into_iter())
+                    .filter(|id| !no_deps && !self.tried.contains(id))
+                    .collect();
+                if forks.is_empty() {
+                    break;
+                }
+                for id in forks {
+                    if gix::interrupt::is_triggered() {
+                        bail!("Interrupted");
+                    }
+                    self.read_stand_in(&id, &mut releases, &mut frontier, &mut commits)?;
+                }
+                continue;
             }
             frontier.clear();
             seen.extend(wave.iter().cloned());
@@ -2113,8 +2252,8 @@ impl Search<'_> {
                             plan.steps.push(Step::Readd { release: (*e.release).clone(), thorns: enabled })
                         }
                         _ if !newly.is_empty() => {
-                            let (id, label) = (id.clone(), e.release.label());
-                            plan.steps.push(Step::AddThorns { id, label, thorns: newly, why });
+                            let (id, label, release) = (id.clone(), e.release.label(), (*e.release).clone());
+                            plan.steps.push(Step::AddThorns { id, label, release, thorns: newly, why });
                         }
                         Origin::Base { .. } if named => {
                             let note = format!("{} is in the installation's base already", e.release.label());

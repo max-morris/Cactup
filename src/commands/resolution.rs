@@ -57,6 +57,8 @@ pub(crate) struct Registry {
     last_tick: usize,
     /// The Cactarium has no `/providers` (it is older than this cactup).
     no_providers: bool,
+    /// Snapshots not answered now, by package and what was asked, with why.
+    unanswered: BTreeMap<(PkgId, String), String>,
 }
 
 impl Registry {
@@ -76,6 +78,7 @@ impl Registry {
             search: None,
             last_tick: 0,
             no_providers: false,
+            unanswered: BTreeMap::new(),
         }
     }
 
@@ -281,10 +284,26 @@ impl Facts for Registry {
         let read = self.one(&label, "reading the package there", move |c| {
             let (owner, name) = owner_name(&who)?;
             c.package_at_if_any(owner, name, &at_owned)
-        })?;
+        });
+        let read = match read {
+            Ok(read) => read,
+            // Not answered now: no such commit as far as this search goes,
+            // and the reason kept for a refusal that depends on it.
+            Err(e) => match e.downcast_ref::<crate::cactarium::Refused>().filter(|r| r.is_unanswered()) {
+                Some(r) => {
+                    self.unanswered.insert((id.clone(), at.to_owned()), format!("the Cactarium did not answer: {}", r.message));
+                    return Ok(None);
+                }
+                None => return Err(e),
+            },
+        };
         let Some((version, untrusted)) = read else { return Ok(None) };
         let release = Release::from_served(id, &version, self.contact(id))?;
         Ok(Some(Snapshot { release, untrusted }))
+    }
+
+    fn unanswered(&self, id: &PkgId, at: &str) -> Option<String> {
+        self.unanswered.get(&(id.clone(), at.to_owned())).cloned()
     }
 
     fn providers(&mut self, requirement: &deps::Requirement) -> Res<Vec<Provider>> {
@@ -566,6 +585,7 @@ pub(crate) fn present(
         let url = r.url.clone().unwrap_or_default();
         let flesh = info_of(i).is_some_and(|info| info.flesh);
         let mut libraries = Vec::new();
+        let mut stand_in = false;
         let release = match id {
             // Two base repos of one package: the second is a repo of its own.
             Some(id) if taken(&out, id) => unknown(&PkgId::repo(&r.name), &commit, &url, false, &checkouts, local),
@@ -577,9 +597,16 @@ pub(crate) fn present(
                 }
                 match want_of_repo[i].and_then(|w| read[w].clone()) {
                     Some(rel) => with_local_facts(rel, &checkouts, local),
+                    // Not read (no version froze its commit, `--no-deps`, or
+                    // the read went unanswered): the resolver reads it when
+                    // its plan depends on it. What the lookup says it forks
+                    // is known already.
                     None => {
                         unchecked.push(format!("{id}#{}", short(&commit)));
-                        unknown(id, &commit, &url, flesh, &checkouts, local)
+                        stand_in = true;
+                        let mut r = unknown(id, &commit, &url, flesh, &checkouts, local);
+                        r.claims = info_of(i).map(|info| fork_claims(&info.fork_of)).unwrap_or_default();
+                        r
                     }
                 }
             }
@@ -589,7 +616,7 @@ pub(crate) fn present(
             None => unknown(&PkgId::repo(&r.name), &commit, &url, false, &checkouts, local),
         };
         let enabled = checkouts.iter().map(|(c, _)| thorn_of(c).to_owned()).collect();
-        out.push(Present { release, enabled, origin: Origin::Base { repo: r.name.clone() }, libraries });
+        out.push(Present { release, enabled, origin: Origin::Base { repo: r.name.clone() }, libraries, stand_in });
     }
     // A base repo whose package an `[[added]]` entry also is (and does not
     // merely extend): the added one is that package, the repo's remaining
@@ -617,9 +644,32 @@ pub(crate) fn present(
             }
         };
         let enabled = checkouts.iter().map(|(c, _)| thorn_of(c).to_owned()).collect();
-        out.push(Present { release, enabled, origin: Origin::Added, libraries: installed_libraries(a) });
+        out.push(Present { release, enabled, origin: Origin::Added, libraries: installed_libraries(a), stand_in: false });
     }
     Ok(PresentSet { present: out, unread, unchecked })
+}
+
+/// The lookup's `fork-of` targets (`owner/name@<range>`) as fork claims.
+fn fork_claims(targets: &[String]) -> Vec<cactup_ecosystem_common::api::ClaimInfo> {
+    (targets.iter())
+        .map(|t| {
+            let (target, range) = match t.split_once('@') {
+                Some((target, range)) => (target.to_owned(), Some(range.to_owned())),
+                None => (t.clone(), None),
+            };
+            cactup_ecosystem_common::api::ClaimInfo {
+                kind: "fork-of".to_owned(),
+                target,
+                range,
+                sha: None,
+                needs: Vec::new(),
+                into: None,
+                needed_by: Vec::new(),
+                alternatives: Vec::new(),
+                note: None,
+            }
+        })
+        .collect()
 }
 
 /// An added package's libraries, as the resolver holds them.

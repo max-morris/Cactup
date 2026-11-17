@@ -56,6 +56,9 @@ struct Fake {
     unfrozen_reads: usize,
     /// Commits whose reads answer 403 (not served to this caller).
     refuse_at: Vec<String>,
+    /// What a read at a commit no version froze answers (the package read
+    /// now), by package and commit.
+    snapshots: Vec<(String, String, String)>,
 }
 
 /// A fake Cactarium's state, changeable while it serves.
@@ -71,6 +74,7 @@ impl Fake {
             providers_endpoint: true,
             unfrozen_reads: 0,
             refuse_at: Vec::new(),
+            snapshots: Vec::new(),
         }
     }
 
@@ -176,7 +180,10 @@ impl Fake {
                 let body = r#"{"error":{"code":"rate-limited","message":"Too many requests; try again in a minute"}}"#;
                 return ("429 Too Many Requests", "api-generation: 1\r\n".to_owned(), body.as_bytes().to_vec());
             }
-            return missing();
+            return match self.snapshots.iter().find(|(p, c, _)| p == id && c == at) {
+                Some((_, _, json)) => ok(json.clone()),
+                None => missing(),
+            };
         }
         no_route()
     }
@@ -488,11 +495,17 @@ fn admbase(range: &str) -> Admbase {
 }
 
 fn admbase_with(range: &str, change: impl FnOnce(Fake) -> Fake) -> Admbase {
-    admbase_full(range, true, change)
+    admbase_full(range, true, true, change)
+}
+
+/// [`admbase`], with the base at a1 no version froze: 1.0.0 froze another
+/// commit, and a read at a1 answers the package read there.
+fn admbase_unfrozen(range: &str) -> Admbase {
+    admbase_full(range, true, false, |f| f)
 }
 
 /// [`admbase_with`], its base section pinned or following its branch.
-fn admbase_full(range: &str, pinned: bool, change: impl FnOnce(Fake) -> Fake) -> Admbase {
+fn admbase_full(range: &str, pinned: bool, frozen: bool, change: impl FnOnce(Fake) -> Fake) -> Admbase {
     let tmp = tempfile::tempdir().unwrap();
     let files = [
         ("ADMBase/interface.ccl", "IMPLEMENTS: admbase\n"),
@@ -510,7 +523,13 @@ fn admbase_full(range: &str, pinned: bool, change: impl FnOnce(Fake) -> Fake) ->
     let thorns = ["ADMBase", "ADMCoupling", "StaticConformal", "ADMMacros"];
     let claims = format!("[{}]", depends("et/admbase", range, &["StaticConformal"]));
     let claims2 = format!("[{}]", depends("et/admbase", "^1.0", &["ADMBase", "ADMMacros"]));
-    let fake = Fake::new()
+    let one = if frozen { a1.clone() } else { "1".repeat(40) };
+    let mut fake = Fake::new();
+    if !frozen {
+        let read = version(&a1, &a1, &aurl, "ADMBase", &thorns, "[]");
+        fake.snapshots.push(("et/admbase".to_owned(), a1.clone(), read));
+    }
+    let fake = fake
         .package("max/app", vec![version("1.0.0", &p, &purl, "App", &["App"], &claims)])
         .package("max/app2", vec![version("1.0.0", &p2, &p2url, "App2", &["App2"], &claims2)])
         .package("max/solo", vec![version("1.0.0", &so, &surl, "Solo", &["Solo"], "[]")])
@@ -519,7 +538,7 @@ fn admbase_full(range: &str, pinned: bool, change: impl FnOnce(Fake) -> Fake) ->
             "et/admbase",
             vec![
                 version("2.0.0", &a2, &aurl, "ADMBase", &thorns, "[]"),
-                version("1.0.0", &a1, &aurl, "ADMBase", &thorns, "[]"),
+                version("1.0.0", &one, &aurl, "ADMBase", &thorns, "[]"),
             ],
         )
         .pin(&aurl, "et/admbase", Some("1.0.0"));
@@ -1137,7 +1156,7 @@ fn an_entry_edited_at_the_same_commit_keeps_unknown_keys() {
 #[test]
 fn more_thorns_of_an_unpinned_base_clone_are_linked_where_it_is() {
     // Its clone on its branch, at the tip: a2.
-    let it = admbase_full("^1.0", false, |f| f);
+    let it = admbase_full("^1.0", false, true, |f| f);
     let s = &it.setup;
     let up = s.inst.root.parent().unwrap().join("up/admbase");
     let a3 = crate::fetch::tests::commit_files(&up, &[("ADMBase/interface.ccl", "IMPLEMENTS: admbase\n"), ("NEW", "3\n")]).to_string();
@@ -1187,4 +1206,116 @@ fn thorns_added_to_a_second_base_clone_of_a_package_stay_present() {
     let set = set.unwrap_or_else(|e| panic!("{e:#}"));
     let enabled: Vec<String> = set.present.iter().flat_map(|p| p.enabled.iter().cloned()).collect();
     assert!(enabled.contains(&"C".to_owned()), "{enabled:?}");
+}
+
+/// A base at a commit no version froze: naming a thorn of its package reads
+/// the package there (one read) and keeps it at its commit, `--no-deps` or
+/// not; never an upgrade to the newest release.
+#[test]
+fn a_named_thorn_of_an_unfrozen_base_package_keeps_its_commit() {
+    for no_deps in [true, false] {
+        let it = admbase_unfrozen("^1.0");
+        let s = &it.setup;
+        s.add(&["et/admbase/StaticConformal"], AddFlags { no_deps, ..AddFlags::default() }).unwrap_or_else(|e| panic!("{e:#}"));
+        let meta = s.meta();
+        let admbase = meta.added.iter().find(|a| a.package == "et/admbase").unwrap();
+        assert_eq!((admbase.commit.as_str(), admbase.replaces.len()), (it.a1.as_str(), 0), "no_deps {no_deps}");
+        assert_eq!(admbase.thorns.iter().map(|t| t.checkout.as_str()).collect::<Vec<_>>(), ["ADMBase/StaticConformal"]);
+        assert_eq!(it.fake.lock().unwrap().unfrozen_reads, 1);
+        let _ = (&it.a2, &it.log);
+    }
+}
+
+/// A dependency on a thorn the unfrozen base package has but does not
+/// enable: read there, the thorn added, no false "pass --upgrade".
+#[test]
+fn a_needed_thorn_of_an_unfrozen_base_package_is_found() {
+    let it = admbase_unfrozen("^1.0");
+    let s = &it.setup;
+    s.add(&["max/app"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let added = s.added();
+    assert!(added.contains(&("et/admbase".to_owned(), vec!["ADMBase/StaticConformal".to_owned()])), "{added:?}");
+    let _ = (&it.a1, &it.a2, &it.log);
+}
+
+/// The read refused (429: the server's limit on reads at unfrozen commits):
+/// a plan that hinges on the package refuses, naming it and `--no-deps`;
+/// one that does not touch it goes ahead.
+#[test]
+fn an_unfrozen_base_package_the_server_will_not_read_refuses_what_hinges_on_it() {
+    let it = admbase_unfrozen("^1.0");
+    let s = &it.setup;
+    it.fake.lock().unwrap().unfrozen_reads = 12;
+    let err = format!("{:#}", s.add(&["max/app"], yes()).unwrap_err());
+    assert!(err.contains("et/admbase#") && err.contains("Too many requests") && err.contains("--no-deps"), "{err}");
+    assert!(!err.contains("--upgrade"), "{err}");
+    s.add(&["max/solo"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let _ = (&it.a1, &it.a2, &it.log);
+}
+
+/// A registered fork in the base at a commit no version froze, which shares
+/// thorn names with what the plan brings in: read there, it stands in for
+/// et/carpet, which max/d needs; et/carpet is not added beside it.
+#[test]
+fn an_unfrozen_base_fork_stands_in() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (furl, f) = upstream(
+        tmp.path(),
+        "carpet-mp",
+        &[("Carpet/interface.ccl", "IMPLEMENTS: driver\n"), ("CarpetSlab/interface.ccl", "IMPLEMENTS: hyperslab\n")],
+    );
+    let (durl, d) = upstream(tmp.path(), "d", &[("D/interface.ccl", "IMPLEMENTS: d\n")]);
+    let fork = r#"[{"kind":"fork-of","target":"et/carpet","range":"=2026.5.0","note":null}]"#;
+    let claims = format!("[{}]", depends("et/carpet", "^2026.5", &["CarpetSlab"]));
+    let mut fake = Fake::new()
+        .package("max/carpet-mp", vec![version("1.0.0", &"9".repeat(40), &furl, "Carpet", &["Carpet", "CarpetSlab"], fork)])
+        .package("et/carpet", vec![version("2026.5.0", &"e".repeat(40), "https://x/carpet.git", "Carpet", &["Carpet", "CarpetSlab"], "[]")])
+        .package("max/d", vec![version("1.0.0", &d, &durl, "D", &["D"], &claims)])
+        .pin(&furl, "max/carpet-mp", None);
+    let read = version(&f, &f, &furl, "Carpet", &["Carpet", "CarpetSlab"], fork);
+    fake.snapshots.push(("max/carpet-mp".to_owned(), f.clone(), read));
+    let (cactarium, _) = fake.serve();
+    let s = Setup::new(tmp, &section(&furl, &f, &["Carpet/Carpet"]), &cactarium);
+    s.add(&["max/d"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let added = s.added();
+    assert!(added.contains(&("max/carpet-mp".to_owned(), vec!["Carpet/CarpetSlab".to_owned()])), "{added:?}");
+    assert!(!added.iter().any(|(p, _)| p == "et/carpet"), "{added:?}");
+}
+
+/// The requests on a base of twenty registered repos at commits no version
+/// froze, when a dependency names a thorn of one of them that is not
+/// enabled: that one package is read at its commit, nothing else.
+#[test]
+fn a_dependency_on_an_unfrozen_base_package_reads_only_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut base = String::new();
+    let mut fake = Fake::new();
+    let mut r0 = (String::new(), String::new());
+    for i in 0..20 {
+        let name = format!("r{i}");
+        let (url, c) = upstream(tmp.path(), &name, &[(&format!("T{i}/interface.ccl"), "IMPLEMENTS: x\n"), (&format!("U{i}/interface.ccl"), "IMPLEMENTS: u\n")]);
+        base.push_str(&section(&url, &c, &[&format!("Arr{i}/T{i}")]));
+        let id = format!("et/{name}");
+        let other = format!("{:040x}", i + 1);
+        let thorns = [format!("T{i}"), format!("U{i}")];
+        let thorns: Vec<&str> = thorns.iter().map(String::as_str).collect();
+        fake = fake.package(&id, vec![version("1.0.0", &other, &url, &format!("Arr{i}"), &thorns, "[]")]);
+        fake.snapshots.push((id.clone(), c.clone(), version(&c, &c, &url, &format!("Arr{i}"), &thorns, "[]")));
+        fake = fake.pin(&url, &id, None);
+        if i == 0 {
+            r0 = (url, c);
+        }
+    }
+    let (durl, d) = upstream(tmp.path(), "dep", &[("Dep/interface.ccl", "IMPLEMENTS: dep\n")]);
+    let claims = format!("[{}]", depends("et/r0", ">=0.0.0", &["U0"]));
+    let (cactarium, log, fake) =
+        fake.package("max/dep", vec![version("1.0.0", &d, &durl, "Dep", &["Dep"], &claims)]).serve_shared();
+    let s = Setup::new(tmp, &base, &cactarium);
+    log.lock().unwrap().clear();
+    let got = records(&s, &["max/dep"], &AddFlags::default()).unwrap_or_else(|e| panic!("{e:#}"));
+    assert_eq!(record_of(&got, "et/r0").2, ["Arr0/U0"]);
+    // [resolve, lookup, whole version lists, one version at a commit, other]
+    assert_eq!(counts(&log), [1, 1, 1, 1, 0]);
+    assert_eq!(fake.lock().unwrap().unfrozen_reads, 1);
+    let _ = r0;
 }
