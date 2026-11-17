@@ -44,7 +44,7 @@ pub fn active_thorns(par: &str) -> BTreeSet<String> {
 /// pool with progress; ~400 thorns' `.ccl` files on a network filesystem add
 /// up. A thorn whose `interface.ccl` cannot be read is kept by the caller,
 /// never guessed at.
-fn thorn_facts(list: &Thornlist, cactus_root: &Path) -> Res<BTreeMap<String, (String, Option<ThornFacts>)>> {
+pub(crate) fn thorn_facts(list: &Thornlist, cactus_root: &Path) -> Res<BTreeMap<String, (String, Option<ThornFacts>)>> {
     let thorns: Vec<&Component> = list.components().iter().filter(|c| is_arrangement_thorn(list, c)).collect();
     let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
     let item = progress.add_child("read thorns' .ccl files");
@@ -84,7 +84,7 @@ fn read_ccl(path: &Path) -> Option<String> {
 /// checkout-only thorn (`fetch_only`, written on its `!CHECKOUT` line) is
 /// not one: it is never compiled, so it can neither be activated nor meet a
 /// requirement, and a trim leaves it exactly as it is.
-fn is_arrangement_thorn(list: &Thornlist, c: &Component) -> bool {
+pub(crate) fn is_arrangement_thorn(list: &Thornlist, c: &Component) -> bool {
     !c.fetch_only
         && c.target.trim_end_matches('/') == format!("{}/arrangements", list.root().trim_end_matches('/'))
         && c.checkout.matches('/').count() == 1

@@ -1017,7 +1017,7 @@ pub fn source_heads_with_progress(
 /// target the root, but check out `./manifest`, `./simfactory` and `par`, so
 /// neither matches — which matters, because a flesh change costs a full
 /// realclean rebuild and those two do not affect compilation at all.
-fn is_flesh(root: &str, c: &Component) -> bool {
+pub(crate) fn is_flesh(root: &str, c: &Component) -> bool {
     c.target.trim_end_matches('/') == root.trim_end_matches('/')
         && matches!(c.checkout.as_str(), "Makefile" | "lib" | "src")
 }

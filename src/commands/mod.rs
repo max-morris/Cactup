@@ -3,6 +3,7 @@
 //! subcommand to it.
 
 pub mod add;
+pub(crate) mod resolution;
 pub mod build;
 pub mod cache;
 pub mod config;

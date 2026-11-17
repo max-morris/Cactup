@@ -15,9 +15,6 @@
 //! dependencies are decided in a fixed order, so the same inputs give the same plan whatever the
 //! order a hash map, the server or the caller happened to list them in.
 
-// Wired into `add`/`remove` by the next phase (P3); until then only the tests call it.
-#![cfg_attr(not(test), allow(dead_code))]
-
 mod conflict;
 mod overrides;
 mod plan;

@@ -196,9 +196,13 @@ fn main() -> Res<()> {
         Commands::Import(import) => commands::import::dispatch(&ctx, import),
         Commands::Refresh { target } => commands::import::refresh(&ctx, &target),
         Commands::Login { token } => commands::import::login(&ctx, token),
-        Commands::Add { packages, replace, force } => commands::add::dispatch(&ctx, &packages, replace, force),
-        Commands::Remove { packages, force } => {
-            packages.iter().try_for_each(|package| commands::add::remove(&ctx, package, force))
+        Commands::Add { packages, replace, force, upgrade, upgrade_all, no_deps, ignore_claim, yes, dry_run } => {
+            let flags =
+                commands::add::AddFlags { replace, force, upgrade, upgrade_all, no_deps, ignore_claim, yes, dry_run };
+            commands::add::dispatch(&ctx, &packages, &flags)
+        }
+        Commands::Remove { packages, force, no_deps, yes, dry_run } => {
+            commands::add::remove(&ctx, &packages, &commands::add::RemoveFlags { force, no_deps, yes, dry_run })
         }
         Commands::Stack(crate::args::StackCommand::Publish { definition, target, version, thornlist }) => {
             commands::import::publish_stack(&ctx, &definition, &target, &version, thornlist.as_deref())

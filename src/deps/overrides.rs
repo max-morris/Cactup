@@ -95,6 +95,8 @@ impl fmt::Display for ClaimPattern {
 }
 
 /// One durable override of the claims the registry serves.
+// Read from the installation by `cactup claims` (P4); only the tests make one before that.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Override {
     /// Drop a claim (`OWNER/PKG:KIND:TARGET`), or every claim of a package (`OWNER/PKG`), as

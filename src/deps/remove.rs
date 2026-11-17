@@ -81,6 +81,7 @@ impl RemovePlan {
         out
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn render(&self, command: &str) -> String {
         self.lines(command).into_iter().map(|(_, l)| l + "\n").collect()
     }

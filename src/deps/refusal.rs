@@ -149,10 +149,16 @@ impl Refusal {
             Refusal::Unclaimed(unmet) => {
                 let mut s =
                     String::from("Cactup adds only what a manifest declares. Add a provider yourself first");
+                // A provider on another track than the default is named at
+                // its version there, or `cactup add` would look on the
+                // default track.
                 let lines: Vec<String> = unmet
                     .iter()
                     .flat_map(|u| u.providers.iter())
-                    .map(|p| format!("  cactup add {}/{}", p.package, p.thorn))
+                    .map(|p| match p.version.contains(':') {
+                        true => format!("  cactup add {}/{}@{}", p.package, p.thorn, p.version),
+                        false => format!("  cactup add {}/{}", p.package, p.thorn),
+                    })
                     .collect();
                 if lines.is_empty() {
                     s.push_str(", or ask the package's authors to declare the dependency");

@@ -370,9 +370,31 @@ pub(crate) enum Commands {
         /// Add even though the live thornlist has hand edits, which are overwritten.
         #[clap(short, long)]
         force: bool,
+        /// Move an installed package the plan needs at another version, rather than refusing.
+        #[clap(long)]
+        upgrade: bool,
+        /// Move every installed package to its newest version that fits, not only those the plan touches.
+        #[clap(long)]
+        upgrade_all: bool,
+        /// Add only the packages named, none of their dependencies (libraries are still placed).
+        #[clap(long)]
+        no_deps: bool,
+        /// Leave out a package's claims for this command: OWNER/PKG for all of them, or
+        /// OWNER/PKG:KIND:TARGET for one (KIND is dependency, incompatible-with or fork-of). Repeatable.
+        #[clap(long, value_name = "OWNER/PKG[:KIND:TARGET]", action = ArgAction::Append)]
+        ignore_claim: Vec<String>,
+        /// Go ahead without asking, even when the plan goes beyond the packages named.
+        #[clap(short, long)]
+        yes: bool,
+        /// Show the plan and change nothing.
+        #[clap(long)]
+        dry_run: bool,
     },
     // §8.11
     /// Remove packages `cactup add` added, restoring any repo they replaced
+    ///
+    /// Refuses while another package depends on one named, and removes the packages that were
+    /// brought in only for the ones named, after showing them.
     Remove {
         /// The packages: owner/name.
         #[clap(required = true, value_name = "PACKAGE")]
@@ -380,6 +402,16 @@ pub(crate) enum Commands {
         /// Remove even though the live thornlist has hand edits, which are overwritten.
         #[clap(short, long)]
         force: bool,
+        /// Remove exactly the packages named: no check of what depends on them (no Cactarium needed), and
+        /// what was brought in for them stays.
+        #[clap(long)]
+        no_deps: bool,
+        /// Go ahead without asking, even when packages brought in for the ones named go too.
+        #[clap(short, long)]
+        yes: bool,
+        /// Show the plan and change nothing.
+        #[clap(long)]
+        dry_run: bool,
     },
     // §8.10
     /// Work with Cactarium stacks

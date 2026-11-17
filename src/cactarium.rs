@@ -13,9 +13,10 @@ use crate::Res;
 use anyhow::{anyhow, bail, Context};
 use colored::Colorize;
 use cactup_ecosystem_common::api::{
-    ErrorBody, PackageVersions, Published, Refreshed, Resolved, StackReleases, VersionInfo, API_GENERATION,
-    API_GENERATION_HEADER, API_PREFIX,
-    CONTACT_HEADER, SHA256_HEADER, SIM_QUERY, UNPINNED_HEADER, UNTRUSTED_HEADER,
+    ErrorBody, LookedUp, LookupRequest, PackageVersion, PackageVersions, PinInfo, PinQuery, Providers,
+    ProvidersQuery, Published, Refreshed, Resolved, StackReleases, VersionInfo, API_GENERATION,
+    API_GENERATION_HEADER, API_PREFIX, CONTACT_HEADER, MAX_LOOKUP_PINS, SHA256_HEADER, SIM_QUERY,
+    UNPINNED_HEADER, UNTRUSTED_HEADER,
 };
 use cactup_ecosystem_common::stack::FrozenStack;
 use cactup_ecosystem_common::STACK_FORMAT;
@@ -121,16 +122,80 @@ impl Client {
         json(self.send(crate::fetch::download::client().get(&url))?)
     }
 
+    /// [`Client::package_versions`], or `None` when the Cactarium has no
+    /// such package.
+    pub fn package_versions_if_any(&self, owner: &str, name: &str) -> Res<Option<PackageVersions>> {
+        let url = self.url(&format!("/packages/{owner}/{name}/versions"));
+        self.send_found(crate::fetch::download::client().get(&url))?.map(json).transpose()
+    }
+
     /// A package read at something no published version names: a branch
-    /// tip (`head` or `master`: both its default branch) or a full commit
-    /// id. Its thorns there, and whether the Cactarium does not trust it
-    /// (then nobody has reviewed that code).
-    pub fn package_at(&self, owner: &str, name: &str, at: &str) -> Res<(cactup_ecosystem_common::api::PackageVersion, bool)> {
+    /// tip (`head` or `master`: both its default branch) or a commit. Its
+    /// thorns there, and whether the Cactarium does not trust it (then
+    /// nobody has reviewed that code); `None` when the Cactarium has no such
+    /// package or cannot find that commit in its repository.
+    pub fn package_at_if_any(&self, owner: &str, name: &str, at: &str) -> Res<Option<(PackageVersion, bool)>> {
         let url = self.url(&format!("/packages/{owner}/{name}/versions/{at}"));
-        let response = self.send(crate::fetch::download::client().get(&url))?;
-        // Missing: untrusted, as for a stack tip.
+        let Some(response) = self.send_found(crate::fetch::download::client().get(&url))? else {
+            return Ok(None);
+        };
         let untrusted = response.headers().get(UNTRUSTED_HEADER).is_none_or(|v| v.as_bytes() == b"true");
-        Ok((json(response)?, untrusted))
+        Ok(Some((json(response)?, untrusted)))
+    }
+
+    /// Which package, if any, each pinned repo is, in the order asked. Every
+    /// pin goes in one request (the endpoint is rate-limited per address), or
+    /// in as few as its size limit allows; each request is checked as the
+    /// server checks it before it is sent.
+    pub fn lookup(&self, pins: &[PinQuery]) -> Res<Vec<PinInfo>> {
+        let mut out = Vec::with_capacity(pins.len());
+        for chunk in pins.chunks(MAX_LOOKUP_PINS) {
+            if gix::interrupt::is_triggered() {
+                bail!("Interrupted");
+            }
+            let request = LookupRequest { pins: chunk.to_vec(), downloads: Vec::new() };
+            request.validate().map_err(|e| anyhow!("Cannot ask the Cactarium about these repos: {e}"))?;
+            let body = serde_json::to_vec(&request).context("Failed to encode the lookup request")?;
+            let request = crate::fetch::download::client()
+                .post(self.url("/lookup"))
+                .header("content-type", "application/json")
+                .body(body);
+            let answer: LookedUp = json(self.send(request)?)?;
+            if answer.pins.len() != chunk.len() {
+                bail!(
+                    "The Cactarium answered a lookup of {} repos with {}; cactup cannot tell which is which",
+                    chunk.len(),
+                    answer.pins.len()
+                );
+            }
+            for (asked, info) in chunk.iter().zip(&answer.pins) {
+                // The answer echoes each pin as asked; a server that spells
+                // the URL its own way still names the same repo, as the
+                // registry compares them.
+                let same = cactup_ecosystem_common::url::same_repo_lenient(&info.url, &asked.url);
+                if !same || !info.commit.eq_ignore_ascii_case(&asked.commit) {
+                    bail!(
+                        "The Cactarium answered a lookup of {} at {} with {} at {}, out of order",
+                        asked.url,
+                        asked.commit,
+                        info.url,
+                        info.commit
+                    );
+                }
+            }
+            out.extend(answer.pins);
+        }
+        Ok(out)
+    }
+
+    /// The registered thorns that meet a CCL requirement: for each package
+    /// and track, its newest version's.
+    pub fn providers(&self, need: &cactup_ecosystem_common::ccl::Need) -> Res<Providers> {
+        let query = ProvidersQuery::of(need)
+            .to_query_string()
+            .map_err(|e| anyhow!("Cannot ask the Cactarium what provides {need}: {e}"))?;
+        let url = format!("{}?{query}", self.url("/providers"));
+        json(self.send(crate::fetch::download::client().get(&url))?)
     }
 
     /// Every release of a stack, each with whether it has been yanked.
@@ -257,6 +322,20 @@ impl Client {
     /// Send, then refuse a registry newer than this cactup speaks, and turn
     /// an error status into the message the registry wrote for it.
     fn send(&self, request: reqwest::blocking::RequestBuilder) -> Res<reqwest::blocking::Response> {
+        Ok(self.send_as(request, false)?.expect("only a 404 answers nothing"))
+    }
+
+    /// [`Client::send`], but a 404 answers `None`: the Cactarium has no such
+    /// thing.
+    fn send_found(&self, request: reqwest::blocking::RequestBuilder) -> Res<Option<reqwest::blocking::Response>> {
+        self.send_as(request, true)
+    }
+
+    fn send_as(
+        &self,
+        request: reqwest::blocking::RequestBuilder,
+        missing_is_none: bool,
+    ) -> Res<Option<reqwest::blocking::Response>> {
         let request = match self.timeout {
             Some(timeout) => request.timeout(timeout),
             None => request,
@@ -276,9 +355,12 @@ impl Client {
             }
         }
         if response.status().is_success() {
-            return Ok(response);
+            return Ok(Some(response));
         }
         let status = response.status();
+        if missing_is_none && status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
         let text = response.text().unwrap_or_default();
         // A missing or dead token: say how to get a working one.
         let login = if status == reqwest::StatusCode::UNAUTHORIZED {
