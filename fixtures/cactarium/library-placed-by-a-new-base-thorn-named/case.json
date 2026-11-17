@@ -1,0 +1,12 @@
+{
+  "about": "A base package's thorn enabled by name whose claim places a library: the library is placed, by that package",
+  "packages": ["et--kadath--extra-needs-fuka", "et--fuka"],
+  "specs": ["et/kadath/KadathExtra"],
+  "present": [
+    {"package": "et/kadath", "version": "1.0.0", "base": "kadath", "enabled": ["Kadath"]}
+  ],
+  "expect": {
+    "plan": ["add et/kadath@1.0.0 KadathExtra named"],
+    "libraries": ["et/fuka@1.2.0: src/fuka by et/kadath"]
+  }
+}

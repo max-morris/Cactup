@@ -1152,6 +1152,12 @@ fn records_of(
                                 package.thorns.push(t);
                             }
                         }
+                        // The libraries the new thorns need.
+                        for l in more.libraries {
+                            if !package.libraries.iter().any(|have| have.package == l.package && have.into == l.into) {
+                                package.libraries.push(l);
+                            }
+                        }
                         // More thorns of a base repo's package: the entry is
                         // at the release the base has now.
                         if matches!(p.origin, Origin::Base { .. }) {

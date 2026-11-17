@@ -1,0 +1,15 @@
+{
+  "about": "A base package's thorn a dependency needs, whose claim places a library: the library is placed with it; the thorn already enabled places nothing new",
+  "packages": ["et--kadath--extra-needs-fuka", "et--fuka", "max--needs-kx"],
+  "specs": ["max/needs-kx"],
+  "present": [
+    {"package": "et/kadath", "version": "1.0.0", "base": "kadath", "enabled": ["Kadath"]}
+  ],
+  "expect": {
+    "plan": [
+      "add max/needs-kx@1.0.0 NeedsKX named",
+      "add et/kadath@1.0.0 KadathExtra needed by max/needs-kx@1.0.0"
+    ],
+    "libraries": ["et/fuka@1.2.0: src/fuka by et/kadath"]
+  }
+}

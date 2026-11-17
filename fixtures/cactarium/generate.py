@@ -326,6 +326,9 @@ POOL = {
     "max--lib": ("max/lib", [V("1.0.0", ["Lib"])]),
     "et--p5": ("et/p5", [V("2.0.0", ["PA", "PC"]), V("1.0.0", ["PA"])]),
     "max--d--carpetslab": ("max/d", [V("1.0.0", ["D"], [dep("et/carpet", "^2026.5", ["CarpetSlab"])])]),
+    "et--kadath--extra-needs-fuka": ("et/kadath", [V("1.0.0", ["Kadath", "KadathExtra"],
+                                                     [dep("et/fuka", "^1", into="src/fuka", needed_by=["KadathExtra"])])]),
+    "max--needs-kx": ("max/needs-kx", [V("1.0.0", ["NeedsKX"], [dep("et/kadath", None, ["KadathExtra"])])]),
     "max--kadath--into-carpetx": ("max/kadath", [V("1.0.0", ["Kadath"], [dep("et/carpetx", "^2026.5", into="src/carpetx")])]),
 
     # Remove.

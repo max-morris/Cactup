@@ -1,0 +1,49 @@
+{
+  "slug": "max/needs-kx",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "858831f15015935b67857047c5c3cf1cb1dc23cf",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/needs-kx.git",
+      "thorns": [
+        {
+          "arrangement": "Needs-kx",
+          "thorn": "NeedsKX",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "NeedsKX",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/kadath",
+          "range": null,
+          "needs": [
+            "KadathExtra"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

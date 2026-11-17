@@ -2351,22 +2351,33 @@ impl Search<'_> {
                 installed.entry(l.id.clone()).or_default().push((l.commit.clone(), placement, live));
             }
         }
-        let mut roots: Vec<&Entry> = chosen.values().filter(|e| e.is_new()).collect();
+        // A package brought in or moved places every library it claims; a present one given
+        // more thorns, those its new thorns need (a claim whose needed-by names one of them).
+        let mut roots: Vec<&Entry> = chosen.values().filter(|e| e.changed()).collect();
         roots.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.release.id.cmp(&b.release.id)));
-        let roots: Vec<(PkgId, Rel)> =
-            roots.iter().map(|e| (e.release.id.clone(), e.release.clone())).collect();
+        let roots: Vec<(PkgId, Rel, Option<BTreeSet<String>>)> = (roots.iter())
+            .map(|e| {
+                let only = (!e.is_new()).then(|| e.enabled.iter().filter(|t| e.thorn_is_new(t)).cloned().collect());
+                (e.release.id.clone(), e.release.clone(), only)
+            })
+            .collect();
         let mut selected: BTreeMap<PkgId, Rel> = BTreeMap::new();
         // Each round reads every placing release (the packages, then the libraries selected so
         // far, inside each package that placed them) and selects each library again, until
         // nothing changes.
         for _ in 0..64 {
             let mut placements: BTreeMap<PkgId, Vec<(Placement, Live)>> = BTreeMap::new();
-            let mut frontier: VecDeque<(PkgId, Option<PkgId>, Rel)> =
-                roots.iter().map(|(id, r)| (id.clone(), None, r.clone())).collect();
+            let mut frontier: VecDeque<(PkgId, Option<PkgId>, Rel, Option<BTreeSet<String>>)> =
+                roots.iter().map(|(id, r, only)| (id.clone(), None, r.clone(), only.clone())).collect();
             let mut seen: BTreeSet<(PkgId, PkgId)> = BTreeSet::new();
-            while let Some((by, inside, r)) = frontier.pop_front() {
+            while let Some((by, inside, r, only)) = frontier.pop_front() {
                 for c in r.claims.iter().filter(|c| c.kind == "dependency") {
                     let Some(into) = &c.into else { continue };
+                    if let Some(only) = &only
+                        && !c.needed_by.iter().any(|n| contains(only, n))
+                    {
+                        continue;
+                    }
                     let (label, ignore) = (r.label(), format!("{}:dependency:{}", r.id, c.target));
                     let (lib, req) = match claim_target(&c.target, c.range.as_deref(), c.sha.as_deref()) {
                         Ok(x) => x,
@@ -2392,7 +2403,7 @@ impl Search<'_> {
                         && !installed.contains_key(&lib)
                         && seen.insert((by.clone(), lib.clone()))
                     {
-                        frontier.push_back((by.clone(), Some(lib.clone()), sel.clone()));
+                        frontier.push_back((by.clone(), Some(lib.clone()), sel.clone(), None));
                     }
                 }
             }
