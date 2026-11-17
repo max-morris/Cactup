@@ -966,6 +966,28 @@ mod tests {
         assert!(heads[0].starts_with("GET /api/v1/providers?implements=Hyperslab "), "{}", heads[0]);
     }
 
+    /// A Cactarium older than this cactup has no `/lookup` or `/providers`:
+    /// a 404 (or 405) there means the route is missing, since neither
+    /// endpoint answers 404 about what it is asked. A 404 for a package is
+    /// that package missing.
+    #[test]
+    fn an_older_cactarium_is_told_apart_from_a_missing_package() {
+        use cactup_ecosystem_common::ccl::Need;
+        let (base, _) = serve_with(4, |path| {
+            let status = if path.contains("/lookup") { "405 Method Not Allowed" } else { "404 Not Found" };
+            (status, String::new(), Vec::new())
+        });
+        let client = Client::at(&base);
+        let pins = [PinQuery { url: "https://x/r.git".into(), commit: "a".repeat(40) }];
+        let err = client.lookup(&pins).unwrap_err();
+        assert!(err.downcast_ref::<OldCactarium>().is_some_and(|o| o.endpoint == "/lookup"), "{err:#}");
+        assert!(format!("{err:#}").contains("older than this cactup"), "{err:#}");
+        let err = client.providers(&Need::Capability("HDF5".into())).unwrap_err();
+        assert!(err.downcast_ref::<OldCactarium>().is_some_and(|o| o.endpoint == "/providers"), "{err:#}");
+        assert!(client.package_versions_if_any("et", "nope").unwrap().is_none());
+        assert!(client.package_at_if_any("et", "nope", &"b".repeat(40)).unwrap().is_none());
+    }
+
     #[test]
     fn tokens_are_stored_per_registry_owner_only() {
         use std::os::unix::fs::PermissionsExt;
