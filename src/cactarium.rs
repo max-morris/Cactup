@@ -70,6 +70,18 @@ static PATIENT: std::sync::LazyLock<reqwest::blocking::Client> = std::sync::Lazy
         .expect("failed to build the HTTP client")
 });
 
+/// Ctrl-C while a request was in flight: it may have reached the server.
+#[derive(Debug)]
+pub(crate) struct InFlight;
+
+impl std::fmt::Display for InFlight {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Interrupted")
+    }
+}
+
+impl std::error::Error for InFlight {}
+
 /// Runs `request` on a thread of its own and waits for it, checking `stop`
 /// every 50 ms: once it is set, fails with "interrupted" at once and leaves
 /// the request to finish (or time out) on its own. Blocking reqwest cannot be
@@ -78,13 +90,17 @@ pub(crate) fn interruptibly<T: Send + 'static>(
     request: impl FnOnce() -> Res<T> + Send + 'static,
     stop: &std::sync::atomic::AtomicBool,
 ) -> Res<T> {
+    // Not started at all once Ctrl-C was pressed.
+    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+        bail!("Interrupted");
+    }
     let (send, receive) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = send.send(request());
     });
     loop {
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
-            bail!("Interrupted");
+            return Err(anyhow::Error::new(InFlight));
         }
         match receive.recv_timeout(std::time::Duration::from_millis(50)) {
             Ok(answer) => return answer,
@@ -366,7 +382,7 @@ impl Client {
             .bearer_auth(token)
             .header("content-type", "application/toml")
             .body(body);
-        self.send(request)?.json()
+        self.send_change(request, "the publication")?.json()
     }
 
     /// Publish a stack release.
@@ -383,7 +399,7 @@ impl Client {
             .bearer_auth(token)
             .header("content-type", "application/json")
             .body(body);
-        self.send(request)?.json()
+        self.send_change(request, "the publication")?.json()
     }
 
     /// Have the registry check package (or repo-kept stack) `owner/name`'s
@@ -393,7 +409,7 @@ impl Client {
         let request = self.http()
             .post(self.url(&format!("/packages/{owner}/{name}/refresh")))
             .bearer_auth(token);
-        self.send(request)?.json()
+        self.send_change(request, "the refresh")?.json()
     }
 
     /// A request that never got an answer. A server that cannot be reached
@@ -414,6 +430,15 @@ impl Client {
              Cactarium with the {URL_KNOB} knob or CACTARIUM_URL",
             self.base
         )
+    }
+
+    /// [`Client::send`] for a request that changes something on the
+    /// Cactarium (`what`): interrupted in flight, it may have done so.
+    fn send_change(&self, request: reqwest::blocking::RequestBuilder, what: &str) -> Res<Answer> {
+        self.send(request).map_err(|e| match e.downcast_ref::<InFlight>() {
+            Some(_) => anyhow!("Interrupted; {what} may have reached the Cactarium: check before trying again"),
+            None => e,
+        })
     }
 
     /// Send, then refuse a registry newer than this cactup speaks, and turn
@@ -540,6 +565,7 @@ impl Refused {
 }
 
 /// A successful answer, read whole.
+#[derive(Debug)]
 struct Answer {
     headers: reqwest::header::HeaderMap,
     body: Vec<u8>,
@@ -1210,6 +1236,40 @@ mod tests {
         }
         // An answer comes back as it is.
         assert_eq!(interruptibly(|| Ok(7), &AtomicBool::new(false)).unwrap(), 7);
+    }
+
+    /// After Ctrl-C nothing goes out; a change interrupted in flight says it
+    /// may have reached the Cactarium.
+    #[test]
+    fn a_change_interrupted_in_flight_says_it_may_have_reached_the_cactarium() {
+        use std::io::Read;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static STOPPED: AtomicBool = AtomicBool::new(true);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let client = Client::at(&base).stopped_by(&STOPPED);
+        let err = client.send_change(http_post(&client), "the refresh").unwrap_err();
+        assert_eq!(err.to_string(), "Interrupted");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(listener.accept().is_err(), "a request went out after Ctrl-C");
+
+        static STOP: AtomicBool = AtomicBool::new(false);
+        listener.set_nonblocking(false).unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut head = [0u8; 1024];
+            let _ = stream.read(&mut head);
+            STOP.store(true, Ordering::Relaxed);
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        });
+        let client = Client::at(&base).stopped_by(&STOP);
+        let err = format!("{:#}", client.send_change(http_post(&client), "the refresh").unwrap_err());
+        assert!(err.contains("the refresh may have reached the Cactarium") && err.contains("check before"), "{err}");
+    }
+
+    fn http_post(client: &Client) -> reqwest::blocking::RequestBuilder {
+        client.http().post(client.url("/packages/et/x/refresh"))
     }
 
     /// Rate limits, refusals to serve and failing servers are answers not
