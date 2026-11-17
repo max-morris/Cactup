@@ -110,6 +110,11 @@ you give `-n`; `--run` from a login node runs on that one machine. Without
 either flag it stops after creating the simulation and prints the submit
 command.
 
+On a machine that builds on the queue, `import` submits the build and follows
+it: it names the job, shows its state and how long it has waited, and streams
+the build's output once it starts. Ctrl-C stops the import but not the build;
+run the same command again once the build is over to finish the import.
+
 Inputs are settled **before** anything long runs: from `--input KNOB=VALUE`,
 else by downloading the file the input names (into
 `~/.cactup/inputs/`, checked against its recorded hash), else by asking.

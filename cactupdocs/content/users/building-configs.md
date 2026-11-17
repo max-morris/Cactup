@@ -65,7 +65,10 @@ cactup build submit myconfig --follow
 
 It also accepts `--block`, which waits for the queued build to finish
 before returning but — unlike `--follow` — prints no build output along the
-way; just the job id up front and the final verdict. Use `--block` in a
+way; just the job id, a line showing the job's state and how long it has
+waited (on a terminal), and the final verdict. On a machine whose
+`blocking-submit` is `sbatch --wait`, the job id may only show once the
+build is over. Use `--block` in a
 script that must not continue until the build is done, and `--follow` when
 you want to watch it happen. The two are mutually exclusive. Either way,
 Ctrl-C only detaches your terminal — the queued build keeps running and you
