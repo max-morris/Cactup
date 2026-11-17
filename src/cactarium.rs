@@ -48,12 +48,39 @@ pub fn validate_url(value: &str) -> Res<String> {
     }
 }
 
+/// How long a request to the registry may wait for the head of its answer
+/// (connecting, sending, the server's own work: a cold read of a package at
+/// a commit fetches its repository) and for each further piece of the body.
+/// Generous: Ctrl-C ends any wait at once (`resolution::interruptibly`).
+const WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+/// How long connecting may take, within [`WAIT`].
+const CONNECT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The registry's HTTP client: cactup's `User-Agent`, and [`WAIT`] on the
+/// head of each answer and on each stall of its body, rather than reqwest's
+/// 30 s default (blocking reqwest's timeout bounds the whole wait for the
+/// head).
+static HTTP: std::sync::LazyLock<reqwest::blocking::Client> = std::sync::LazyLock::new(|| {
+    reqwest::blocking::Client::builder()
+        .user_agent(crate::build_info::USER_AGENT)
+        .timeout(WAIT)
+        .connect_timeout(CONNECT)
+        .build()
+        .expect("failed to build the HTTP client")
+});
+
+fn http() -> &'static reqwest::blocking::Client {
+    &HTTP
+}
+
 /// A connection to one registry: its base URL and, for writes, the token.
 #[derive(Clone, Debug)]
 pub struct Client {
     base: String,
-    /// A whole-request limit: set for lookups a command makes in passing
-    /// (`inst show`), so a registry that cannot be reached costs seconds.
+    /// A limit on each whole request, the answer's body included: set for
+    /// lookups a command makes in passing (`inst show`), so a registry that
+    /// cannot be reached, or answers slowly, costs seconds. Without it, only
+    /// [`WAIT`] bounds each wait.
     timeout: Option<std::time::Duration>,
 }
 
@@ -73,7 +100,8 @@ impl Client {
         Client { base: base.trim_end_matches('/').to_owned(), timeout: None }
     }
 
-    /// This client, giving up on any request after `timeout`.
+    /// This client, giving up on any request, its whole answer read, after
+    /// `timeout`.
     pub fn with_timeout(self, timeout: std::time::Duration) -> Client {
         Client { timeout: Some(timeout), ..self }
     }
@@ -95,14 +123,14 @@ impl Client {
     /// still holds.
     pub fn resolve(&self, req: &str, kind: &str) -> Res<Resolved> {
         let url = format!("{}?req={}&kind={}", self.url("/resolve"), query_escape(req), query_escape(kind));
-        json(self.send(crate::fetch::download::client().get(&url))?)
+        self.send(http().get(&url))?.json()
     }
 
     /// A stack release (`version` exact, or `head`/`master`), with what the
     /// server's headers say about it.
     pub fn stack_release(&self, owner: &str, name: &str, version: &str) -> Res<StackResponse> {
         let url = self.url(&format!("/stacks/{owner}/{name}/releases/{version}"));
-        let response = self.send(crate::fetch::download::client().get(&url))?;
+        let response = self.send(http().get(&url))?;
         let flag = |header: &str| response.headers().get(header).map(|v| v.as_bytes() == b"true");
         let unpinned = flag(UNPINNED_HEADER).unwrap_or(false);
         // A tip without the trust header (a registry that predates it, or
@@ -115,19 +143,20 @@ impl Client {
             .and_then(|v| v.to_str().ok())
             .filter(|c| !c.is_empty())
             .map(str::to_owned);
-        Ok(StackResponse { stack: stack_json(response)?, unpinned, untrusted, contact })
+        let url = response.url.clone();
+        Ok(StackResponse { stack: stack_json(response.text()?, &url)?, unpinned, untrusted, contact })
     }
 
     pub fn package_versions(&self, owner: &str, name: &str) -> Res<PackageVersions> {
         let url = self.url(&format!("/packages/{owner}/{name}/versions"));
-        json(self.send(crate::fetch::download::client().get(&url))?)
+        self.send(http().get(&url))?.json()
     }
 
     /// [`Client::package_versions`], or `None` when the Cactarium has no
     /// such package.
     pub fn package_versions_if_any(&self, owner: &str, name: &str) -> Res<Option<PackageVersions>> {
         let url = self.url(&format!("/packages/{owner}/{name}/versions"));
-        self.send_found(crate::fetch::download::client().get(&url))?.map(json).transpose()
+        self.send_found(http().get(&url), &[reqwest::StatusCode::NOT_FOUND])?.ok().map(Answer::json).transpose()
     }
 
     /// A package read at something no published version names: a branch
@@ -137,11 +166,11 @@ impl Client {
     /// package or cannot find that commit in its repository.
     pub fn package_at_if_any(&self, owner: &str, name: &str, at: &str) -> Res<Option<(PackageVersion, bool)>> {
         let url = self.url(&format!("/packages/{owner}/{name}/versions/{at}"));
-        let Some(response) = self.send_found(crate::fetch::download::client().get(&url))? else {
+        let Ok(response) = self.send_found(http().get(&url), &[reqwest::StatusCode::NOT_FOUND])? else {
             return Ok(None);
         };
         let untrusted = response.headers().get(UNTRUSTED_HEADER).is_none_or(|v| v.as_bytes() == b"true");
-        Ok(Some((json(response)?, untrusted)))
+        Ok(Some((response.json()?, untrusted)))
     }
 
     /// Which package, if any, each pinned repo is, in the order asked. Every
@@ -157,12 +186,12 @@ impl Client {
             let request = LookupRequest { pins: chunk.to_vec(), downloads: Vec::new() };
             request.validate().map_err(|e| anyhow!("Cannot ask the Cactarium about these repos: {e}"))?;
             let body = serde_json::to_vec(&request).context("Failed to encode the lookup request")?;
-            let request = crate::fetch::download::client()
+            let request = http()
                 .post(self.url("/lookup"))
                 .header("content-type", "application/json")
                 .body(body);
-            let response = self.send_found(request)?.ok_or_else(|| self.old("/lookup"))?;
-            let answer: LookedUp = json(response)?;
+            let response = self.send_found(request, MISSING_ROUTE)?.map_err(|m| self.missing("/lookup", m))?;
+            let answer: LookedUp = response.json()?;
             if answer.pins.len() != chunk.len() {
                 bail!(
                     "The Cactarium answered a lookup of {} repos with {}; cactup cannot tell which is which",
@@ -197,21 +226,33 @@ impl Client {
             .to_query_string()
             .map_err(|e| anyhow!("Cannot ask the Cactarium what provides {need}: {e}"))?;
         let url = format!("{}?{query}", self.url("/providers"));
-        let response = self.send_found(crate::fetch::download::client().get(&url))?.ok_or_else(|| self.old("/providers"))?;
-        json(response)
+        let response = self.send_found(http().get(&url), MISSING_ROUTE)?.map_err(|m| self.missing("/providers", m))?;
+        response.json()
     }
 
-    /// A Cactarium without `endpoint`. Only for endpoints that never answer
-    /// 404 about what they are asked (a lookup answers every pin, a provider
-    /// search an empty list): their 404 can only mean the route is missing.
-    fn old(&self, endpoint: &'static str) -> anyhow::Error {
-        anyhow::Error::new(OldCactarium { base: self.base.clone(), endpoint })
+    /// A route `endpoint` the server does not have. Only for endpoints that
+    /// never answer 404 about what they are asked (a lookup answers every
+    /// pin, a provider search an empty list): their 404 (or 405) can only
+    /// mean the route is missing. A Cactarium says so with its API
+    /// generation, as every answer under its API carries one (its fallback
+    /// route too): then it is older than this cactup. Without one, the
+    /// address is no Cactarium's.
+    fn missing(&self, endpoint: &'static str, m: Missing) -> anyhow::Error {
+        if m.generation {
+            return anyhow::Error::new(OldCactarium { base: self.base.clone(), endpoint });
+        }
+        anyhow!(
+            "The server at {} does not look like a Cactarium: it answered {} to {endpoint}, without saying which \
+             Cactarium API it speaks. Check the {URL_KNOB} knob (or CACTARIUM_URL)",
+            self.base,
+            m.status
+        )
     }
 
     /// Every release of a stack, each with whether it has been yanked.
     pub fn stack_releases(&self, owner: &str, name: &str) -> Res<StackReleases> {
         let url = self.url(&format!("/stacks/{owner}/{name}/releases"));
-        json(self.send(crate::fetch::download::client().get(&url))?)
+        self.send(http().get(&url))?.json()
     }
 
     /// Whether `version` of package or stack `owner/name` has been yanked
@@ -241,7 +282,7 @@ impl Client {
         if let Some(sim) = sim {
             url.push_str(&format!("?{SIM_QUERY}={}", query_escape(sim)));
         }
-        let response = self.send(crate::fetch::download::client().get(&url))?;
+        let response = self.send(http().get(&url))?;
         let expected = response.headers().get(SHA256_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
         let bytes = response.bytes().with_context(|| format!("Failed to download {url}"))?;
         if let Some(expected) = expected {
@@ -274,12 +315,12 @@ impl Client {
             Some(v) => format!("/sims/{owner}/{name}?version={}", query_escape(v)),
             None => format!("/sims/{owner}/{name}"),
         };
-        let request = crate::fetch::download::client()
+        let request = http()
             .post(self.url(&path))
             .bearer_auth(token)
             .header("content-type", "application/toml")
             .body(body);
-        json(self.send(request)?)
+        self.send(request)?.json()
     }
 
     /// Publish a stack release.
@@ -291,22 +332,22 @@ impl Client {
     ) -> Res<Published> {
         let token = token_for(&self.base)?;
         let body = serde_json::to_vec(request).context("Failed to encode the release request")?;
-        let request = crate::fetch::download::client()
+        let request = http()
             .post(self.url(&format!("/stacks/{owner}/{name}/releases")))
             .bearer_auth(token)
             .header("content-type", "application/json")
             .body(body);
-        json(self.send(request)?)
+        self.send(request)?.json()
     }
 
     /// Have the registry check package (or repo-kept stack) `owner/name`'s
     /// repository for new release tags now, rather than at its next poll.
     pub fn refresh(&self, owner: &str, name: &str) -> Res<Refreshed> {
         let token = token_for(&self.base)?;
-        let request = crate::fetch::download::client()
+        let request = http()
             .post(self.url(&format!("/packages/{owner}/{name}/refresh")))
             .bearer_auth(token);
-        json(self.send(request)?)
+        self.send(request)?.json()
     }
 
     /// A request that never got an answer. A server that cannot be reached
@@ -331,21 +372,18 @@ impl Client {
 
     /// Send, then refuse a registry newer than this cactup speaks, and turn
     /// an error status into the message the registry wrote for it.
-    fn send(&self, request: reqwest::blocking::RequestBuilder) -> Res<reqwest::blocking::Response> {
-        Ok(self.send_as(request, false)?.expect("only a 404 answers nothing"))
+    fn send(&self, request: reqwest::blocking::RequestBuilder) -> Res<Answer> {
+        Ok(self.send_found(request, &[])?.expect("no status counts as missing"))
     }
 
-    /// [`Client::send`], but a 404 answers `None`: the Cactarium has no such
-    /// thing.
-    fn send_found(&self, request: reqwest::blocking::RequestBuilder) -> Res<Option<reqwest::blocking::Response>> {
-        self.send_as(request, true)
-    }
-
-    fn send_as(
+    /// [`Client::send`], but an answer with one of the `missing` statuses is
+    /// `Err(Missing)`: the server has no such thing (a package, or a route).
+    fn send_found(
         &self,
         request: reqwest::blocking::RequestBuilder,
-        missing_is_none: bool,
-    ) -> Res<Option<reqwest::blocking::Response>> {
+        missing: &[reqwest::StatusCode],
+    ) -> Res<Result<Answer, Missing>> {
+        let deadline = self.timeout.map(|t| std::time::Instant::now() + t);
         let request = match self.timeout {
             Some(timeout) => request.timeout(timeout),
             None => request,
@@ -354,24 +392,24 @@ impl Client {
             .header(API_GENERATION_HEADER, API_GENERATION.to_string())
             .send()
             .map_err(|e| self.unreachable(e))?;
-        if let Some(generation) = response.headers().get(API_GENERATION_HEADER) {
-            let generation: u32 = generation.to_str().ok().and_then(|g| g.parse().ok()).unwrap_or(0);
-            if generation > API_GENERATION {
-                bail!(
-                    "The Cactarium at {} speaks API generation {generation}, newer than this cactup's \
-                     {API_GENERATION}; run `cactup update`",
-                    self.base
-                );
-            }
+        let generation = (response.headers().get(API_GENERATION_HEADER))
+            .map(|g| g.to_str().ok().and_then(|g| g.parse::<u32>().ok()).unwrap_or(0));
+        if let Some(generation) = generation
+            && generation > API_GENERATION
+        {
+            bail!(
+                "The Cactarium at {} speaks API generation {generation}, newer than this cactup's \
+                 {API_GENERATION}; run `cactup update`",
+                self.base
+            );
         }
         if response.status().is_success() {
-            return Ok(Some(response));
+            let url = response.url().to_string();
+            return Ok(Ok(Answer { response, deadline, url, base: self.base.clone() }));
         }
         let status = response.status();
-        // A route an older server lacks may answer 405 to a POST, too.
-        let missing = status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::METHOD_NOT_ALLOWED;
-        if missing_is_none && missing {
-            return Ok(None);
+        if missing.contains(&status) {
+            return Ok(Err(Missing { status, generation: generation.is_some() }));
         }
         let text = response.text().unwrap_or_default();
         // A missing or dead token: say how to get a working one.
@@ -380,10 +418,83 @@ impl Client {
         } else {
             String::new()
         };
-        match serde_json::from_str::<ErrorBody>(&text) {
-            Ok(body) => Err(anyhow!("{}{login}", body.error.message)),
-            Err(_) => Err(anyhow!("The Cactarium at {} answered {status}", self.base)),
+        let message = match serde_json::from_str::<ErrorBody>(&text) {
+            Ok(body) => format!("{}{login}", body.error.message),
+            Err(_) => format!("The Cactarium at {} answered {status}", self.base),
+        };
+        Err(anyhow::Error::new(Refused { status: status.as_u16(), message }))
+    }
+}
+
+/// The statuses a server without a route answers: 404, and 405 when another
+/// route of that path takes another method.
+const MISSING_ROUTE: &[reqwest::StatusCode] = &[reqwest::StatusCode::NOT_FOUND, reqwest::StatusCode::METHOD_NOT_ALLOWED];
+
+/// An answer the server had nothing for.
+#[derive(Debug)]
+struct Missing {
+    status: reqwest::StatusCode,
+    /// It said which API generation it speaks: a Cactarium.
+    generation: bool,
+}
+
+/// An error status the registry answered, with its message.
+#[derive(Debug)]
+pub struct Refused {
+    pub status: u16,
+    pub message: String,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// A successful answer, read within the client's whole-request limit when
+/// it has one.
+struct Answer {
+    response: reqwest::blocking::Response,
+    deadline: Option<std::time::Instant>,
+    url: String,
+    base: String,
+}
+
+impl Answer {
+    fn headers(&self) -> &reqwest::header::HeaderMap {
+        self.response.headers()
+    }
+
+    /// The body, read through `Read`: each stall bounded by [`WAIT`] (or the
+    /// whole-request limit), and the whole by that limit, checked between
+    /// pieces.
+    fn bytes(mut self) -> Res<Vec<u8>> {
+        let mut bytes = Vec::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            if self.deadline.is_some_and(|d| std::time::Instant::now() > d) {
+                bail!("The Cactarium at {} isn't reachable (it did not answer in time)", self.base);
+            }
+            let n = std::io::Read::read(&mut self.response, &mut buf)
+                .with_context(|| format!("Failed to read the answer from {}", self.url))?;
+            if n == 0 {
+                return Ok(bytes);
+            }
+            bytes.extend_from_slice(&buf[..n]);
         }
+    }
+
+    fn text(self) -> Res<String> {
+        let url = self.url.clone();
+        String::from_utf8(self.bytes()?).with_context(|| format!("The Cactarium's answer from {url} is not text"))
+    }
+
+    fn json<T: DeserializeOwned>(self) -> Res<T> {
+        let url = self.url.clone();
+        let text = self.text()?;
+        serde_json::from_str(&text).with_context(|| format!("The Cactarium's answer from {url} is not what cactup expects"))
     }
 }
 
@@ -570,24 +681,11 @@ fn check_stamp(bytes: &[u8], want: &str) -> Res<()> {
     }
 }
 
-/// The answer's JSON. Read through `Read`, so the client's timeout bounds
-/// each stall rather than the whole body: a version list can be megabytes on
-/// a slow link.
-fn json<T: DeserializeOwned>(mut response: reqwest::blocking::Response) -> Res<T> {
-    let url = response.url().to_string();
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut response, &mut bytes).with_context(|| format!("Failed to read the answer from {url}"))?;
-    let text = String::from_utf8(bytes).with_context(|| format!("The Cactarium's answer from {url} is not text"))?;
-    serde_json::from_str(&text).with_context(|| format!("The Cactarium's answer from {url} is not what cactup expects"))
-}
-
 /// A stack release's JSON, its `format` checked before the typed parse
 /// (`FrozenStack` refuses keys it does not know, so a release from a newer
 /// server would fail on whichever of them came first, with a message that
 /// never says to upgrade).
-fn stack_json(response: reqwest::blocking::Response) -> Res<FrozenStack> {
-    let url = response.url().to_string();
-    let text = response.text().with_context(|| format!("Failed to read the answer from {url}"))?;
+fn stack_json(text: String, url: &str) -> Res<FrozenStack> {
     let unexpected = || format!("The Cactarium's answer from {url} is not what cactup expects");
     let value: serde_json::Value = serde_json::from_str(&text).with_context(unexpected)?;
     if let Some(found) = value.get("format").and_then(serde_json::Value::as_u64)
@@ -968,17 +1066,19 @@ mod tests {
 
     /// A Cactarium older than this cactup has no `/lookup` or `/providers`:
     /// a 404 (or 405) there means the route is missing, since neither
-    /// endpoint answers 404 about what it is asked. A 404 for a package is
-    /// that package missing.
+    /// endpoint answers 404 about what it is asked, and its API fallback
+    /// still says which generation it speaks. Without that header the
+    /// address is no Cactarium's. A 404 for a package is that package
+    /// missing; a 405 there is no such thing, but an error.
     #[test]
-    fn an_older_cactarium_is_told_apart_from_a_missing_package() {
+    fn an_older_cactarium_is_told_apart_from_a_missing_package_and_a_wrong_url() {
         use cactup_ecosystem_common::ccl::Need;
+        let pins = [PinQuery { url: "https://x/r.git".into(), commit: "a".repeat(40) }];
         let (base, _) = serve_with(4, |path| {
             let status = if path.contains("/lookup") { "405 Method Not Allowed" } else { "404 Not Found" };
-            (status, String::new(), Vec::new())
+            (status, "api-generation: 1\r\n".into(), br#"{"error":{"code":"not-found","message":"Not found"}}"#.to_vec())
         });
         let client = Client::at(&base);
-        let pins = [PinQuery { url: "https://x/r.git".into(), commit: "a".repeat(40) }];
         let err = client.lookup(&pins).unwrap_err();
         assert!(err.downcast_ref::<OldCactarium>().is_some_and(|o| o.endpoint == "/lookup"), "{err:#}");
         assert!(format!("{err:#}").contains("older than this cactup"), "{err:#}");
@@ -986,6 +1086,46 @@ mod tests {
         assert!(err.downcast_ref::<OldCactarium>().is_some_and(|o| o.endpoint == "/providers"), "{err:#}");
         assert!(client.package_versions_if_any("et", "nope").unwrap().is_none());
         assert!(client.package_at_if_any("et", "nope", &"b".repeat(40)).unwrap().is_none());
+
+        // Some other web server: no API generation on its 404.
+        let (base, _) = serve_with(2, |_| ("404 Not Found", String::new(), b"<html>nope</html>".to_vec()));
+        let client = Client::at(&base);
+        let err = format!("{:#}", client.lookup(&pins).unwrap_err());
+        assert!(err.contains("does not look like a Cactarium") && err.contains("cactarium-url"), "{err}");
+        let err = client.providers(&Need::Capability("HDF5".into())).unwrap_err();
+        assert!(err.downcast_ref::<OldCactarium>().is_none(), "{err:#}");
+
+        // A 405 for a package is no missing package.
+        let (base, _) = serve_with(2, |_| ("405 Method Not Allowed", "api-generation: 1\r\n".into(), Vec::new()));
+        let client = Client::at(&base);
+        assert!(client.package_versions_if_any("et", "x").is_err());
+        assert!(client.package_at_if_any("et", "x", &"b".repeat(40)).is_err());
+    }
+
+    /// A client with a whole-request limit gives up on an answer whose body
+    /// trickles in past it, however short each stall.
+    #[test]
+    fn a_whole_request_limit_covers_the_body() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut head = [0u8; 1024];
+            let _ = stream.read(&mut head);
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\napi-generation: 1\r\nContent-Length: 400\r\n\r\n");
+            for _ in 0..400 {
+                if stream.write_all(b" ").and_then(|()| stream.flush()).is_err() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        });
+        let started = std::time::Instant::now();
+        let client = Client::at(&base).with_timeout(std::time::Duration::from_millis(1500));
+        let err = client.package_versions("et", "x").unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(4), "{elapsed:?}: {err:#}");
     }
 
     #[test]

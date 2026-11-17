@@ -42,7 +42,7 @@ fn depends(target: &str, range: &str, needs: &[&str]) -> String {
 /// The fake Cactarium: `packages` (id → its versions, newest first), the
 /// pins `/lookup` knows (URL → package and version), and what `/providers`
 /// answers with. `lookup`/`providers` false: an older Cactarium, which has
-/// no such endpoint (its router answers 404 with no body).
+/// no such endpoint (its API fallback answers 404, with its generation).
 #[derive(Clone)]
 struct Fake {
     packages: Vec<(String, Vec<String>)>,
@@ -99,7 +99,11 @@ impl Fake {
             let body = r#"{"error":{"code":"not-found","message":"No such package"}}"#;
             ("404 Not Found", "api-generation: 1\r\n".to_owned(), body.as_bytes().to_vec())
         };
-        let no_route = || ("404 Not Found", String::new(), Vec::new());
+        // The real server's API fallback: 404, with its API generation.
+        let no_route = || {
+            let body = r#"{"error":{"code":"not-found","message":"Not found"}}"#;
+            ("404 Not Found", "api-generation: 1\r\n".to_owned(), body.as_bytes().to_vec())
+        };
         let path = path.strip_prefix("/api/v1").unwrap_or(path);
         if let Some(req) = path.strip_prefix("/resolve?req=") {
             let req = req.split('&').next().unwrap().replace("%40", "@").replace("%23", "#");
