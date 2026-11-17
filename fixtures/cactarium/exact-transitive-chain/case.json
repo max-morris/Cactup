@@ -1,0 +1,19 @@
+{
+  "about": "A read stand-in's claim for a thorn the plan enables needs another stand-in's thorn: read too, with no other wave loading; the claim of a thorn nothing enables reads nothing",
+  "packages": ["max--n10", "et--p10", "et--p11", "et--p12"],
+  "snapshots": ["et--p10--at-1010", "et--p11--at-1111", "et--p12--at-1212"],
+  "specs": ["max/n10"],
+  "present": [
+    {"package": "et/p10", "unknown": "1010101010101010101010101010101010101010", "thorns": ["P10a"], "base": "p10", "enabled": ["P10a"], "stand_in": true},
+    {"package": "et/p11", "unknown": "1111111111111111111111111111111111111111", "thorns": ["Q0"], "base": "p11", "enabled": ["Q0"], "stand_in": true},
+    {"package": "et/p12", "unknown": "1212121212121212121212121212121212121212", "thorns": ["R0"], "base": "p12", "enabled": ["R0"], "stand_in": true}
+  ],
+  "expect": {
+    "plan": [
+      "add max/n10@1.0.0 N10 named",
+      "add et/p10#101010101010 P10b needed by max/n10@1.0.0",
+      "add et/p11#111111111111 Q needed by et/p10#101010101010 (P10b)"
+    ],
+    "reads": ["et/p10@101010101010", "et/p11@111111111111"]
+  }
+}

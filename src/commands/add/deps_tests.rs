@@ -51,9 +51,19 @@ struct Fake {
     lookup: bool,
     providers_endpoint: bool,
     /// Reads at a commit no version froze so far: the real server reads the
-    /// package now (a fetch of its repository), at most 12 a minute per
-    /// address, then answers 429.
+    /// package now (a fetch of its repository), at most 12 in a window that
+    /// opens at the first counted read, then answers 429 (refused reads do
+    /// not count).
     unfrozen_reads: usize,
+    /// Reads in the current window, and when it opened.
+    in_window: usize,
+    window_start: Option<std::time::Instant>,
+    /// The window's length (60 s on the real server).
+    window: std::time::Duration,
+    /// Whether a 429 says `Retry-After`.
+    retry_after: bool,
+    /// Every read at an unfrozen commit answers 429.
+    always_limited: bool,
     /// Commits whose reads answer 403 (not served to this caller).
     refuse_at: Vec<String>,
     /// What a read at a commit no version froze answers (the package read
@@ -73,6 +83,11 @@ impl Fake {
             lookup: true,
             providers_endpoint: true,
             unfrozen_reads: 0,
+            in_window: 0,
+            window_start: None,
+            window: std::time::Duration::from_secs(60),
+            retry_after: false,
+            always_limited: false,
             refuse_at: Vec::new(),
             snapshots: Vec::new(),
         }
@@ -175,11 +190,19 @@ impl Fake {
             if let Some(v) = versions.iter().rev().find(|v| v.contains(&format!("\"commit\":\"{at}"))) {
                 return ok(v.clone());
             }
-            self.unfrozen_reads += 1;
-            if self.unfrozen_reads > 12 {
-                let body = r#"{"error":{"code":"rate-limited","message":"Too many requests; try again in a minute"}}"#;
-                return ("429 Too Many Requests", "api-generation: 1\r\n".to_owned(), body.as_bytes().to_vec());
+            let now = std::time::Instant::now();
+            if self.window_start.is_some_and(|s| now.duration_since(s) >= self.window) {
+                (self.window_start, self.in_window) = (None, 0);
             }
+            if self.always_limited || self.in_window >= 12 {
+                let body = r#"{"error":{"code":"rate-limited","message":"Too many requests; try again in a minute"}}"#;
+                let left = self.window_start.map_or(self.window, |s| self.window.saturating_sub(now.duration_since(s)));
+                let header = if self.retry_after { format!("retry-after: {}\r\n", left.as_secs().max(1)) } else { String::new() };
+                return ("429 Too Many Requests", format!("api-generation: 1\r\n{header}"), body.as_bytes().to_vec());
+            }
+            self.window_start.get_or_insert(now);
+            self.in_window += 1;
+            self.unfrozen_reads += 1;
             return match self.snapshots.iter().find(|(p, c, _)| p == id && c == at) {
                 Some((_, _, json)) => ok(json.clone()),
                 None => missing(),
@@ -1249,10 +1272,11 @@ fn a_needed_thorn_of_an_unfrozen_base_package_is_found() {
 fn an_unfrozen_base_package_the_server_will_not_read_refuses_what_hinges_on_it() {
     let it = admbase_unfrozen("^1.0");
     let s = &it.setup;
-    it.fake.lock().unwrap().unfrozen_reads = 12;
+    it.fake.lock().unwrap().always_limited = true;
+    super::super::resolution::TEST_READ_WINDOW.with(|w| w.set(Some(std::time::Duration::from_millis(200))));
     let err = format!("{:#}", s.add(&["max/app"], yes()).unwrap_err());
-    assert!(err.contains("et/admbase#") && err.contains("Too many requests") && err.contains("--no-deps"), "{err}");
-    assert!(!err.contains("--upgrade"), "{err}");
+    assert!(err.contains("et/admbase#") && err.contains("the Cactarium's read limit; try again in a minute"), "{err}");
+    assert!(err.contains("--upgrade") && err.contains("--no-deps"), "{err}");
     s.add(&["max/solo"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
     let _ = (&it.a1, &it.a2, &it.log);
 }

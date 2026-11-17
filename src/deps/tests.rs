@@ -43,6 +43,8 @@ struct FixtureFacts {
     waves: Vec<Vec<PkgId>>,
     /// The progress ticks heard.
     ticks: Vec<usize>,
+    /// Each snapshot asked for, `owner/name@at`, in order.
+    reads: Vec<String>,
 }
 
 impl Facts for FixtureFacts {
@@ -57,6 +59,7 @@ impl Facts for FixtureFacts {
     }
 
     fn snapshot(&mut self, id: &PkgId, at: &str) -> Res<Option<Snapshot>> {
+        self.reads.push(format!("{id}@{}", at.get(..12).unwrap_or(at)));
         let found = self.snapshots.iter().find(|((i, a), _)| i == id && (a == at || a.starts_with(at)));
         Ok(found.map(|(_, s)| s.clone()))
     }
@@ -257,10 +260,16 @@ struct Expect {
     /// Text the refusal's message must contain (spaces collapsed).
     #[serde(default)]
     message: Vec<String>,
+    /// Text it must not.
+    #[serde(default)]
+    not_in_message: Vec<String>,
     #[serde(default)]
     removed: Option<Vec<String>>,
     #[serde(default)]
     orphans: Option<Vec<String>>,
+    /// The snapshots read, `owner/name@<12 hex>`, in order (checked whatever the outcome).
+    #[serde(default)]
+    reads: Option<Vec<String>>,
 }
 
 fn cases_dir() -> PathBuf {
@@ -416,6 +425,11 @@ fn check_refusal(expect: &Expect, refusal: Option<&Refusal>, other: Option<Strin
                     errors.push(format!("the message lacks \"{m}\": {text}"));
                 }
             }
+            for m in &expect.not_in_message {
+                if text.contains(&collapse(m)) {
+                    errors.push(format!("the message has \"{m}\": {text}"));
+                }
+            }
             if text.contains('§') {
                 errors.push(format!("a spec ref in user-visible text: {text}"));
             }
@@ -522,7 +536,9 @@ fn run(dir: &Path) -> Vec<String> {
     }
     let specs = specs_of(&case);
     let request = Request { specs: &specs, present: &present, rules: &rules, options: options_of(&case) };
-    match resolve(&request, &mut facts) {
+    let result = resolve(&request, &mut facts);
+    compare("reads", &case.expect.reads, facts.reads.clone(), &mut errors);
+    match result {
         Ok(plan) => {
             check_refusal(&case.expect, None, None, &mut errors);
             let rendered = plan.render(&command);

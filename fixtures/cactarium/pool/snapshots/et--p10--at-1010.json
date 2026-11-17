@@ -1,0 +1,100 @@
+{
+  "slug": "et/p10",
+  "at": "1010101010101010101010101010101010101010",
+  "untrusted": false,
+  "served": {
+    "version": "1010101010101010101010101010101010101010",
+    "track": null,
+    "tag": null,
+    "commit": "1010101010101010101010101010101010101010",
+    "tree": "0000000000000000000000000000000000000000",
+    "yanked": false,
+    "yank-reason": null,
+    "state": "ok",
+    "curated": false,
+    "published": 1793000000,
+    "url": "https://github.com/et/p10.git",
+    "thorns": [
+      {
+        "arrangement": "P10",
+        "thorn": "P10a",
+        "repo-path": "$1/$2",
+        "facts": {
+          "implements": "P10a",
+          "inherits": [],
+          "friends": [],
+          "requires-functions": [],
+          "uses-functions": [],
+          "provides-functions": [],
+          "uses-includes": [],
+          "requires": [],
+          "requires-thorns": [],
+          "optional": [],
+          "provides": []
+        }
+      },
+      {
+        "arrangement": "P10",
+        "thorn": "P10b",
+        "repo-path": "$1/$2",
+        "facts": {
+          "implements": "P10b",
+          "inherits": [],
+          "friends": [],
+          "requires-functions": [],
+          "uses-functions": [],
+          "provides-functions": [],
+          "uses-includes": [],
+          "requires": [],
+          "requires-thorns": [],
+          "optional": [],
+          "provides": []
+        }
+      },
+      {
+        "arrangement": "P10",
+        "thorn": "P10c",
+        "repo-path": "$1/$2",
+        "facts": {
+          "implements": "P10c",
+          "inherits": [],
+          "friends": [],
+          "requires-functions": [],
+          "uses-functions": [],
+          "provides-functions": [],
+          "uses-includes": [],
+          "requires": [],
+          "requires-thorns": [],
+          "optional": [],
+          "provides": []
+        }
+      }
+    ],
+    "claims": [
+      {
+        "kind": "dependency",
+        "target": "et/p11",
+        "range": null,
+        "needs": [
+          "Q"
+        ],
+        "needed-by": [
+          "P10b"
+        ],
+        "note": null
+      },
+      {
+        "kind": "dependency",
+        "target": "et/p12",
+        "range": null,
+        "needs": [
+          "R"
+        ],
+        "needed-by": [
+          "P10c"
+        ],
+        "note": null
+      }
+    ]
+  }
+}

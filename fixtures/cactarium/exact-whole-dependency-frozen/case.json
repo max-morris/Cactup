@@ -1,0 +1,11 @@
+{
+  "about": "A dependency naming no thorns on a base package at a version: every thorn the version has is enabled",
+  "packages": ["max--needs-adm-all", "et--admbase"],
+  "specs": ["max/needs-adm-all"],
+  "present": [
+    {"package": "et/admbase", "version": "2026.5.1", "base": "admbase", "enabled": ["ADMBase"]}
+  ],
+  "expect": {
+    "plan": ["add max/needs-adm-all@1.0.0 NA named", "add et/admbase@2026.5.1 StaticConformal needed by max/needs-adm-all@1.0.0"]
+  }
+}

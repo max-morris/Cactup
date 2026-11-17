@@ -1,0 +1,36 @@
+{
+  "about": "A named thorn of a base package the Cactarium does not read, under --no-deps: the ways past are --upgrade or a released version, never --no-deps again",
+  "packages": [
+    "et--admbase"
+  ],
+  "specs": [
+    "et/admbase/StaticConformal"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "unknown": "abababababababababababababababababababab",
+      "thorns": [
+        "ADMBase"
+      ],
+      "base": "admbase",
+      "enabled": [
+        "ADMBase"
+      ],
+      "stand_in": true
+    }
+  ],
+  "options": {
+    "no-deps": true
+  },
+  "expect": {
+    "refusal": "Unreadable",
+    "message": [
+      "et/admbase#abababababab",
+      "Pass --upgrade to move it to a release, or name a released version"
+    ],
+    "not_in_message": [
+      "--no-deps"
+    ]
+  }
+}

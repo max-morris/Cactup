@@ -1,0 +1,75 @@
+{
+  "slug": "et/p10",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "3f10fa3274183ccf3ab906e88df4e22f4f97887b",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/p10.git",
+      "thorns": [
+        {
+          "arrangement": "P10",
+          "thorn": "P10a",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "P10a",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        },
+        {
+          "arrangement": "P10",
+          "thorn": "P10b",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "P10b",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        },
+        {
+          "arrangement": "P10",
+          "thorn": "P10c",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "P10c",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    }
+  ]
+}

@@ -1447,8 +1447,28 @@ fn plan_remove_with_deps(
     let mut reg = super::resolution::Registry::new(&client, names);
     let options = super::resolution::PresentOptions::default();
     let set = super::resolution::present(&mut reg, &start.inst.root, base, &start.meta.added, None, &options);
+    // A base package at a commit no version froze that cactup gave more
+    // thorns: what those thorns claim decides what may go, so it is read
+    // there, exactly.
+    let set = set.and_then(|mut set| {
+        let extended: Vec<PkgId> = (set.present.iter())
+            .filter(|p| p.stand_in && start.meta.added.iter().any(|a| a.package == p.release.id.as_str()))
+            .map(|p| p.release.id.clone())
+            .collect();
+        let unread = super::resolution::read_stand_ins(&mut reg, &mut set, &extended)?;
+        Ok((set, unread))
+    });
     reg.finish();
-    let set = set.map_err(|e| needs_the_cactarium(e, &way))?;
+    let (set, unread_extensions) = set.map_err(|e| needs_the_cactarium(e, &way))?;
+    if !unread_extensions.is_empty() {
+        let lines: Vec<String> = unread_extensions.iter().map(|(id, why)| format!("\n  {id} ({why})")).collect();
+        bail!(
+            "Cactup cannot tell what the thorns it added to these base packages need, so it cannot tell what still \
+             needs {}:{}\nPass --no-deps to remove exactly what was named",
+            named.join(", "),
+            lines.concat()
+        );
+    }
     // A remaining added package whose release cannot be read hides what it
     // needs: nothing can be said to be unneeded beside it.
     let unread: Vec<&super::resolution::Unread> = set.unread.iter().filter(|u| !targets.contains(&u.id)).collect();

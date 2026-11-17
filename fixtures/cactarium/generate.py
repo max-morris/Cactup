@@ -329,6 +329,16 @@ POOL = {
     "et--kadath--extra-needs-fuka": ("et/kadath", [V("1.0.0", ["Kadath", "KadathExtra"],
                                                      [dep("et/fuka", "^1", into="src/fuka", needed_by=["KadathExtra"])])]),
     "max--needs-kx": ("max/needs-kx", [V("1.0.0", ["NeedsKX"], [dep("et/kadath", None, ["KadathExtra"])])]),
+    # Exact reads of base packages at unfrozen commits.
+    "max--x--old-needs-adm": ("max/x", [V("2.0.0", ["X"]), V("1.0.0", ["X"], [dep("et/admbase", None, ["StaticConformal"])])]),
+    "max--y--anyof-carpet-adm": ("max/y", [V("1.0.0", ["Y"], [dep("et/carpet", any_of=[
+        ("et/carpet", None, ["CarpetSlab"]), ("et/admbase", None, ["StaticConformal"])])])]),
+    "max--newcarpet": ("max/newcarpet", [V("1.0.0", ["Carpet"])]),
+    "max--n10": ("max/n10", [V("1.0.0", ["N10"], [dep("et/p10", None, ["P10b"])])]),
+    "et--p10": ("et/p10", [V("1.0.0", ["P10a", "P10b", "P10c"])]),
+    "et--p11": ("et/p11", [V("1.0.0", ["Q0", "Q"])]),
+    "et--p12": ("et/p12", [V("1.0.0", ["R0", "R"])]),
+    "max--needs-adm-all": ("max/needs-adm-all", [V("1.0.0", ["NA"], [dep("et/admbase", None, [])])]),
     "max--kadath--into-carpetx": ("max/kadath", [V("1.0.0", ["Kadath"], [dep("et/carpetx", "^2026.5", into="src/carpetx")])]),
 
     # Remove.
@@ -343,12 +353,22 @@ POOL = {
 }
 
 ADM_SNAP = "abababababababababababababababababababab"
+ADM2_SNAP = "efefefefefefefefefefefefefefefefefefefef"
+P10_SNAP = "1010101010101010101010101010101010101010"
+P11_SNAP = "1111111111111111111111111111111111111111"
+P12_SNAP = "1212121212121212121212121212121212121212"
 MP_SNAP = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
 SNAPSHOTS = {
     "et--carpetx--at-4444": snapshot("et/carpetx", CX_SNAP, CX_SNAP, ["CarpetX", "Loop"]),
     # Base packages at commits no version froze, read when a plan depends on them.
     "et--admbase--at-abab": snapshot("et/admbase", ADM_SNAP, ADM_SNAP, ["ADMBase", "ADMCoupling", "StaticConformal"],
                                      untrusted=False),
+    "et--admbase--at-efef": snapshot("et/admbase", ADM2_SNAP, ADM2_SNAP, ["ADMBase", "StaticConformal"], untrusted=False),
+    "et--p10--at-1010": snapshot("et/p10", P10_SNAP, P10_SNAP, ["P10a", "P10b", "P10c"],
+                                 [dep("et/p11", None, ["Q"], needed_by=["P10b"]), dep("et/p12", None, ["R"], needed_by=["P10c"])],
+                                 untrusted=False),
+    "et--p11--at-1111": snapshot("et/p11", P11_SNAP, P11_SNAP, ["Q0", "Q"], untrusted=False),
+    "et--p12--at-1212": snapshot("et/p12", P12_SNAP, P12_SNAP, ["R0", "R"], untrusted=False),
     "max--carpet-mp--at-cdcd": snapshot("max/carpet-mp", MP_SNAP, MP_SNAP, ["Carpet", "CarpetSlab"],
                                         [fork_of("et/carpet", "=2026.5.0")], untrusted=False),
     "et--carpetx--at-head": snapshot("et/carpetx", "head", CX_SNAP, ["CarpetX", "Loop"]),

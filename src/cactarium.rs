@@ -499,6 +499,10 @@ impl Client {
         if missing.contains(&status) {
             return Ok(Err(Missing { status, generation: generation.is_some() }));
         }
+        // A rate limit says when it lifts, in whole seconds.
+        let retry_after = (response.headers().get(reqwest::header::RETRY_AFTER))
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok());
         let text = response.text().unwrap_or_default();
         // A missing or dead token: say how to get a working one.
         let login = if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -510,7 +514,7 @@ impl Client {
             Ok(body) => format!("{}{login}", body.error.message),
             Err(_) => format!("The Cactarium at {} answered {status}", self.base),
         };
-        Err(anyhow::Error::new(Refused { status: status.as_u16(), message }))
+        Err(anyhow::Error::new(Refused { status: status.as_u16(), message, retry_after }))
     }
 
     /// A body that stopped arriving: said as [`Client::unreachable`] says a
@@ -544,6 +548,8 @@ struct Missing {
 pub struct Refused {
     pub status: u16,
     pub message: String,
+    /// A 429's `Retry-After`: seconds until the limit lifts.
+    pub retry_after: Option<u64>,
 }
 
 impl std::fmt::Display for Refused {
@@ -1276,7 +1282,7 @@ mod tests {
     /// given now; anything else is an answer.
     #[test]
     fn unanswered_statuses() {
-        let refused = |status| Refused { status, message: String::new() }.is_unanswered();
+        let refused = |status| Refused { status, message: String::new(), retry_after: None }.is_unanswered();
         assert!(refused(429) && refused(403) && refused(502) && refused(500));
         assert!(!refused(404) && !refused(400) && !refused(401));
     }

@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use anyhow::{anyhow, bail, Context};
-use cactup_ecosystem_common::api::{PinInfo, PinQuery, ThornInfo};
+use cactup_ecosystem_common::api::{PackageVersion, PinInfo, PinQuery, ThornInfo};
 use cactup_ecosystem_common::ccl::ThornFacts;
 use cactup_ecosystem_common::slug::is_commit_id;
 use colored::Colorize;
@@ -59,6 +59,39 @@ pub(crate) struct Registry {
     no_providers: bool,
     /// Snapshots not answered now, by package and what was asked, with why.
     unanswered: BTreeMap<(PkgId, String), String>,
+    /// When the server's window for reads at a commit opened (the first read
+    /// since the last wait), for an older server's 429 without `Retry-After`.
+    window_start: Option<std::time::Instant>,
+}
+
+/// An older server's read limit without `Retry-After`: 12 reads a minute,
+/// in a window that opens at the first read.
+const READ_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[cfg(test)]
+thread_local! {
+    /// The read window, scaled down for a test.
+    pub(crate) static TEST_READ_WINDOW: std::cell::Cell<Option<std::time::Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn read_window() -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(w) = TEST_READ_WINDOW.with(|w| w.get()) {
+        return w;
+    }
+    READ_WINDOW
+}
+
+/// A read at a commit the Cactarium did not answer: its status and why, in
+/// words that say what is true.
+fn unanswered_why(id: &PkgId, status: u16, message: &str) -> String {
+    match status {
+        429 => "the Cactarium's read limit; try again in a minute".to_owned(),
+        403 => format!("the Cactarium will not read {id} at that commit (untrusted entries are read only at released versions)"),
+        s if s >= 500 => format!("the Cactarium failed reading {id}; try again"),
+        _ => format!("the Cactarium did not answer: {message}"),
+    }
 }
 
 impl Registry {
@@ -79,6 +112,7 @@ impl Registry {
             last_tick: 0,
             no_providers: false,
             unanswered: BTreeMap::new(),
+            window_start: None,
         }
     }
 
@@ -192,21 +226,92 @@ impl Registry {
         })?;
         let mut out = Vec::with_capacity(at.len());
         for ((id, commit), answer) in at.iter().zip(answers) {
-            // Rate-limited, or not served to this caller: that package is
-            // unread, the command goes on.
-            let refused = |e: &anyhow::Error| {
-                (e.downcast_ref::<crate::cactarium::Refused>()).filter(|r| r.is_unanswered()).map(|r| r.message.clone())
+            // Rate-limited: read again, one at a time, once the limit lifts.
+            // Not served to this caller, or the server failing: that package
+            // is unread, the command goes on.
+            let refused = (answer.as_ref().err())
+                .and_then(|e| e.downcast_ref::<crate::cactarium::Refused>())
+                .filter(|r| r.is_unanswered())
+                .map(|r| (r.status, r.message.clone()));
+            let answer = match refused {
+                Some((429, _)) => match self.read_one(id, commit)? {
+                    Ok(read) => Ok(read),
+                    Err(why) => {
+                        out.push(Read::Refused(why));
+                        continue;
+                    }
+                },
+                Some((status, message)) => {
+                    out.push(Read::Refused(unanswered_why(id, status, &message)));
+                    continue;
+                }
+                None => answer,
             };
             out.push(match answer {
                 Ok(Some((version, _))) => Read::Found(Box::new(Release::from_served(id, &version, self.contact(id))?)),
                 Ok(None) => Read::Missing,
-                Err(e) => match refused(&e) {
-                    Some(why) => Read::Refused(why),
-                    None => return Err(e.context(format!("Failed to read {id} at {commit}"))),
-                },
+                Err(e) => return Err(e.context(format!("Failed to read {id} at {commit}"))),
             });
         }
         Ok(out)
+    }
+
+    /// One read at a commit, waiting out the server's read limit: on a 429,
+    /// for its `Retry-After`, else until the window this command opened has
+    /// passed, then again, at most twice. `Err((status, why))`: not answered.
+    fn read_one(&mut self, id: &PkgId, at: &str) -> Res<Result<Option<(PackageVersion, bool)>, String>> {
+        let shown = if is_commit_id(at) || at.len() > 12 { at.get(..12).unwrap_or(at) } else { at };
+        let label = format!("{id}@{shown}");
+        for attempt in 0..3 {
+            self.window_start.get_or_insert_with(std::time::Instant::now);
+            let (who, at_owned) = (id.clone(), at.to_owned());
+            let read = self.one(&label, "reading the package there", move |c| {
+                let (owner, name) = owner_name(&who)?;
+                c.package_at_if_any(owner, name, &at_owned)
+            });
+            let refused = match &read {
+                Err(e) => e.downcast_ref::<crate::cactarium::Refused>().filter(|r| r.is_unanswered()),
+                Ok(_) => None,
+            };
+            match refused {
+                None => return read.map(Ok),
+                Some(r) if r.status == 429 && attempt < 2 => {
+                    let retry_after = r.retry_after;
+                    self.wait_for_limit(retry_after)?;
+                }
+                Some(r) => return Ok(Err(unanswered_why(id, r.status, &r.message))),
+            }
+        }
+        unreachable!("the last attempt answers")
+    }
+
+    /// Waits for the server's read limit to lift: `Retry-After` seconds, or
+    /// (an older server) until the window opened by this command's first
+    /// read has passed. Shown on a line; Ctrl-C ends it at once.
+    fn wait_for_limit(&mut self, retry_after: Option<u64>) -> Res<()> {
+        let now = std::time::Instant::now();
+        let until = match retry_after {
+            Some(secs) => now + std::time::Duration::from_secs(secs.max(1)),
+            None => self.window_start.unwrap_or(now) + read_window(),
+        };
+        let mut headline = self.headline(1, "waits");
+        let line = Line::over(headline.add_child("read limit"), "read limit", self.layout.clone());
+        loop {
+            if gix::interrupt::is_triggered() {
+                bail!("Interrupted");
+            }
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            line.phase(format!("waiting for the Cactarium's read limit, {} s", left.as_secs() + 1));
+            std::thread::sleep(left.min(std::time::Duration::from_millis(50)));
+        }
+        drop(line);
+        headline.inc();
+        // A new window opens at the next read.
+        self.window_start = None;
+        Ok(())
     }
 
     /// The package's contact, as its versions answer gave it.
@@ -278,24 +383,16 @@ impl Facts for Registry {
     }
 
     fn snapshot(&mut self, id: &PkgId, at: &str) -> Res<Option<Snapshot>> {
-        let shown = if is_commit_id(at) || at.len() > 12 { at.get(..12).unwrap_or(at) } else { at };
-        let label = format!("{id}@{shown}");
-        let (who, at_owned) = (id.clone(), at.to_owned());
-        let read = self.one(&label, "reading the package there", move |c| {
-            let (owner, name) = owner_name(&who)?;
-            c.package_at_if_any(owner, name, &at_owned)
-        });
-        let read = match read {
+        // Read once per package and commit for the whole command (the
+        // catalog keeps what came back); the read limit waited out.
+        let read = match self.read_one(id, at)? {
             Ok(read) => read,
-            // Not answered now: no such commit as far as this search goes,
-            // and the reason kept for a refusal that depends on it.
-            Err(e) => match e.downcast_ref::<crate::cactarium::Refused>().filter(|r| r.is_unanswered()) {
-                Some(r) => {
-                    self.unanswered.insert((id.clone(), at.to_owned()), format!("the Cactarium did not answer: {}", r.message));
-                    return Ok(None);
-                }
-                None => return Err(e),
-            },
+            // Not answered: no such commit as far as this search goes, and
+            // the reason kept for a refusal that depends on it.
+            Err(why) => {
+                self.unanswered.insert((id.clone(), at.to_owned()), why);
+                return Ok(None);
+            }
         };
         let Some((version, untrusted)) = read else { return Ok(None) };
         let release = Release::from_served(id, &version, self.contact(id))?;
@@ -585,7 +682,10 @@ pub(crate) fn present(
             r.thorns.iter().map(|c| (c.checkout.as_str(), c.repo_path.as_deref().unwrap_or(""))).collect();
         let commit = r.commit.clone().unwrap_or_default();
         let url = r.url.clone().unwrap_or_default();
-        let flesh = info_of(i).is_some_and(|info| info.flesh);
+        // Whether the repo is the flesh: the tree says so (its components
+        // are the root's), exactly. The lookup's `flesh` is exact only for a
+        // commit a version froze.
+        let flesh = r.flesh;
         let mut libraries = Vec::new();
         let mut stand_in = false;
         let release = match id {
@@ -631,6 +731,8 @@ pub(crate) fn present(
             p.release.id = PkgId::repo(repo);
             p.release.at = At::Unknown(p.release.commit.clone());
             p.release.claims.clear();
+            // A repo of no package now: nothing to read for it.
+            p.stand_in = false;
         }
         if taken(&out, id) {
             bail!("installation.toml adds {id} twice");
@@ -695,6 +797,39 @@ fn installed_libraries(a: &AddedPackage) -> Vec<InstalledLibrary> {
 
 fn short(commit: &str) -> &str {
     commit.get(..12).unwrap_or(commit)
+}
+
+/// Reads the present stand-ins `ids` at their commits, exactly (the read
+/// limit waited out): each read release takes its stand-in's place, its
+/// enabled thorns kept. The ones not read, with why.
+pub(crate) fn read_stand_ins(reg: &mut Registry, set: &mut PresentSet, ids: &[PkgId]) -> Res<Vec<(PkgId, String)>> {
+    let mut unread = Vec::new();
+    for id in ids {
+        let Some(p) = set.present.iter_mut().find(|p| &p.release.id == id && p.stand_in && !id.is_repo()) else {
+            continue;
+        };
+        let commit = p.release.commit.clone();
+        match reg.snapshot(id, &commit)? {
+            Some(snapshot) => {
+                let mut release = snapshot.release;
+                for t in release.thorns.iter_mut() {
+                    if let Some(local) = p.release.thorn(&t.thorn) {
+                        t.facts = local.facts.clone();
+                    }
+                }
+                p.release = release;
+                p.stand_in = false;
+                set.unchecked.retain(|u| !u.starts_with(&format!("{id}#")));
+            }
+            None => {
+                let why = reg.unanswered(id, &commit).unwrap_or_else(|| {
+                    format!("the Cactarium has no commit {} of {id}: is it pushed?", short(&commit))
+                });
+                unread.push((id.clone(), why));
+            }
+        }
+    }
+    Ok(unread)
 }
 
 /// The thorn name of an `Arrangement/Thorn` checkout.

@@ -1,0 +1,12 @@
+{
+  "about": "Under --replace a package whose thorn a base package the Cactarium does not read also has takes that thorn's place: nothing hinges on reading it",
+  "packages": ["max--newcarpet"],
+  "specs": ["max/newcarpet"],
+  "present": [
+    {"package": "max/carpet-mp", "unknown": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd", "thorns": ["Carpet"], "base": "carpet-mp", "enabled": ["Carpet"], "stand_in": true}
+  ],
+  "options": {"replace": true},
+  "expect": {
+    "plan": ["add max/newcarpet@1.0.0 Carpet named", "replace base repo carpet-mp with max/newcarpet"]
+  }
+}

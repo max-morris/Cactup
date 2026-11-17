@@ -95,9 +95,11 @@ pub enum Refusal {
     NotRegistered { target: PkgId, by: Option<Live> },
     /// A claim cactup cannot read.
     BadClaim { by: String, claim: String, detail: String, ignore: String },
-    /// Present packages the plan depends on that the Cactarium would not read now: each as
-    /// installed, and why.
-    Unreadable { packages: Vec<(String, String)> },
+    /// Present packages the plan depends on that the Cactarium did not read at their commits:
+    /// each as installed, and why. The ways past that work: moving it to a release (`upgrade`),
+    /// leaving dependencies out (`no_deps`), naming a released version (`released`, for a named
+    /// one).
+    Unreadable { packages: Vec<(String, String)>, upgrade: bool, no_deps: bool, released: bool },
     /// Removing these would leave dependents without what they need.
     HasDependents { removed: Vec<PkgId>, dependents: Vec<(String, String)> },
 }
@@ -194,8 +196,25 @@ impl Refusal {
             Refusal::BadClaim { ignore, .. } => {
                 format!("Pass --ignore-claim {ignore} (and tell the package's authors)")
             }
-            Refusal::Unreadable { .. } => {
-                "Try again in a minute, or pass --no-deps to add exactly the packages named".to_owned()
+            Refusal::Unreadable { upgrade, no_deps, released, .. } => {
+                let mut ways: Vec<&str> = Vec::new();
+                if *upgrade {
+                    ways.push("pass --upgrade to move it to a release");
+                }
+                if *released {
+                    ways.push("name a released version");
+                }
+                if *no_deps {
+                    ways.push("pass --no-deps to add exactly the packages named");
+                }
+                match ways.as_slice() {
+                    [] => "Try again later".to_owned(),
+                    ways => {
+                        let mut s = ways.join(", or ");
+                        s[..1].make_ascii_uppercase();
+                        s
+                    }
+                }
             }
             Refusal::HasDependents { .. } => {
                 "Pass --no-deps to remove only what was named, leaving its dependents without it".to_owned()
@@ -320,8 +339,8 @@ impl fmt::Display for Refusal {
             Refusal::BadClaim { by, claim, detail, .. } => {
                 write!(f, "{by} has a claim cactup cannot read ({claim}): {detail}")?
             }
-            Refusal::Unreadable { packages } => {
-                write!(f, "This plan depends on installed packages the Cactarium did not read just now:")?;
+            Refusal::Unreadable { packages, .. } => {
+                write!(f, "This plan depends on installed packages the Cactarium did not read at their commits:")?;
                 for (label, why) in packages {
                     write!(f, "\n  {label} ({why})")?;
                 }
