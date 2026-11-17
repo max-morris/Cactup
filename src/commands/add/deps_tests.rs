@@ -1113,15 +1113,19 @@ fn a_base_extension_follows_a_refetch_of_the_base() {
 fn the_lookup_s_version_picks_the_track() {
     let tmp = tempfile::tempdir().unwrap();
     let (url, c) = upstream(tmp.path(), "two", &[("T/interface.ccl", "IMPLEMENTS: t\n")]);
-    let (cactarium, _) = Fake::new()
-        .package("et/two", vec![version("2.0.0", &c, &url, "Arr", &["T"], "[]"), version("mp:2.0.0", &c, &url, "Arr", &["T"], "[]")])
-        .pin(&url, "et/two", None)
-        .serve();
+    let (default, mp) = (version("2.0.0", &c, &url, "Arr", &["T"], "[]"), version("mp:2.0.0", &c, &url, "Arr", &["T"], "[]"));
+    let (cactarium, _, fake) =
+        Fake::new().package("et/two", vec![default.clone(), mp.clone()]).pin(&url, "et/two", None).serve_shared();
     let s = Setup::new(tmp, &section(&url, &c, &["Arr/T"]), &cactarium);
     let pristine = std::fs::read_to_string(s.inst.source_thornlist()).unwrap();
     let list = thornlist::parse(&pristine).unwrap();
     let client = crate::cactarium::Client::new(&s.ctx.db.read().unwrap());
     for full in [false, true] {
+        // Either way the first release found at the commit is the other
+        // track's: the one read at the commit (the fake answers the last
+        // listed), or the first in the whole list.
+        fake.lock().unwrap().packages[0].1 =
+            if full { vec![mp.clone(), default.clone()] } else { vec![default.clone(), mp.clone()] };
         let mut reg = super::super::resolution::Registry::new(&client, []);
         let options = super::super::resolution::PresentOptions { full, ..Default::default() };
         let set = super::super::resolution::present(&mut reg, &s.inst.root, &list, &[], None, &options);
