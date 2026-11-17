@@ -9,7 +9,7 @@
 //! `ensure_meta` (non-reentrant); the only other lock taken is the global DB
 //! lock, briefly, inside `ctx.db.update` at the very end.
 
-use super::{prompt_with_default, Ctx};
+use super::{prompt_with_default, remove_tree_until, Ctx};
 use crate::args::RefetchArgs;
 use crate::commands::installation::Tone;
 use crate::database::{UnfetchedReason, UnfetchedRepo};
@@ -1290,7 +1290,7 @@ fn remove_pruned_repo_until(inst: &Installation, repo: &str, dir: &Path, stop: &
         Ok(()) => aside,
         Err(_) => dir.to_owned(),
     };
-    remove_tree_until(&target, stop).map_err(|e| match stop.load(Ordering::Relaxed) {
+    remove_tree_until(&target, stop, &|| ()).map_err(|e| match stop.load(Ordering::Relaxed) {
         true if target != dir => anyhow!(
             "Interrupted while deleting the pruned repo {repo}; it is already out of the \
              tree, and the next `cactup inst refetch --prune` finishes deleting it"
@@ -1312,26 +1312,10 @@ fn finish_interrupted_prunes(inst: &Installation) -> Res<()> {
     let Ok(entries) = fs::read_dir(&pruning) else { return Ok(()) };
     for entry in entries {
         let path = entry?.path();
-        remove_tree_until(&path, &gix::interrupt::IS_INTERRUPTED)?;
+        remove_tree_until(&path, &gix::interrupt::IS_INTERRUPTED, &|| ())?;
         println!("Finished deleting '{}' from an interrupted prune.", path.display());
     }
     Ok(())
-}
-
-/// `remove_dir_all`, but checking `stop` (Ctrl-C) before every entry, failing
-/// with "interrupted" when it is set. Symlinks are removed, never followed.
-fn remove_tree_until(path: &Path, stop: &AtomicBool) -> Res<()> {
-    if stop.load(Ordering::Relaxed) {
-        bail!("Interrupted while deleting '{}'", path.display());
-    }
-    let meta = fs::symlink_metadata(path).with_context(|| format!("Failed to stat '{}'", path.display()))?;
-    if !meta.is_dir() {
-        return fs::remove_file(path).with_context(|| format!("Failed to remove '{}'", path.display()));
-    }
-    for entry in fs::read_dir(path).with_context(|| format!("Failed to list '{}'", path.display()))? {
-        remove_tree_until(&entry?.path(), stop)?;
-    }
-    fs::remove_dir(path).with_context(|| format!("Failed to remove '{}'", path.display()))
 }
 
 /// Where refetch backs files up before it overwrites or prunes them:

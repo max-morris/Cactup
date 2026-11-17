@@ -629,7 +629,8 @@ path flag.
 
 ```
 cactup install [release] [--alias …] [--silent] [--install-prefix …] …   (existing)
-cactup uninstall <alias> [-f]                                             (new; see §3.1)
+cactup uninstall <alias> [-f]                                             (new; see §3.1;
+                                                                          same as `installation delete`)
 cactup show                        (aggregate state view: active installation +
                                     active config + resolved machine; read-only,
                                     never prompts, never writes the DB)
@@ -643,6 +644,13 @@ cactup installation refetch [THORNLIST | --release TAG] [-f]
                                                    see §3.2)
 cactup installation delta [<alias>]               (how the source trees diverged
                                                    from the last fetch — §3.3)
+cactup installation delete <alias> [-f]           (delete an installation: the
+                                                   Cactus tree and cactup's files
+                                                   beside it; the directory only
+                                                   once empty, the default symlink
+                                                   if it points there; refuses
+                                                   while a build is in flight
+                                                   unless -f)
 cactup inst …                      (short form of `installation`, a duplicate
                                     clap variant routed identically, so the docs
                                     generator renders both)

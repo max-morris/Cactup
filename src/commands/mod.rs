@@ -93,3 +93,30 @@ pub fn p2s(pb: PathBuf) -> Res<String> {
         .map(|s| s.to_owned())
         .ok_or(anyhow!("Failed to convert path to string"))
 }
+
+/// `remove_dir_all`, but checking `stop` (Ctrl-C) before every entry, failing
+/// with "interrupted" when it is set, and calling `removed` after each entry
+/// it deletes (for a progress count). Symlinks are removed, never followed.
+pub(crate) fn remove_tree_until(
+    path: &std::path::Path,
+    stop: &std::sync::atomic::AtomicBool,
+    removed: &dyn Fn(),
+) -> Res<()> {
+    use anyhow::Context;
+    use std::fs;
+    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+        bail!("Interrupted while deleting '{}'", path.display());
+    }
+    let meta = fs::symlink_metadata(path).with_context(|| format!("Failed to stat '{}'", path.display()))?;
+    if !meta.is_dir() {
+        fs::remove_file(path).with_context(|| format!("Failed to remove '{}'", path.display()))?;
+        removed();
+        return Ok(());
+    }
+    for entry in fs::read_dir(path).with_context(|| format!("Failed to list '{}'", path.display()))? {
+        remove_tree_until(&entry?.path(), stop, removed)?;
+    }
+    fs::remove_dir(path).with_context(|| format!("Failed to remove '{}'", path.display()))?;
+    removed();
+    Ok(())
+}

@@ -283,7 +283,7 @@ that binary from where it was built.
 ## Uninstalling
 
 1. Optionally remove the Einstein Toolkit installations first with `cactup
-   list` and `cactup uninstall <alias>`, so nothing is left behind outside
+   list` and `cactup inst delete <alias>`, so nothing is left behind outside
    `~/.cactup` (installation, simulation and test directories can live
    elsewhere, as set by your machine definition).
 2. Remove cactup's home. **This also removes anything else under it**: your
