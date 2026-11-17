@@ -322,6 +322,7 @@ POOL = {
                                                       [dep("max/lib", "^1.0", ["Lib"], needed_by=["Arith"])])]),
     "et--carpetx--needs-lib": ("et/carpetx", [V("2026.5.1", ["CarpetX", "Loop", "Arith"], [dep("max/lib", "^1.0", ["Lib"])])]),
     "max--lib": ("max/lib", [V("1.0.0", ["Lib"])]),
+    "et--p5": ("et/p5", [V("2.0.0", ["PA", "PC"]), V("1.0.0", ["PA"])]),
     "max--d--carpetslab": ("max/d", [V("1.0.0", ["D"], [dep("et/carpet", "^2026.5", ["CarpetSlab"])])]),
     "max--kadath--into-carpetx": ("max/kadath", [V("1.0.0", ["Kadath"], [dep("et/carpetx", "^2026.5", into="src/carpetx")])]),
 

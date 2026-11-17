@@ -1301,6 +1301,24 @@ fn under_upgrade_a_clash_with_a_base_thorn_still_refuses_quickly() {
     }
 }
 
+/// Under `--upgrade-all` every present package may move, but an unnamed one keeps every thorn it
+/// has enabled whatever release it moves to: a clash with a base repo's thorn is jumped back from
+/// at once, not searched through package by package until the wall-time net.
+#[test]
+fn under_upgrade_all_a_clash_with_a_base_thorn_still_refuses_quickly() {
+    let all = Options { upgrade_all: true, ..Options::default() };
+    let (result, steps, time) = timed_with(None, all);
+    eprintln!("realistic installation, --upgrade-all: {steps} steps, {time:?}");
+    result.unwrap();
+    for clash in ["new/top", "new/d3"] {
+        let (result, steps, time) = timed_with(Some(clash), all);
+        eprintln!("clash in {clash}, --upgrade-all: {steps} steps, {time:?}");
+        let e = result.expect_err("a clash");
+        assert_eq!(e.downcast_ref::<Refusal>().map(variant).as_deref(), Some("SameThorn"), "{e}");
+        assert!(steps <= 200, "{clash}: {steps} steps");
+    }
+}
+
 /// Where a fork could still take a conflicting package's place, the search may not jump back
 /// past anything: it goes on chronologically (slower, never wrong), and tells the caller it is
 /// still going.

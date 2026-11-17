@@ -1183,7 +1183,8 @@ impl Search<'_> {
     /// Every decision, when some package in that closure is [`Self::removable`] (another decision
     /// could take it out of play, so the failure may vanish without any of the decisions named).
     /// A `fixed` party (one that keeps its part in the failure whatever happens) is neither
-    /// followed nor tested, unless something else in the closure leads to it.
+    /// followed nor tested, unless something else in the closure leads to it, and its own
+    /// decision counts only where its release could make it leave play (a flesh).
     fn involved(
         &self,
         d: &Derived,
@@ -1205,8 +1206,12 @@ impl Search<'_> {
         for i in needs {
             add_need(&d.needs[*i], &mut out, &mut queue);
         }
+        // A fixed party's own release bears on the failure only where it decides whether the
+        // party stays: a release that is a flesh, which a flesh coming in replaces.
         for p in fixed.iter().filter(|p| a.releases.contains_key(*p)) {
-            out.insert(DKey::Pkg(p.clone()));
+            if self.flesh_possible && self.may_be_flesh.contains(p) {
+                out.insert(DKey::Pkg(p.clone()));
+            }
         }
         while let Some(p) = queue.pop_front() {
             if !seen.insert(p.clone()) {
@@ -1685,7 +1690,7 @@ impl Search<'_> {
     fn movable(&self, t: &PkgId, d: &Derived) -> bool {
         let options = self.request.options;
         !t.is_repo()
-            && (self.named(t).is_some()
+            && ((self.named(t).is_some() && !self.held_base(t))
                 || options.upgrade_all
                 || (options.upgrade && (d.touched.contains(t) || d.chosen.get(t).is_some_and(|e| e.decided)))
                 || d.chosen.get(t).is_some_and(|e| e.release.flesh))
