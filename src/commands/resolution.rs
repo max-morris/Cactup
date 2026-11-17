@@ -227,7 +227,7 @@ impl Registry {
                     .map(|r| r.message.clone())
             };
             out.push(match answer {
-                Ok(Some((version, _))) => Read::Found(Release::from_served(id, &version, self.contact(id))?),
+                Ok(Some((version, _))) => Read::Found(Box::new(Release::from_served(id, &version, self.contact(id))?)),
                 Ok(None) => Read::Missing,
                 Err(e) => match refused(&e) {
                     Some(why) => Read::Refused(why),
@@ -246,7 +246,7 @@ impl Registry {
 
 /// A package read at a commit.
 pub(crate) enum Read {
-    Found(Release),
+    Found(Box<Release>),
     /// No such package or commit.
     Missing,
     /// Not answered now (rate-limited, or not served to this caller), with
@@ -557,7 +557,7 @@ pub(crate) fn present(
     let mut astray: Vec<PkgId> = Vec::new();
     for (i, answer) in missing.into_iter().zip(answers) {
         match answer {
-            Read::Found(r) if fits(&r, &wants[i]) => read[i] = Some(r),
+            Read::Found(r) if fits(&r, &wants[i]) => read[i] = Some(*r),
             // Another version froze that commit too (another track): the
             // one recorded, or the one the lookup named, is in the whole list.
             Read::Found(_) => astray.push(wants[i].id.clone()),
