@@ -49,6 +49,7 @@ pub fn validate_url(value: &str) -> Res<String> {
 }
 
 /// A connection to one registry: its base URL and, for writes, the token.
+#[derive(Clone, Debug)]
 pub struct Client {
     base: String,
     /// A whole-request limit: set for lookups a command makes in passing
@@ -160,7 +161,8 @@ impl Client {
                 .post(self.url("/lookup"))
                 .header("content-type", "application/json")
                 .body(body);
-            let answer: LookedUp = json(self.send(request)?)?;
+            let response = self.send_found(request)?.ok_or_else(|| self.old("/lookup"))?;
+            let answer: LookedUp = json(response)?;
             if answer.pins.len() != chunk.len() {
                 bail!(
                     "The Cactarium answered a lookup of {} repos with {}; cactup cannot tell which is which",
@@ -195,7 +197,15 @@ impl Client {
             .to_query_string()
             .map_err(|e| anyhow!("Cannot ask the Cactarium what provides {need}: {e}"))?;
         let url = format!("{}?{query}", self.url("/providers"));
-        json(self.send(crate::fetch::download::client().get(&url))?)
+        let response = self.send_found(crate::fetch::download::client().get(&url))?.ok_or_else(|| self.old("/providers"))?;
+        json(response)
+    }
+
+    /// A Cactarium without `endpoint`. Only for endpoints that never answer
+    /// 404 about what they are asked (a lookup answers every pin, a provider
+    /// search an empty list): their 404 can only mean the route is missing.
+    fn old(&self, endpoint: &'static str) -> anyhow::Error {
+        anyhow::Error::new(OldCactarium { base: self.base.clone(), endpoint })
     }
 
     /// Every release of a stack, each with whether it has been yanked.
@@ -358,7 +368,9 @@ impl Client {
             return Ok(Some(response));
         }
         let status = response.status();
-        if missing_is_none && status == reqwest::StatusCode::NOT_FOUND {
+        // A route an older server lacks may answer 405 to a POST, too.
+        let missing = status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::METHOD_NOT_ALLOWED;
+        if missing_is_none && missing {
             return Ok(None);
         }
         let text = response.text().unwrap_or_default();
@@ -374,6 +386,27 @@ impl Client {
         }
     }
 }
+
+/// A Cactarium older than this cactup: it has no `endpoint`, so it cannot
+/// say which package a repo is, or what provides a requirement.
+#[derive(Debug)]
+pub struct OldCactarium {
+    pub base: String,
+    pub endpoint: &'static str,
+}
+
+impl std::fmt::Display for OldCactarium {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "The Cactarium at {} is older than this cactup (it has no {}), so cactup cannot resolve dependencies \
+             with it",
+            self.base, self.endpoint
+        )
+    }
+}
+
+impl std::error::Error for OldCactarium {}
 
 /// The two kinds of registry entry an installation records a version of.
 #[derive(Clone, Copy, Debug)]
@@ -537,9 +570,14 @@ fn check_stamp(bytes: &[u8], want: &str) -> Res<()> {
     }
 }
 
-fn json<T: DeserializeOwned>(response: reqwest::blocking::Response) -> Res<T> {
+/// The answer's JSON. Read through `Read`, so the client's timeout bounds
+/// each stall rather than the whole body: a version list can be megabytes on
+/// a slow link.
+fn json<T: DeserializeOwned>(mut response: reqwest::blocking::Response) -> Res<T> {
     let url = response.url().to_string();
-    let text = response.text().with_context(|| format!("Failed to read the answer from {url}"))?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut response, &mut bytes).with_context(|| format!("Failed to read the answer from {url}"))?;
+    let text = String::from_utf8(bytes).with_context(|| format!("The Cactarium's answer from {url} is not text"))?;
     serde_json::from_str(&text).with_context(|| format!("The Cactarium's answer from {url} is not what cactup expects"))
 }
 

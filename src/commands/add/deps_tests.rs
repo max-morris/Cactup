@@ -41,16 +41,29 @@ fn depends(target: &str, range: &str, needs: &[&str]) -> String {
 
 /// The fake Cactarium: `packages` (id → its versions, newest first), the
 /// pins `/lookup` knows (URL → package and version), and what `/providers`
-/// answers with.
+/// answers with. `lookup`/`providers` false: an older Cactarium, which has
+/// no such endpoint (its router answers 404 with no body).
+#[derive(Clone)]
 struct Fake {
     packages: Vec<(String, Vec<String>)>,
     pins: Vec<(String, String, Option<String>)>,
     providers: String,
+    lookup: bool,
+    providers_endpoint: bool,
 }
+
+/// A fake Cactarium's state, changeable while it serves.
+type Shared = Arc<Mutex<Fake>>;
 
 impl Fake {
     fn new() -> Fake {
-        Fake { packages: Vec::new(), pins: Vec::new(), providers: r#"{"providers":[]}"#.to_owned() }
+        Fake {
+            packages: Vec::new(),
+            pins: Vec::new(),
+            providers: r#"{"providers":[]}"#.to_owned(),
+            lookup: true,
+            providers_endpoint: true,
+        }
     }
 
     fn package(mut self, id: &str, versions: Vec<String>) -> Fake {
@@ -64,69 +77,101 @@ impl Fake {
     }
 
     fn serve(self) -> (String, Log) {
-        let log: Log = Arc::default();
-        let seen = log.clone();
-        let (base, _) = crate::fetch::download::test_server::serve_with_body(1000, move |path, body| {
-            seen.lock().unwrap().push((path.to_owned(), String::from_utf8_lossy(body).into_owned()));
-            let ok = |body: String| ("200 OK", "api-generation: 1\r\nx-cactarium-untrusted: false\r\n".to_owned(), body.into_bytes());
-            let missing = || {
-                let body = r#"{"error":{"code":"not-found","message":"No such package"}}"#;
-                ("404 Not Found", "api-generation: 1\r\n".to_owned(), body.as_bytes().to_vec())
-            };
-            let path = path.strip_prefix("/api/v1").unwrap_or(path);
-            if let Some(req) = path.strip_prefix("/resolve?req=") {
-                let req = req.split('&').next().unwrap().replace("%40", "@").replace("%23", "#");
-                let id = req.split(['@', '#']).next().unwrap();
-                return match self.packages.iter().find(|(p, _)| p == id) {
-                    Some(_) => ok(format!(
-                        r#"{{"slug":"{id}","kind":"package","url":"u","contact":null,"version":"1.0.0","track":null,
-                        "tag":null,"commit":null,"tree":null,"yanked":false,"yank-reason":null,"state":"ok",
-                        "curated":false,"published":0}}"#
-                    )),
-                    None => missing(),
-                };
-            }
-            if path == "/lookup" {
-                let asked: cactup_ecosystem_common::api::LookupRequest = serde_json::from_slice(body).unwrap();
-                let pins: Vec<String> = (asked.pins.iter())
-                    .map(|p| {
-                        let known = self.pins.iter().find(|(url, _, _)| *url == p.url);
-                        let package = known.map_or("null".to_owned(), |(_, pkg, _)| format!("\"{pkg}\""));
-                        let version = known
-                            .and_then(|(_, _, v)| v.as_ref())
-                            .map_or("null".to_owned(), |v| format!("\"{v}\""));
-                        // The real server often cannot say whether its mirror
-                        // has the commit: null.
-                        format!(
-                            r#"{{"url":"{}","commit":"{}","package":{package},"version":{version},"flesh":false,
-                            "fork-of":null,"commit-known":null}}"#,
-                            p.url, p.commit
-                        )
-                    })
-                    .collect();
-                return ok(format!(r#"{{"pins":[{}]}}"#, pins.join(",")));
-            }
-            if path.starts_with("/providers?") {
-                return ok(self.providers.clone());
-            }
-            if let Some(rest) = path.strip_prefix("/packages/") {
-                let (id, at) = match rest.split_once("/versions") {
-                    Some((id, at)) => (id, at.trim_start_matches('/')),
-                    None => return missing(),
-                };
-                let Some((_, versions)) = self.packages.iter().find(|(p, _)| p == id) else { return missing() };
-                if at.is_empty() {
-                    return ok(format!(r#"{{"slug":"{id}","versions":[{}]}}"#, versions.join(",")));
-                }
-                return match versions.iter().find(|v| v.contains(&format!("\"commit\":\"{at}"))) {
-                    Some(v) => ok(v.clone()),
-                    None => missing(),
-                };
-            }
-            missing()
-        });
+        let (base, log, _) = self.serve_shared();
         (base, log)
     }
+
+    fn serve_shared(self) -> (String, Log, Shared) {
+        let log: Log = Arc::default();
+        let seen = log.clone();
+        let state: Shared = Arc::new(Mutex::new(self));
+        let fake = state.clone();
+        let (base, _) = crate::fetch::download::test_server::serve_with_body(1000, move |path, body| {
+            seen.lock().unwrap().push((path.to_owned(), String::from_utf8_lossy(body).into_owned()));
+            fake.lock().unwrap().answer(path, body)
+        });
+        (base, log, state)
+    }
+
+    fn answer(&self, path: &str, body: &[u8]) -> (&'static str, String, Vec<u8>) {
+        let ok = |body: String| ("200 OK", "api-generation: 1\r\nx-cactarium-untrusted: false\r\n".to_owned(), body.into_bytes());
+        let missing = || {
+            let body = r#"{"error":{"code":"not-found","message":"No such package"}}"#;
+            ("404 Not Found", "api-generation: 1\r\n".to_owned(), body.as_bytes().to_vec())
+        };
+        let no_route = || ("404 Not Found", String::new(), Vec::new());
+        let path = path.strip_prefix("/api/v1").unwrap_or(path);
+        if let Some(req) = path.strip_prefix("/resolve?req=") {
+            let req = req.split('&').next().unwrap().replace("%40", "@").replace("%23", "#");
+            let id = req.split(['@', '#']).next().unwrap();
+            return match self.packages.iter().find(|(p, _)| p == id) {
+                Some(_) => ok(format!(
+                    r#"{{"slug":"{id}","kind":"package","url":"u","contact":null,"version":"1.0.0","track":null,
+                    "tag":null,"commit":null,"tree":null,"yanked":false,"yank-reason":null,"state":"ok",
+                    "curated":false,"published":0}}"#
+                )),
+                None => missing(),
+            };
+        }
+        if path == "/lookup" {
+            if !self.lookup {
+                return no_route();
+            }
+            let asked: cactup_ecosystem_common::api::LookupRequest = serde_json::from_slice(body).unwrap();
+            let pins: Vec<String> = (asked.pins.iter())
+                .map(|p| {
+                    let known = self.pins.iter().find(|(url, _, _)| *url == p.url);
+                    let package = known.map_or("null".to_owned(), |(_, pkg, _)| format!("\"{pkg}\""));
+                    let version =
+                        known.and_then(|(_, _, v)| v.as_ref()).map_or("null".to_owned(), |v| format!("\"{v}\""));
+                    // The real server often cannot say whether its mirror has
+                    // the commit: null.
+                    format!(
+                        r#"{{"url":"{}","commit":"{}","package":{package},"version":{version},"flesh":false,
+                        "fork-of":null,"commit-known":null}}"#,
+                        p.url, p.commit
+                    )
+                })
+                .collect();
+            return ok(format!(r#"{{"pins":[{}]}}"#, pins.join(",")));
+        }
+        if path.starts_with("/providers?") {
+            return if self.providers_endpoint { ok(self.providers.clone()) } else { no_route() };
+        }
+        if let Some(rest) = path.strip_prefix("/packages/") {
+            let (id, at) = match rest.split_once("/versions") {
+                Some((id, at)) => (id, at.trim_start_matches('/')),
+                None => return missing(),
+            };
+            let Some((_, versions)) = self.packages.iter().find(|(p, _)| p == id) else { return missing() };
+            if at.is_empty() {
+                return ok(format!(r#"{{"slug":"{id}","versions":[{}]}}"#, versions.join(",")));
+            }
+            return match versions.iter().find(|v| v.contains(&format!("\"commit\":\"{at}"))) {
+                Some(v) => ok(v.clone()),
+                None => missing(),
+            };
+        }
+        no_route()
+    }
+}
+
+/// The requests the fake got, by kind: `/resolve`, `/lookup`, whole
+/// version lists, one version at a commit, `/providers`.
+fn counts(log: &Log) -> [usize; 5] {
+    let mut n = [0; 5];
+    for (path, _) in log.lock().unwrap().iter() {
+        let path = path.strip_prefix("/api/v1").unwrap_or(path);
+        let i = match path {
+            p if p.starts_with("/resolve") => 0,
+            "/lookup" => 1,
+            p if p.ends_with("/versions") => 2,
+            p if p.contains("/versions/") => 3,
+            _ => 4,
+        };
+        n[i] += 1;
+    }
+    n
 }
 
 /// An upstream repo `name` with `files`, as a local URL and its commit.
@@ -255,6 +300,7 @@ struct Z4c {
     z: String,
     c: String,
     log: Log,
+    fake: Shared,
 }
 
 fn z4c() -> Z4c {
@@ -270,11 +316,11 @@ fn z4c() -> Z4c {
         ],
     );
     let claims = format!("[{}]", depends("et/carpetx", "^1.0", &["CarpetX", "Loop"]));
-    let (base, log) = Fake::new()
+    let (base, log, fake) = Fake::new()
         .package("max/z4c", vec![version("1.0.0", &z, &zurl, "Z4c", &["Z4c"], &claims)])
         .package("et/carpetx", vec![version("1.0.0", &c, &curl, "CarpetX", &["CarpetX", "Loop", "Arith"], "[]")])
-        .serve();
-    Z4c { setup: Setup::new(tmp, "", &base), z, c, log }
+        .serve_shared();
+    Z4c { setup: Setup::new(tmp, "", &base), z, c, log, fake }
 }
 
 /// `cactup add max/z4c`: the plan brings in et/carpetx's CarpetX and Loop,
@@ -385,29 +431,41 @@ fn remove_offline_refuses_unless_no_deps() {
 }
 
 /// A base of et/admbase (ADMBase, ADMCoupling) at 1.0.0 whose repo also has
-/// StaticConformal, and 2.0.0 a commit later; max/app 1.0.0 needs
-/// StaticConformal of et/admbase `range`.
+/// StaticConformal and ADMMacros, and 2.0.0 a commit later; max/app 1.0.0
+/// needs StaticConformal of et/admbase `range`, and max/app2 1.0.0 needs its
+/// ADMBase and ADMMacros at ^1.0. max/solo 1.0.0 needs nothing.
 struct Admbase {
     setup: Setup,
     a1: String,
     a2: String,
     log: Log,
+    fake: Shared,
 }
 
 fn admbase(range: &str) -> Admbase {
+    admbase_with(range, |f| f)
+}
+
+fn admbase_with(range: &str, change: impl FnOnce(Fake) -> Fake) -> Admbase {
     let tmp = tempfile::tempdir().unwrap();
     let files = [
         ("ADMBase/interface.ccl", "IMPLEMENTS: admbase\n"),
         ("ADMCoupling/interface.ccl", "IMPLEMENTS: admcoupling\n"),
         ("StaticConformal/interface.ccl", "IMPLEMENTS: staticconformal\n"),
+        ("ADMMacros/interface.ccl", "IMPLEMENTS: admmacros\n"),
     ];
     let (aurl, a1) = upstream(tmp.path(), "admbase", &files);
-    let (_, a2) = upstream(tmp.path(), "admbase", &[files[0], files[1], files[2], ("README", "2\n")]);
+    let (_, a2) = upstream(tmp.path(), "admbase", &[files[0], files[1], files[2], files[3], ("README", "2\n")]);
     let (purl, p) = upstream(tmp.path(), "app", &[("App/interface.ccl", "IMPLEMENTS: app\n")]);
-    let thorns = ["ADMBase", "ADMCoupling", "StaticConformal"];
+    let (p2url, p2) = upstream(tmp.path(), "app2", &[("App2/interface.ccl", "IMPLEMENTS: app2\n")]);
+    let (surl, so) = upstream(tmp.path(), "solo", &[("Solo/interface.ccl", "IMPLEMENTS: solo\n")]);
+    let thorns = ["ADMBase", "ADMCoupling", "StaticConformal", "ADMMacros"];
     let claims = format!("[{}]", depends("et/admbase", range, &["StaticConformal"]));
-    let (base, log) = Fake::new()
+    let claims2 = format!("[{}]", depends("et/admbase", "^1.0", &["ADMBase", "ADMMacros"]));
+    let fake = Fake::new()
         .package("max/app", vec![version("1.0.0", &p, &purl, "App", &["App"], &claims)])
+        .package("max/app2", vec![version("1.0.0", &p2, &p2url, "App2", &["App2"], &claims2)])
+        .package("max/solo", vec![version("1.0.0", &so, &surl, "Solo", &["Solo"], "[]")])
         .package(
             "et/admbase",
             vec![
@@ -415,10 +473,10 @@ fn admbase(range: &str) -> Admbase {
                 version("1.0.0", &a1, &aurl, "ADMBase", &thorns, "[]"),
             ],
         )
-        .pin(&aurl, "et/admbase", Some("1.0.0"))
-        .serve();
+        .pin(&aurl, "et/admbase", Some("1.0.0"));
+    let (base, log, fake) = change(fake).serve_shared();
     let setup = Setup::new(tmp, &section(&aurl, &a1, &["ADMBase/ADMBase", "ADMBase/ADMCoupling"]), &base);
-    Admbase { setup, a1, a2, log }
+    Admbase { setup, a1, a2, log, fake }
 }
 
 /// The plan for `specs` on the setup's installation, and the records it
@@ -471,13 +529,13 @@ fn upgrades_carry_the_present_enabled_set_and_the_flags_agree() {
     let all = AddFlags { upgrade_all: true, ..AddFlags::default() };
     let got = records(s, &["max/app"], &all).unwrap_or_else(|e| panic!("{e:#}"));
     assert_eq!(sorted(record_of(&got, "et/admbase")), want);
-    let got = records(s, &["et/admbase"], &upgrade).unwrap_or_else(|e| panic!("{e:#}"));
+    let got = records(s, &["et/admbase/StaticConformal"], &upgrade).unwrap_or_else(|e| panic!("{e:#}"));
     assert_eq!(sorted(record_of(&got, "et/admbase")), want);
     let replace = AddFlags { replace: true, ..AddFlags::default() };
-    let got = records(s, &["et/admbase@2.0.0"], &replace).unwrap_or_else(|e| panic!("{e:#}"));
+    let got = records(s, &["et/admbase/StaticConformal@2.0.0"], &replace).unwrap_or_else(|e| panic!("{e:#}"));
     assert_eq!(sorted(record_of(&got, "et/admbase")), want);
 
-    // And on disk: the base's clone moves to 2.0.0 with all three thorns.
+    // And on disk: the base's clone moves to 2.0.0 with those three thorns.
     s.add(&["max/app"], AddFlags { upgrade: true, yes: true, ..AddFlags::default() }).unwrap_or_else(|e| panic!("{e:#}"));
     let arrangements = s.inst.root.join("Cactus/arrangements/ADMBase");
     assert!(arrangements.join("StaticConformal/interface.ccl").is_file());
@@ -507,7 +565,23 @@ fn the_base_is_looked_up_in_one_request_and_null_commit_known_maps() {
         .pin(&aurl, "et/one", Some("1.0.0"))
         .serve();
     let s = Setup::new(tmp, &base, &fake);
-    // Naming a base package: it is in the base already.
+    // Base repo one is et/one at 1.0.0, read at its commit; the rest are no
+    // registered package's.
+    let pristine = std::fs::read_to_string(s.inst.source_thornlist()).unwrap();
+    let list = thornlist::parse(&pristine).unwrap();
+    let client = crate::cactarium::Client::new(&s.ctx.db.read().unwrap());
+    let mut reg = super::super::resolution::Registry::new(&client, []);
+    let read = super::super::resolution::present(&mut reg, &s.inst.root, &list, &[], None, &Default::default());
+    reg.finish();
+    let read = read.unwrap_or_else(|e| panic!("{e:#}"));
+    let ids: Vec<(String, String)> = (read.present.iter())
+        .map(|p| (p.release.id.to_string(), p.release.label()))
+        .collect();
+    assert!(ids.contains(&("et/one".to_owned(), "et/one@1.0.0".to_owned())), "{ids:?}");
+    assert_eq!(ids.iter().filter(|(id, _)| id.starts_with("repo:")).count(), 4, "{ids:?}");
+    // Naming a base package: it is in the base already, so its new thorn
+    // goes into the base's own clone.
+    log.lock().unwrap().clear();
     let got = records(&s, &["et/one/Extra"], &AddFlags::default()).unwrap_or_else(|e| panic!("{e:#}"));
     assert_eq!(record_of(&got, "et/one").2, ["Arrone/Extra"]);
     let lookups: Vec<String> =
@@ -519,15 +593,16 @@ fn the_base_is_looked_up_in_one_request_and_null_commit_known_maps() {
 }
 
 /// More thorns of a base package go into an `[[added]]` entry of their own,
-/// at the base's commit; an `added-for` entry an older binary's `remove` left
-/// for it (saying it was brought in, for that very commit) is not inherited:
-/// a package with no `[[added]]` entry before starts as named.
+/// at the base's commit, brought in (not named); an `added-for` entry an
+/// older binary's `remove` left for it (saying it was named, for that very
+/// commit, by another dependent) is not inherited: a package with no
+/// `[[added]]` entry before starts afresh.
 #[test]
 fn a_leftover_added_for_entry_is_not_inherited() {
     let it = admbase("^1.0");
     let s = &it.setup;
     let mut meta = s.meta();
-    let leftover = AddedFor { requested: false, by: vec!["max/old@1.0.0".into()], for_commit: Some(it.a1.clone()), choices: vec![] };
+    let leftover = AddedFor { requested: true, by: vec!["max/old@1.0.0".into()], for_commit: Some(it.a1.clone()), choices: vec![] };
     meta.added_for.insert("et/admbase".into(), leftover);
     s.write_meta(&meta);
     s.add(&["max/app"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
@@ -535,8 +610,8 @@ fn a_leftover_added_for_entry_is_not_inherited() {
     let admbase = meta.added.iter().find(|a| a.package == "et/admbase").unwrap();
     assert_eq!((admbase.commit.as_str(), admbase.repo.as_str()), (it.a1.as_str(), "admbase"));
     let entry = &meta.added_for["et/admbase"];
-    assert!(entry.requested, "{entry:?}");
-    assert!(!entry.by.contains(&"max/old@1.0.0".to_owned()), "{entry:?}");
+    assert!(!entry.requested, "{entry:?}");
+    assert_eq!(entry.by, ["max/app@1.0.0"], "{entry:?}");
     assert!(s.inst.root.join("Cactus/arrangements/ADMBase/StaticConformal/interface.ccl").is_file());
     let _ = (&it.a2, &it.log);
 }
@@ -617,4 +692,203 @@ fn the_ccl_check_reads_present_thorns_from_the_tree() {
             assert!(s.meta().added.is_empty());
         }
     }
+}
+
+/// A remaining added package whose release the Cactarium no longer serves
+/// (unapproved since, renamed, a commit it cannot find) hides what it
+/// depends on: `remove` refuses rather than delete something it may need,
+/// naming it and `--no-deps`.
+#[test]
+fn remove_refuses_while_a_dependent_cannot_be_read() {
+    let it = z4c();
+    let s = &it.setup;
+    s.add(&["max/z4c"], yes()).unwrap();
+    it.fake.lock().unwrap().packages.retain(|(p, _)| p != "max/z4c");
+    let err = format!("{:#}", s.remove(&["et/carpetx"], remove_yes()).unwrap_err());
+    assert!(err.contains("max/z4c") && err.contains("--no-deps"), "{err}");
+    assert_eq!(s.meta().added.len(), 2, "nothing removed");
+    s.remove(&["et/carpetx"], RemoveFlags { no_deps: true, ..RemoveFlags::default() }).unwrap();
+    assert_eq!(s.meta().added.len(), 1);
+}
+
+/// `add` beside an added package whose release cannot be read: a plan that
+/// moves a present package (or any plan under `--upgrade`) is refused, as
+/// that package's ranges are unknown; one that moves nothing goes ahead.
+#[test]
+fn add_refuses_to_move_packages_beside_one_that_cannot_be_read() {
+    let it = admbase("^2.0");
+    let s = &it.setup;
+    s.add(&["max/solo"], yes()).unwrap();
+    it.fake.lock().unwrap().packages.retain(|(p, _)| p != "max/solo");
+    let upgrade = AddFlags { upgrade: true, ..AddFlags::default() };
+    let err = format!("{:#}", records(s, &["max/app"], &upgrade).unwrap_err());
+    assert!(err.contains("max/solo") && err.contains("--no-deps"), "{err}");
+    // Nothing moves: a warning, and on.
+    records(s, &["max/app2"], &AddFlags::default()).unwrap_or_else(|e| panic!("{e:#}"));
+    let _ = (&it.a1, &it.a2, &it.log);
+}
+
+/// After a dependency gave base package et/admbase another thorn, the base
+/// repo and that `[[added]]` entry are one package: a second dependent that
+/// needs a base thorn (ADMBase) and one more (ADMMacros) gets them from it,
+/// no clash, and the entry holds both added thorns.
+#[test]
+fn a_second_dependent_of_a_base_package_s_thorns_finds_them() {
+    let it = admbase("^1.0");
+    let s = &it.setup;
+    s.add(&["max/app"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    s.add(&["max/app2"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let added = s.added();
+    let admbase = added.iter().find(|(p, _)| p == "et/admbase").unwrap();
+    let mut thorns = admbase.1.clone();
+    thorns.sort();
+    assert_eq!(thorns, ["ADMBase/ADMMacros", "ADMBase/StaticConformal"]);
+    assert!(added.iter().any(|(p, _)| p == "max/app2"));
+    assert_eq!(s.meta().added.iter().find(|a| a.package == "et/admbase").unwrap().commit, it.a1);
+    let _ = (&it.a2, &it.log, &it.fake);
+}
+
+/// Thorns of a base package brought in only for a dependency are recorded as
+/// brought in, and go once the dependent goes: only those thorns leave the
+/// thornlist, the base repo stays. While something needs them they cannot
+/// be removed. Named, they stay.
+#[test]
+fn base_thorns_brought_in_for_a_dependency_go_with_it() {
+    let it = admbase("^1.0");
+    let s = &it.setup;
+    s.add(&["max/app"], yes()).unwrap();
+    assert!(!s.meta().added_for["et/admbase"].requested);
+    let err = format!("{:#}", s.remove(&["et/admbase"], remove_yes()).unwrap_err());
+    assert!(err.contains("max/app@1.0.0"), "{err}");
+    s.remove(&["max/app"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    assert!(s.meta().added.is_empty(), "{:?}", s.added());
+    let live = std::fs::read_to_string(s.inst.live_thornlist().unwrap()).unwrap();
+    assert!(!live.contains("StaticConformal") && live.contains("ADMBase/ADMCoupling"), "{live}");
+
+    // Named, the thorn stays when the package that needed it goes.
+    s.add(&["max/app", "et/admbase/StaticConformal"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    assert!(s.meta().added_for["et/admbase"].requested);
+    s.remove(&["max/app"], remove_yes()).unwrap();
+    assert_eq!(s.added(), [("et/admbase".to_owned(), vec!["ADMBase/StaticConformal".to_owned()])]);
+    let _ = (&it.a1, &it.a2, &it.log, &it.fake);
+}
+
+/// A Cactarium older than this cactup, with no `/lookup`: `add` says so and
+/// names `--no-deps`, which then adds exactly what was named, the base taken
+/// as repos of no known package.
+#[test]
+fn an_older_cactarium_without_lookup() {
+    let it = admbase_with("^1.0", |mut f| {
+        f.lookup = false;
+        f
+    });
+    let s = &it.setup;
+    let err = format!("{:#}", s.add(&["max/app"], yes()).unwrap_err());
+    assert!(err.contains("older than this cactup") && err.contains("--no-deps"), "{err}");
+    s.add(&["max/app"], AddFlags { no_deps: true, ..AddFlags::default() }).unwrap_or_else(|e| panic!("{e:#}"));
+    assert_eq!(s.added(), [("max/app".to_owned(), vec!["App/App".to_owned()])]);
+    let _ = (&it.a1, &it.a2, &it.log, &it.fake);
+}
+
+/// The requests `add` and `remove` make on a base of five registered
+/// packages: an unmoved present package is read at its commit (one small
+/// answer), and whole version lists are asked for only what may move.
+#[test]
+fn the_requests_add_and_remove_make() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut base = String::new();
+    let mut fake = Fake::new();
+    for name in ["one", "two", "three", "four", "five"] {
+        let (url, c) = upstream(tmp.path(), name, &[(&format!("T{name}/interface.ccl"), "IMPLEMENTS: x\n")]);
+        base.push_str(&section(&url, &c, &[&format!("Arr{name}/T{name}")]));
+        let id = format!("et/{name}");
+        fake = fake.package(&id, vec![version("1.0.0", &c, &url, &format!("Arr{name}"), &[&format!("T{name}")], "[]")]);
+        fake = fake.pin(&url, &id, Some("1.0.0"));
+    }
+    let (nurl, n) = upstream(tmp.path(), "new", &[("New/interface.ccl", "IMPLEMENTS: new\n")]);
+    let (durl, d) = upstream(tmp.path(), "dep", &[("Dep/interface.ccl", "IMPLEMENTS: dep\n")]);
+    let (lurl, l) = upstream(tmp.path(), "lib", &[("Lib/interface.ccl", "IMPLEMENTS: lib\n")]);
+    let claims = format!("[{}]", depends("et/lib", "^1.0", &[]));
+    let (cactarium, log) = fake
+        .package("max/new", vec![version("1.0.0", &n, &nurl, "New", &["New"], "[]")])
+        .package("max/dep", vec![version("1.0.0", &d, &durl, "Dep", &["Dep"], &claims)])
+        .package("et/lib", vec![version("1.0.0", &l, &lurl, "Lib", &["Lib"], "[]")])
+        .serve();
+    let s = Setup::new(tmp, &base, &cactarium);
+    let count = |specs: &[&str], flags: AddFlags| {
+        log.lock().unwrap().clear();
+        records(&s, specs, &flags).unwrap_or_else(|e| panic!("{e:#}"));
+        counts(&log)
+    };
+    // [resolve, lookup, whole version lists, one version at a commit, other]
+    assert_eq!(count(&["max/new"], AddFlags::default()), [1, 1, 1, 5, 0]);
+    assert_eq!(count(&["max/dep"], AddFlags::default()), [1, 1, 2, 5, 0]);
+    assert_eq!(count(&["max/dep"], AddFlags { upgrade: true, ..AddFlags::default() }), [1, 1, 7, 0, 0]);
+    assert_eq!(count(&["max/dep"], AddFlags { upgrade_all: true, ..AddFlags::default() }), [1, 1, 7, 0, 0]);
+    s.add(&["max/new"], yes()).unwrap();
+    log.lock().unwrap().clear();
+    s.remove(&["max/new"], remove_yes()).unwrap();
+    assert_eq!(counts(&log), [0, 1, 0, 6, 0]);
+}
+
+/// The live thornlist is read before the prompt; hand edits made while it
+/// waits are not overwritten: the check under the lock sees them.
+#[test]
+fn hand_edits_made_while_the_prompt_waits_are_caught() {
+    let it = z4c();
+    let s = &it.setup;
+    let start = Start::read(&s.ctx, false, Doing::Adding).unwrap();
+    let live = s.inst.live_thornlist().unwrap();
+    let text = std::fs::read_to_string(&live).unwrap();
+    std::fs::write(&live, format!("{text}\n!TARGET = $ROOT/arrangements\n!TYPE = ignore\n!CHECKOUT = Mine/Mine\n")).unwrap();
+    let locked = start.inst.locked().unwrap();
+    let err = format!("{:#}", start.recheck(&locked).unwrap_err());
+    assert!(err.contains("changed while"), "{err}");
+    let _ = (&it.z, &it.c, &it.log, &it.fake);
+}
+
+/// The check that a replaced thorn keeps the base's `Arrangement/Thorn` runs
+/// before anything is confirmed: `--dry-run` already refuses.
+#[test]
+fn a_replaced_checkout_is_checked_before_the_prompt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (curl, c) = upstream(tmp.path(), "carpetx", &[("CarpetX/interface.ccl", "IMPLEMENTS: carpetx\n")]);
+    let (furl, f) = upstream(tmp.path(), "carpetx-mp", &[("CarpetX/interface.ccl", "IMPLEMENTS: carpetx\n")]);
+    let (cactarium, _) = Fake::new()
+        .package("max/carpetx-mp", vec![version("1.0.0", &f, &furl, "CarpetXMP", &["CarpetX"], "[]")])
+        .serve();
+    let s = Setup::new(tmp, &section(&curl, &c, &["CarpetX/CarpetX"]), &cactarium);
+    let flags = AddFlags { replace: true, dry_run: true, ..AddFlags::default() };
+    let err = format!("{:#}", s.add(&["max/carpetx-mp"], flags).unwrap_err());
+    assert!(err.contains("same Arrangement/Thorn"), "{err}");
+}
+
+/// No `/providers` on an older Cactarium: the unmet requirement is still the
+/// refusal, saying the Cactarium cannot list what provides it.
+#[test]
+fn an_older_cactarium_without_providers_keeps_the_refusal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (lurl, l) = upstream(tmp.path(), "mylib", &[("MyLib/interface.ccl", "IMPLEMENTS: other\n")]);
+    let (zurl, z) = upstream(tmp.path(), "z4c", &[("Z4c/interface.ccl", "IMPLEMENTS: z4c\nINHERITS: mylib\n")]);
+    let facts = ThornFacts { implements: Some("z4c".into()), inherits: vec!["mylib".into()], ..ThornFacts::default() };
+    let z4c = version_with("1.0.0", &z, &zurl, &[thorn("Z4c", "Z4c", &facts)], "[]", false);
+    let mut fake = Fake::new().package("max/z4c", vec![z4c]);
+    fake.providers_endpoint = false;
+    let (base, _) = fake.serve();
+    let s = Setup::new(tmp, &section(&lurl, &l, &["MyLib/MyLib"]), &base);
+    let err = format!("{:#}", s.add(&["max/z4c"], yes()).unwrap_err());
+    assert!(err.contains("Z4c (max/z4c)") && err.contains("mylib"), "{err}");
+    assert!(err.contains("cannot list"), "{err}");
+    assert!(!err.contains("no registered package provides it"), "{err}");
+}
+
+/// Without its pristine thornlist an installation has nothing to add to.
+#[test]
+fn add_needs_the_pristine_thornlist() {
+    let it = z4c();
+    let s = &it.setup;
+    std::fs::remove_file(s.inst.source_thornlist()).unwrap();
+    let err = format!("{:#}", s.add(&["max/z4c"], yes()).unwrap_err());
+    assert!(err.contains("no pristine thornlist to add to"), "{err}");
+    let _ = (&it.z, &it.c, &it.log, &it.fake);
 }

@@ -32,20 +32,45 @@ const ASK: &str = "ask the Cactarium";
 const SEARCH: &str = "look for a plan";
 /// How many search steps go by between two updates of the search line.
 const TICK_EVERY: usize = 1024;
-/// A whole-request limit for each request: blocking reqwest cannot be
-/// interrupted mid-request, so this bounds how long Ctrl-C can wait.
-const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+/// How often a request in flight checks for Ctrl-C.
+const POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// The thorns read from the installed tree: checkout → its `.ccl` facts
 /// (`None`: unreadable). What [`crate::sim::trim::thorn_facts`] gives, keyed
 /// by checkout.
 pub(crate) type LocalFacts = BTreeMap<String, Option<ThornFacts>>;
 
+/// Runs `request` on a thread of its own and waits for it, checking `stop`
+/// every [`POLL`]: once it is set, fails with "interrupted" at once and
+/// leaves the request to finish (or time out) on its own. Blocking reqwest
+/// cannot be cancelled, and a version list can take a while on a slow link.
+pub(crate) fn interruptibly<T: Send + 'static>(
+    request: impl FnOnce() -> Res<T> + Send + 'static,
+    stop: &std::sync::atomic::AtomicBool,
+) -> Res<T> {
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = send.send(request());
+    });
+    loop {
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            bail!("Interrupted");
+        }
+        match receive.recv_timeout(POLL) {
+            Ok(answer) => return answer,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => bail!("A request to the Cactarium died"),
+        }
+    }
+}
+
 /// The Cactarium, as [`deps::resolve`] reads it: every package's versions
 /// loaded once, in parallel waves, each request on a line under a headline;
 /// snapshots and provider searches one at a time, each on its line too. One
 /// renderer for the whole conversation, shut down by [`Registry::finish`] (or
-/// on drop), so nothing may print to the terminal while one is alive.
+/// on drop), so nothing may print to the terminal while one is alive. Every
+/// request gives way to Ctrl-C at once ([`interruptibly`]); none has a limit
+/// on its whole length, only the client's on connecting and on each stall.
 pub(crate) struct Registry {
     client: Client,
     loaded: BTreeMap<PkgId, Option<Vec<Release>>>,
@@ -55,18 +80,19 @@ pub(crate) struct Registry {
     layout: Layout,
     search: Option<Line>,
     last_tick: usize,
+    /// The Cactarium has no `/providers` (it is older than this cactup).
+    no_providers: bool,
 }
 
 impl Registry {
     /// A conversation with the Cactarium `client` talks to; `names` sizes
     /// the progress lines (package ids and repo names known so far).
     pub(crate) fn new<'a>(client: &Client, names: impl IntoIterator<Item = &'a str>) -> Registry {
-        let client = Client::at(client.base()).with_timeout(REQUEST_TIMEOUT);
         // Only bars: no line here ever calls `info`/`fail`.
         let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
         let layout = Layout::for_names([ASK, SEARCH].into_iter().chain(names));
         Registry {
-            client,
+            client: client.clone(),
             loaded: BTreeMap::new(),
             contacts: BTreeMap::new(),
             progress,
@@ -74,12 +100,15 @@ impl Registry {
             layout,
             search: None,
             last_tick: 0,
+            no_providers: false,
         }
     }
 
-    /// Stops the renderer: after this, the terminal is the caller's.
-    pub(crate) fn finish(mut self) {
+    /// Stops the renderer: after this, the terminal is the caller's. Says
+    /// whether the Cactarium could not list providers.
+    pub(crate) fn finish(mut self) -> Finished {
         self.stop();
+        Finished { base: self.client.base().to_owned(), no_providers: self.no_providers }
     }
 
     fn stop(&mut self) {
@@ -93,37 +122,68 @@ impl Registry {
         Headline::over(self.progress.add_child(ASK), ASK, total, unit, self.layout.clone())
     }
 
+    /// One request, interruptibly, with a clone of the client.
+    fn ask<T: Send + 'static>(&self, request: impl FnOnce(Client) -> Res<T> + Send + 'static) -> Res<T> {
+        let client = self.client.clone();
+        interruptibly(move || request(client), &gix::interrupt::IS_INTERRUPTED)
+    }
+
     /// One request on a line of its own under the headline, `name` naming
     /// it and `phase` saying what it asks.
-    fn one<T>(&self, name: &str, phase: &str, ask: impl FnOnce(&Client) -> Res<T>) -> Res<T> {
+    fn one<T: Send + 'static>(
+        &self,
+        name: &str,
+        phase: &str,
+        request: impl FnOnce(Client) -> Res<T> + Send + 'static,
+    ) -> Res<T> {
         if gix::interrupt::is_triggered() {
             bail!("Interrupted");
         }
         let mut headline = self.headline(1, "requests");
         let line = Line::over(headline.add_child(name.to_owned()), name, self.layout.clone());
         line.phase(phase.to_owned());
-        let answer = ask(&self.client);
+        let answer = self.ask(request);
         drop(line);
         headline.inc();
         answer
+    }
+
+    /// `request` for each of `items`, in parallel, each on a line named by
+    /// `name` under one headline, in the order given.
+    fn wave<I: Sync, T: Send + 'static>(
+        &self,
+        items: &[I],
+        unit: &'static str,
+        name: impl Fn(&I) -> String + Sync,
+        phase: &str,
+        request: impl Fn(&I, Client) -> Box<dyn FnOnce() -> Res<T> + Send> + Sync,
+    ) -> Res<Vec<Res<T>>> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        if gix::interrupt::is_triggered() {
+            bail!("Interrupted");
+        }
+        let headline = Mutex::new(self.headline(items.len(), unit));
+        crate::par::parallel_map(items, |item| {
+            let label = name(item);
+            let line = Line::over(headline.lock().expect("progress poisoned").add_child(label.clone()), &label, self.layout.clone());
+            line.phase(phase.to_owned());
+            let job = request(item, self.client.clone());
+            let answer = interruptibly(job, &gix::interrupt::IS_INTERRUPTED);
+            drop(line);
+            headline.lock().expect("progress poisoned").inc();
+            answer
+        })
     }
 
     /// Asks `/resolve` about each named package, as a package, in parallel:
     /// a name that is a stack or a sim, or that the Cactarium does not know,
     /// fails here with the Cactarium's own words.
     pub(crate) fn check_named(&self, specs: &[(String, String)]) -> Res<()> {
-        if specs.is_empty() {
-            return Ok(());
-        }
-        let headline = Mutex::new(self.headline(specs.len(), "packages"));
-        let answers = crate::par::parallel_map(specs, |(entry, req)| {
-            let item = headline.lock().expect("progress poisoned").add_child(entry.clone());
-            let line = Line::over(item, entry, self.layout.clone());
-            line.phase("resolving".to_owned());
-            let answer = self.client.resolve(req, "package");
-            drop(line);
-            headline.lock().expect("progress poisoned").inc();
-            answer
+        let answers = self.wave(specs, "packages", |(entry, _)| entry.clone(), "resolving", |(_, req), c| {
+            let req = req.clone();
+            Box::new(move || c.resolve(&req, "package"))
         })?;
         for answer in answers {
             let resolved = answer?;
@@ -141,13 +201,43 @@ impl Registry {
             return Ok(Vec::new());
         }
         let phase = format!("looking up {} repos", pins.len());
-        self.one("the installation's repos", &phase, |c| c.lookup(pins))
+        let pins = pins.to_vec();
+        self.one("the installation's repos", &phase, move |c| c.lookup(&pins))
+    }
+
+    /// Each package read at a commit, in parallel: what the Cactarium serves
+    /// there (the version that froze it, or the package read now), or `None`
+    /// when it has no such package or commit.
+    pub(crate) fn read_at(&mut self, at: &[(PkgId, String)]) -> Res<Vec<Option<Release>>> {
+        let name = |(id, commit): &(PkgId, String)| format!("{id}#{}", commit.get(..12).unwrap_or(commit));
+        let answers = self.wave(at, "packages", name, "reading it at its commit", |(id, commit), c| {
+            let (id, commit) = (id.clone(), commit.clone());
+            Box::new(move || {
+                let (owner, name) = owner_name(&id)?;
+                c.package_at_if_any(owner, name, &commit)
+            })
+        })?;
+        let mut out = Vec::with_capacity(at.len());
+        for ((id, commit), answer) in at.iter().zip(answers) {
+            let read = answer.with_context(|| format!("Failed to read {id} at {commit}"))?;
+            out.push(match read {
+                Some((version, _)) => Some(Release::from_served(id, &version, self.contact(id))?),
+                None => None,
+            });
+        }
+        Ok(out)
     }
 
     /// The package's contact, as its versions answer gave it.
     fn contact(&self, id: &PkgId) -> Option<&str> {
         self.contacts.get(id).map(String::as_str)
     }
+}
+
+/// What a finished conversation leaves to say.
+pub(crate) struct Finished {
+    base: String,
+    pub(crate) no_providers: bool,
 }
 
 impl Drop for Registry {
@@ -169,22 +259,12 @@ impl Facts for Registry {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        if want.is_empty() {
-            return Ok(());
-        }
-        if gix::interrupt::is_triggered() {
-            bail!("Interrupted");
-        }
-        let headline = Mutex::new(self.headline(want.len(), "packages"));
-        let (client, layout) = (&self.client, &self.layout);
-        let answers = crate::par::parallel_map(&want, |id| {
-            let item = headline.lock().expect("progress poisoned").add_child(id.to_string());
-            let line = Line::over(item, id.as_str(), layout.clone());
-            line.phase("reading its versions".to_owned());
-            let answer = owner_name(id).and_then(|(o, n)| client.package_versions_if_any(o, n));
-            drop(line);
-            headline.lock().expect("progress poisoned").inc();
-            answer
+        let answers = self.wave(&want, "packages", PkgId::to_string, "reading its versions", |id, c| {
+            let id = id.clone();
+            Box::new(move || {
+                let (owner, name) = owner_name(&id)?;
+                c.package_versions_if_any(owner, name)
+            })
         })?;
         for (id, answer) in want.into_iter().zip(answers) {
             let Some(versions) = answer.with_context(|| format!("Failed to read the versions of {id}"))? else {
@@ -207,10 +287,13 @@ impl Facts for Registry {
     }
 
     fn snapshot(&mut self, id: &PkgId, at: &str) -> Res<Option<Snapshot>> {
-        let (owner, name) = owner_name(id)?;
         let shown = if is_commit_id(at) || at.len() > 12 { at.get(..12).unwrap_or(at) } else { at };
         let label = format!("{id}@{shown}");
-        let read = self.one(&label, "reading the package there", |c| c.package_at_if_any(owner, name, at))?;
+        let (who, at_owned) = (id.clone(), at.to_owned());
+        let read = self.one(&label, "reading the package there", move |c| {
+            let (owner, name) = owner_name(&who)?;
+            c.package_at_if_any(owner, name, &at_owned)
+        })?;
         let Some((version, untrusted)) = read else { return Ok(None) };
         let release = Release::from_served(id, &version, self.contact(id))?;
         Ok(Some(Snapshot { release, untrusted }))
@@ -218,7 +301,16 @@ impl Facts for Registry {
 
     fn providers(&mut self, requirement: &deps::Requirement) -> Res<Vec<Provider>> {
         let label = requirement.to_string();
-        let found = self.one(&label, "asking what provides it", |c| c.providers(requirement))?;
+        let need = requirement.clone();
+        let found = match self.one(&label, "asking what provides it", move |c| c.providers(&need)) {
+            Ok(found) => found,
+            // An older Cactarium: the refusal stands, without the list.
+            Err(e) if e.downcast_ref::<crate::cactarium::OldCactarium>().is_some() => {
+                self.no_providers = true;
+                return Ok(Vec::new());
+            }
+            Err(e) => return Err(e),
+        };
         (found.providers.into_iter())
             .map(|p| {
                 Ok(Provider { package: PkgId::parse(&p.package)?, version: p.version, arrangement: p.arrangement, thorn: p.thorn })
@@ -253,10 +345,50 @@ struct BaseRepo<'l> {
     flesh: bool,
 }
 
+/// How [`present`] reads the installation.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PresentOptions {
+    /// Present packages may move (`--upgrade`, `--upgrade-all`): read their
+    /// whole version lists, which the resolver needs anyway. Otherwise each is
+    /// read at its own commit only (one small answer each).
+    pub full: bool,
+    /// A Cactarium without `/lookup` (older than this cactup) is no error:
+    /// every base repo is then taken as no registered package's.
+    pub without_lookup: bool,
+}
+
+/// A present package whose release the Cactarium cannot give: what it
+/// depends on is unknown.
+#[derive(Clone, Debug)]
+pub(crate) struct Unread {
+    pub id: PkgId,
+    /// As installed: `owner/name@1.2.0`, or at a commit.
+    pub label: String,
+    pub why: String,
+    /// An `[[added]]` package (rather than a base repo's).
+    pub added: bool,
+}
+
+impl Unread {
+    /// `max/z4c@1.0.0 (the Cactarium no longer serves that version)`.
+    pub fn line(&self) -> String {
+        format!("{} ({})", self.label, self.why)
+    }
+}
+
+/// The installation as [`deps::resolve`] and [`deps::plan_remove`] see it.
+pub(crate) struct PresentSet {
+    pub present: Vec<Present>,
+    /// The present packages whose release could not be read.
+    pub unread: Vec<Unread>,
+}
+
 /// The installation as [`deps::resolve`] and [`deps::plan_remove`] see it:
 /// every added package at its release, and every base repo, mapped to its
 /// package by the lookup (or a pseudo-package `repo:<name>` when it is no
-/// registered package's), each with the thorns it has enabled. Present
+/// registered package's), each with the thorns it has enabled. An `[[added]]`
+/// entry that only gives a base repo's own package more thorns (at the base's
+/// commit, in the base's clone) is one present package with that repo. Present
 /// thorns carry the facts read from the tree (`local`), where they were read:
 /// what is installed, rather than what the Cactarium scanned.
 pub(crate) fn present(
@@ -265,7 +397,8 @@ pub(crate) fn present(
     base: &Thornlist,
     added: &[AddedPackage],
     local: Option<&LocalFacts>,
-) -> Res<Vec<Present>> {
+    options: &PresentOptions,
+) -> Res<PresentSet> {
     let root = base.root();
     // What compose drops from the base: the checkouts of replaced repos that
     // an added package claims.
@@ -322,81 +455,177 @@ pub(crate) fn present(
         };
         pin_of.push(Some(i));
     }
-    let answers = reg.lookup(&pins)?;
-    let mapped: Vec<Option<&PinInfo>> = pin_of.iter().map(|i| i.map(|i| &answers[i])).collect();
-    let package_of = |info: &PinInfo| info.package.as_deref().and_then(|p| PkgId::parse(p).ok());
-
-    // Every version of every package present, in one wave.
-    let mut ids: Vec<PkgId> = added.iter().filter_map(|a| PkgId::parse(&a.package).ok()).collect();
-    for info in mapped.iter().copied().flatten() {
-        if let (Some(id), Some(_)) = (package_of(info), &info.version) {
-            ids.push(id);
+    let answers = match reg.lookup(&pins) {
+        Ok(answers) => answers,
+        Err(e) if options.without_lookup && e.downcast_ref::<crate::cactarium::OldCactarium>().is_some() => {
+            pin_of.iter_mut().for_each(|i| *i = None);
+            Vec::new()
         }
-    }
-    reg.load(&ids)?;
+        Err(e) => return Err(e),
+    };
+    let package_of = |info: &PinInfo| info.package.as_deref().and_then(|p| PkgId::parse(p).ok());
+    let mapped: Vec<Option<PkgId>> =
+        pin_of.iter().map(|i| i.and_then(|i| package_of(&answers[i])).filter(|id| !id.is_repo())).collect();
 
-    let mut out: Vec<Present> = Vec::new();
-    let taken = |out: &[Present], id: &PkgId| out.iter().any(|p| &p.release.id == id);
+    // What to read: each added package at its commit (expecting its recorded
+    // version, unless it is at a commit or tip), each mapped base repo at
+    // its commit.
+    struct Want {
+        id: PkgId,
+        commit: String,
+        version: Option<String>,
+    }
+    let mut wants: Vec<Want> = Vec::new();
     for a in added {
         let id = PkgId::parse(&a.package).with_context(|| format!("installation.toml adds {}", a.package))?;
-        if taken(&out, &id) {
-            bail!("installation.toml adds {id} twice");
-        }
         let at_commit = crate::commands::add::is_commit(&a.version) || crate::commands::add::is_tip(&a.version);
-        let served = if at_commit {
-            reg.snapshot(&id, &a.commit)?.map(|s| s.release)
-        } else {
-            let fits = |r: &&Release| r.at.version().is_some_and(|v| v.to_string() == a.version) && r.commit == a.commit;
-            reg.releases(&id).and_then(|rs| rs.iter().find(fits)).cloned()
-        };
-        let checkouts: Vec<(&str, &str)> =
-            a.thorns.iter().map(|t| (t.checkout.as_str(), t.repo_path.as_str())).collect();
-        let release = match served {
-            Some(r) => with_local_facts(r, &checkouts, local),
-            None => unknown(&id, &a.commit, &a.url, false, &checkouts, local),
-        };
-        let own = a.thorns.first().map(|t| crate::commands::add::clone_of(&a.repo, t)).unwrap_or_default();
-        let libraries = (a.libraries.iter())
-            .filter_map(|l| {
-                let inside = if l.inside == own {
-                    None
-                } else {
-                    let holder = a.libraries.iter().find(|h| h.clone_name() == l.inside)?;
-                    Some(PkgId::parse(&holder.package).ok()?)
-                };
-                let id = PkgId::parse(&l.package).ok()?;
-                Some(InstalledLibrary { id, commit: l.commit.clone(), into: l.into.clone(), inside })
-            })
-            .collect();
-        let enabled = checkouts.iter().map(|(c, _)| thorn_of(c).to_owned()).collect();
-        out.push(Present { release, enabled, origin: Origin::Added, libraries });
+        wants.push(Want { id, commit: a.commit.clone(), version: (!at_commit).then(|| a.version.clone()) });
     }
-    for (r, info) in repos.iter().zip(&mapped) {
-        let checkouts: Vec<(&str, &str)> =
+    for (r, id) in repos.iter().zip(&mapped) {
+        if let (Some(id), Some(commit)) = (id, &r.commit) {
+            wants.push(Want { id: id.clone(), commit: commit.clone(), version: None });
+        }
+    }
+    let fits = |r: &Release, w: &Want| {
+        r.commit == w.commit && w.version.as_ref().is_none_or(|v| r.at.version().is_some_and(|at| &at.to_string() == v))
+    };
+    let mut read: Vec<Option<Release>> = vec![None; wants.len()];
+    if options.full {
+        reg.load(&wants.iter().map(|w| w.id.clone()).collect::<Vec<_>>())?;
+        for (w, slot) in wants.iter().zip(read.iter_mut()) {
+            *slot = reg.releases(&w.id).and_then(|rs| rs.iter().find(|r| fits(r, w))).cloned();
+        }
+    }
+    // Read at the commit: what is still missing (everything, unless full).
+    let missing: Vec<usize> = (0..wants.len()).filter(|i| read[*i].is_none()).collect();
+    let at: Vec<(PkgId, String)> = missing.iter().map(|i| (wants[*i].id.clone(), wants[*i].commit.clone())).collect();
+    let answers = reg.read_at(&at)?;
+    let mut astray: Vec<PkgId> = Vec::new();
+    for (i, answer) in missing.into_iter().zip(answers) {
+        match answer {
+            Some(r) if fits(&r, &wants[i]) => read[i] = Some(r),
+            // Another version froze that commit too (another track): the
+            // recorded one is in the whole list.
+            Some(_) => astray.push(wants[i].id.clone()),
+            None => {}
+        }
+    }
+    if !astray.is_empty() {
+        reg.load(&astray)?;
+        for (w, slot) in wants.iter().zip(read.iter_mut()) {
+            if slot.is_none() && astray.contains(&w.id) {
+                *slot = reg.releases(&w.id).and_then(|rs| rs.iter().find(|r| fits(r, w))).cloned();
+            }
+        }
+    }
+    let why = |w: &Want| match &w.version {
+        Some(v) => format!("the Cactarium does not serve version {v} at commit {}", short(&w.commit)),
+        None => format!("the Cactarium cannot read it at commit {}", short(&w.commit)),
+    };
+
+    let mut out: Vec<Present> = Vec::new();
+    let mut unread: Vec<Unread> = Vec::new();
+    let taken = |out: &[Present], id: &PkgId| out.iter().any(|p| &p.release.id == id);
+    // An `[[added]]` entry that only gives a base repo's package more thorns.
+    let extends = |a: &AddedPackage, r: &BaseRepo, id: &PkgId| {
+        a.package == id.as_str() && a.replaces.is_empty() && a.repo == r.name && r.commit.as_deref() == Some(a.commit.as_str())
+    };
+    let mut merged: BTreeSet<usize> = BTreeSet::new();
+    let mut next = added.len();
+    for (r, id) in repos.iter().zip(&mapped) {
+        let mut checkouts: Vec<(&str, &str)> =
             r.thorns.iter().map(|c| (c.checkout.as_str(), c.repo_path.as_deref().unwrap_or(""))).collect();
         let commit = r.commit.clone().unwrap_or_default();
         let url = r.url.clone().unwrap_or_default();
-        let mapped_id = info.and_then(package_of).filter(|id| !taken(&out, id));
-        let release = match (mapped_id, info) {
-            (Some(id), Some(info)) => {
-                let fits = |rel: &&Release| {
-                    info.version.as_deref().is_some_and(|v| rel.at.version().is_some_and(|at| at.to_string() == v))
-                        && rel.commit == commit
-                };
-                match reg.releases(&id).and_then(|rs| rs.iter().find(fits)).cloned() {
-                    Some(rel) => with_local_facts(rel, &checkouts, local),
-                    None => unknown(&id, &commit, &url, info.flesh, &checkouts, local),
+        let mut libraries = Vec::new();
+        let w = id.as_ref().map(|_| {
+            next += 1;
+            next - 1
+        });
+        let release = match (id, w) {
+            // Two base repos of one package: the second is a repo of its own.
+            (Some(id), _) if taken(&out, id) => unknown(&PkgId::repo(&r.name), &commit, &url, false, &checkouts, local),
+            (Some(id), Some(w)) => {
+                if let Some(i) = added.iter().position(|a| extends(a, r, id)) {
+                    merged.insert(i);
+                    let a = &added[i];
+                    checkouts.extend(a.thorns.iter().map(|t| (t.checkout.as_str(), t.repo_path.as_str())));
+                    libraries = installed_libraries(a);
+                }
+                match &read[w] {
+                    Some(rel) => with_local_facts(rel.clone(), &checkouts, local),
+                    None => {
+                        unread.push(Unread {
+                            id: id.clone(),
+                            label: format!("{id}#{}", short(&commit)),
+                            why: why(&wants[w]),
+                            added: false,
+                        });
+                        unknown(id, &commit, &url, r.flesh, &checkouts, local)
+                    }
                 }
             }
-            // The flesh is a registered package's or nothing the resolver
-            // can speak of: an unmapped one has no thorns to clash with.
+            // An unmapped flesh has no thorns to clash with: nothing the
+            // resolver can speak of.
             _ if r.thorns.is_empty() => continue,
             _ => unknown(&PkgId::repo(&r.name), &commit, &url, false, &checkouts, local),
         };
         let enabled = checkouts.iter().map(|(c, _)| thorn_of(c).to_owned()).collect();
-        out.push(Present { release, enabled, origin: Origin::Base { repo: r.name.clone() }, libraries: Vec::new() });
+        out.push(Present { release, enabled, origin: Origin::Base { repo: r.name.clone() }, libraries });
     }
-    Ok(out)
+    // A base repo whose package an `[[added]]` entry also is (and does not
+    // merely extend): the added one is that package, the repo's remaining
+    // checkouts a pseudo-package of their own.
+    for (i, a) in added.iter().enumerate() {
+        if merged.contains(&i) {
+            continue;
+        }
+        let w = &wants[i];
+        if let Some(p) = out.iter_mut().find(|p| p.release.id == w.id && matches!(p.origin, Origin::Base { .. })) {
+            let Origin::Base { repo } = &p.origin else { unreachable!() };
+            p.release.id = PkgId::repo(repo);
+            p.release.at = At::Unknown(p.release.commit.clone());
+            p.release.claims.clear();
+            unread.retain(|u| u.added || u.id != w.id);
+        }
+        if taken(&out, &w.id) {
+            bail!("installation.toml adds {} twice", w.id);
+        }
+        let checkouts: Vec<(&str, &str)> =
+            a.thorns.iter().map(|t| (t.checkout.as_str(), t.repo_path.as_str())).collect();
+        let release = match &read[i] {
+            Some(r) => with_local_facts(r.clone(), &checkouts, local),
+            None => {
+                let label = crate::commands::add::describe(&a.package, &a.version);
+                unread.push(Unread { id: w.id.clone(), label, why: why(w), added: true });
+                unknown(&w.id, &a.commit, &a.url, false, &checkouts, local)
+            }
+        };
+        let enabled = checkouts.iter().map(|(c, _)| thorn_of(c).to_owned()).collect();
+        out.push(Present { release, enabled, origin: Origin::Added, libraries: installed_libraries(a) });
+    }
+    Ok(PresentSet { present: out, unread })
+}
+
+/// An added package's libraries, as the resolver holds them.
+fn installed_libraries(a: &AddedPackage) -> Vec<InstalledLibrary> {
+    let own = a.thorns.first().map(|t| crate::commands::add::clone_of(&a.repo, t)).unwrap_or_default();
+    (a.libraries.iter())
+        .filter_map(|l| {
+            let inside = if l.inside == own {
+                None
+            } else {
+                let holder = a.libraries.iter().find(|h| h.clone_name() == l.inside)?;
+                Some(PkgId::parse(&holder.package).ok()?)
+            };
+            let id = PkgId::parse(&l.package).ok()?;
+            Some(InstalledLibrary { id, commit: l.commit.clone(), into: l.into.clone(), inside })
+        })
+        .collect()
+}
+
+fn short(commit: &str) -> &str {
+    commit.get(..12).unwrap_or(commit)
 }
 
 /// The thorn name of an `Arrangement/Thorn` checkout.
@@ -561,10 +790,54 @@ pub(crate) fn show_and_confirm(lines: &[(LineKind, String)], beyond_named: bool,
 }
 
 /// The refusal inside a resolver error, as its text (which ends with the way
-/// past); any other error as it is.
-pub(crate) fn refusal_text(e: anyhow::Error) -> anyhow::Error {
+/// past); any other error as it is. A Cactarium that could not list
+/// providers (`finished.no_providers`) leaves the refusal standing, saying
+/// so rather than that nothing provides them.
+pub(crate) fn refusal_text(e: anyhow::Error, finished: &Finished) -> anyhow::Error {
     match e.downcast::<deps::Refusal>() {
+        Ok(deps::Refusal::Unclaimed(unmet)) if finished.no_providers => {
+            let lines: Vec<String> =
+                unmet.iter().map(|u| format!("\n  {} ({}) {}", u.thorn, u.package, u.requirement)).collect();
+            anyhow!(
+                "Requirements nothing in the installation meets, which no manifest declares:{}.\nThe Cactarium at {} \
+                 is older than this cactup and cannot list what provides them. Cactup adds only what a manifest \
+                 declares: add a provider yourself first, or ask the package's authors to declare the dependency",
+                lines.concat(),
+                finished.base
+            )
+        }
         Ok(r) => anyhow!("{r}"),
         Err(e) => e,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A request that would hang gives way to the stop flag within a poll
+    /// or two, its thread left to finish on its own.
+    #[test]
+    fn a_request_in_flight_gives_way_to_ctrl_c() {
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let setter = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            setter.store(true, Ordering::Relaxed);
+        });
+        let started = std::time::Instant::now();
+        let err = interruptibly(
+            || {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                Ok(())
+            },
+            &stop,
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "Interrupted");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "{:?}", started.elapsed());
+        // And an answer comes back as it is.
+        assert_eq!(interruptibly(|| Ok(7), &AtomicBool::new(false)).unwrap(), 7);
     }
 }
