@@ -429,10 +429,12 @@ pub(crate) fn present(
         let i = match repos.iter().position(|r| r.name == c.repo) {
             Some(i) => i,
             None => {
+                // Where HEAD is in the clone (a pull by hand moves it
+                // without the fetch record), for a clone cactup fetched.
                 let on_disk = (fetched.as_ref())
                     .and_then(|f| f.repos.get(&c.repo))
                     .filter(|r| c.url.as_deref().is_some_and(|u| normalized(u) == normalized(&r.url)))
-                    .map(|r| r.head.clone());
+                    .map(|r| crate::commands::add::clone_head(install_root, root, &c.repo).unwrap_or_else(|| r.head.clone()));
                 let commit = on_disk.or_else(|| c.commit.clone()).filter(|c| is_commit_id(c));
                 let git = c.ty == ComponentType::Git;
                 repos.push(BaseRepo { name: c.repo.clone(), url: c.url.clone(), commit, git, thorns: Vec::new(), flesh: false });

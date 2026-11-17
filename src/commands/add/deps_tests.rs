@@ -561,7 +561,7 @@ fn records(s: &Setup, specs: &[&str], flags: &AddFlags) -> Res<Vec<AddedPackage>
     let specs: Vec<String> = specs.iter().map(|s| (*s).to_owned()).collect();
     let (plan, present) = plan_add(&client, &s.inst.root, &base, &meta, None, &specs, flags)?;
     let records = records_of(&plan, &present, &meta)?;
-    place(&base, &meta, records, &plan, &mut Vec::new(), &on_disk(&s.inst.root).unwrap())
+    place(&base, &meta, records, &plan, &mut Vec::new(), &on_disk(&s.inst.root, base.root()).unwrap())
 }
 
 /// The record of `package` among `records`: version, commit, thorns, replaces.
@@ -1322,4 +1322,45 @@ fn a_dependency_on_an_unfrozen_base_package_reads_only_it() {
     assert_eq!(counts(&log), [1, 1, 1, 1, 0]);
     assert_eq!(fake.lock().unwrap().unfrozen_reads, 1);
     let _ = r0;
+}
+
+/// A base clone moved by hand (a clean `git pull` in a base that follows
+/// its branch) is read where its HEAD is, not where the fetch record says:
+/// thorns are never linked in from a commit the clone is no longer at.
+#[test]
+fn a_base_clone_moved_by_hand_is_read_at_its_head() {
+    let it = admbase_full("^1.0", false, true, |f| f);
+    let s = &it.setup;
+    // Upstream moves on, without ADMMacros; the clone is pulled there, and
+    // the fetch record left as it was.
+    let up = s.inst.root.parent().unwrap().join("up/admbase");
+    let a3 = crate::fetch::tests::commit_files(
+        &up,
+        &[("ADMBase/interface.ccl", "IMPLEMENTS: admbase\n"), ("ADMCoupling/interface.ccl", "IMPLEMENTS: admcoupling\n")],
+    )
+    .to_string();
+    let state = s.inst.root.join(".cactup/fetch-state.toml");
+    let recorded = std::fs::read_to_string(&state).unwrap();
+    let live = std::fs::read_to_string(s.inst.live_thornlist().unwrap()).unwrap();
+    let list = thornlist::parse(&live).unwrap();
+    let mut progress = prodash::tree::Root::new().add_child("plan");
+    let plan = crate::fetch::plan(&list, &s.inst.root, &mut progress).unwrap();
+    let report = crate::fetch::execute(&plan, &s.inst.root).unwrap();
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    std::fs::write(&state, recorded).unwrap();
+    assert_eq!(crate::fetch::FetchState::read(&s.inst.root).unwrap().unwrap().repos["admbase"].head, it.a2);
+    assert_eq!(super::clone_head(&s.inst.root, "Cactus", "admbase").as_deref(), Some(a3.as_str()));
+
+    // ADMMacros is not at HEAD: no link into it; the add says why.
+    let result = s.add(&["max/app3"], yes());
+    let macros = s.inst.root.join("Cactus/arrangements/ADMBase/ADMMacros/interface.ccl");
+    match result {
+        Ok(()) => assert!(macros.is_file(), "a link to a thorn the clone does not have"),
+        Err(e) => {
+            let e = format!("{e:#}");
+            assert!(e.contains(&a3[..12]), "{e}");
+            assert!(!macros.exists());
+        }
+    }
+    let _ = (&it.a1, &it.log, &it.fake);
 }

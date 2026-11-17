@@ -902,7 +902,7 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
     // Everything that can refuse the plan, before anyone is asked about it.
     let mut notes: Vec<String> = Vec::new();
     let records = records_of(&plan, &present, &start.meta)?;
-    let added = place(&base, &start.meta, records, &plan, &mut notes, &on_disk(&start.inst.root)?)?;
+    let added = place(&base, &start.meta, records, &plan, &mut notes, &on_disk(&start.inst.root, base.root())?)?;
     if !super::resolution::show_and_confirm(&plan.lines(&command), plan.beyond_named(), how)? {
         return Ok(());
     }
@@ -1290,9 +1290,25 @@ fn record_of_release(release: &crate::deps::Release, thorns: &[String], plan: &c
 }
 
 /// The commit each clone of the installation is at, as its last fetch left it.
-fn on_disk(install_root: &std::path::Path) -> Res<std::collections::BTreeMap<String, String>> {
+/// The commit HEAD is at in each clone the last fetch recorded: read from
+/// the clone itself (a pull by hand moves it without the record), else the
+/// record's.
+fn on_disk(install_root: &std::path::Path, root: &str) -> Res<std::collections::BTreeMap<String, String>> {
     let state = crate::fetch::FetchState::read(install_root)?;
-    Ok(state.map(|s| s.repos.into_iter().map(|(name, r)| (name, r.head)).collect()).unwrap_or_default())
+    let heads = state.map(|s| s.repos).unwrap_or_default();
+    Ok((heads.into_iter())
+        .map(|(name, r)| {
+            let head = clone_head(install_root, root, &name).unwrap_or(r.head);
+            (name, head)
+        })
+        .collect())
+}
+
+/// The commit HEAD is at in clone `repo` of the installation, when it can be
+/// read.
+pub(crate) fn clone_head(install_root: &std::path::Path, root: &str, repo: &str) -> Option<String> {
+    let dir = install_root.join(root).join("repos").join(repo);
+    crate::fetch::git::head_of(&dir).ok().map(|(_, id)| id.to_string())
 }
 
 /// The records placed into the installation: each goes into a clone the base
