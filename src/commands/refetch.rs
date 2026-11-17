@@ -103,7 +103,18 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // old one are composed onto it (§8.11), and that is what is fetched and
     // becomes the live list. The live list itself already carries them.
     let composed = if source.is_explicit() {
-        super::add::compose(source.bytes(), &inst.meta()?.added)
+        let added = inst.meta()?.added;
+        // More thorns of a base clone the new base drops: said loudly, as
+        // they fall back to their own source.
+        if let (Ok(old), Ok(new)) = (
+            fs::read_to_string(inst.source_thornlist_to_read()).map_err(anyhow::Error::from).and_then(|t| thornlist::parse(&t)),
+            thornlist::parse(source.bytes()),
+        ) {
+            for warning in super::add::extensions_left_behind(&old, &new, &added) {
+                println!("{}", warning.yellow());
+            }
+        }
+        super::add::compose(source.bytes(), &added)
             .with_context(|| format!("Failed to add this installation's added packages to {}", source.describe()))?
     } else {
         source.bytes().to_owned()

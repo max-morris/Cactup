@@ -465,11 +465,19 @@ pub(crate) fn present(
     // the same package, in the base's own clone, replacing nothing. Its
     // thorns live at whatever commit the base has the clone at (compose
     // writes them so), so it is matched by package and clone, never commit.
+    // The same predicate compose writes them by (`add::base_clone_of`),
+    // and the package is the one the lookup says the clone is. Only the
+    // first base repo of a package is that package (a second is a repo of
+    // its own), so only it is extended.
     let extends = |a: &AddedPackage, r: &BaseRepo, id: &PkgId| {
-        a.package == id.as_str() && a.replaces.is_empty() && a.repo == r.name
+        a.package == id.as_str() && crate::commands::add::base_clone_of(a, base).is_some_and(|c| c.repo == r.name)
     };
+    let mut first: BTreeSet<&PkgId> = BTreeSet::new();
     let extension_of: Vec<Option<usize>> = (repos.iter().zip(&mapped))
-        .map(|(r, id)| id.as_ref().and_then(|id| added.iter().position(|a| extends(a, r, id))))
+        .map(|(r, id)| {
+            let id = id.as_ref().filter(|id| first.insert(id))?;
+            added.iter().position(|a| extends(a, r, id))
+        })
         .collect();
 
     // What to read: each added package at its commit (expecting its recorded

@@ -154,10 +154,10 @@ pub fn plan_remove(
     let mut dependents: Vec<(String, String)> = Vec::new();
     for d in &remaining {
         let p = &all[*d];
-        for (label, before) in g.holders(p, &everything) {
+        for (claim, before) in g.holders(p, &everything) {
             let was_held_by_gone = before.iter().any(|h| gone.contains(h));
-            if was_held_by_gone && g.holders_of_label(p, &label, &remaining).is_empty() {
-                dependents.push((p.release.label(), label));
+            if was_held_by_gone && g.holders_of_label(p, &claim, &remaining).is_empty() {
+                dependents.push((label(d, &all), claim));
             }
         }
     }
@@ -191,7 +191,8 @@ struct Graph<'a> {
 impl Graph<'_> {
     /// Who in `set` takes a dependency on `target`: the target itself, a package an override
     /// says satisfies it, or a fork of it (identity only: the versions were checked when it was
-    /// added). Never an extension node: its base package takes the dependency.
+    /// added). An extension node shares its base node's claims, but the base node, which sorts
+    /// before it and never goes, is always found first.
     fn taker<'s>(&self, target: &str, set: &BTreeSet<&'s PkgId>) -> Option<&'s PkgId> {
         if let Some(id) = set.iter().find(|id| id.as_str() == target) {
             return Some(id);
@@ -202,7 +203,7 @@ impl Graph<'_> {
                 return Some(id);
             }
         }
-        set.iter().filter(|id| !self.ext.contains_key(**id)).find(|id| forks(&self.all[**id].release, &t)).copied()
+        set.iter().find(|id| forks(&self.all[**id].release, &t)).copied()
     }
 
     /// The holder of a dependency that `taker` takes, needing `needs` of it: the taker, or
@@ -222,9 +223,12 @@ impl Graph<'_> {
     /// recorded as its choice, else the first one present.
     fn holders<'s>(&self, p: &Present, set: &BTreeSet<&'s PkgId>) -> Vec<(String, Vec<&'s PkgId>)> {
         let mut out = Vec::new();
+        // An extension node carries only the dependencies of its own thorns:
+        // one for every thorn is its package's, held from the base node.
+        let extension = self.ext.contains_key(&p.release.id);
         for c in p.release.claims.iter().filter(|c| c.kind == "dependency" && c.into.is_none()) {
             let enabled = |n: &String| p.enabled.iter().any(|t| t.eq_ignore_ascii_case(n));
-            let applies = c.needed_by.is_empty() || c.needed_by.iter().any(enabled);
+            let applies = (c.needed_by.is_empty() && !extension) || c.needed_by.iter().any(enabled);
             if !applies {
                 continue;
             }

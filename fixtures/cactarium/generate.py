@@ -318,6 +318,10 @@ POOL = {
     "max--fuka-gw--fuka-1-1": ("max/fuka-gw", [V("1.0.0", ["FukaGW"], [dep("et/fuka", "~1.1", into="lib/fuka")])]),
     "max--carpet-mp--two": ("max/carpet-mp", [V("2.0.0", ["CarpetSlab"], [fork_of("et/carpet", "=2026.6.0")]),
                                               V("1.0.0", ["CarpetSlab"], [fork_of("et/carpet", "=2026.5.0")])]),
+    "et--carpetx--arith-needs-lib": ("et/carpetx", [V("2026.5.1", ["CarpetX", "Loop", "Arith"],
+                                                      [dep("max/lib", "^1.0", ["Lib"], needed_by=["Arith"])])]),
+    "et--carpetx--needs-lib": ("et/carpetx", [V("2026.5.1", ["CarpetX", "Loop", "Arith"], [dep("max/lib", "^1.0", ["Lib"])])]),
+    "max--lib": ("max/lib", [V("1.0.0", ["Lib"])]),
     "max--kadath--into-carpetx": ("max/kadath", [V("1.0.0", ["Kadath"], [dep("et/carpetx", "^2026.5", into="src/carpetx")])]),
 
     # Remove.

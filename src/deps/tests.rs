@@ -201,6 +201,10 @@ struct ProviderSpec {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct RemoveSpec {
     targets: Vec<String>,
+    /// `[[added]]` entries that give a present base package more thorns:
+    /// package → those thorns.
+    #[serde(default)]
+    extensions: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     added_for: BTreeMap<String, AddedForSpec>,
     #[serde(default)]
@@ -490,7 +494,15 @@ fn run(dir: &Path) -> Vec<String> {
                 .collect();
             added_for.insert(id, AddedFor { requested: a.requested, by: a.by.clone(), choices, for_commit });
         }
-        match plan_remove(&present, &added_for, &targets, &rules, rm.no_deps, &[]) {
+        let extensions: Vec<Extension> = (rm.extensions.iter())
+            .map(|(id, thorns)| {
+                let id = PkgId::parse(id).unwrap();
+                let p = present.iter().find(|p| p.release.id == id).expect("an extension of a present package");
+                let label = format!("{} ({})", p.release.label(), thorns.join(", "));
+                Extension { id, thorns: thorns.clone(), label, commit: p.release.commit.clone() }
+            })
+            .collect();
+        match plan_remove(&present, &added_for, &targets, &rules, rm.no_deps, &extensions) {
             Ok(plan) => {
                 check_refusal(&case.expect, None, None, &mut errors);
                 compare("removed", &case.expect.removed, plan.removed.iter().map(ToString::to_string).collect(), &mut errors);

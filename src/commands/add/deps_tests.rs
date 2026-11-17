@@ -488,6 +488,11 @@ fn admbase(range: &str) -> Admbase {
 }
 
 fn admbase_with(range: &str, change: impl FnOnce(Fake) -> Fake) -> Admbase {
+    admbase_full(range, true, change)
+}
+
+/// [`admbase_with`], its base section pinned or following its branch.
+fn admbase_full(range: &str, pinned: bool, change: impl FnOnce(Fake) -> Fake) -> Admbase {
     let tmp = tempfile::tempdir().unwrap();
     let files = [
         ("ADMBase/interface.ccl", "IMPLEMENTS: admbase\n"),
@@ -519,7 +524,11 @@ fn admbase_with(range: &str, change: impl FnOnce(Fake) -> Fake) -> Admbase {
         )
         .pin(&aurl, "et/admbase", Some("1.0.0"));
     let (base, log, fake) = change(fake).serve_shared();
-    let setup = Setup::new(tmp, &section(&aurl, &a1, &["ADMBase/ADMBase", "ADMBase/ADMCoupling"]), &base);
+    let mut text = section(&aurl, &a1, &["ADMBase/ADMBase", "ADMBase/ADMCoupling"]);
+    if !pinned {
+        text = text.replace(&format!("!REPO_COMMIT = {a1}\n"), "");
+    }
+    let setup = Setup::new(tmp, &text, &base);
     Admbase { setup, a1, a2, log, fake }
 }
 
@@ -533,7 +542,7 @@ fn records(s: &Setup, specs: &[&str], flags: &AddFlags) -> Res<Vec<AddedPackage>
     let specs: Vec<String> = specs.iter().map(|s| (*s).to_owned()).collect();
     let (plan, present) = plan_add(&client, &s.inst.root, &base, &meta, None, &specs, flags)?;
     let records = records_of(&plan, &present, &meta)?;
-    place(&base, &meta, records, &plan, &mut Vec::new())
+    place(&base, &meta, records, &plan, &mut Vec::new(), &on_disk(&s.inst.root).unwrap())
 }
 
 /// The record of `package` among `records`: version, commit, thorns, replaces.
@@ -701,8 +710,8 @@ fn a_replaced_thorn_must_keep_the_base_s_checkout() {
     let step = Step::Replace { replaced, by, thorns: vec!["CarpetX".into()], flesh: false, explicit: true };
     let plan = Plan { steps: vec![step], ..Plan::default() };
     let meta = InstallationMeta::default();
-    place(&base, &meta, vec![fork("CarpetX")], &plan, &mut Vec::new()).unwrap();
-    let err = format!("{:#}", place(&base, &meta, vec![fork("CarpetXMP")], &plan, &mut Vec::new()).unwrap_err());
+    place(&base, &meta, vec![fork("CarpetX")], &plan, &mut Vec::new(), &Default::default()).unwrap();
+    let err = format!("{:#}", place(&base, &meta, vec![fork("CarpetXMP")], &plan, &mut Vec::new(), &Default::default()).unwrap_err());
     assert!(err.contains("CarpetX/CarpetX") && err.contains("same Arrangement/Thorn"), "{err}");
 }
 
@@ -1119,4 +1128,63 @@ fn an_entry_edited_at_the_same_commit_keeps_unknown_keys() {
     let doc: toml::Table = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert!(doc["added-for"]["et/admbase"].get("cactup-future").is_some(), "{doc:?}");
     let _ = (&it.a1, &it.a2, &it.log, &it.fake);
+}
+
+/// A base that follows a branch (its admbase section unpinned): more thorns
+/// of its package live at the commit the clone is at on disk. They are linked
+/// in; the clone is neither fetched nor moved, even with new commits
+/// upstream.
+#[test]
+fn more_thorns_of_an_unpinned_base_clone_are_linked_where_it_is() {
+    // Its clone on its branch, at the tip: a2.
+    let it = admbase_full("^1.0", false, |f| f);
+    let s = &it.setup;
+    let up = s.inst.root.parent().unwrap().join("up/admbase");
+    let a3 = crate::fetch::tests::commit_files(&up, &[("ADMBase/interface.ccl", "IMPLEMENTS: admbase\n"), ("NEW", "3\n")]).to_string();
+    s.add(&["max/app3"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let state = crate::fetch::FetchState::read(&s.inst.root).unwrap().unwrap();
+    assert_eq!(state.repos["admbase"].head, it.a2, "not moved to {a3}");
+    assert!(s.inst.root.join("Cactus/arrangements/ADMBase/ADMMacros/interface.ccl").is_file());
+    let meta = s.meta();
+    let admbase = meta.added.iter().find(|a| a.package == "et/admbase").unwrap();
+    assert_eq!(admbase.commit, it.a2);
+    let _ = (&it.a1, &it.log, &it.fake);
+}
+
+/// Two base clones of one package: only the first is the package; thorns
+/// added to the second stay present, as the added package they are.
+#[test]
+fn thorns_added_to_a_second_base_clone_of_a_package_stay_present() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (u1, c1) = upstream(tmp.path(), "one", &[("A/interface.ccl", "IMPLEMENTS: a\n")]);
+    let (u2, c2) = upstream(tmp.path(), "two", &[("B/interface.ccl", "IMPLEMENTS: b\n"), ("C/interface.ccl", "IMPLEMENTS: c\n")]);
+    let (cactarium, _) = Fake::new()
+        .package("et/x", vec![version("1.0.0", &c1, &u1, "Arr", &["A"], "[]"), version("0.9.0", &c2, &u2, "Arr", &["B", "C"], "[]")])
+        .pin(&u1, "et/x", None)
+        .pin(&u2, "et/x", None)
+        .serve();
+    let base = format!("{}{}", section(&u1, &c1, &["Arr/A"]), section(&u2, &c2, &["Arr/B"]));
+    let s = Setup::new(tmp, &base, &cactarium);
+    let added = AddedPackage {
+        package: "et/x".into(),
+        version: "0.9.0".into(),
+        tag: None,
+        commit: c2.clone(),
+        url: u2.clone(),
+        repo: "two".into(),
+        thorns: vec![AddedThorn { checkout: "Arr/C".into(), repo_path: "$2".into() }],
+        replaces: Vec::new(),
+        contact: None,
+        libraries: Vec::new(),
+    };
+    let pristine = std::fs::read_to_string(s.inst.source_thornlist()).unwrap();
+    let list = thornlist::parse(&pristine).unwrap();
+    let client = crate::cactarium::Client::new(&s.ctx.db.read().unwrap());
+    let mut reg = super::super::resolution::Registry::new(&client, []);
+    let options = super::super::resolution::PresentOptions::default();
+    let set = super::super::resolution::present(&mut reg, &s.inst.root, &list, &[added], None, &options);
+    reg.finish();
+    let set = set.unwrap_or_else(|e| panic!("{e:#}"));
+    let enabled: Vec<String> = set.present.iter().flat_map(|p| p.enabled.iter().cloned()).collect();
+    assert!(enabled.contains(&"C".to_owned()), "{enabled:?}");
 }

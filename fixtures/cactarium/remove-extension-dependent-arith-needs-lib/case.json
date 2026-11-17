@@ -1,0 +1,43 @@
+{
+  "about": "A base package's added thorn that needs a package keeps it: the refusal names the extension as people read it",
+  "packages": [
+    "et--carpetx--arith-needs-lib",
+    "max--lib"
+  ],
+  "present": [
+    {
+      "package": "et/carpetx",
+      "version": "2026.5.1",
+      "base": "carpetx",
+      "enabled": [
+        "CarpetX",
+        "Loop",
+        "Arith"
+      ]
+    },
+    {
+      "package": "max/lib",
+      "version": "1.0.0",
+      "enabled": [
+        "Lib"
+      ]
+    }
+  ],
+  "remove": {
+    "targets": [
+      "max/lib"
+    ],
+    "extensions": {
+      "et/carpetx": [
+        "Arith"
+      ]
+    }
+  },
+  "expect": {
+    "refusal": "HasDependents",
+    "message": [
+      "Other packages depend on max/lib:",
+      "et/carpetx@2026.5.1 (Arith) (max/lib@^1.0)"
+    ]
+  }
+}
