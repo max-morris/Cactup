@@ -869,6 +869,65 @@ mod tests {
         assert_eq!(client.yanked_since(Stack, "et", "et-stack", "2026.5.1").unwrap(), None);
     }
 
+    /// Every pin goes out in one POST (the endpoint is rate-limited per
+    /// address), split only at the size limit, and the answers come back in
+    /// the order asked; a pin the server would refuse is refused before
+    /// anything is sent.
+    #[test]
+    fn a_lookup_batches_every_pin() {
+        use crate::fetch::download::test_server::serve_with_body;
+        let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = bodies.clone();
+        let (base, heads) = serve_with_body(2, move |_, body| {
+            let asked: LookupRequest = serde_json::from_slice(body).unwrap();
+            seen.lock().unwrap().push(asked.pins.len());
+            let pins: Vec<String> = (asked.pins.iter())
+                .map(|p| {
+                    format!(
+                        r#"{{"url":"{}","commit":"{}","package":"et/x","version":null,"commit-known":null}}"#,
+                        p.url, p.commit
+                    )
+                })
+                .collect();
+            ("200 OK", "api-generation: 1\r\n".into(), format!(r#"{{"pins":[{}]}}"#, pins.join(",")).into_bytes())
+        });
+        let pins: Vec<PinQuery> = (0..MAX_LOOKUP_PINS + 1)
+            .map(|i| PinQuery { url: format!("https://x/r{i}.git"), commit: format!("{i:040x}") })
+            .collect();
+        let answers = Client::at(&base).lookup(&pins).unwrap_or_else(|e| panic!("{e:#}"));
+        assert_eq!(answers.len(), pins.len());
+        assert!(answers.iter().zip(&pins).all(|(a, p)| a.url == p.url && a.commit_known.is_none()));
+        assert_eq!(*bodies.lock().unwrap(), [MAX_LOOKUP_PINS, 1]);
+        let heads = heads.join().unwrap();
+        assert!(heads.iter().all(|h| h.starts_with("POST /api/v1/lookup ")), "{heads:?}");
+
+        // Nothing listens here: refused before sending.
+        let bad = [PinQuery { url: "https://x/r.git".into(), commit: "abc".into() }];
+        let err = format!("{:#}", Client::at("http://127.0.0.1:9").lookup(&bad).unwrap_err());
+        assert!(err.contains("not a full lowercase commit id"), "{err}");
+    }
+
+    /// `/providers` is asked with the one parameter the requirement maps to;
+    /// a package the Cactarium does not have reads as none, not an error.
+    #[test]
+    fn providers_and_missing_packages() {
+        use cactup_ecosystem_common::ccl::Need;
+        let (base, heads) = serve_with(2, |path| {
+            if path.contains("/providers") {
+                let body = r#"{"providers":[{"package":"et/carpet","version":"mp:2026.5.0","arrangement":"Carpet","thorn":"CarpetSlab"}]}"#;
+                return ("200 OK", "api-generation: 1\r\n".into(), body.as_bytes().to_vec());
+            }
+            let body = r#"{"error":{"code":"not-found","message":"No package et/nope"}}"#;
+            ("404 Not Found", "api-generation: 1\r\n".into(), body.as_bytes().to_vec())
+        });
+        let client = Client::at(&base);
+        let found = client.providers(&Need::Implementation("Hyperslab".into())).unwrap();
+        assert_eq!(found.providers[0].version, "mp:2026.5.0");
+        assert!(client.package_versions_if_any("et", "nope").unwrap().is_none());
+        let heads = heads.join().unwrap();
+        assert!(heads[0].starts_with("GET /api/v1/providers?implements=Hyperslab "), "{}", heads[0]);
+    }
+
     #[test]
     fn tokens_are_stored_per_registry_owner_only() {
         use std::os::unix::fs::PermissionsExt;

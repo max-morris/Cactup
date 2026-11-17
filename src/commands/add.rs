@@ -2278,3 +2278,6 @@ mod tests {
         assert!(it.kadath_dir().join("src/fuka/Cmake/CMakeLists.txt").is_file());
     }
 }
+
+#[cfg(test)]
+mod deps_tests;
