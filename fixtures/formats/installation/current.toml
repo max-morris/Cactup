@@ -26,3 +26,12 @@ commit = "89abcdef0123456789abcdef0123456789abcdef"
 url = "https://github.com/owner/lib"
 inside = "pkg"
 into = "src/lib"
+
+[added-for."owner/pkg"]
+requested = false
+by = ["owner/app@2.0.0"]
+for-commit = "0123456789abcdef0123456789abcdef01234567"
+
+[[added-for."owner/pkg".choices]]
+dependent = "owner/app"
+alternatives = ["owner/pkg", "owner/other"]

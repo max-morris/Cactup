@@ -21,11 +21,23 @@ use chrono::{DateTime, Utc};
 use colored::Colorize;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// `installation.toml`'s format. Only login binaries write it (D11), so it is
-/// not `frozen_read`. Every field is a scalar or an array (`added`, which
-/// put-back never enters), so nothing is replaced whole.
+/// not `frozen_read`. `added` is an array, which put-back never enters. Each
+/// `added-for` entry is rebuilt whole by the command that writes it (for the
+/// commit its package ends up at), so it is replaced whole: a key a newer
+/// binary put in it says something about the old entry, not the new one.
+///
+/// `added-for` (why each added package is there) is additive: a top-level map,
+/// so an older binary that does not model it puts it back on a rewrite, and an
+/// entry it could no longer vouch for reads as "named by the user", which is
+/// what its absence means. An entry is believed only beside an `[[added]]`
+/// entry at the commit it was written for (`for-commit`): an older binary that
+/// re-adds or upgrades the package leaves it stale, and one that removes the
+/// package leaves it without one; both read as named, so no orphan pass ever
+/// removes a package the user may have named.
 ///
 /// Version 2 added `[[added.libraries]]`. Inside an array element, an older
 /// writer would drop it, and losing it is not harmless: which links to
@@ -48,7 +60,7 @@ pub static INSTALLATION: Format<Toml> = Format {
     down_floor: 1,
     frozen_read: false,
     legacy: None,
-    replace_whole: &[],
+    replace_whole: &["added-for.*"],
 };
 
 /// v1 → v2: nothing to change (v1 has no libraries).
@@ -108,7 +120,7 @@ pub static TEST_REGISTRY: Format<Toml> = Format {
 };
 
 /// `installation.toml` (§8.1, §11.8).
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct InstallationMeta {
     /// The active config; absent = the §7.1 null-config state.
@@ -130,6 +142,56 @@ pub struct InstallationMeta {
     /// onto it, so a refetch of a new base (a stack upgrade) re-applies them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub added: Vec<AddedPackage>,
+    /// Why each added package is there, by `owner/name`: named on a command
+    /// line, or brought in as another's dependency. A map rather than a key
+    /// of each `[[added]]` element, so an older binary's rewrite keeps it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub added_for: BTreeMap<String, AddedFor>,
+}
+
+/// One `added-for` entry. Believed only beside the package's `[[added]]`
+/// entry at `for-commit` (see [`INSTALLATION`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AddedFor {
+    /// Named on a command line (`true`), or brought in by another package's
+    /// dependency. Missing reads as named, the safe side.
+    #[serde(default = "named")]
+    pub requested: bool,
+    /// The dependents (`owner/name@version`) whose dependencies brought it
+    /// in. Informational: what depends on it is read from the current claims.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by: Vec<String>,
+    /// The `[[added]]` commit this entry was written for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub for_commit: Option<String>,
+    /// The any-of dependencies that chose it, each by its dependent and its
+    /// alternatives.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<AddedForChoice>,
+}
+
+fn named() -> bool {
+    true
+}
+
+/// An any-of dependency, by the package declaring it and its alternatives in
+/// the order declared.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AddedForChoice {
+    pub dependent: String,
+    pub alternatives: Vec<String>,
+}
+
+impl InstallationMeta {
+    /// The `added-for` entries a reader may believe: only those of packages
+    /// that have an `[[added]]` entry (one an older binary's `remove` left
+    /// behind is no entry). Whether each still holds for the commit the
+    /// package is at is the reader's call (`for-commit`).
+    pub fn added_for_present(&self) -> impl Iterator<Item = (&AddedPackage, Option<&AddedFor>)> {
+        self.added.iter().map(|a| (a, self.added_for.get(&a.package)))
+    }
 }
 
 /// One package `cactup add` added (§8.11), frozen at the commit the registry
@@ -669,7 +731,17 @@ impl LockedInstallation<'_> {
         self.inst.meta()
     }
 
+    /// Writes the record. An `added-for` entry of a package with no
+    /// `[[added]]` entry (an older binary's `remove` left it) is dropped:
+    /// no reader believes it, and a package added again later must not
+    /// inherit it.
     pub fn set_meta(&self, meta: &InstallationMeta) -> Res<()> {
+        let stray = |name: &String| !meta.added.iter().any(|a| &a.package == name);
+        if meta.added_for.keys().any(stray) {
+            let mut kept = meta.clone();
+            kept.added_for.retain(|name, _| !stray(name));
+            return format::write(&self.inst.meta_path(), &kept, &INSTALLATION);
+        }
         format::write(&self.inst.meta_path(), meta, &INSTALLATION)
     }
 
@@ -909,6 +981,19 @@ mod tests {
                     into: "src/lib".to_owned(),
                 }],
             }],
+            added_for: [(
+                "owner/pkg".to_owned(),
+                AddedFor {
+                    requested: false,
+                    by: vec!["owner/app@2.0.0".to_owned()],
+                    for_commit: Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
+                    choices: vec![AddedForChoice {
+                        dependent: "owner/app".to_owned(),
+                        alternatives: vec!["owner/pkg".to_owned(), "owner/other".to_owned()],
+                    }],
+                },
+            )]
+            .into(),
         }
     }
 
@@ -1045,6 +1130,8 @@ mod tests {
         let path = dir.path().join("installation.toml");
         let mut plain = exhaustive_meta();
         plain.added[0].libraries.clear();
+        // Additive, and not in the v1 fixture (see the test of `added-for`).
+        plain.added_for.clear();
 
         format::write(&path, &plain, &INSTALLATION).unwrap();
         let old: InstallationMeta = format::read(&path, &V1).unwrap().unwrap();
@@ -1067,6 +1154,103 @@ mod tests {
         let fixture = crate::format::testing::fixture_dir("installation").join("v2.toml");
         let err = format::read::<InstallationMeta, _>(&fixture, &V1).unwrap_err();
         assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+    }
+
+    /// An older binary, which models no `added-for`, rewrites the record (a
+    /// `config use`, an `add` of its own): the map is put back whole, entries
+    /// and their `choices` arrays alike, and the version stays what it was.
+    #[test]
+    fn an_older_binary_s_rewrite_keeps_added_for() {
+        // `InstallationMeta` and `INSTALLATION` as they shipped before
+        // `added-for`.
+        #[derive(Debug, Default, Serialize, Deserialize)]
+        #[serde(rename_all = "kebab-case")]
+        struct Before {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            active_config: Option<String>,
+            #[serde(default)]
+            sim_home: Option<PathBuf>,
+            #[serde(default)]
+            test_home: Option<PathBuf>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            root_dir: Option<String>,
+            #[serde(default, skip_serializing_if = "Vec::is_empty")]
+            added: Vec<AddedPackage>,
+        }
+        static V2: Format<Toml> = Format {
+            name: "installation record",
+            key: "schema",
+            current: 2,
+            upgrades: &[installation_up_1],
+            downgrades: &[installation_down_2],
+            down_floor: 1,
+            frozen_read: false,
+            legacy: None,
+            replace_whole: &[],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installation.toml");
+        let mut plain = exhaustive_meta();
+        plain.added[0].libraries.clear();
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        let schema = || {
+            let doc: Toml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            doc["schema"].as_integer().unwrap()
+        };
+        assert_eq!(schema(), 1, "added-for alone needs no newer version");
+
+        let mut old: Before = format::read(&path, &V2).unwrap().unwrap();
+        old.active_config = Some("other".to_owned());
+        old.added[0].version = "1.2.4".to_owned();
+        format::write(&path, &old, &V2).unwrap();
+        assert_eq!(schema(), 1);
+        let back: InstallationMeta = format::read(&path, &INSTALLATION).unwrap().unwrap();
+        assert_eq!(back.added_for, plain.added_for, "kept whole, choices included");
+        assert_eq!(back.added[0].version, "1.2.4");
+    }
+
+    /// Every `added-for` entry is written whole from the struct: a key a newer
+    /// binary put in an entry does not carry over into the entry written for
+    /// a new commit (nor, the cost of that, into one left as it was).
+    #[test]
+    fn an_added_for_entry_is_replaced_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installation.toml");
+        let mut meta = exhaustive_meta();
+        meta.added_for.insert("owner/b".to_owned(), meta.added_for["owner/pkg"].clone());
+        format::write(&path, &meta, &INSTALLATION).unwrap();
+        let mut doc: Toml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for name in ["owner/pkg", "owner/b"] {
+            let entry = doc["added-for"][name].as_table_mut().unwrap();
+            entry.insert("cactup-future".to_owned(), toml::Value::Integer(1));
+        }
+        std::fs::write(&path, toml::to_string(&doc).unwrap()).unwrap();
+
+        let mut meta: InstallationMeta = format::read(&path, &INSTALLATION).unwrap().unwrap();
+        meta.added_for.get_mut("owner/pkg").unwrap().requested = true;
+        format::write(&path, &meta, &INSTALLATION).unwrap();
+        let doc: Toml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // Both entries are rewritten from the struct: neither keeps it.
+        assert!(doc["added-for"]["owner/pkg"].get("cactup-future").is_none());
+        assert!(doc["added-for"]["owner/b"].get("cactup-future").is_none());
+        assert_eq!(doc["added-for"]["owner/pkg"]["requested"].as_bool(), Some(true));
+    }
+
+    /// `set_meta` drops an entry with no `[[added]]` entry beside it (an
+    /// older binary's `remove` left it), so a package added again later
+    /// never inherits it.
+    #[test]
+    fn set_meta_drops_added_for_entries_without_a_package() {
+        let (_dir, inst) = inst();
+        std::fs::create_dir_all(inst.cactup_dir()).unwrap();
+        let mut meta = exhaustive_meta();
+        meta.added_for.insert("owner/gone".to_owned(), meta.added_for["owner/pkg"].clone());
+        let locked = inst.locked().unwrap();
+        locked.set_meta(&meta).unwrap();
+        let back = locked.meta().unwrap();
+        assert_eq!(back.added_for.keys().collect::<Vec<_>>(), ["owner/pkg"]);
+        let present: Vec<bool> = back.added_for_present().map(|(_, f)| f.is_some()).collect();
+        assert_eq!(present, [true]);
     }
 
     #[test]
