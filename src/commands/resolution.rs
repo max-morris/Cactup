@@ -263,12 +263,14 @@ impl Registry {
         let shown = if is_commit_id(at) || at.len() > 12 { at.get(..12).unwrap_or(at) } else { at };
         let label = format!("{id}@{shown}");
         for attempt in 0..3 {
-            self.window_start.get_or_insert_with(std::time::Instant::now);
             let (who, at_owned) = (id.clone(), at.to_owned());
             let read = self.one(&label, "reading the package there", move |c| {
                 let (owner, name) = owner_name(&who)?;
                 c.package_at_if_any(owner, name, &at_owned)
             });
+            // The window opened when the server counted the first read: no
+            // later than its answer came back, so waiting from then is safe.
+            self.window_start.get_or_insert_with(std::time::Instant::now);
             let refused = match &read {
                 Err(e) => e.downcast_ref::<crate::cactarium::Refused>().filter(|r| r.is_unanswered()),
                 Ok(_) => None,

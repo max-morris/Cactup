@@ -1388,3 +1388,165 @@ fn a_base_clone_moved_by_hand_is_read_at_its_head() {
     }
     let _ = (&it.a1, &it.log, &it.fake);
 }
+
+/// Twenty base repos at unfrozen commits, each with a thorn `T{i}` enabled
+/// and `U{i}` not, each read at its commit by the fake; `extra` adds
+/// packages to the fake.
+fn unfrozen_base(n: usize, extra: impl FnOnce(&std::path::Path, Fake) -> Fake) -> (Setup, Log, Shared) {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut base = String::new();
+    let mut fake = Fake::new();
+    for i in 0..n {
+        let name = format!("r{i}");
+        let (url, c) = upstream(
+            tmp.path(),
+            &name,
+            &[(&format!("T{i}/interface.ccl"), "IMPLEMENTS: x\n"), (&format!("U{i}/interface.ccl"), "IMPLEMENTS: u\n")],
+        );
+        base.push_str(&section(&url, &c, &[&format!("Arr{i}/T{i}")]));
+        let id = format!("et/{name}");
+        let thorns = [format!("T{i}"), format!("U{i}")];
+        let thorns: Vec<&str> = thorns.iter().map(String::as_str).collect();
+        fake = fake.package(&id, vec![version("1.0.0", &format!("{:040x}", i + 1), &url, &format!("Arr{i}"), &thorns, "[]")]);
+        fake.snapshots.push((id.clone(), c.clone(), version(&c, &c, &url, &format!("Arr{i}"), &thorns, "[]")));
+        fake = fake.pin(&url, &id, None);
+    }
+    let fake = extra(tmp.path(), fake);
+    let (cactarium, log, fake) = fake.serve_shared();
+    (Setup::new(tmp, &base, &cactarium), log, fake)
+}
+
+/// The requests at a commit the fake got: (all of them, those it answered
+/// 429).
+fn commit_reads(log: &Log, fake: &Shared) -> (usize, usize) {
+    let all = log.lock().unwrap().iter().filter(|(p, _)| p.contains("/versions/")).count();
+    (all, all - fake.lock().unwrap().unfrozen_reads)
+}
+
+/// A plan needing fifteen reads at unfrozen commits, past the server's
+/// twelve a window: it waits once for the window (an older server: no
+/// Retry-After), then reads the rest, and goes through. With Retry-After it
+/// waits for that.
+#[test]
+fn fifteen_reads_wait_once_for_the_read_limit() {
+    for retry_after in [false, true] {
+        // With Retry-After, the server's window (1 s) is what it says, and
+        // cactup's own fallback (10 s) must not be what it waits for.
+        let window = if retry_after { std::time::Duration::from_secs(1) } else { std::time::Duration::from_secs(2) };
+        let fallback = if retry_after { std::time::Duration::from_secs(10) } else { window };
+        super::super::resolution::TEST_READ_WINDOW.with(|w| w.set(Some(fallback)));
+        let (s, log, fake) = unfrozen_base(15, |tmp, fake| {
+            let (url, c) = upstream(tmp, "dep", &[("Dep/interface.ccl", "IMPLEMENTS: dep\n")]);
+            let claims: Vec<String> = (0..15).map(|i| depends(&format!("et/r{i}"), ">=0.0.0", &[&format!("U{i}")])).collect();
+            fake.package("max/dep15", vec![version("1.0.0", &c, &url, "Dep", &["Dep"], &format!("[{}]", claims.join(",")))])
+        });
+        {
+            let mut f = fake.lock().unwrap();
+            (f.window, f.retry_after) = (window, retry_after);
+        }
+        log.lock().unwrap().clear();
+        let started = std::time::Instant::now();
+        let got = records(&s, &["max/dep15"], &AddFlags::default()).unwrap_or_else(|e| panic!("{e:#}"));
+        assert_eq!(got.iter().filter(|r| r.package.starts_with("et/r")).count(), 15);
+        // Fifteen read, the thirteenth asked twice: once refused, once after the wait.
+        assert_eq!(commit_reads(&log, &fake), (16, 1), "retry-after {retry_after}");
+        assert!(started.elapsed() >= window.mul_f32(0.5), "it waited");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "for Retry-After, not the fallback");
+    }
+    super::super::resolution::TEST_READ_WINDOW.with(|w| w.set(None));
+}
+
+/// A package whose thorns clash by name with fourteen base packages at
+/// unfrozen commits: each is read once (any could be a fork standing in),
+/// and the claims of its thorns nothing enables read nothing more.
+#[test]
+fn a_package_clashing_with_fourteen_base_packages_reads_each_once() {
+    super::super::resolution::TEST_READ_WINDOW.with(|w| w.set(Some(std::time::Duration::from_secs(2))));
+    let (s, log, fake) = unfrozen_base(14, |tmp, fake| {
+        let (url, c) = upstream(tmp, "wide", &[("W/interface.ccl", "IMPLEMENTS: w\n")]);
+        let thorns: Vec<String> = (0..14).map(|i| format!("T{i}")).collect();
+        let thorns: Vec<&str> = thorns.iter().map(String::as_str).collect();
+        fake.package("max/wide", vec![version("1.0.0", &c, &url, "Wide", &thorns, "[]")])
+    });
+    fake.lock().unwrap().window = std::time::Duration::from_secs(2);
+    log.lock().unwrap().clear();
+    let err = format!("{:#}", records(&s, &["max/wide"], &AddFlags::default()).unwrap_err());
+    assert!(err.contains("both have a thorn"), "{err}");
+    assert_eq!(fake.lock().unwrap().unfrozen_reads, 14);
+    assert_eq!(commit_reads(&log, &fake), (15, 1));
+    super::super::resolution::TEST_READ_WINDOW.with(|w| w.set(None));
+}
+
+/// A base repo whose package an `[[added]]` entry also is (and does not
+/// only extend) becomes a repo of no package: no stand-in, never read.
+#[test]
+fn a_base_repo_renamed_to_a_pseudo_package_is_no_stand_in() {
+    let (s, _, fake) = unfrozen_base(1, |_, f| f);
+    let added = AddedPackage {
+        package: "et/r0".into(),
+        version: "1.0.0".into(),
+        tag: None,
+        commit: format!("{:040x}", 1),
+        url: "https://elsewhere/r0.git".into(),
+        repo: "r0-elsewhere".into(),
+        thorns: vec![AddedThorn { checkout: "Arr0/U0".into(), repo_path: "$2".into() }],
+        replaces: Vec::new(),
+        contact: None,
+        libraries: Vec::new(),
+    };
+    let pristine = std::fs::read_to_string(s.inst.source_thornlist()).unwrap();
+    let list = thornlist::parse(&pristine).unwrap();
+    let client = crate::cactarium::Client::new(&s.ctx.db.read().unwrap());
+    let mut reg = super::super::resolution::Registry::new(&client, []);
+    let set = super::super::resolution::present(&mut reg, &s.inst.root, &list, &[added], None, &Default::default());
+    reg.finish();
+    let set = set.unwrap_or_else(|e| panic!("{e:#}"));
+    let pseudo = set.present.iter().find(|p| p.release.id.as_str() == "repo:r0").expect("the base repo as a pseudo-package");
+    assert!(!pseudo.stand_in);
+    assert_eq!(fake.lock().unwrap().unfrozen_reads, 0);
+}
+
+/// Why a base package at an unfrozen commit was not read, said as it is:
+/// not served (403: an untrusted entry is read only at released versions),
+/// not there (404: is it pushed?); the way past names --upgrade.
+#[test]
+fn an_unread_base_package_says_why() {
+    let it = admbase_unfrozen("^1.0");
+    it.fake.lock().unwrap().refuse_at.push(it.a1.clone());
+    let err = format!("{:#}", it.setup.add(&["max/app"], yes()).unwrap_err());
+    assert!(err.contains("will not read et/admbase at that commit (untrusted entries are read only at released versions)"), "{err}");
+    assert!(err.contains("--upgrade"), "{err}");
+    let it = admbase_unfrozen("^1.0");
+    it.fake.lock().unwrap().snapshots.clear();
+    let err = format!("{:#}", it.setup.add(&["max/app"], yes()).unwrap_err());
+    assert!(err.contains(&format!("has no commit {} of et/admbase: is it pushed?", &it.a1[..12])), "{err}");
+    let _ = (&it.a2, &it.log);
+}
+
+/// `add` brought in max/lib for a thorn it gave a base package at an
+/// unfrozen commit (that thorn's claim needs it): `remove max/lib` reads the
+/// base package there and refuses, naming it.
+#[test]
+fn remove_reads_an_unfrozen_base_package_cactup_gave_thorns() {
+    let it = admbase_unfrozen("^1.0");
+    let s = &it.setup;
+    let libdir = tempfile::tempdir().unwrap();
+    let (lurl, l) = upstream(libdir.path(), "lib", &[("Lib/interface.ccl", "IMPLEMENTS: lib\n")]);
+    {
+        let mut f = it.fake.lock().unwrap();
+        f.packages.push(("max/lib".into(), vec![version("1.0.0", &l, &lurl, "Lib", &["Lib"], "[]")]));
+        let claims = format!(
+            r#"[{{"kind":"dependency","target":"max/lib","range":"^1.0","needs":["Lib"],"needed-by":["StaticConformal"],"note":null}}]"#
+        );
+        let (_, _, json) = &mut f.snapshots[0];
+        let read: serde_json::Value = serde_json::from_str(json).unwrap();
+        let mut read = read;
+        read["claims"] = serde_json::from_str(&claims).unwrap();
+        *json = read.to_string();
+    }
+    s.add(&["max/app"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    assert!(s.added().iter().any(|(p, _)| p == "max/lib"), "{:?}", s.added());
+    let err = format!("{:#}", s.remove(&["max/lib"], remove_yes()).unwrap_err());
+    assert!(err.contains("Other packages depend on max/lib") && err.contains("et/admbase"), "{err}");
+    let _ = (&it.a2, &it.log);
+}
