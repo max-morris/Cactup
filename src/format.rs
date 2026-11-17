@@ -1090,9 +1090,6 @@ mod tests {
         assert!(!is_unparsable(&parse::<Toy, _>("name = 1\n", path, &TOY).unwrap_err()));
     }
 
-    /// Put-back recurses into maps only. A key inside an array element is
-    /// dropped (it could land on the wrong element); unknown keys keep their
-    /// place in the file; an unknown map the writer also lacks is copied whole.
     /// A sub-record named by its keys, literally: a key with a `.` in it is
     /// one key, and only the record named is replaced whole; its sibling
     /// keeps what a newer binary put in it.
@@ -1142,6 +1139,9 @@ mod tests {
         assert!(future("a.b"));
     }
 
+    /// Put-back recurses into maps only. A key inside an array element is
+    /// dropped (it could land on the wrong element); unknown keys keep their
+    /// place in the file; an unknown map the writer also lacks is copied whole.
     #[test]
     fn put_back_is_maps_only_and_keeps_the_order() {
         let dir = tempfile::tempdir().unwrap();

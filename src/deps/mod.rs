@@ -45,7 +45,7 @@ pub use plan::{
 #[allow(unused_imports)]
 pub use refusal::{Live, Refusal, Unmet};
 #[allow(unused_imports)]
-pub use remove::{is_requested, plan_remove, AddedFor, Orphan, RemovePlan};
+pub use remove::{is_requested, plan_remove, AddedFor, Extension, Orphan, RemovePlan};
 #[allow(unused_imports)]
 pub use resolve::resolve;
 

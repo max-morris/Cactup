@@ -208,7 +208,7 @@ impl Registry {
     /// Each package read at a commit, in parallel: what the Cactarium serves
     /// there (the version that froze it, or the package read now), or `None`
     /// when it has no such package or commit.
-    pub(crate) fn read_at(&mut self, at: &[(PkgId, String)]) -> Res<Vec<Option<Release>>> {
+    pub(crate) fn read_at(&mut self, at: &[(PkgId, String)]) -> Res<Vec<Read>> {
         let name = |(id, commit): &(PkgId, String)| format!("{id}#{}", commit.get(..12).unwrap_or(commit));
         let answers = self.wave(at, "packages", name, "reading it at its commit", |(id, commit), c| {
             let (id, commit) = (id.clone(), commit.clone());
@@ -219,10 +219,20 @@ impl Registry {
         })?;
         let mut out = Vec::with_capacity(at.len());
         for ((id, commit), answer) in at.iter().zip(answers) {
-            let read = answer.with_context(|| format!("Failed to read {id} at {commit}"))?;
-            out.push(match read {
-                Some((version, _)) => Some(Release::from_served(id, &version, self.contact(id))?),
-                None => None,
+            // Rate-limited, or not served to this caller: that package is
+            // unread, the command goes on.
+            let refused = |e: &anyhow::Error| {
+                (e.downcast_ref::<crate::cactarium::Refused>())
+                    .filter(|r| r.status == 429 || r.status == 403)
+                    .map(|r| r.message.clone())
+            };
+            out.push(match answer {
+                Ok(Some((version, _))) => Read::Found(Release::from_served(id, &version, self.contact(id))?),
+                Ok(None) => Read::Missing,
+                Err(e) => match refused(&e) {
+                    Some(why) => Read::Refused(why),
+                    None => return Err(e.context(format!("Failed to read {id} at {commit}"))),
+                },
             });
         }
         Ok(out)
@@ -232,6 +242,16 @@ impl Registry {
     fn contact(&self, id: &PkgId) -> Option<&str> {
         self.contacts.get(id).map(String::as_str)
     }
+}
+
+/// A package read at a commit.
+pub(crate) enum Read {
+    Found(Release),
+    /// No such package or commit.
+    Missing,
+    /// Not answered now (rate-limited, or not served to this caller), with
+    /// the Cactarium's words.
+    Refused(String),
 }
 
 /// What a finished conversation leaves to say.
@@ -355,9 +375,12 @@ pub(crate) struct PresentOptions {
     /// A Cactarium without `/lookup` (older than this cactup) is no error:
     /// every base repo is then taken as no registered package's.
     pub without_lookup: bool,
+    /// Read no base package's release (`--no-deps`: nothing beyond what was
+    /// named): base packages are present with their dependencies unknown.
+    pub no_base_reads: bool,
 }
 
-/// A present package whose release the Cactarium cannot give: what it
+/// An added package whose release the Cactarium cannot give: what it
 /// depends on is unknown.
 #[derive(Clone, Debug)]
 pub(crate) struct Unread {
@@ -365,8 +388,6 @@ pub(crate) struct Unread {
     /// As installed: `owner/name@1.2.0`, or at a commit.
     pub label: String,
     pub why: String,
-    /// An `[[added]]` package (rather than a base repo's).
-    pub added: bool,
 }
 
 impl Unread {
@@ -379,8 +400,12 @@ impl Unread {
 /// The installation as [`deps::resolve`] and [`deps::plan_remove`] see it.
 pub(crate) struct PresentSet {
     pub present: Vec<Present>,
-    /// The present packages whose release could not be read.
+    /// The added packages whose release could not be read.
     pub unread: Vec<Unread>,
+    /// The base packages whose dependencies are unknown: at a commit no
+    /// version froze (normal for a base that follows branches), not read,
+    /// or unreadable now. As installed.
+    pub unchecked: Vec<String>,
 }
 
 /// The installation as [`deps::resolve`] and [`deps::plan_remove`] see it:
@@ -464,32 +489,61 @@ pub(crate) fn present(
         Err(e) => return Err(e),
     };
     let package_of = |info: &PinInfo| info.package.as_deref().and_then(|p| PkgId::parse(p).ok());
+    let info_of = |i: usize| pin_of[i].map(|i| &answers[i]);
     let mapped: Vec<Option<PkgId>> =
-        pin_of.iter().map(|i| i.and_then(|i| package_of(&answers[i])).filter(|id| !id.is_repo())).collect();
+        (0..repos.len()).map(|i| info_of(i).and_then(package_of).filter(|id| !id.is_repo())).collect();
+
+    // An `[[added]]` entry that only gives a base repo's package more thorns:
+    // the same package, in the base's own clone, replacing nothing. Its
+    // thorns live at whatever commit the base has the clone at (compose
+    // writes them so), so it is matched by package and clone, never commit.
+    let extends = |a: &AddedPackage, r: &BaseRepo, id: &PkgId| {
+        a.package == id.as_str() && a.replaces.is_empty() && a.repo == r.name
+    };
+    let extension_of: Vec<Option<usize>> = (repos.iter().zip(&mapped))
+        .map(|(r, id)| id.as_ref().and_then(|id| added.iter().position(|a| extends(a, r, id))))
+        .collect();
 
     // What to read: each added package at its commit (expecting its recorded
-    // version, unless it is at a commit or tip), each mapped base repo at
-    // its commit.
+    // version, unless it is at a commit or tip), an extension excepted (the
+    // base is read for it); each base repo the lookup says a version froze,
+    // at its commit, expecting that version. A base repo at a commit no
+    // version froze is not read: that would read the package now (a fetch
+    // of its repository, rate-limited by the server), for every repo of a
+    // base that follows branches.
     struct Want {
         id: PkgId,
         commit: String,
         version: Option<String>,
     }
     let mut wants: Vec<Want> = Vec::new();
-    for a in added {
+    let mut want_of_added: Vec<Option<usize>> = Vec::new();
+    for (i, a) in added.iter().enumerate() {
         let id = PkgId::parse(&a.package).with_context(|| format!("installation.toml adds {}", a.package))?;
+        if extension_of.contains(&Some(i)) {
+            want_of_added.push(None);
+            continue;
+        }
         let at_commit = crate::commands::add::is_commit(&a.version) || crate::commands::add::is_tip(&a.version);
+        want_of_added.push(Some(wants.len()));
         wants.push(Want { id, commit: a.commit.clone(), version: (!at_commit).then(|| a.version.clone()) });
     }
-    for (r, id) in repos.iter().zip(&mapped) {
-        if let (Some(id), Some(commit)) = (id, &r.commit) {
-            wants.push(Want { id: id.clone(), commit: commit.clone(), version: None });
+    let mut want_of_repo: Vec<Option<usize>> = Vec::new();
+    for (i, (r, id)) in repos.iter().zip(&mapped).enumerate() {
+        let frozen = info_of(i).and_then(|info| info.version.clone());
+        match (id, &r.commit, frozen) {
+            (Some(id), Some(commit), Some(version)) if !options.no_base_reads => {
+                want_of_repo.push(Some(wants.len()));
+                wants.push(Want { id: id.clone(), commit: commit.clone(), version: Some(version) });
+            }
+            _ => want_of_repo.push(None),
         }
     }
     let fits = |r: &Release, w: &Want| {
         r.commit == w.commit && w.version.as_ref().is_none_or(|v| r.at.version().is_some_and(|at| &at.to_string() == v))
     };
     let mut read: Vec<Option<Release>> = vec![None; wants.len()];
+    let mut refused: Vec<Option<String>> = vec![None; wants.len()];
     if options.full {
         reg.load(&wants.iter().map(|w| w.id.clone()).collect::<Vec<_>>())?;
         for (w, slot) in wants.iter().zip(read.iter_mut()) {
@@ -503,11 +557,12 @@ pub(crate) fn present(
     let mut astray: Vec<PkgId> = Vec::new();
     for (i, answer) in missing.into_iter().zip(answers) {
         match answer {
-            Some(r) if fits(&r, &wants[i]) => read[i] = Some(r),
+            Read::Found(r) if fits(&r, &wants[i]) => read[i] = Some(r),
             // Another version froze that commit too (another track): the
-            // recorded one is in the whole list.
-            Some(_) => astray.push(wants[i].id.clone()),
-            None => {}
+            // one recorded, or the one the lookup named, is in the whole list.
+            Read::Found(_) => astray.push(wants[i].id.clone()),
+            Read::Missing => {}
+            Read::Refused(why) => refused[i] = Some(why),
         }
     }
     if !astray.is_empty() {
@@ -518,57 +573,44 @@ pub(crate) fn present(
             }
         }
     }
-    let why = |w: &Want| match &w.version {
-        Some(v) => format!("the Cactarium does not serve version {v} at commit {}", short(&w.commit)),
-        None => format!("the Cactarium cannot read it at commit {}", short(&w.commit)),
+    let why = |i: usize| match (&refused[i], &wants[i].version) {
+        (Some(why), _) => format!("the Cactarium did not answer: {why}"),
+        (None, Some(v)) => format!("the Cactarium does not serve version {v} at commit {}", short(&wants[i].commit)),
+        (None, None) => format!("the Cactarium cannot read it at commit {}", short(&wants[i].commit)),
     };
 
     let mut out: Vec<Present> = Vec::new();
     let mut unread: Vec<Unread> = Vec::new();
+    let mut unchecked: Vec<String> = Vec::new();
     let taken = |out: &[Present], id: &PkgId| out.iter().any(|p| &p.release.id == id);
-    // An `[[added]]` entry that only gives a base repo's package more thorns.
-    let extends = |a: &AddedPackage, r: &BaseRepo, id: &PkgId| {
-        a.package == id.as_str() && a.replaces.is_empty() && a.repo == r.name && r.commit.as_deref() == Some(a.commit.as_str())
-    };
-    let mut merged: BTreeSet<usize> = BTreeSet::new();
-    let mut next = added.len();
-    for (r, id) in repos.iter().zip(&mapped) {
+    for (i, (r, id)) in repos.iter().zip(&mapped).enumerate() {
         let mut checkouts: Vec<(&str, &str)> =
             r.thorns.iter().map(|c| (c.checkout.as_str(), c.repo_path.as_deref().unwrap_or(""))).collect();
         let commit = r.commit.clone().unwrap_or_default();
         let url = r.url.clone().unwrap_or_default();
+        let flesh = info_of(i).is_some_and(|info| info.flesh);
         let mut libraries = Vec::new();
-        let w = id.as_ref().map(|_| {
-            next += 1;
-            next - 1
-        });
-        let release = match (id, w) {
+        let release = match id {
             // Two base repos of one package: the second is a repo of its own.
-            (Some(id), _) if taken(&out, id) => unknown(&PkgId::repo(&r.name), &commit, &url, false, &checkouts, local),
-            (Some(id), Some(w)) => {
-                if let Some(i) = added.iter().position(|a| extends(a, r, id)) {
-                    merged.insert(i);
-                    let a = &added[i];
+            Some(id) if taken(&out, id) => unknown(&PkgId::repo(&r.name), &commit, &url, false, &checkouts, local),
+            Some(id) => {
+                if let Some(e) = extension_of[i] {
+                    let a = &added[e];
                     checkouts.extend(a.thorns.iter().map(|t| (t.checkout.as_str(), t.repo_path.as_str())));
                     libraries = installed_libraries(a);
                 }
-                match &read[w] {
-                    Some(rel) => with_local_facts(rel.clone(), &checkouts, local),
+                match want_of_repo[i].and_then(|w| read[w].clone()) {
+                    Some(rel) => with_local_facts(rel, &checkouts, local),
                     None => {
-                        unread.push(Unread {
-                            id: id.clone(),
-                            label: format!("{id}#{}", short(&commit)),
-                            why: why(&wants[w]),
-                            added: false,
-                        });
-                        unknown(id, &commit, &url, r.flesh, &checkouts, local)
+                        unchecked.push(format!("{id}#{}", short(&commit)));
+                        unknown(id, &commit, &url, flesh, &checkouts, local)
                     }
                 }
             }
             // An unmapped flesh has no thorns to clash with: nothing the
             // resolver can speak of.
-            _ if r.thorns.is_empty() => continue,
-            _ => unknown(&PkgId::repo(&r.name), &commit, &url, false, &checkouts, local),
+            None if r.thorns.is_empty() => continue,
+            None => unknown(&PkgId::repo(&r.name), &commit, &url, false, &checkouts, local),
         };
         let enabled = checkouts.iter().map(|(c, _)| thorn_of(c).to_owned()).collect();
         out.push(Present { release, enabled, origin: Origin::Base { repo: r.name.clone() }, libraries });
@@ -577,34 +619,31 @@ pub(crate) fn present(
     // merely extend): the added one is that package, the repo's remaining
     // checkouts a pseudo-package of their own.
     for (i, a) in added.iter().enumerate() {
-        if merged.contains(&i) {
-            continue;
-        }
-        let w = &wants[i];
-        if let Some(p) = out.iter_mut().find(|p| p.release.id == w.id && matches!(p.origin, Origin::Base { .. })) {
+        let Some(w) = want_of_added[i] else { continue };
+        let id = &wants[w].id;
+        if let Some(p) = out.iter_mut().find(|p| &p.release.id == id && matches!(p.origin, Origin::Base { .. })) {
             let Origin::Base { repo } = &p.origin else { unreachable!() };
             p.release.id = PkgId::repo(repo);
             p.release.at = At::Unknown(p.release.commit.clone());
             p.release.claims.clear();
-            unread.retain(|u| u.added || u.id != w.id);
         }
-        if taken(&out, &w.id) {
-            bail!("installation.toml adds {} twice", w.id);
+        if taken(&out, id) {
+            bail!("installation.toml adds {id} twice");
         }
         let checkouts: Vec<(&str, &str)> =
             a.thorns.iter().map(|t| (t.checkout.as_str(), t.repo_path.as_str())).collect();
-        let release = match &read[i] {
+        let release = match &read[w] {
             Some(r) => with_local_facts(r.clone(), &checkouts, local),
             None => {
                 let label = crate::commands::add::describe(&a.package, &a.version);
-                unread.push(Unread { id: w.id.clone(), label, why: why(w), added: true });
-                unknown(&w.id, &a.commit, &a.url, false, &checkouts, local)
+                unread.push(Unread { id: id.clone(), label, why: why(w) });
+                unknown(id, &a.commit, &a.url, false, &checkouts, local)
             }
         };
         let enabled = checkouts.iter().map(|(c, _)| thorn_of(c).to_owned()).collect();
         out.push(Present { release, enabled, origin: Origin::Added, libraries: installed_libraries(a) });
     }
-    Ok(PresentSet { present: out, unread })
+    Ok(PresentSet { present: out, unread, unchecked })
 }
 
 /// An added package's libraries, as the resolver holds them.

@@ -28,6 +28,12 @@ pub const BLOCK_HEADER: &str = "# Added by `cactup add` (generated; change it wi
 /// component), then one section per added package, each pinned. No packages:
 /// the base itself. The result must parse — a checkout two places claim is
 /// the parser's duplicate error, not a silent winner.
+///
+/// A package that only adds thorns to a clone the base already has (the
+/// same repository, replacing nothing) follows the base's source for that
+/// clone, branch and pin: its thorns live at whatever commit the base has
+/// the clone at, so a refetch that moves the base moves them too, and one
+/// clone keeps one source.
 pub fn compose(base: &str, added: &[AddedPackage]) -> Res<String> {
     if added.is_empty() {
         return Ok(base.to_owned());
@@ -50,14 +56,30 @@ pub fn compose(base: &str, added: &[AddedPackage]) -> Res<String> {
     out.push_str(BLOCK_HEADER);
     out.push('\n');
     let root = list.root();
+    let normalized = crate::fetch::git::normalize_url;
+    let base_source = |a: &AddedPackage| {
+        (a.replaces.is_empty())
+            .then(|| {
+                list.components().iter().find(|c| {
+                    c.repo == a.repo && c.url.as_deref().is_some_and(|u| normalized(u) == normalized(&a.url))
+                })
+            })
+            .flatten()
+            .map(|c| (c.branch.clone(), c.commit.clone()))
+    };
     let components: Vec<Component> = added
         .iter()
         .flat_map(|a| {
+            let follows = base_source(a);
             a.thorns.iter().map(move |t| {
                 let repo = clone_of(&a.repo, t);
                 // A branch tip follows its default branch (named in `tag`):
                 // no pin, so a refetch moves it with the tip.
                 let tip = is_tip(&a.version);
+                let (branch, commit) = match &follows {
+                    Some(source) => source.clone(),
+                    None => (a.tag.clone(), (!tip).then(|| a.commit.clone())),
+                };
                 Component {
                     ty: ComponentType::Git,
                     target: format!("{root}/arrangements"),
@@ -68,8 +90,8 @@ pub fn compose(base: &str, added: &[AddedPackage]) -> Res<String> {
                     anon_user: None,
                     anon_pass: None,
                     repo_path: (!t.repo_path.is_empty()).then(|| t.repo_path.clone()),
-                    branch: a.tag.clone(),
-                    commit: (!tip).then(|| a.commit.clone()),
+                    branch,
+                    commit,
                     checksum: None,
                     fetch_only: false,
                     repo,
@@ -646,7 +668,11 @@ fn plan_add(
     // Without --no-deps an older Cactarium (no lookup) cannot map the base;
     // with it, the base is taken as repos of no known package, as before
     // dependencies were resolved.
-    let options = PresentOptions { full: flags.upgrade || flags.upgrade_all, without_lookup: flags.no_deps };
+    let options = PresentOptions {
+        full: flags.upgrade || flags.upgrade_all,
+        without_lookup: flags.no_deps,
+        no_base_reads: flags.no_deps,
+    };
     let set = match super::resolution::present(&mut reg, install_root, base, &meta.added, local, &options) {
         Ok(set) => set,
         Err(e) if e.downcast_ref::<crate::cactarium::OldCactarium>().is_some() => {
@@ -663,22 +689,41 @@ fn plan_add(
     let finished = reg.finish();
     let plan = plan.map_err(|e| super::resolution::refusal_text(e, &finished))?;
     refuse_flesh(&plan)?;
-    // A present package whose release cannot be read hides what it depends
+    // An added package whose release cannot be read hides what it depends
     // on: no present package moves beside it, unless --no-deps says the
-    // dependencies are the user's business.
-    // One the plan itself moves or re-adds hides nothing any more.
+    // dependencies are the user's business. One the plan itself moves,
+    // re-adds or replaces hides nothing any more.
     let renewed: Vec<&deps::PkgId> = (plan.steps.iter())
         .filter_map(|s| match s {
             Step::Upgrade { to, .. } => Some(&to.id),
             Step::Readd { release, .. } => Some(&release.id),
+            Step::Replace { replaced: deps::Replaced::Added { id }, .. } => Some(id),
             _ => None,
         })
         .collect();
+    let moved: Vec<String> = (plan.steps.iter())
+        .filter_map(|s| match s {
+            Step::Upgrade { to, .. } => Some(to.id.to_string()),
+            Step::Replace { replaced: deps::Replaced::Base { repo }, .. } => Some(format!("base repo {repo}")),
+            Step::Replace { replaced: deps::Replaced::Added { id }, .. } => Some(id.to_string()),
+            _ => None,
+        })
+        .collect();
+    // Base packages whose dependencies are unknown are normal (a base that
+    // follows branches): said once, and only when the plan moves something
+    // they might need where it is.
+    if !set.unchecked.is_empty() && !moved.is_empty() {
+        let line = format!(
+            "Cannot check that {} base package{} still fit after {} moves: their dependencies are unknown here.",
+            set.unchecked.len(),
+            if set.unchecked.len() == 1 { "" } else { "s" },
+            moved.join(", ")
+        );
+        println!("{}", line.yellow());
+    }
     let unread: Vec<&super::resolution::Unread> = set.unread.iter().filter(|u| !renewed.contains(&&u.id)).collect();
     if !unread.is_empty() {
-        let moves = flags.upgrade
-            || flags.upgrade_all
-            || plan.steps.iter().any(|s| matches!(s, Step::Upgrade { .. } | Step::Replace { .. }));
+        let moves = flags.upgrade || flags.upgrade_all || !moved.is_empty();
         if moves && !flags.no_deps {
             bail!(
                 "Cactup cannot tell what these installed packages depend on, so it will not move installed packages \
@@ -693,6 +738,55 @@ fn plan_add(
         );
     }
     Ok((plan, set.present))
+}
+
+/// The `[[added]]` entries giving a base repo's package more thorns, brought
+/// in rather than named, of which `specs` name the package whole or one of
+/// those thorns.
+fn named_extensions(
+    specs: &[String],
+    present: &[crate::deps::Present],
+    meta: &crate::installation::InstallationMeta,
+) -> Vec<String> {
+    let believed = super::resolution::added_for(meta);
+    let mut out = Vec::new();
+    for spec in specs {
+        let Ok(named) = crate::deps::NamedSpec::parse(spec) else { continue };
+        let Some(a) = meta.added.iter().find(|a| a.package == named.id.as_str()) else { continue };
+        let base = present.iter().any(|p| p.release.id == named.id && matches!(p.origin, crate::deps::Origin::Base { .. }));
+        let thorn_of = |t: &AddedThorn| t.checkout.rsplit('/').next().unwrap_or(&t.checkout).to_owned();
+        let names_one = named.thorns.as_ref().is_none_or(|ts| {
+            ts.iter().any(|n| a.thorns.iter().any(|t| thorn_of(t).eq_ignore_ascii_case(n)))
+        });
+        let requested = crate::deps::is_requested(believed.get(&named.id), &a.commit);
+        if base && names_one && !requested && !out.contains(&a.package) {
+            out.push(a.package.clone());
+        }
+    }
+    out
+}
+
+/// Records `promoted` as named, and says so.
+fn keep_as_named(meta: &mut crate::installation::InstallationMeta, promoted: &[String]) {
+    for name in promoted {
+        let Some(a) = meta.added.iter().find(|a| &a.package == name) else { continue };
+        let entry = meta.added_for.entry(name.clone()).or_insert_with(|| crate::installation::AddedFor {
+            requested: true,
+            by: Vec::new(),
+            for_commit: Some(a.commit.clone()),
+            choices: Vec::new(),
+        });
+        entry.requested = true;
+        let thorns: Vec<&str> = a.thorns.iter().map(|t| t.checkout.as_str()).collect();
+        println!("Kept {} of {} as named: they stay when what brought them in goes.", thorns.join(", "), name.bold());
+    }
+}
+
+/// A yanked library the plan places: a dependency named exactly that
+/// version (a range never takes a yanked one).
+fn library_yank_warning(label: &str, reason: Option<&str>, by: &[&str]) -> String {
+    let why = reason.map(|r| format!(": {r}")).unwrap_or_default();
+    format!("The library {label} is yanked{why}. Using it because {} asks for exactly that version.", by.join(" and "))
 }
 
 /// `label is yanked: reason. Using it …`, for a release the plan takes
@@ -725,11 +819,21 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
         dry_run: flags.dry_run,
         interactive: crate::cactarium::interactive(),
     };
+    // Thorns of a base repo's package that a dependency brought in, now
+    // named: they stay when what brought them in goes.
+    let promoted = named_extensions(specs, &present, &start.meta);
     if plan.is_empty() {
         for (_, line) in plan.lines(&command).iter().filter(|(k, _)| *k != crate::deps::LineKind::Header) {
             println!("{}", line.trim_start());
         }
-        println!("Nothing to add.");
+        if promoted.is_empty() || flags.dry_run {
+            println!("Nothing to add.");
+            return Ok(());
+        }
+        let locked = start.inst.locked()?;
+        let mut meta = start.recheck(&locked)?;
+        keep_as_named(&mut meta, &promoted);
+        locked.set_meta(&meta)?;
         return Ok(());
     }
     // Everything that can refuse the plan, before anyone is asked about it.
@@ -747,7 +851,8 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
         }
     }
     for l in plan.libraries.iter().filter(|l| l.release.yanked && l.placements.iter().any(|p| p.new)) {
-        println!("{}", yank_warning(&l.release.label(), l.release.yank_reason.as_deref()).yellow());
+        let by: Vec<&str> = l.placements.iter().filter(|p| p.new).map(|p| p.by_label.as_str()).collect();
+        println!("{}", library_yank_warning(&l.release.label(), l.release.yank_reason.as_deref(), &by).yellow());
     }
     confirm_untrusted(&plan, ctx.globals.risky_allow_untrusted_artifacts, how.interactive)?;
 
@@ -785,8 +890,13 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
         }
         let merged = record.merge(old, old_commit.map(String::as_str));
         meta.added_for.insert(id.clone(), super::resolution::record_of(&merged));
-        rebuilt.push(id);
+        // Made anew only when written for another commit than before (or for
+        // a package that had none); more thorns at the same commit edit it.
+        if old_commit != Some(&package.commit) || old.is_none() {
+            rebuilt.push(id);
+        }
     }
+    keep_as_named(&mut meta, &promoted);
     let composed = compose(&start.pristine, &meta.added)?;
 
     // Fetch those repos (each package's own, and its libraries') — never
@@ -963,10 +1073,18 @@ fn records_of(
                             .find(|a| a.package == id.as_str())
                             .cloned()
                             .ok_or_else(|| anyhow!("{id} has no record in this installation"))?;
-                        for t in record_of_release(&p.release, thorns, plan)?.thorns {
+                        let more = record_of_release(&p.release, thorns, plan)?;
+                        for t in more.thorns {
                             if !package.thorns.iter().any(|have| have.checkout == t.checkout) {
                                 package.thorns.push(t);
                             }
+                        }
+                        // More thorns of a base repo's package: the entry is
+                        // at the release the base has now.
+                        if matches!(p.origin, Origin::Base { .. }) {
+                            package.version = more.version;
+                            package.commit = more.commit;
+                            package.tag = more.tag;
                         }
                         out.push(package);
                     }
@@ -1211,7 +1329,7 @@ fn plan_remove_with_deps(
     base: &thornlist::Thornlist,
     targets: &[crate::deps::PkgId],
 ) -> Res<crate::deps::RemovePlan> {
-    use crate::deps::{self, is_requested, Orphan, Origin, PkgId, Refusal, Rules};
+    use crate::deps::{self, Extension, Origin, PkgId, Rules};
     let named: Vec<String> = targets.iter().map(ToString::to_string).collect();
     // Without the Cactarium nothing can say what depends on what.
     let way = format!(
@@ -1227,8 +1345,7 @@ fn plan_remove_with_deps(
     let set = set.map_err(|e| needs_the_cactarium(e, &way))?;
     // A remaining added package whose release cannot be read hides what it
     // needs: nothing can be said to be unneeded beside it.
-    let unread: Vec<&super::resolution::Unread> =
-        set.unread.iter().filter(|u| u.added && !targets.contains(&u.id)).collect();
+    let unread: Vec<&super::resolution::Unread> = set.unread.iter().filter(|u| !targets.contains(&u.id)).collect();
     if !unread.is_empty() {
         bail!(
             "Cactup cannot tell what these installed packages depend on, so it cannot tell what still needs {}:{}\n\
@@ -1237,86 +1354,33 @@ fn plan_remove_with_deps(
             unread_lines(&unread)
         );
     }
-    let base_unread: Vec<&str> = set.unread.iter().filter(|u| !u.added).map(|u| u.label.as_str()).collect();
-    if !base_unread.is_empty() {
-        let line = format!("Cannot check what {} need: the Cactarium cannot read them.", base_unread.join(", "));
+    let added_for = super::resolution::added_for(&start.meta);
+    let extensions: Vec<Extension> = (start.meta.added.iter())
+        .filter_map(|a| {
+            let id = PkgId::parse(&a.package).ok()?;
+            let base = set.present.iter().any(|p| p.release.id == id && matches!(p.origin, Origin::Base { .. }));
+            base.then(|| Extension {
+                id,
+                thorns: a.thorns.iter().map(|t| t.checkout.rsplit('/').next().unwrap_or(&t.checkout).to_owned()).collect(),
+                label: describe(&a.package, &a.version),
+                commit: a.commit.clone(),
+            })
+        })
+        .collect();
+    // Claim overrides kept in the installation join with `cactup claims` (P4).
+    let plan = deps::plan_remove(&set.present, &added_for, targets, &Rules::default(), false, &extensions)
+        .map_err(|r| anyhow!("{r}"))?;
+    // Base packages whose dependencies are unknown are normal (a base that
+    // follows branches): said once, and only when packages nobody named go.
+    if !set.unchecked.is_empty() && !plan.orphans.is_empty() {
+        let line = format!(
+            "Cannot check that {} base package{} need none of what goes along: their dependencies are unknown here.",
+            set.unchecked.len(),
+            if set.unchecked.len() == 1 { "" } else { "s" }
+        );
         println!("{}", line.yellow());
     }
-    let added_for = super::resolution::added_for(&start.meta);
-    let extension = |id: &PkgId| {
-        set.present.iter().any(|p| &p.release.id == id && matches!(p.origin, Origin::Base { .. }))
-            && start.meta.added.iter().any(|a| a.package == id.as_str())
-    };
-    let thorns_of = |id: &PkgId| -> Vec<String> {
-        let a = start.meta.added.iter().find(|a| a.package == id.as_str());
-        a.map(|a| a.thorns.iter().map(|t| t.checkout.rsplit('/').next().unwrap_or(&t.checkout).to_owned()).collect())
-            .unwrap_or_default()
-    };
-    let label_of = |id: &PkgId| {
-        let a = start.meta.added.iter().find(|a| a.package == id.as_str());
-        a.map_or_else(|| id.to_string(), |a| describe(&a.package, &a.version))
-    };
-    let (ext, plain): (Vec<PkgId>, Vec<PkgId>) = targets.iter().cloned().partition(|id| extension(id));
-    // Claim overrides kept in the installation join with `cactup claims` (P4).
-    let mut plan =
-        deps::plan_remove(&set.present, &added_for, &plain, &Rules::default(), false).map_err(|r| anyhow!("{r}"))?;
-    let mut gone: BTreeSet<PkgId> = plan.removed.iter().chain(plan.orphans.iter().map(|o| &o.id)).cloned().collect();
-    let mut dependents = Vec::new();
-    for id in &ext {
-        dependents.extend(needers(&set.present, &gone, id, &thorns_of(id)));
-    }
-    if !dependents.is_empty() {
-        bail!("{}", Refusal::HasDependents { removed: ext.clone(), dependents });
-    }
-    for id in ext {
-        plan.removed_labels.push(label_of(&id));
-        plan.removed.push(id.clone());
-        gone.insert(id);
-    }
-    for a in &start.meta.added {
-        let Ok(id) = PkgId::parse(&a.package) else { continue };
-        if gone.contains(&id) || !extension(&id) || is_requested(added_for.get(&id), &a.commit) {
-            continue;
-        }
-        if needers(&set.present, &gone, &id, &thorns_of(&id)).is_empty() {
-            let by = added_for.get(&id).map(|f| f.by.clone()).unwrap_or_default();
-            plan.orphans.push(Orphan { id: id.clone(), label: label_of(&id), by });
-        }
-    }
     Ok(plan)
-}
-
-/// The present packages, other than `gone` and `id` itself, whose current
-/// dependencies on `id` (for the thorns they have enabled) need any of
-/// `thorns`; a dependency naming no thorns needs them all. Each as
-/// (dependent, the dependency).
-fn needers(
-    present: &[crate::deps::Present],
-    gone: &BTreeSet<crate::deps::PkgId>,
-    id: &crate::deps::PkgId,
-    thorns: &[String],
-) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    let hit = |needs: &[String]| needs.is_empty() || needs.iter().any(|n| thorns.iter().any(|t| t.eq_ignore_ascii_case(n)));
-    for p in present.iter().filter(|p| !gone.contains(&p.release.id) && &p.release.id != id) {
-        for c in p.release.claims.iter().filter(|c| c.kind == "dependency" && c.into.is_none()) {
-            let applies = c.needed_by.is_empty()
-                || c.needed_by.iter().any(|n| p.enabled.iter().any(|e| e.eq_ignore_ascii_case(n)));
-            if !applies {
-                continue;
-            }
-            let needs = if c.alternatives.is_empty() {
-                (c.target == id.as_str() && hit(&c.needs)).then_some(&c.needs)
-            } else {
-                c.alternatives.iter().find(|a| a.target == id.as_str() && hit(&a.needs)).map(|a| &a.needs)
-            };
-            if needs.is_some() {
-                let range = c.range.as_deref().map(|r| format!("@{r}")).unwrap_or_default();
-                out.push((p.release.label(), format!("{}{range}", c.target)));
-            }
-        }
-    }
-    out
 }
 
 /// `cactup remove owner/name…` (§8.11): undo adds. Unless `--no-deps`, it
@@ -1352,7 +1416,7 @@ pub fn remove(ctx: &Ctx, packages: &[String], flags: &RemoveFlags) -> Res<()> {
     }
     let base = thornlist::parse(&start.pristine)?;
     let plan = if flags.no_deps {
-        deps::plan_remove(&[], &Default::default(), &targets, &Rules::default(), true)
+        deps::plan_remove(&[], &Default::default(), &targets, &Rules::default(), true, &[])
             .map_err(|r| anyhow!("{r}"))?
     } else {
         plan_remove_with_deps(ctx, &start, &base, &targets)?
@@ -1596,16 +1660,37 @@ mod tests {
     /// section names that branch and no commit, so a refetch moves it.
     #[test]
     fn a_branch_tip_is_written_unpinned() {
-        let mut tip = package("carpetx", &[("CarpetX/Arith", "$2")], &[]);
+        let mut tip = package("spacetimex", &[("SpacetimeX/Z4c", "$2")], &[]);
         tip.version = "head".into();
         tip.tag = Some("main".into());
         let out = compose(BASE, &[tip]).unwrap();
         let added = &out[out.find(BLOCK_HEADER).unwrap()..];
         assert!(!added.contains("!REPO_COMMIT"), "{added}");
         let list = thornlist::parse(&out).unwrap();
-        let arith = list.components().iter().find(|c| c.checkout == "CarpetX/Arith").unwrap();
-        assert_eq!((arith.commit.as_deref(), arith.branch.as_deref()), (None, Some("main")));
+        let z4c = list.components().iter().find(|c| c.checkout == "SpacetimeX/Z4c").unwrap();
+        assert_eq!((z4c.commit.as_deref(), z4c.branch.as_deref()), (None, Some("main")));
         assert!(is_tip("master") && !is_tip("1.0.0"));
+    }
+
+    /// More thorns in a clone the base has (the same repository, replacing
+    /// nothing) follow the base's source for it, whatever commit they were
+    /// recorded at: a refetch that moves the base moves them, and one clone
+    /// keeps one source.
+    #[test]
+    fn more_thorns_of_a_base_clone_follow_the_base() {
+        let pinned = BASE.replace(
+            "!URL = https://x/carpetx.git\n",
+            &format!("!URL = https://x/carpetx.git\n!REPO_BRANCH = main\n!REPO_COMMIT = {}\n", "b".repeat(40)),
+        );
+        let more = package("carpetx", &[("CarpetX/Arith", "$2")], &[]);
+        let list = thornlist::parse(&compose(&pinned, std::slice::from_ref(&more)).unwrap()).unwrap();
+        let arith = list.components().iter().find(|c| c.checkout == "CarpetX/Arith").unwrap();
+        assert_eq!((arith.commit.as_deref(), arith.branch.as_deref()), (Some(&*"b".repeat(40)), Some("main")));
+        // Replacing the repo, it is its own source.
+        let fork = package("carpetx", &[("CarpetX/CarpetX", "$2")], &["carpetx"]);
+        let list = thornlist::parse(&compose(&pinned, &[fork]).unwrap()).unwrap();
+        let carpetx = list.components().iter().find(|c| c.checkout == "CarpetX/CarpetX").unwrap();
+        assert_eq!(carpetx.commit.as_deref(), Some(&*"5".repeat(40)));
     }
 
     /// Registry names become paths and thornlist words: anything but plain
@@ -2442,6 +2527,10 @@ mod tests {
             "et/x@1.0.0 is yanked: breaks Loop. Using it because it was asked for exactly that version."
         );
         assert!(yank_warning("et/x@1.0.0", None).starts_with("et/x@1.0.0 is yanked. Using"));
+        assert_eq!(
+            library_yank_warning("et/fuka@1.0.0", None, &["et/kadath@2.0.0"]),
+            "The library et/fuka@1.0.0 is yanked. Using it because et/kadath@2.0.0 asks for exactly that version."
+        );
     }
 
     /// `cactup add` again at a version that moves FUKA to `ext/fuka` and also

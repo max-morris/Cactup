@@ -50,6 +50,12 @@ struct Fake {
     providers: String,
     lookup: bool,
     providers_endpoint: bool,
+    /// Reads at a commit no version froze so far: the real server reads the
+    /// package now (a fetch of its repository), at most 12 a minute per
+    /// address, then answers 429.
+    unfrozen_reads: usize,
+    /// Commits whose reads answer 403 (not served to this caller).
+    refuse_at: Vec<String>,
 }
 
 /// A fake Cactarium's state, changeable while it serves.
@@ -63,6 +69,8 @@ impl Fake {
             providers: r#"{"providers":[]}"#.to_owned(),
             lookup: true,
             providers_endpoint: true,
+            unfrozen_reads: 0,
+            refuse_at: Vec::new(),
         }
     }
 
@@ -93,7 +101,7 @@ impl Fake {
         (base, log, state)
     }
 
-    fn answer(&self, path: &str, body: &[u8]) -> (&'static str, String, Vec<u8>) {
+    fn answer(&mut self, path: &str, body: &[u8]) -> (&'static str, String, Vec<u8>) {
         let ok = |body: String| ("200 OK", "api-generation: 1\r\nx-cactarium-untrusted: false\r\n".to_owned(), body.into_bytes());
         let missing = || {
             let body = r#"{"error":{"code":"not-found","message":"No such package"}}"#;
@@ -126,8 +134,11 @@ impl Fake {
                 .map(|p| {
                     let known = self.pins.iter().find(|(url, _, _)| *url == p.url);
                     let package = known.map_or("null".to_owned(), |(_, pkg, _)| format!("\"{pkg}\""));
-                    let version =
-                        known.and_then(|(_, _, v)| v.as_ref()).map_or("null".to_owned(), |v| format!("\"{v}\""));
+                    // The version that froze the commit, as the server says:
+                    // null when none did.
+                    let version = known
+                        .and_then(|(_, pkg, _)| self.frozen(pkg, &p.commit))
+                        .map_or("null".to_owned(), |v| format!("\"{v}\""));
                     // The real server often cannot say whether its mirror has
                     // the commit: null.
                     format!(
@@ -151,12 +162,38 @@ impl Fake {
             if at.is_empty() {
                 return ok(format!(r#"{{"slug":"{id}","versions":[{}]}}"#, versions.join(",")));
             }
-            return match versions.iter().find(|v| v.contains(&format!("\"commit\":\"{at}"))) {
-                Some(v) => ok(v.clone()),
-                None => missing(),
-            };
+            if self.refuse_at.iter().any(|c| c == at) {
+                let body = r#"{"error":{"code":"forbidden","message":"not served: the package isn't trusted"}}"#;
+                return ("403 Forbidden", "api-generation: 1\r\n".to_owned(), body.as_bytes().to_vec());
+            }
+            // Several versions at one commit (tracks): this fake answers the
+            // last listed, as a server might any of them.
+            if let Some(v) = versions.iter().rev().find(|v| v.contains(&format!("\"commit\":\"{at}"))) {
+                return ok(v.clone());
+            }
+            self.unfrozen_reads += 1;
+            if self.unfrozen_reads > 12 {
+                let body = r#"{"error":{"code":"rate-limited","message":"Too many requests; try again in a minute"}}"#;
+                return ("429 Too Many Requests", "api-generation: 1\r\n".to_owned(), body.as_bytes().to_vec());
+            }
+            return missing();
         }
         no_route()
+    }
+}
+
+impl Fake {
+    /// The version of `package` that froze `commit`, if one did.
+    /// On the default track first, as the server's lookup answers.
+    fn frozen(&self, package: &str, commit: &str) -> Option<String> {
+        let (_, versions) = self.packages.iter().find(|(p, _)| p == package)?;
+        let label = |v: &String| {
+            let start = v.find("\"version\":\"")? + "\"version\":\"".len();
+            Some(v[start..].split('"').next()?.to_owned())
+        };
+        let at: Vec<String> =
+            versions.iter().filter(|v| v.contains(&format!("\"commit\":\"{commit}\""))).filter_map(label).collect();
+        at.iter().find(|v| !v.contains(':')).or(at.first()).cloned()
     }
 }
 
@@ -463,6 +500,8 @@ fn admbase_with(range: &str, change: impl FnOnce(Fake) -> Fake) -> Admbase {
     let (purl, p) = upstream(tmp.path(), "app", &[("App/interface.ccl", "IMPLEMENTS: app\n")]);
     let (p2url, p2) = upstream(tmp.path(), "app2", &[("App2/interface.ccl", "IMPLEMENTS: app2\n")]);
     let (surl, so) = upstream(tmp.path(), "solo", &[("Solo/interface.ccl", "IMPLEMENTS: solo\n")]);
+    let (p3url, p3) = upstream(tmp.path(), "app3", &[("App3/interface.ccl", "IMPLEMENTS: app3\n")]);
+    let claims3 = format!("[{}]", depends("et/admbase", ">=1.0", &["ADMMacros"]));
     let thorns = ["ADMBase", "ADMCoupling", "StaticConformal", "ADMMacros"];
     let claims = format!("[{}]", depends("et/admbase", range, &["StaticConformal"]));
     let claims2 = format!("[{}]", depends("et/admbase", "^1.0", &["ADMBase", "ADMMacros"]));
@@ -470,6 +509,7 @@ fn admbase_with(range: &str, change: impl FnOnce(Fake) -> Fake) -> Admbase {
         .package("max/app", vec![version("1.0.0", &p, &purl, "App", &["App"], &claims)])
         .package("max/app2", vec![version("1.0.0", &p2, &p2url, "App2", &["App2"], &claims2)])
         .package("max/solo", vec![version("1.0.0", &so, &surl, "Solo", &["Solo"], "[]")])
+        .package("max/app3", vec![version("1.0.0", &p3, &p3url, "App3", &["App3"], &claims3)])
         .package(
             "et/admbase",
             vec![
@@ -895,4 +935,188 @@ fn add_needs_the_pristine_thornlist() {
     let err = format!("{:#}", s.add(&["max/z4c"], yes()).unwrap_err());
     assert!(err.contains("no pristine thornlist to add to"), "{err}");
     let _ = (&it.z, &it.c, &it.log, &it.fake);
+}
+
+/// A base that follows branches: twenty registered repos at commits no
+/// version froze. Reading a package at such a commit makes the server read it
+/// now (a fetch of its repository, 12 a minute): none is read. `add`, `add
+/// --no-deps`, `add --upgrade` and `remove` all go through, each with a
+/// handful of requests.
+#[test]
+fn a_base_at_unfrozen_commits_is_never_read_at_them() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut base = String::new();
+    let mut fake = Fake::new();
+    for i in 0..20 {
+        let name = format!("r{i}");
+        let (url, c) = upstream(tmp.path(), &name, &[(&format!("T{i}/interface.ccl"), "IMPLEMENTS: x\n")]);
+        base.push_str(&section(&url, &c, &[&format!("Arr{i}/T{i}")]));
+        let id = format!("et/{name}");
+        // Its one version froze another commit.
+        let other = format!("{:040x}", i + 1);
+        fake = fake.package(&id, vec![version("1.0.0", &other, &url, &format!("Arr{i}"), &[&format!("T{i}")], "[]")]);
+        fake = fake.pin(&url, &id, None);
+    }
+    let (nurl, n) = upstream(tmp.path(), "new", &[("New/interface.ccl", "IMPLEMENTS: new\n")]);
+    let (cactarium, log, fake) =
+        fake.package("max/new", vec![version("1.0.0", &n, &nurl, "New", &["New"], "[]")]).serve_shared();
+    let s = Setup::new(tmp, &base, &cactarium);
+    let count = |specs: &[&str], flags: AddFlags| {
+        log.lock().unwrap().clear();
+        records(&s, specs, &flags).unwrap_or_else(|e| panic!("{e:#}"));
+        counts(&log)
+    };
+    // [resolve, lookup, whole version lists, one version at a commit, other]
+    assert_eq!(count(&["max/new"], AddFlags::default()), [1, 1, 1, 0, 0]);
+    assert_eq!(count(&["max/new"], AddFlags { no_deps: true, ..AddFlags::default() }), [1, 1, 1, 0, 0]);
+    assert_eq!(count(&["max/new"], AddFlags { upgrade: true, ..AddFlags::default() }), [1, 1, 21, 0, 0]);
+    s.add(&["max/new"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    log.lock().unwrap().clear();
+    s.remove(&["max/new"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    assert_eq!(counts(&log), [0, 1, 0, 1, 0]);
+    assert_eq!(fake.lock().unwrap().unfrozen_reads, 0);
+}
+
+/// A base package's frozen release that the Cactarium will not serve now
+/// (403: not served to this caller; 429 alike) leaves its dependencies
+/// unknown, no failure; replacing it is no move beside an unread package.
+#[test]
+fn a_base_read_refused_leaves_it_unchecked() {
+    let it = admbase("^1.0");
+    let s = &it.setup;
+    it.fake.lock().unwrap().refuse_at.push(it.a1.clone());
+    let replace = AddFlags { replace: true, ..AddFlags::default() };
+    let got = records(s, &["et/admbase/StaticConformal@2.0.0"], &replace).unwrap_or_else(|e| panic!("{e:#}"));
+    assert_eq!(record_of(&got, "et/admbase").0, "2.0.0");
+    records(s, &["max/solo"], &AddFlags::default()).unwrap_or_else(|e| panic!("{e:#}"));
+    let _ = (&it.a2, &it.log);
+}
+
+/// A registered fork in the base (max/carpet-mp, which stands in for
+/// et/carpet) given CarpetSlab for max/d: the extension is held through the
+/// fork, so it cannot be removed while max/d needs it, nor swept as an
+/// orphan when something unrelated goes.
+#[test]
+fn a_base_extension_held_through_a_fork_stays() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (furl, f) = upstream(
+        tmp.path(),
+        "carpet-mp",
+        &[("Carpet/interface.ccl", "IMPLEMENTS: driver\n"), ("CarpetSlab/interface.ccl", "IMPLEMENTS: hyperslab\n")],
+    );
+    let (durl, d) = upstream(tmp.path(), "d", &[("D/interface.ccl", "IMPLEMENTS: d\n")]);
+    let (surl, so) = upstream(tmp.path(), "solo", &[("Solo/interface.ccl", "IMPLEMENTS: solo\n")]);
+    let fork = r#"[{"kind":"fork-of","target":"et/carpet","range":"=2026.5.0","note":null}]"#;
+    let claims = format!("[{}]", depends("et/carpet", "^2026.5", &["CarpetSlab"]));
+    let (cactarium, _) = Fake::new()
+        .package("max/carpet-mp", vec![version("1.0.0", &f, &furl, "Carpet", &["Carpet", "CarpetSlab"], fork)])
+        .package("et/carpet", vec![version("2026.5.0", &"e".repeat(40), "https://x/carpet.git", "Carpet", &["Carpet", "CarpetSlab"], "[]")])
+        .package("max/d", vec![version("1.0.0", &d, &durl, "D", &["D"], &claims)])
+        .package("max/solo", vec![version("1.0.0", &so, &surl, "Solo", &["Solo"], "[]")])
+        .pin(&furl, "max/carpet-mp", None)
+        .serve();
+    let s = Setup::new(tmp, &section(&furl, &f, &["Carpet/Carpet"]), &cactarium);
+    s.add(&["max/d"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    assert!(s.added().contains(&("max/carpet-mp".to_owned(), vec!["Carpet/CarpetSlab".to_owned()])), "{:?}", s.added());
+    assert!(!s.meta().added_for["max/carpet-mp"].requested);
+
+    let err = format!("{:#}", s.remove(&["max/carpet-mp"], remove_yes()).unwrap_err());
+    assert!(err.contains("max/d@1.0.0"), "{err}");
+    s.add(&["max/solo"], yes()).unwrap();
+    s.remove(&["max/solo"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    assert!(s.added().iter().any(|(p, _)| p == "max/carpet-mp"), "{:?}", s.added());
+    // max/d gone, nothing needs it: it goes along.
+    s.remove(&["max/d"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    assert!(s.added().is_empty(), "{:?}", s.added());
+}
+
+/// Naming a thorn a dependency brought into a base package keeps it as
+/// named, with nothing installed again: it stays when that dependency goes.
+#[test]
+fn naming_a_brought_in_base_thorn_keeps_it() {
+    let it = admbase("^1.0");
+    let s = &it.setup;
+    s.add(&["max/app"], yes()).unwrap();
+    assert!(!s.meta().added_for["et/admbase"].requested);
+    s.add(&["et/admbase/StaticConformal"], AddFlags::default()).unwrap_or_else(|e| panic!("{e:#}"));
+    assert!(s.meta().added_for["et/admbase"].requested);
+    s.remove(&["max/app"], remove_yes()).unwrap();
+    assert_eq!(s.added(), [("et/admbase".to_owned(), vec!["ADMBase/StaticConformal".to_owned()])]);
+    let _ = (&it.a1, &it.a2, &it.log, &it.fake);
+}
+
+/// After `inst refetch` moves the base to another commit, the thorns a
+/// dependency gave its package follow it, and are still that package: a
+/// further dependent of it is no clash, and the entry grows at the new
+/// commit.
+#[test]
+fn a_base_extension_follows_a_refetch_of_the_base() {
+    let it = admbase("^1.0");
+    let s = &it.setup;
+    s.add(&["max/app"], yes()).unwrap();
+    let pristine = std::fs::read_to_string(s.inst.source_thornlist()).unwrap();
+    let moved = pristine.replace(&it.a1, &it.a2);
+    let file = s.inst.root.join("moved.th");
+    std::fs::write(&file, &moved).unwrap();
+    let args = match <crate::args::Args as clap::Parser>::try_parse_from(["cactup", "inst", "refetch", file.to_str().unwrap()])
+        .unwrap()
+        .command
+    {
+        crate::args::Commands::Inst(crate::args::InstallationCommand::Refetch(args)) => args,
+        other => panic!("{other:?}"),
+    };
+    super::super::refetch::dispatch(&s.ctx, args).unwrap_or_else(|e| panic!("{e:#}"));
+    assert_eq!(crate::fetch::FetchState::read(&s.inst.root).unwrap().unwrap().repos["admbase"].head, it.a2);
+
+    s.add(&["max/app3"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let meta = s.meta();
+    let admbase = meta.added.iter().find(|a| a.package == "et/admbase").unwrap();
+    let mut thorns: Vec<&str> = admbase.thorns.iter().map(|t| t.checkout.as_str()).collect();
+    thorns.sort();
+    assert_eq!(thorns, ["ADMBase/ADMMacros", "ADMBase/StaticConformal"]);
+    assert_eq!(admbase.commit, it.a2);
+    assert!(s.inst.root.join("Cactus/arrangements/ADMBase/ADMMacros/interface.ccl").is_file());
+    let _ = (&it.log, &it.fake);
+}
+
+/// One commit frozen by two versions (two tracks): the present release is
+/// the one the lookup names, read lazily or in full alike.
+#[test]
+fn the_lookup_s_version_picks_the_track() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (url, c) = upstream(tmp.path(), "two", &[("T/interface.ccl", "IMPLEMENTS: t\n")]);
+    let (cactarium, _) = Fake::new()
+        .package("et/two", vec![version("2.0.0", &c, &url, "Arr", &["T"], "[]"), version("mp:2.0.0", &c, &url, "Arr", &["T"], "[]")])
+        .pin(&url, "et/two", None)
+        .serve();
+    let s = Setup::new(tmp, &section(&url, &c, &["Arr/T"]), &cactarium);
+    let pristine = std::fs::read_to_string(s.inst.source_thornlist()).unwrap();
+    let list = thornlist::parse(&pristine).unwrap();
+    let client = crate::cactarium::Client::new(&s.ctx.db.read().unwrap());
+    for full in [false, true] {
+        let mut reg = super::super::resolution::Registry::new(&client, []);
+        let options = super::super::resolution::PresentOptions { full, ..Default::default() };
+        let set = super::super::resolution::present(&mut reg, &s.inst.root, &list, &[], None, &options);
+        reg.finish();
+        let set = set.unwrap_or_else(|e| panic!("{e:#}"));
+        let labels: Vec<String> = set.present.iter().map(|p| p.release.label()).collect();
+        assert_eq!(labels, ["et/two@2.0.0"], "full: {full}");
+    }
+}
+
+/// A write that only gives an `added-for` entry more (more thorns at the
+/// same commit) edits it: what a newer binary put in it stays.
+#[test]
+fn an_entry_edited_at_the_same_commit_keeps_unknown_keys() {
+    let it = admbase("^1.0");
+    let s = &it.setup;
+    s.add(&["max/app"], yes()).unwrap();
+    let path = s.inst.cactup_dir().join("installation.toml");
+    let mut doc: toml::Table = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    doc["added-for"]["et/admbase"].as_table_mut().unwrap().insert("cactup-future".into(), toml::Value::Integer(1));
+    std::fs::write(&path, toml::to_string(&doc).unwrap()).unwrap();
+    s.add(&["max/app2"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let doc: toml::Table = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(doc["added-for"]["et/admbase"].get("cactup-future").is_some(), "{doc:?}");
+    let _ = (&it.a1, &it.a2, &it.log, &it.fake);
 }

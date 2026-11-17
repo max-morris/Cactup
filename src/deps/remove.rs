@@ -87,33 +87,69 @@ impl RemovePlan {
     }
 }
 
+/// An `[[added]]` entry that only gives a base repo's package (`id`, present as the base) more
+/// thorns. Removing it takes those thorns away and leaves the base: it is its own node of the
+/// removal, held only by dependencies that need one of its thorns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Extension {
+    pub id: PkgId,
+    pub thorns: Vec<String>,
+    /// As installed, for the plan's lines.
+    pub label: String,
+    /// The `[[added]]` commit, against which its `added-for` entry is read.
+    pub commit: String,
+}
+
 /// Plans removing `targets`: refuses while a remaining package depends on one of them (unless
 /// `no_deps`), and lists the added packages, never named, that only the removed ones needed
 /// (to a fixpoint, cycles included). A package nothing reached before the removal (one an
 /// earlier `--no-deps` left behind) counts as named: it is never swept, nor what it needs.
+/// A target, or an orphan, that is one of `extensions` is that extension: its thorns go, the
+/// base package stays.
 pub fn plan_remove(
     present: &[Present],
     added_for: &BTreeMap<PkgId, AddedFor>,
     targets: &[PkgId],
     rules: &Rules,
     no_deps: bool,
+    extensions: &[Extension],
 ) -> Result<RemovePlan, Refusal> {
-    let removed: Vec<PkgId> = targets.to_vec();
     let mut all: BTreeMap<PkgId, Present> = BTreeMap::new();
     for p in present {
         let mut p = p.clone();
         rules.apply(&mut p.release);
         all.insert(p.release.id.clone(), p);
     }
-    let removed_labels =
-        removed.iter().map(|id| all.get(id).map_or_else(|| id.to_string(), |p| p.release.label())).collect();
+    // Each extension its own node, beside the base node of its package, which keeps the rest.
+    let mut ext: BTreeMap<PkgId, (PkgId, &Extension)> = BTreeMap::new();
+    for e in extensions {
+        let Some(base) = all.get_mut(&e.id) else { continue };
+        let has = |t: &String| e.thorns.iter().any(|x| x.eq_ignore_ascii_case(t));
+        base.enabled.retain(|t| !has(t));
+        let mut node = base.clone();
+        let node_id = PkgId(format!("{}#added", e.id));
+        node.release.id = node_id.clone();
+        node.enabled = e.thorns.iter().cloned().collect();
+        node.origin = Origin::Added;
+        node.libraries.clear();
+        all.insert(node_id.clone(), node);
+        ext.insert(node_id, (e.id.clone(), e));
+    }
+    let node_of = |id: &PkgId| ext.iter().find(|(_, (b, _))| b == id).map_or_else(|| id.clone(), |(n, _)| n.clone());
+    let real = |id: &PkgId| ext.get(id).map_or_else(|| id.clone(), |(b, _)| b.clone());
+    let label = |id: &PkgId, all: &BTreeMap<PkgId, Present>| match ext.get(id) {
+        Some((_, e)) => e.label.clone(),
+        None => all.get(id).map_or_else(|| id.to_string(), |p| p.release.label()),
+    };
+    let removed: Vec<PkgId> = targets.iter().map(node_of).collect();
+    let removed_labels = removed.iter().map(|id| label(id, &all)).collect();
     if no_deps {
-        return Ok(RemovePlan { removed, removed_labels, orphans: Vec::new() });
+        return Ok(RemovePlan { removed: targets.to_vec(), removed_labels, orphans: Vec::new() });
     }
     let gone: BTreeSet<&PkgId> = removed.iter().collect();
     let remaining: BTreeSet<&PkgId> = all.keys().filter(|id| !gone.contains(id)).collect();
     let everything: BTreeSet<&PkgId> = all.keys().collect();
-    let g = Graph { all: &all, rules, added_for };
+    let g = Graph { all: &all, rules, added_for, ext: &ext };
 
     let mut dependents: Vec<(String, String)> = Vec::new();
     for d in &remaining {
@@ -126,7 +162,7 @@ pub fn plan_remove(
         }
     }
     if !dependents.is_empty() {
-        return Err(Refusal::HasDependents { removed, dependents });
+        return Err(Refusal::HasDependents { removed: targets.to_vec(), dependents });
     }
 
     let reached_before = g.reach(&everything, &BTreeSet::new());
@@ -136,25 +172,26 @@ pub fn plan_remove(
     let orphans = remaining
         .iter()
         .filter(|id| !reached_after.contains(**id))
-        .map(|id| Orphan {
-            id: (*id).clone(),
-            label: all[*id].release.label(),
-            by: added_for.get(*id).map(|a| a.by.clone()).unwrap_or_default(),
+        .map(|id| {
+            let real = real(id);
+            Orphan { id: real.clone(), label: label(id, &all), by: added_for.get(&real).map(|a| a.by.clone()).unwrap_or_default() }
         })
         .collect();
-    Ok(RemovePlan { removed, removed_labels, orphans })
+    Ok(RemovePlan { removed: targets.to_vec(), removed_labels, orphans })
 }
 
 struct Graph<'a> {
     all: &'a BTreeMap<PkgId, Present>,
     rules: &'a Rules,
     added_for: &'a BTreeMap<PkgId, AddedFor>,
+    /// Extension node → (its base package, the extension).
+    ext: &'a BTreeMap<PkgId, (PkgId, &'a Extension)>,
 }
 
 impl Graph<'_> {
     /// Who in `set` takes a dependency on `target`: the target itself, a package an override
     /// says satisfies it, or a fork of it (identity only: the versions were checked when it was
-    /// added).
+    /// added). Never an extension node: its base package takes the dependency.
     fn taker<'s>(&self, target: &str, set: &BTreeSet<&'s PkgId>) -> Option<&'s PkgId> {
         if let Some(id) = set.iter().find(|id| id.as_str() == target) {
             return Some(id);
@@ -165,7 +202,19 @@ impl Graph<'_> {
                 return Some(id);
             }
         }
-        set.iter().find(|id| forks(&self.all[**id].release, &t)).copied()
+        set.iter().filter(|id| !self.ext.contains_key(**id)).find(|id| forks(&self.all[**id].release, &t)).copied()
+    }
+
+    /// The holder of a dependency that `taker` takes, needing `needs` of it: the taker, or
+    /// its extension node when the dependency needs one of the extension's thorns (every thorn,
+    /// when it names none); `None` when that node is not in `set`.
+    fn holder<'s>(&self, taker: &'s PkgId, needs: &[String], set: &BTreeSet<&'s PkgId>) -> Option<&'s PkgId> {
+        let Some((node, (_, e))) = self.ext.iter().find(|(_, (b, _))| b == taker) else { return Some(taker) };
+        let touches = needs.is_empty() || needs.iter().any(|n| e.thorns.iter().any(|t| t.eq_ignore_ascii_case(n)));
+        if !touches {
+            return Some(taker);
+        }
+        set.iter().find(|id| **id == node).copied()
     }
 
     /// For each dependency of `p` that applies to its enabled thorns (libraries aside), the
@@ -181,19 +230,24 @@ impl Graph<'_> {
             }
             let label = claim_label(c);
             let held: Vec<&PkgId> = if c.alternatives.is_empty() {
-                self.taker(&c.target, set).into_iter().collect()
+                let taker = self.taker(&c.target, set);
+                taker.and_then(|t| self.holder(t, &c.needs, set)).into_iter().collect()
             } else {
                 let alternatives: Option<Vec<PkgId>> =
                     c.alternatives.iter().map(|a| PkgId::parse(&a.target).ok()).collect();
-                let dependent = p.release.id.clone();
+                // The dependent as recorded: an extension node's choices are its package's.
+                let dependent = self.ext.get(&p.release.id).map_or_else(|| p.release.id.clone(), |(b, _)| b.clone());
                 let key = alternatives.map(|alternatives| ChoiceKey { dependent, alternatives });
-                let takers: Vec<&PkgId> =
-                    c.alternatives.iter().filter_map(|a| self.taker(&a.target, set)).collect();
-                let recorded = takers.iter().find(|id| {
-                    let choices = self.added_for.get(**id).map(|a| a.choices.as_slice()).unwrap_or_default();
+                let takers: Vec<(&PkgId, &Vec<String>)> = (c.alternatives.iter())
+                    .filter_map(|a| self.taker(&a.target, set).map(|t| (t, &a.needs)))
+                    .collect();
+                let recorded = takers.iter().find(|(id, _)| {
+                    let real = self.ext.get(*id).map_or(*id, |(b, _)| b);
+                    let choices = self.added_for.get(real).map(|a| a.choices.as_slice()).unwrap_or_default();
                     key.as_ref().is_some_and(|k| choices.contains(k))
                 });
-                recorded.or(takers.first()).copied().into_iter().collect()
+                let chosen = recorded.or(takers.first());
+                chosen.and_then(|(t, needs)| self.holder(t, needs, set)).into_iter().collect()
             };
             out.push((label, held));
         }
@@ -217,9 +271,10 @@ impl Graph<'_> {
         for id in set {
             let p = &self.all[*id];
             let root = extra.contains(*id)
-                || match p.origin {
-                    Origin::Base { .. } => true,
-                    Origin::Added => is_requested(self.added_for.get(*id), &p.release.commit),
+                || match (&p.origin, self.ext.get(*id)) {
+                    (_, Some((base, e))) => is_requested(self.added_for.get(base), &e.commit),
+                    (Origin::Base { .. }, None) => true,
+                    (Origin::Added, None) => is_requested(self.added_for.get(*id), &p.release.commit),
                 };
             if root && reached.insert((*id).clone()) {
                 queue.push_back(id);

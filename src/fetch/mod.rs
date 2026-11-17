@@ -778,16 +778,11 @@ impl FetchState {
                 },
             );
         }
-        // The records made anew above: put-back must not reach into them. A
-        // repo name with a dot cannot be named in a dotted pattern, so a
-        // write that touches one replaces every record whole.
-        let patterns: Vec<String> = if records.repos.iter().any(|(repo, _)| repo.contains('.')) {
-            vec!["repos.*".to_owned()]
-        } else {
-            records.repos.iter().map(|(repo, _)| format!("repos.{repo}")).collect()
-        };
-        let whole: Vec<&str> = patterns.iter().map(String::as_str).collect();
-        format::write_replacing(&Self::path(install_root), &state, &FETCH_STATE, &whole)
+        // The records made anew above: put-back must not reach into them,
+        // each named by its key (a repo name may hold a dot).
+        let whole: Vec<Vec<String>> =
+            records.repos.iter().map(|(repo, _)| vec!["repos".to_owned(), repo.clone()]).collect();
+        format::write_replacing_keys(&Self::path(install_root), &state, &FETCH_STATE, &whole)
     }
 }
 

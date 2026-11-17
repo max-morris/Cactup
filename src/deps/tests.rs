@@ -490,7 +490,7 @@ fn run(dir: &Path) -> Vec<String> {
                 .collect();
             added_for.insert(id, AddedFor { requested: a.requested, by: a.by.clone(), choices, for_commit });
         }
-        match plan_remove(&present, &added_for, &targets, &rules, rm.no_deps) {
+        match plan_remove(&present, &added_for, &targets, &rules, rm.no_deps, &[]) {
             Ok(plan) => {
                 check_refusal(&case.expect, None, None, &mut errors);
                 compare("removed", &case.expect.removed, plan.removed.iter().map(ToString::to_string).collect(), &mut errors);
@@ -1337,4 +1337,20 @@ fn a_search_that_cannot_jump_back_still_finishes_and_ticks() {
     assert!(steps > 64, "{steps} steps: no chronological search?");
     assert_eq!(facts.ticks.len(), steps / 64, "a tick every 64 steps: {:?}", facts.ticks);
     assert!(facts.ticks.iter().enumerate().all(|(i, t)| *t == 64 * (i + 1)));
+}
+
+/// A library placement of a package with thorns names the claim to ignore
+/// when there is one, and no empty `--ignore-claim` when there is none.
+#[test]
+fn not_a_library_names_a_usable_way_past() {
+    let refusal = |ignore: Option<&str>| Refusal::NotALibrary {
+        target: PkgId::parse("et/carpetx").unwrap(),
+        by: "max/kadath@1.0.0".into(),
+        into: "src/carpetx".into(),
+        ignore: ignore.map(str::to_owned),
+    };
+    let with = refusal(Some("max/kadath:dependency:et/carpetx")).to_string();
+    assert!(with.ends_with("Pass --ignore-claim max/kadath:dependency:et/carpetx (and tell the package's authors)"), "{with}");
+    let without = refusal(None).to_string();
+    assert!(!without.contains("--ignore-claim") && without.ends_with("Tell the package's authors"), "{without}");
 }

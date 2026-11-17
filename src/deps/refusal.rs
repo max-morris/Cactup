@@ -90,7 +90,7 @@ pub enum Refusal {
     NamedLibrary { target: PkgId },
     /// A dependency places `target` at `into` as a library, but it is a
     /// package with thorns.
-    NotALibrary { target: PkgId, by: String, into: String, ignore: String },
+    NotALibrary { target: PkgId, by: String, into: String, ignore: Option<String> },
     /// The Cactarium has no such package.
     NotRegistered { target: PkgId, by: Option<Live> },
     /// A claim cactup cannot read.
@@ -174,9 +174,10 @@ impl Refusal {
             Refusal::NamedLibrary { .. } => {
                 "Add the package that builds against it, and the library comes with it".to_owned()
             }
-            Refusal::NotALibrary { ignore, .. } => {
+            Refusal::NotALibrary { ignore: Some(ignore), .. } => {
                 format!("Pass --ignore-claim {ignore} (and tell the package's authors)")
             }
+            Refusal::NotALibrary { ignore: None, .. } => "Tell the package's authors".to_owned(),
             Refusal::NotRegistered { by: Some(live), .. } => match &live.ignore {
                 Some(ignore) => format!("Pass --ignore-claim {ignore}"),
                 None => "Check the name".to_owned(),

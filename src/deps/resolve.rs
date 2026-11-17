@@ -126,8 +126,10 @@ pub fn resolve(request: &Request, facts: &mut dyn Facts) -> Res<Plan> {
         };
         s.specs.push(NamedSpec { id: spec.id.clone(), req, thorns: spec.thorns.clone() });
     }
-    s.prepare();
+    // The universe first: which alternative a present fork holds is read
+    // from its upstream's published versions, loaded with it.
     s.build_universe()?;
+    s.prepare();
     let mut assign = Assign::default();
     let outcome = s.search(&mut assign)?;
     #[cfg(test)]
@@ -2285,7 +2287,7 @@ impl Search<'_> {
                         // gives a place (`into`) to something that is no library.
                         let (p, _) = &ps[0];
                         let (by, into) = (p.by_label.clone(), p.into.clone());
-                        let ignore = lives.first().and_then(|l| l.ignore.clone()).unwrap_or_default();
+                        let ignore = lives.first().and_then(|l| l.ignore.clone());
                         Refusal::NotALibrary { target, by, into, ignore }
                     } else if ps.iter().map(|(p, _)| &p.by).collect::<BTreeSet<_>>().len() > 1 {
                         Refusal::LibraryClash { library: target, placements: lives.clone() }
