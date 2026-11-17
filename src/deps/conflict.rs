@@ -20,6 +20,9 @@ pub(super) fn incompatible(a: &Release, b: &Release) -> bool {
         .any(|q| q.map_or(true, |q| q.fit(b) != Fit::No))
 }
 
+/// Which packages' thorns a thorn-name check counts: (package, thorn).
+pub(super) type CountsThorn<'a> = &'a dyn Fn(&PkgId, &str) -> bool;
+
 /// The first conflict among the packages `among` accepts that involves something this command
 /// changes (brings in, moves, or gives thorns; two unchanged present packages are the
 /// installation's business, not this plan's), with the two packages it is between. The most
@@ -27,11 +30,12 @@ pub(super) fn incompatible(a: &Release, b: &Release) -> bool {
 /// - a fork and its upstream;
 /// - an `incompatible-with`, whichever of the two declares it;
 /// - two enabled thorns of one name (case-insensitive) in different packages, pseudo-packages
-///   included (only when `same_thorn`).
+///   included (only when `same_thorn` is given, and among the thorns it accepts: a package's
+///   thorn may count where the package's release does not).
 pub(super) fn conflicts(
     chosen: &BTreeMap<PkgId, Entry>,
     among: &dyn Fn(&PkgId) -> bool,
-    same_thorn: bool,
+    same_thorn: Option<CountsThorn>,
 ) -> Option<(Refusal, Vec<PkgId>)> {
     let entries: Vec<(&PkgId, &Entry)> = chosen.iter().filter(|(id, _)| among(id)).collect();
     // Only a pair with something changing can conflict anew: each changing package against all.
@@ -66,16 +70,18 @@ pub(super) fn conflicts(
             }
         }
     }
-    if !same_thorn {
-        return None;
-    }
-    for (a, ea) in &changing {
-        for ta in ea.enabled.iter().filter(|t| ea.thorn_is_new(t)) {
-            for (b, eb) in &entries {
+    let holds = same_thorn?;
+    let all: Vec<(&PkgId, &Entry)> = chosen.iter().collect();
+    for (a, ea) in all.iter().filter(|(_, e)| e.changed()) {
+        for ta in ea.enabled.iter().filter(|t| ea.thorn_is_new(t) && holds(a, t)) {
+            for (b, eb) in &all {
                 if a == b {
                     continue;
                 }
                 let Some(tb) = eb.enabled.iter().find(|t| t.eq_ignore_ascii_case(ta)) else { continue };
+                if !holds(b, tb) {
+                    continue;
+                }
                 // Reported with the two in id order; the newcomer is the one changing (the later
                 // one when both are), and the other may be a base repo to replace.
                 let ((first, ef, tf), (_, es, _)) =

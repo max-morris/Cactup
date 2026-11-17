@@ -1249,9 +1249,13 @@ fn synthetic(clash: Option<&str>) -> (FixtureFacts, Vec<Present>, Vec<NamedSpec>
 }
 
 fn timed(clash: Option<&str>) -> (Res<Plan>, usize, std::time::Duration) {
+    timed_with(clash, Options::default())
+}
+
+fn timed_with(clash: Option<&str>, options: Options) -> (Res<Plan>, usize, std::time::Duration) {
     let (mut facts, present, specs) = synthetic(clash);
     let rules = Rules::default();
-    let request = Request { specs: &specs, present: &present, rules: &rules, options: Options::default() };
+    let request = Request { specs: &specs, present: &present, rules: &rules, options };
     let start = std::time::Instant::now();
     let result = resolve(&request, &mut facts, &ServerRules);
     (result, super::resolve::STEPS.with(|s| s.get()), start.elapsed())
@@ -1279,6 +1283,25 @@ fn a_clash_on_every_release_refuses_quickly() {
         assert_eq!(e.downcast_ref::<Refusal>().map(variant).as_deref(), Some("SameThorn"), "{e}");
         // Linear: each release of new/top tries new/d3's five and jumps over d1 and d2 (without
         // jumping back it is some 3,000 leaves).
+        assert!(steps <= 60, "{clash}: {steps} steps");
+    }
+}
+
+/// Under `--upgrade` every present package may move, but an unnamed one keeps every thorn it has
+/// enabled: a clash with a base repo's thorn is still found at once and jumped back from, not
+/// searched through chronologically (some 3,900 nodes in this tree).
+#[test]
+fn under_upgrade_a_clash_with_a_base_thorn_still_refuses_quickly() {
+    let upgrade = Options { upgrade: true, ..Options::default() };
+    let (result, steps, time) = timed_with(None, upgrade);
+    eprintln!("realistic installation, --upgrade: {steps} steps, {time:?}");
+    result.unwrap();
+    assert!(steps <= 100, "{steps} steps");
+    for clash in ["new/top", "new/d3"] {
+        let (result, steps, time) = timed_with(Some(clash), upgrade);
+        eprintln!("clash in {clash}, --upgrade: {steps} steps, {time:?}");
+        let e = result.expect_err("a clash");
+        assert_eq!(e.downcast_ref::<Refusal>().map(variant).as_deref(), Some("SameThorn"), "{e}");
         assert!(steps <= 60, "{clash}: {steps} steps");
     }
 }

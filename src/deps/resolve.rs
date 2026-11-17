@@ -581,12 +581,15 @@ struct Failure {
     needs: Vec<usize>,
     /// Any decision may bear on it (no jumping back past any).
     all: bool,
+    /// Parties whose part in it no decision can change: present packages that keep the clashing
+    /// thorn whatever release they end up at (see [`Search::keeps_thorn`]).
+    fixed: Vec<PkgId>,
 }
 
 impl Failure {
     fn of(refusal: Refusal, lives: Vec<Live>, parties: Vec<PkgId>) -> Failure {
         let refusal = Pending::Refusal(refusal);
-        Failure { refusal, lives, weak: false, parties, needs: Vec::new(), all: false }
+        Failure { refusal, lives, weak: false, parties, needs: Vec::new(), all: false, fixed: Vec::new() }
     }
 
     fn everything(mut self) -> Failure {
@@ -597,7 +600,8 @@ impl Failure {
     /// Requirements nothing meets: any decision may bear on what provides them.
     fn unclaimed(unmet: Vec<(String, PkgId, Requirement)>) -> Failure {
         let (lives, parties, needs) = (Vec::new(), Vec::new(), Vec::new());
-        Failure { refusal: Pending::Unclaimed(unmet), lives, weak: false, parties, needs, all: true }
+        let fixed = Vec::new();
+        Failure { refusal: Pending::Unclaimed(unmet), lives, weak: false, parties, needs, all: true, fixed }
     }
 }
 
@@ -867,6 +871,7 @@ impl Search<'_> {
             self.follow(&r, &mut frontier, &mut commits);
         }
         let mut seen: BTreeSet<PkgId> = BTreeSet::new();
+        let mut read: BTreeSet<(PkgId, String)> = BTreeSet::new();
         loop {
             // A present package that cannot move is only its present release.
             let wave: Vec<PkgId> = (frontier.iter())
@@ -887,8 +892,14 @@ impl Search<'_> {
                     releases.push(r);
                 }
             }
+            // Each commit read once, its package's versions with the wave's; one request each, so
+            // an interrupt is honored between them.
+            let reads: Vec<(PkgId, String)> = reads.into_iter().filter(|k| read.insert(k.clone())).collect();
+            self.cat.ensure(reads.iter().map(|(id, _)| id.clone()))?;
             for (id, sha) in reads {
-                self.cat.ensure([id.clone()])?;
+                if gix::interrupt::is_triggered() {
+                    bail!("Interrupted");
+                }
                 let served = self.cat.releases(&id).iter().any(|r| r.commit.starts_with(sha.as_str()));
                 if !self.cat.known(&id) || served {
                     continue;
@@ -940,6 +951,31 @@ impl Search<'_> {
             || (!d.chosen.get(id).is_some_and(|e| e.decided) && self.may_move(id))
     }
 
+    /// Whether a present package keeps `thorn` in every plan: it has it enabled now, and no
+    /// decision can take it away. An unnamed move carries every enabled thorn (see
+    /// [`Self::candidates`]), so only naming the package, a flesh coming in, or `--replace` giving
+    /// a base checkout up could. A thorn-name clash with such a package does not depend on its
+    /// release, nor on whether it moves.
+    fn keeps_thorn(&self, id: &PkgId, thorn: &str) -> bool {
+        let Some(p) = self.present.get(id) else { return false };
+        contains(&p.enabled, thorn)
+            && self.named(id).is_none()
+            && !(self.present_rel[id].flesh && self.flesh_possible)
+            && !(self.request.options.replace && matches!(p.origin, Origin::Base { .. }))
+    }
+
+    /// A conflict found among `parties`, with the parties that keep a clashing thorn whatever
+    /// happens marked fixed.
+    fn conflict_failure(&self, r: Refusal, parties: Vec<PkgId>) -> Failure {
+        let fixed = match &r {
+            Refusal::SameThorn { thorn, .. } => {
+                parties.iter().filter(|p| self.keeps_thorn(p, thorn)).cloned().collect()
+            }
+            _ => Vec::new(),
+        };
+        Failure { fixed, ..Failure::of(r, Vec::new(), parties) }
+    }
+
     fn record(&mut self, depth: usize, f: Failure) {
         let specific = !f.weak;
         if self.best.as_ref().is_none_or(|(s, d, _)| (specific, depth) > (*s, *d)) {
@@ -984,9 +1020,18 @@ impl Search<'_> {
     /// it in and of the forks looked at for those needs, all the way up.
     /// Every decision, when some package in that closure is [`Self::removable`] (another decision
     /// could take it out of play, so the failure may vanish without any of the decisions named).
-    fn involved(&self, d: &Derived, a: &Assign, parties: &[PkgId], needs: &[usize]) -> BTreeSet<DKey> {
+    /// A `fixed` party (one that keeps its part in the failure whatever happens) is neither
+    /// followed nor tested, unless something else in the closure leads to it.
+    fn involved(
+        &self,
+        d: &Derived,
+        a: &Assign,
+        parties: &[PkgId],
+        needs: &[usize],
+        fixed: &[PkgId],
+    ) -> BTreeSet<DKey> {
         let mut out = BTreeSet::new();
-        let mut queue: VecDeque<PkgId> = parties.iter().cloned().collect();
+        let mut queue: VecDeque<PkgId> = parties.iter().filter(|p| !fixed.contains(p)).cloned().collect();
         let mut seen: BTreeSet<PkgId> = BTreeSet::new();
         let add_need = |rec: &Rec, out: &mut BTreeSet<DKey>, queue: &mut VecDeque<PkgId>| {
             if let Some(f) = &rec.need.any_of {
@@ -997,6 +1042,9 @@ impl Search<'_> {
         };
         for i in needs {
             add_need(&d.needs[*i], &mut out, &mut queue);
+        }
+        for p in fixed.iter().filter(|p| a.releases.contains_key(*p)) {
+            out.insert(DKey::Pkg(p.clone()));
         }
         while let Some(p) = queue.pop_front() {
             if !seen.insert(p.clone()) {
@@ -1016,7 +1064,7 @@ impl Search<'_> {
     }
 
     fn conflict_set(&self, d: &Derived, a: &Assign, f: &Failure) -> BTreeSet<DKey> {
-        if f.all { a.keys() } else { self.involved(d, a, &f.parties, &f.needs) }
+        if f.all { a.keys() } else { self.involved(d, a, &f.parties, &f.needs, &f.fixed) }
     }
 
     /// One node of the search.
@@ -1058,7 +1106,7 @@ impl Search<'_> {
             };
             // Running out of candidates is down to why the package is required and what narrowed
             // its candidates.
-            let mut cs = self.involved(&d, a, std::slice::from_ref(&t), &[]);
+            let mut cs = self.involved(&d, a, std::slice::from_ref(&t), &[], &[]);
             cs.remove(&key);
             drop(d);
             for c in candidates {
@@ -1086,7 +1134,7 @@ impl Search<'_> {
                     return Ok(Outcome::Failed(cs));
                 }
             };
-            let mut cs = self.involved(&d, a, std::slice::from_ref(&open.key.0), &[]);
+            let mut cs = self.involved(&d, a, std::slice::from_ref(&open.key.0), &[], &[]);
             drop(d);
             for (i, rule) in order {
                 a.any_of.insert(open.key.clone(), (i, rule));
@@ -1575,7 +1623,10 @@ impl Search<'_> {
     /// deeper decision does can take away: fork and upstream, incompatible-with, thorn names (not
     /// under `--replace`, which gives base checkouts up), libraries against installed placements,
     /// and requirements nothing reachable provides. A package brought in counts only when no known
-    /// release claims to fork it (a fork coming in later could take its place).
+    /// release claims to fork it (a fork coming in later could take its place). For thorn names,
+    /// a present package's enabled thorn counts too when it keeps it whatever happens, moving or
+    /// not (under `--upgrade` every present package may move, and the clash would otherwise wait
+    /// for a complete assignment).
     fn prune(&self, d: &Derived) -> Option<Failure> {
         let settled = |id: &PkgId| {
             d.chosen.get(id).is_some_and(|e| {
@@ -1591,10 +1642,12 @@ impl Search<'_> {
                     }
             })
         };
-        let same_thorn = !self.request.options.replace;
+        let holds = |id: &PkgId, thorn: &str| settled(id) || self.keeps_thorn(id, thorn);
+        let same_thorn: Option<conflict::CountsThorn> =
+            if self.request.options.replace { None } else { Some(&holds) };
         if let Some((mut r, parties)) = conflict::conflicts(&d.chosen, &settled, same_thorn) {
             self.fill_ignore(&mut r, d);
-            return Some(Failure::of(r, Vec::new(), parties));
+            return Some(self.conflict_failure(r, parties));
         }
         if let Some(f) = self.prune_libraries(d, &settled) {
             return Some(f);
@@ -1840,9 +1893,9 @@ impl Search<'_> {
         if self.request.options.replace {
             replace_colliding(&mut chosen, &mut replaced);
         }
-        if let Some((mut r, parties)) = conflict::conflicts(&chosen, &|_| true, true) {
+        if let Some((mut r, parties)) = conflict::conflicts(&chosen, &|_| true, Some(&|_, _| true)) {
             self.fill_ignore(&mut r, d);
-            return Ok(Err(Failure::of(r, Vec::new(), parties)));
+            return Ok(Err(self.conflict_failure(r, parties)));
         }
         let libraries = match self.place_libraries(&chosen)? {
             Ok(l) => l,
