@@ -25,10 +25,12 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// `installation.toml`'s format. Only login binaries write it (D11), so it is
-/// not `frozen_read`. `added` is an array, which put-back never enters. Each
-/// `added-for` entry is rebuilt whole by the command that writes it (for the
-/// commit its package ends up at), so it is replaced whole: a key a newer
-/// binary put in it says something about the old entry, not the new one.
+/// not `frozen_read`. `added` is an array, which put-back never enters. An
+/// `added-for` entry that `add` or `remove` rebuilds (for the commit its
+/// package ends up at) is replaced whole by that write
+/// ([`LockedInstallation::set_meta_rebuilding`]): a key a newer binary put in
+/// it said something about the old entry. Every other write, and every entry
+/// those two leave alone, keeps such keys.
 ///
 /// `added-for` (why each added package is there) is additive: a top-level map,
 /// so an older binary that does not model it puts it back on a rewrite, and an
@@ -60,7 +62,7 @@ pub static INSTALLATION: Format<Toml> = Format {
     down_floor: 1,
     frozen_read: false,
     legacy: None,
-    replace_whole: &["added-for.*"],
+    replace_whole: &[],
 };
 
 /// v1 → v2: nothing to change (v1 has no libraries).
@@ -736,13 +738,22 @@ impl LockedInstallation<'_> {
     /// no reader believes it, and a package added again later must not
     /// inherit it.
     pub fn set_meta(&self, meta: &InstallationMeta) -> Res<()> {
+        self.set_meta_rebuilding(meta, &[])
+    }
+
+    /// [`LockedInstallation::set_meta`], where the `added-for` entries of
+    /// `rebuilt` (package names) were made anew by this command: they are
+    /// written whole, without what a newer binary had put in the old ones.
+    pub fn set_meta_rebuilding(&self, meta: &InstallationMeta, rebuilt: &[String]) -> Res<()> {
         let stray = |name: &String| !meta.added.iter().any(|a| &a.package == name);
+        let whole: Vec<Vec<String>> = rebuilt.iter().map(|name| vec!["added-for".to_owned(), name.clone()]).collect();
+        let path = self.inst.meta_path();
         if meta.added_for.keys().any(stray) {
             let mut kept = meta.clone();
             kept.added_for.retain(|name, _| !stray(name));
-            return format::write(&self.inst.meta_path(), &kept, &INSTALLATION);
+            return format::write_replacing_keys(&path, &kept, &INSTALLATION, &whole);
         }
-        format::write(&self.inst.meta_path(), meta, &INSTALLATION)
+        format::write_replacing_keys(&path, meta, &INSTALLATION, &whole)
     }
 
     pub fn simulations(&self) -> Res<SimRegistry> {
@@ -1209,31 +1220,41 @@ mod tests {
         assert_eq!(back.added[0].version, "1.2.4");
     }
 
-    /// Every `added-for` entry is written whole from the struct: a key a newer
-    /// binary put in an entry does not carry over into the entry written for
-    /// a new commit (nor, the cost of that, into one left as it was).
+    /// An unrelated write (`config use`, a build) keeps what a newer binary
+    /// put inside an `added-for` entry; a write that rebuilds an entry drops
+    /// it from that entry only, its name taken literally (a `.` included).
     #[test]
-    fn an_added_for_entry_is_replaced_whole() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("installation.toml");
+    fn only_the_entries_a_command_rebuilds_lose_unknown_keys() {
+        let (_dir, inst) = inst();
+        std::fs::create_dir_all(inst.cactup_dir()).unwrap();
         let mut meta = exhaustive_meta();
-        meta.added_for.insert("owner/b".to_owned(), meta.added_for["owner/pkg"].clone());
-        format::write(&path, &meta, &INSTALLATION).unwrap();
+        let mut dotted = meta.added[0].clone();
+        dotted.package = "owner/pkg.x".to_owned();
+        meta.added.push(dotted);
+        meta.added_for.insert("owner/pkg.x".to_owned(), meta.added_for["owner/pkg"].clone());
+        let locked = inst.locked().unwrap();
+        locked.set_meta(&meta).unwrap();
+        let path = inst.meta_path();
         let mut doc: Toml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        for name in ["owner/pkg", "owner/b"] {
+        for name in ["owner/pkg", "owner/pkg.x"] {
             let entry = doc["added-for"][name].as_table_mut().unwrap();
             entry.insert("cactup-future".to_owned(), toml::Value::Integer(1));
         }
         std::fs::write(&path, toml::to_string(&doc).unwrap()).unwrap();
+        let future = |name: &str| {
+            let doc: Toml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            doc["added-for"][name].get("cactup-future").is_some()
+        };
 
-        let mut meta: InstallationMeta = format::read(&path, &INSTALLATION).unwrap().unwrap();
-        meta.added_for.get_mut("owner/pkg").unwrap().requested = true;
-        format::write(&path, &meta, &INSTALLATION).unwrap();
-        let doc: Toml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        // Both entries are rewritten from the struct: neither keeps it.
-        assert!(doc["added-for"]["owner/pkg"].get("cactup-future").is_none());
-        assert!(doc["added-for"]["owner/b"].get("cactup-future").is_none());
-        assert_eq!(doc["added-for"]["owner/pkg"]["requested"].as_bool(), Some(true));
+        let mut meta = locked.meta().unwrap();
+        meta.active_config = Some("other".to_owned());
+        locked.set_meta(&meta).unwrap();
+        assert!(future("owner/pkg") && future("owner/pkg.x"), "an unrelated write keeps them");
+
+        meta.added_for.get_mut("owner/pkg.x").unwrap().requested = true;
+        locked.set_meta_rebuilding(&meta, &["owner/pkg.x".to_owned()]).unwrap();
+        assert!(future("owner/pkg") && !future("owner/pkg.x"));
+        assert!(locked.meta().unwrap().added_for["owner/pkg.x"].requested);
     }
 
     /// `set_meta` drops an entry with no `[[added]]` entry beside it (an
