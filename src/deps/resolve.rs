@@ -104,6 +104,7 @@ pub fn resolve(request: &Request, facts: &mut dyn Facts) -> Res<Plan> {
         universe: Vec::new(),
         forkable: BTreeSet::new(),
         flesh_possible: false,
+        may_be_flesh: BTreeSet::new(),
         steps: 0,
         budget,
         started: Instant::now(),
@@ -637,6 +638,8 @@ struct Search<'a> {
     forkable: BTreeSet<PkgId>,
     /// Some package the plan could bring in is a flesh: the installation's flesh could be replaced.
     flesh_possible: bool,
+    /// The packages some release of which in the universe is a flesh.
+    may_be_flesh: BTreeSet<PkgId>,
     steps: usize,
     budget: usize,
     started: Instant,
@@ -883,17 +886,16 @@ impl Search<'_> {
             }
             frontier.clear();
             seen.extend(wave.iter().cloned());
-            self.cat.ensure(wave.iter().cloned())?;
+            // Each commit read once; its package's versions load with the wave's.
+            let reads: Vec<(PkgId, String)> = reads.into_iter().filter(|k| read.insert(k.clone())).collect();
+            self.cat.ensure(wave.iter().cloned().chain(reads.iter().map(|(id, _)| id.clone())))?;
             for id in &wave {
                 for r in self.cat.releases(id).to_vec() {
                     self.follow(&r, &mut frontier, &mut commits);
                     releases.push(r);
                 }
             }
-            // Each commit read once, its package's versions with the wave's; one request each, so
-            // an interrupt is honored between them.
-            let reads: Vec<(PkgId, String)> = reads.into_iter().filter(|k| read.insert(k.clone())).collect();
-            self.cat.ensure(reads.iter().map(|(id, _)| id.clone()))?;
+            // One request per commit read, so an interrupt is honored between them.
             for (id, sha) in reads {
                 if gix::interrupt::is_triggered() {
                     bail!("Interrupted");
@@ -912,6 +914,7 @@ impl Search<'_> {
             self.forkable.extend(self.fork_claims_of(r).iter().map(|(up, _)| up.clone()));
         }
         self.flesh_possible = releases.iter().any(|r| r.flesh && !self.present.contains_key(&r.id));
+        self.may_be_flesh = releases.iter().filter(|r| r.flesh).map(|r| r.id.clone()).collect();
         self.universe = releases;
         Ok(())
     }
@@ -943,32 +946,51 @@ impl Search<'_> {
     /// a flesh could come in; a base package under `--replace`; a present package not decided
     /// that may still move. A failure involving one is not jumped back past anything.
     fn removable(&self, id: &PkgId, d: &Derived) -> bool {
-        let Some(p) = self.present.get(id) else { return self.displaceable(id) };
-        (self.present_rel[id].flesh && self.flesh_possible)
-            || (self.request.options.replace && matches!(p.origin, Origin::Base { .. }))
-            || (!d.chosen.get(id).is_some_and(|e| e.decided) && self.may_move(id))
+        if !self.present.contains_key(id) {
+            return self.displaceable(id);
+        }
+        !self.stays(id, d) || (!d.chosen.get(id).is_some_and(|e| e.decided) && self.may_move(id))
+    }
+
+    /// Whether a flesh the plan brings in could replace this present package: a flesh could come
+    /// in, and the package is at a flesh release (decided), or could end up at one (not decided:
+    /// any release of it in the universe is a flesh).
+    fn flesh_may_replace(&self, id: &PkgId, d: &Derived) -> bool {
+        self.flesh_possible
+            && match d.chosen.get(id) {
+                Some(e) if e.decided => e.release.flesh,
+                _ => self.may_be_flesh.contains(id),
+            }
+    }
+
+    /// Whether a present package stays in play whatever any other decision does: no flesh could
+    /// replace it, and it is not a base package `--replace` could give up.
+    fn stays(&self, id: &PkgId, d: &Derived) -> bool {
+        let Some(p) = self.present.get(id) else { return false };
+        let replaced_base = self.request.options.replace && matches!(p.origin, Origin::Base { .. });
+        !(self.flesh_may_replace(id, d) || replaced_base)
     }
 
     /// Whether a present package keeps `thorn` in every plan: it has it enabled now, and no
     /// decision can take it away. An unnamed move carries every enabled thorn (see
-    /// [`Self::candidates`]), so only naming the package, a flesh coming in, or `--replace` giving
-    /// a base checkout up could. A thorn-name clash with such a package does not depend on its
-    /// release, nor on whether it moves.
-    fn keeps_thorn(&self, id: &PkgId, thorn: &str) -> bool {
-        let Some(p) = self.present.get(id) else { return false };
-        contains(&p.enabled, thorn)
+    /// [`Self::candidates`]), so only naming the package or its leaving play (see [`Self::stays`])
+    /// could. A thorn-name clash with such a package does not depend on its release, nor on
+    /// whether it moves.
+    fn keeps_thorn(&self, id: &PkgId, thorn: &str, d: &Derived) -> bool {
+        self.present.get(id).is_some_and(|p| contains(&p.enabled, thorn))
             && self.named(id).is_none()
-            && !(self.present_rel[id].flesh && self.flesh_possible)
-            && !(self.request.options.replace && matches!(p.origin, Origin::Base { .. }))
+            && self.stays(id, d)
     }
 
-    /// A conflict found among `parties`, with the parties that keep a clashing thorn whatever
-    /// happens marked fixed.
-    fn conflict_failure(&self, r: Refusal, parties: Vec<PkgId>) -> Failure {
+    /// A conflict found among `parties`, with the parties whose part in it no decision can change
+    /// marked fixed: one that keeps the clashing thorn whatever happens, or an upstream that stays
+    /// in play (whether a release forks it does not depend on the upstream's release).
+    fn conflict_failure(&self, r: Refusal, parties: Vec<PkgId>, d: &Derived) -> Failure {
         let fixed = match &r {
             Refusal::SameThorn { thorn, .. } => {
-                parties.iter().filter(|p| self.keeps_thorn(p, thorn)).cloned().collect()
+                parties.iter().filter(|p| self.keeps_thorn(p, thorn, d)).cloned().collect()
             }
+            Refusal::ForkAndUpstream { upstream, .. } if self.stays(upstream, d) => vec![upstream.clone()],
             _ => Vec::new(),
         };
         Failure { fixed, ..Failure::of(r, Vec::new(), parties) }
@@ -1621,7 +1643,8 @@ impl Search<'_> {
     /// deeper decision does can take away: fork and upstream, incompatible-with, thorn names (not
     /// under `--replace`, which gives base checkouts up), libraries against installed placements,
     /// and requirements nothing reachable provides. A package brought in counts only when no known
-    /// release claims to fork it (a fork coming in later could take its place). For thorn names,
+    /// release claims to fork it (a fork coming in later could take its place). An upstream counts
+    /// when it stays in play, settled or not (a fork claim reads only the fork's release). For thorn names,
     /// a present package's enabled thorn counts too when it keeps it whatever happens, moving or
     /// not (under `--upgrade` every present package may move, and the clash would otherwise wait
     /// for a complete assignment).
@@ -1633,19 +1656,17 @@ impl Search<'_> {
                         None => self.named(id).is_some() || !self.displaceable(id),
                         // A present flesh a planned one could replace, a base repo --replace could
                         // take over: neither stays for sure.
-                        Some(p) => {
-                            !(e.release.flesh && self.flesh_possible)
-                                && !(self.request.options.replace && matches!(p.origin, Origin::Base { .. }))
-                        }
+                        Some(_) => self.stays(id, d),
                     }
             })
         };
-        let holds = |id: &PkgId, thorn: &str| settled(id) || self.keeps_thorn(id, thorn);
+        let holds = |id: &PkgId, thorn: &str| settled(id) || self.keeps_thorn(id, thorn, d);
         let same_thorn: Option<conflict::CountsThorn> =
             if self.request.options.replace { None } else { Some(&holds) };
-        if let Some((mut r, parties)) = conflict::conflicts(&d.chosen, &settled, same_thorn) {
+        let upstream = |id: &PkgId| self.stays(id, d);
+        if let Some((mut r, parties)) = conflict::conflicts(&d.chosen, &settled, &upstream, same_thorn) {
             self.fill_ignore(&mut r, d);
-            return Some(self.conflict_failure(r, parties));
+            return Some(self.conflict_failure(r, parties, d));
         }
         if let Some(f) = self.prune_libraries(d, &settled) {
             return Some(f);
@@ -1891,9 +1912,9 @@ impl Search<'_> {
         if self.request.options.replace {
             replace_colliding(&mut chosen, &mut replaced);
         }
-        if let Some((mut r, parties)) = conflict::conflicts(&chosen, &|_| true, Some(&|_, _| true)) {
+        if let Some((mut r, parties)) = conflict::conflicts(&chosen, &|_| true, &|_| true, Some(&|_, _| true)) {
             self.fill_ignore(&mut r, d);
-            return Ok(Err(self.conflict_failure(r, parties)));
+            return Ok(Err(self.conflict_failure(r, parties, d)));
         }
         let libraries = match self.place_libraries(&chosen)? {
             Ok(l) => l,

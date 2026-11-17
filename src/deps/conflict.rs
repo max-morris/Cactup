@@ -23,7 +23,7 @@ pub(super) fn incompatible(a: &Release, b: &Release) -> bool {
 /// Which packages' thorns a thorn-name check counts: (package, thorn).
 pub(super) type CountsThorn<'a> = &'a dyn Fn(&PkgId, &str) -> bool;
 
-/// The first conflict among the packages `among` accepts that involves something this command
+/// The first conflict among the packages `among` accepts (and the upstreams `upstream` accepts) that involves something this command
 /// changes (brings in, moves, or gives thorns; two unchanged present packages are the
 /// installation's business, not this plan's), with the two packages it is between. The most
 /// specific kind comes first (a fork usually shares its upstream's thorn names):
@@ -35,15 +35,18 @@ pub(super) type CountsThorn<'a> = &'a dyn Fn(&PkgId, &str) -> bool;
 pub(super) fn conflicts(
     chosen: &BTreeMap<PkgId, Entry>,
     among: &dyn Fn(&PkgId) -> bool,
+    upstream: &dyn Fn(&PkgId) -> bool,
     same_thorn: Option<CountsThorn>,
 ) -> Option<(Refusal, Vec<PkgId>)> {
-    let entries: Vec<(&PkgId, &Entry)> = chosen.iter().filter(|(id, _)| among(id)).collect();
+    let all: Vec<(&PkgId, &Entry)> = chosen.iter().collect();
+    let entries: Vec<(&PkgId, &Entry)> = all.iter().copied().filter(|(id, _)| among(id)).collect();
     // Only a pair with something changing can conflict anew: each changing package against all.
     let changing: Vec<(&PkgId, &Entry)> = entries.iter().copied().filter(|(_, e)| e.changed()).collect();
     for (a, ea) in &changing {
-        for (b, eb) in &entries {
+        for (b, eb) in &all {
             for ((fork, ef), (up, eu)) in [((a, ea), (b, eb)), ((b, eb), (a, ea))] {
-                if fork != up && forks(&ef.release, up) {
+                let counts = among(fork) && (among(up) || upstream(up));
+                if fork != up && counts && forks(&ef.release, up) {
                     let r = Refusal::ForkAndUpstream {
                         fork: (*fork).clone(),
                         fork_label: ef.release.label(),
@@ -71,7 +74,6 @@ pub(super) fn conflicts(
         }
     }
     let holds = same_thorn?;
-    let all: Vec<(&PkgId, &Entry)> = chosen.iter().collect();
     for (a, ea) in all.iter().filter(|(_, e)| e.changed()) {
         for ta in ea.enabled.iter().filter(|t| ea.thorn_is_new(t) && holds(a, t)) {
             for (b, eb) in &all {

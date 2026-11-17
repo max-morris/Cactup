@@ -1,0 +1,33 @@
+{
+  "about": "A present package that is no flesh moves (--upgrade-all) to a release that is one; a flesh a later dependency brings in replaces it, which takes away the thorn the named package would clash with",
+  "packages": [
+    "max--n2--ft",
+    "et--zf",
+    "et--newflesh",
+    "et--pflesh"
+  ],
+  "specs": [
+    "max/n2"
+  ],
+  "present": [
+    {
+      "package": "et/pflesh",
+      "version": "1.0.0",
+      "enabled": [
+        "FT"
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/n2@1.0.0 FT named",
+      "add et/zf@1.0.0 Z needed by max/n2@1.0.0",
+      "add et/newflesh@1.0.0 needed by et/zf@1.0.0",
+      "replace et/pflesh with et/newflesh",
+      "The flesh changes: every config of this installation needs a rebuild"
+    ]
+  },
+  "options": {
+    "upgrade-all": true
+  }
+}

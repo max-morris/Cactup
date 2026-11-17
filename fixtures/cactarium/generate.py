@@ -285,6 +285,9 @@ POOL = {
     "et--zf": ("et/zf", [V("2.0.0", ["Z"]), V("1.0.0", ["Z"], [dep("et/newflesh", None)])]),
     "et--newflesh": ("et/newflesh", [V("1.0.0", flesh=True)]),
     "et--oldflesh": ("et/oldflesh", [V("1.0.0", ["FT"], flesh=True)]),
+    # A present package that is no flesh, whose newer release is one: a flesh coming in can
+    # still replace it once it moves.
+    "et--pflesh": ("et/pflesh", [V("2.0.0", ["FT"], flesh=True), V("1.0.0", ["FT"])]),
     # An untouched present package that may still move (C3), and one whose other release
     # provides what a requirement needs (C4).
     "max--n--c3": ("max/n", [V("1.0.0", ["N"], [dep("et/t", "^2", ["T"]), dep("et/x", None, ["X"])])]),

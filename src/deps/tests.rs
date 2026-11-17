@@ -758,6 +758,13 @@ fn tips_and_commits_are_read_from_the_version() {
     let v = read_json(&cases_dir().join("pool/et--carpetx.json"));
     let r = served(&id, &v["versions"][0]);
     assert_eq!((r.tag.as_deref(), r.url.as_str(), r.contact.as_deref()), (Some("v2026.5.1"), "https://github.com/et/carpetx.git", None));
+    let pv: PackageVersion = serde_json::from_value(v["versions"][0].clone()).unwrap();
+    let r = Release::from_served(&id, &pv, Some("help@example.org")).unwrap();
+    assert_eq!(r.contact.as_deref(), Some("help@example.org"), "the package's contact");
+    assert!(!r.pending);
+    let pending = read_json(&cases_dir().join("pool/et--c--pending.json"))["versions"][0].clone();
+    let pv: PackageVersion = serde_json::from_value(pending).unwrap();
+    assert!(Release::from_served(&PkgId::parse("et/c").unwrap(), &pv, None).unwrap().pending, "review: pending");
     assert_eq!(PkgId::repo("carpetx").as_str(), "repo:carpetx");
 }
 

@@ -135,6 +135,12 @@ pub fn needed(list: &Thornlist, cactus_root: &Path, par: &str) -> Res<BTreeSet<S
             let Some((_, Some(facts))) = facts.get(checkout) else { continue };
             let mut add: Vec<&str> = Vec::new();
             for need in ccl::needs_of(facts) {
+                // A thorn by name is the one checkout of that name the list
+                // builds, the same one ActiveThorns names.
+                if let Need::Thorn(thorn) = &need {
+                    add.extend(by_name.get(thorn.to_ascii_lowercase().as_str()).copied());
+                    continue;
+                }
                 let by = met_by.entry(need.clone()).or_insert_with(|| {
                     readable.iter().filter(|(_, name, f)| ccl::meets(name, f, &need)).map(|(c, _, _)| *c).collect()
                 });
