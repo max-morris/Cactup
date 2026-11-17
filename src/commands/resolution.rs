@@ -655,15 +655,17 @@ pub(crate) fn present(
 fn fork_claims(targets: &[String]) -> Vec<cactup_ecosystem_common::api::ClaimInfo> {
     (targets.iter())
         .map(|t| {
-            let (target, range) = match t.split_once('@') {
-                Some((target, range)) => (target.to_owned(), Some(range.to_owned())),
-                None => (t.clone(), None),
+            // `owner/name@<range>`, `owner/name#<commit>`, or a bare `owner/name`.
+            let (target, range, sha) = match (t.split_once('@'), t.split_once('#')) {
+                (Some((target, range)), _) => (target.to_owned(), Some(range.to_owned()), None),
+                (None, Some((target, sha))) => (target.to_owned(), None, Some(sha.to_owned())),
+                (None, None) => (t.clone(), None, None),
             };
             cactup_ecosystem_common::api::ClaimInfo {
                 kind: "fork-of".to_owned(),
                 target,
                 range,
-                sha: None,
+                sha,
                 needs: Vec::new(),
                 into: None,
                 needed_by: Vec::new(),
@@ -875,5 +877,23 @@ pub(crate) fn refusal_text(e: anyhow::Error, finished: &Finished) -> anyhow::Err
         }
         Ok(r) => anyhow!("{r}"),
         Err(e) => e,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The lookup's `fork-of` targets, in each form a claim takes.
+    #[test]
+    fn lookup_fork_targets_read_as_fork_claims() {
+        let claims = fork_claims(&["et/carpet@=2026.5.1".into(), "et/carpetx#0123456789ab".into(), "et/hydro".into()]);
+        let read: Vec<(&str, Option<&str>, Option<&str>)> =
+            claims.iter().map(|c| (c.target.as_str(), c.range.as_deref(), c.sha.as_deref())).collect();
+        assert_eq!(
+            read,
+            [("et/carpet", Some("=2026.5.1"), None), ("et/carpetx", None, Some("0123456789ab")), ("et/hydro", None, None)]
+        );
+        assert!(claims.iter().all(|c| c.kind == "fork-of"));
     }
 }

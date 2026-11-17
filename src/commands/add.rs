@@ -836,6 +836,11 @@ fn moves_of(plan: &crate::deps::Plan) -> Vec<String> {
         })
 }
 
+/// `remove`'s line about base packages whose dependencies are unknown.
+fn unchecked_short(gone: &[&str]) -> String {
+    format!("Not checked: whether base packages at unreleased commits need {}.", gone.join(", "))
+}
+
 /// The one line about base packages whose dependencies are unknown (at
 /// commits no version froze, or unreadable now): `n` of them, and what the
 /// plan does that they might mind.
@@ -1470,10 +1475,11 @@ fn plan_remove_with_deps(
     let plan = deps::plan_remove(&set.present, &added_for, targets, &Rules::default(), false, &extensions)
         .map_err(|r| anyhow!("{r}"))?;
     // Base packages whose dependencies are unknown are normal (a base that
-    // follows branches): said once, and only when packages nobody named go.
+    // follows branches), and nothing tells which of them could claim what
+    // goes (their claims are what is unknown): one short line, no count.
     if !set.unchecked.is_empty() {
-        let gone: Vec<&str> = plan.removed_labels.iter().chain(plan.orphans.iter().map(|o| &o.label)).map(String::as_str).collect();
-        println!("{}", unchecked_line(set.unchecked.len(), &format!("removing {}", gone.join(", "))).yellow());
+        let gone: Vec<&str> = plan.removed.iter().chain(plan.orphans.iter().map(|o| &o.id)).map(PkgId::as_str).collect();
+        println!("{}", unchecked_short(&gone).yellow());
     }
     Ok(plan)
 }
@@ -2712,6 +2718,7 @@ mod tests {
         };
         assert_eq!(moves_of(&plan), ["et/admbase (in place of base repo admbase)"]);
         assert!(unchecked_line(3, "removing max/a").ends_with("breaks 3 base packages whose dependencies are unknown here."));
+        assert_eq!(unchecked_short(&["max/a", "et/b"]), "Not checked: whether base packages at unreleased commits need max/a, et/b.");
     }
 
     /// `cactup add` again at a version that moves FUKA to `ext/fuka` and also

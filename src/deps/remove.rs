@@ -151,12 +151,18 @@ pub fn plan_remove(
     let everything: BTreeSet<&PkgId> = all.keys().collect();
     let g = Graph { all: &all, rules, added_for, ext: &ext };
 
+    // Each dependent once per dependency: a claim of a base package that applies to a base thorn
+    // and an added one is the base node's and the extension node's alike.
     let mut dependents: Vec<(String, String)> = Vec::new();
+    let mut listed: BTreeSet<(PkgId, String)> = BTreeSet::new();
     for d in &remaining {
         let p = &all[*d];
         for (claim, before) in g.holders(p, &everything) {
             let was_held_by_gone = before.iter().any(|h| gone.contains(h));
-            if was_held_by_gone && g.holders_of_label(p, &claim, &remaining).is_empty() {
+            if was_held_by_gone
+                && g.holders_of_label(p, &claim, &remaining).is_empty()
+                && listed.insert((real(d), claim.clone()))
+            {
                 dependents.push((label(d, &all), claim));
             }
         }

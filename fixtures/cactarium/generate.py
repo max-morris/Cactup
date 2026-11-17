@@ -320,6 +320,8 @@ POOL = {
                                               V("1.0.0", ["CarpetSlab"], [fork_of("et/carpet", "=2026.5.0")])]),
     "et--carpetx--arith-needs-lib": ("et/carpetx", [V("2026.5.1", ["CarpetX", "Loop", "Arith"],
                                                       [dep("max/lib", "^1.0", ["Lib"], needed_by=["Arith"])])]),
+    "et--carpetx--both-need-lib": ("et/carpetx", [V("2026.5.1", ["CarpetX", "Loop", "Arith"],
+                                                     [dep("max/lib", "^1.0", ["Lib"], needed_by=["CarpetX", "Arith"])])]),
     "et--carpetx--needs-lib": ("et/carpetx", [V("2026.5.1", ["CarpetX", "Loop", "Arith"], [dep("max/lib", "^1.0", ["Lib"])])]),
     "max--lib": ("max/lib", [V("1.0.0", ["Lib"])]),
     "et--p5": ("et/p5", [V("2.0.0", ["PA", "PC"]), V("1.0.0", ["PA"])]),
