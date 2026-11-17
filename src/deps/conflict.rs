@@ -4,11 +4,11 @@
 
 use std::collections::BTreeMap;
 
-use cactup_ecosystem_common::ccl::ThornFacts;
+use cactup_ecosystem_common::ccl::{self, ThornFacts};
 
 use super::refusal::Refusal;
 use super::resolve::Entry;
-use super::{forks, Fit, PkgId, Release, Req, Requirement, Requirements};
+use super::{forks, Fit, PkgId, Release, Req, Requirement};
 
 /// Whether `a` declares itself incompatible with `b`'s release. A release at no version is taken
 /// to match a range (it may be any version).
@@ -118,7 +118,6 @@ fn enabled_facts(chosen: &BTreeMap<PkgId, Entry>) -> Vec<(&str, &ThornFacts)> {
 /// set meets: (thorn, its package, the requirement), in plan order.
 pub(super) fn unmet_requirements(
     chosen: &BTreeMap<PkgId, Entry>,
-    ccl: &dyn Requirements,
 ) -> Vec<(String, PkgId, Requirement)> {
     let enabled = enabled_facts(chosen);
     let mut entries: Vec<(&PkgId, &Entry)> = chosen.iter().collect();
@@ -127,8 +126,8 @@ pub(super) fn unmet_requirements(
     for (id, e) in entries {
         for name in e.enabled.iter().filter(|t| e.thorn_is_new(t)) {
             let Some(thorn) = e.release.thorn(name) else { continue };
-            for r in ccl.of(&thorn.facts) {
-                if !enabled.iter().any(|(n, f)| ccl.meets(n, f, &r)) {
+            for r in ccl::needs_of(&thorn.facts) {
+                if !enabled.iter().any(|(n, f)| ccl::meets(n, f, &r)) {
                     out.push((thorn.thorn.clone(), id.clone(), r));
                 }
             }
@@ -142,16 +141,15 @@ pub(super) fn unmet_requirements(
 pub(super) fn broken_requirements(
     chosen: &BTreeMap<PkgId, Entry>,
     before: &[(String, ThornFacts)],
-    ccl: &dyn Requirements,
 ) -> Vec<(String, PkgId, Requirement)> {
     let enabled = enabled_facts(chosen);
     let mut out = Vec::new();
     for (id, e) in chosen.iter().filter(|(_, e)| !e.is_new()) {
         for name in e.enabled.iter().filter(|t| !e.thorn_is_new(t)) {
             let Some(thorn) = e.release.thorn(name) else { continue };
-            for r in ccl.of(&thorn.facts) {
-                let now = enabled.iter().any(|(n, f)| ccl.meets(n, f, &r));
-                if !now && before.iter().any(|(n, f)| ccl.meets(n, f, &r)) {
+            for r in ccl::needs_of(&thorn.facts) {
+                let now = enabled.iter().any(|(n, f)| ccl::meets(n, f, &r));
+                if !now && before.iter().any(|(n, f)| ccl::meets(n, f, &r)) {
                     out.push((thorn.thorn.clone(), id.clone(), r));
                 }
             }

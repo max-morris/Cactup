@@ -8,7 +8,7 @@ answer wrapped as {"slug", "at", "untrusted", "served"}. A case's case.json name
 it uses ("packages", "snapshots"); case.json files are edited by hand, never generated.
 
 Commits are the sha1 of "owner/name@version", so a case can name one (`commit()` below). A
-version may carry "review": "pending" (S6), which the crate at 2f2c8f4 does not model yet.
+version may carry "review": "pending" (S6), which the crate reads as `VersionInfo.review`.
 Standard library only.
 """
 import hashlib

@@ -3,8 +3,7 @@
 //!
 //! Pure: no I/O, no printing, no network, no filesystem. Everything the resolver knows about the
 //! registry comes through [`Facts`] (served versions, snapshots at a commit or tip, providers of a
-//! requirement), and what a thorn's CCL requires through [`Requirements`]; the caller implements
-//! both (in parallel, with progress, honoring Ctrl-C) and prints or confirms what comes back. The
+//! requirement); the caller implements it (in parallel, with progress, honoring Ctrl-C) and prints or confirms what comes back. The
 //! only global state read is the interrupt flag, polled once per step.
 //!
 //! - [`resolve`]: named specs plus the installation's present packages → a [`Plan`] of steps
@@ -32,7 +31,6 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use cactup_ecosystem_common::api::{ClaimInfo, PackageVersion, ThornInfo};
-use cactup_ecosystem_common::ccl::ThornFacts;
 use cactup_ecosystem_common::name::{Name, Owner};
 use cactup_ecosystem_common::slug::{is_commit_id, is_commit_prefix, Slug};
 use cactup_ecosystem_common::version::{TrackedReq, TrackedVersion};
@@ -186,9 +184,8 @@ pub struct Release {
     /// The git tag the version was frozen from (`None` for curated versions and snapshots).
     pub tag: Option<String>,
     pub url: String,
-    /// Where to report problems. The versions answer does not carry it yet (asked of the
-    /// Cactarium session), so this is `None` until the crate has it; P3 takes a named spec's
-    /// from `/resolve`.
+    /// Where to report problems: the package's declared contact, else its repo, as the versions
+    /// answer gives it (`None` from an older server).
     pub contact: Option<String>,
     pub flesh: bool,
     pub library: bool,
@@ -203,9 +200,9 @@ pub struct Release {
 
 impl Release {
     /// A release as the Cactarium serves it: a version, a commit no version froze (the version
-    /// is the full commit), or a tip (`head`/`master`). `pending`: the version is awaiting review
-    /// (the crate's `VersionInfo` at 2f2c8f4 has no `review` field yet, so the caller reads it).
-    pub fn from_served(id: &PkgId, v: &PackageVersion, pending: bool) -> Res<Release> {
+    /// is the full commit), or a tip (`head`/`master`); `contact` is the package's, from the
+    /// answer that listed it.
+    pub fn from_served(id: &PkgId, v: &PackageVersion, contact: Option<&str>) -> Res<Release> {
         let info = &v.version;
         let commit = info.commit.clone().unwrap_or_default();
         if !is_commit_id(&commit) {
@@ -230,11 +227,11 @@ impl Release {
             commit,
             tag: info.tag.clone(),
             url: v.url.clone(),
-            contact: None,
+            contact: contact.map(str::to_owned),
             flesh: v.flesh,
             library: v.library,
             yanked: info.yanked,
-            pending,
+            pending: info.review.as_deref() == Some("pending"),
             usable: !matches!(info.state.as_str(), "invalid" | "upstream-missing"),
             thorns: v.thorns.clone(),
             claims: v.claims.clone(),
@@ -474,35 +471,10 @@ impl fmt::Display for Why {
     }
 }
 
-/// A hard CCL requirement of a thorn, as the Cactarium's dependency check reads one. The crate
-/// will carry the shared type (`ccl::Requirement`, S7); until then this mirrors it, and the
-/// semantics live behind [`Requirements`].
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Requirement {
-    /// Inherits or befriends an implementation.
-    Implementation(String),
-    Capability(String),
-    Thorn(String),
-    Function(String),
-}
-
-impl fmt::Display for Requirement {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Requirement::Implementation(i) => write!(f, "inherits or befriends {i}"),
-            Requirement::Capability(c) => write!(f, "requires the capability {c}"),
-            Requirement::Thorn(t) => write!(f, "requires the thorn {t}"),
-            Requirement::Function(x) => write!(f, "requires the function {x}"),
-        }
-    }
-}
-
-/// Which requirements a thorn's facts make, and whether a thorn meets one: one definition shared
-/// with the server's check and `--trim` once the crate has it (S7).
-pub trait Requirements {
-    fn of(&self, facts: &ThornFacts) -> Vec<Requirement>;
-    fn meets(&self, thorn: &str, facts: &ThornFacts, requirement: &Requirement) -> bool;
-}
+/// A hard CCL requirement of a thorn: the shared definition the Cactarium's dependency check and
+/// `--trim` use too (`ccl::needs_of` makes them, `ccl::meets` tells whether a thorn meets one).
+/// Named `Requirement` here, since [`resolve`]'s own need is a dependency on a package.
+pub use cactup_ecosystem_common::ccl::Need as Requirement;
 
 /// A registered thorn that provides what a requirement asks for (`GET /providers`).
 #[derive(Clone, Debug, PartialEq, Eq)]

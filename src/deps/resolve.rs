@@ -38,7 +38,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use cactup_ecosystem_common::api::{AlternativeInfo, ClaimInfo};
-use cactup_ecosystem_common::ccl::ThornFacts;
+use cactup_ecosystem_common::ccl::{self, ThornFacts};
 use cactup_ecosystem_common::manifest::ForkOf;
 use cactup_ecosystem_common::version::{TrackedReq, TrackedVersion};
 use indexmap::{IndexMap, IndexSet};
@@ -47,7 +47,7 @@ use super::plan::{Choice, ChoiceRule, Library, Placement, Plan, Record, Replaced
 use super::refusal::{Live, Refusal, Unmet};
 use super::{
     claim_target, conflict, fork_claims, short, target_text, At, Facts, Fit, NamedSpec, Origin, PkgId, Present,
-    Release, Req, Request, Requirement, Requirements, Rules, Why,
+    Release, Req, Request, Requirement, Rules, Why,
 };
 use crate::Res;
 use anyhow::bail;
@@ -73,10 +73,10 @@ thread_local! {
 
 type Rel = Rc<Release>;
 
-/// Resolves `request` against the registry `facts` gives, checking CCL requirements with `ccl`.
+/// Resolves `request` against the registry `facts` gives.
 /// A refusal comes back as a [`Refusal`] inside the error (downcast to read it); anything else
 /// is a failure of `facts` or an interrupt.
-pub fn resolve(request: &Request, facts: &mut dyn Facts, ccl: &dyn Requirements) -> Res<Plan> {
+pub fn resolve(request: &Request, facts: &mut dyn Facts) -> Res<Plan> {
     let mut present: BTreeMap<PkgId, Rc<Present>> = BTreeMap::new();
     for p in request.present {
         let mut p = p.clone();
@@ -93,7 +93,6 @@ pub fn resolve(request: &Request, facts: &mut dyn Facts, ccl: &dyn Requirements)
     let mut s = Search {
         request,
         cat: Catalog::new(facts, request.rules),
-        ccl,
         specs: Vec::new(),
         named_needs: Vec::new(),
         upgrade_needs: Vec::new(),
@@ -617,7 +616,6 @@ struct Search<'a> {
     /// Each present package's release, shared.
     present_rel: BTreeMap<PkgId, Rel>,
     cat: Catalog<'a>,
-    ccl: &'a dyn Requirements,
     /// The named specs, tips read.
     specs: Vec<NamedSpec>,
     named_needs: Vec<Rc<Need>>,
@@ -1704,7 +1702,7 @@ impl Search<'_> {
     /// A requirement of a settled package's new thorn that nothing in play meets and that no
     /// release of the universe offers: no deeper decision can meet it.
     fn prune_unclaimed(&self, d: &Derived, settled: &dyn Fn(&PkgId) -> bool) -> Option<Failure> {
-        let unmet: Vec<(String, PkgId, Requirement)> = (conflict::unmet_requirements(&d.chosen, self.ccl))
+        let unmet: Vec<(String, PkgId, Requirement)> = (conflict::unmet_requirements(&d.chosen))
             .into_iter()
             .filter(|(_, p, _)| settled(p))
             .collect();
@@ -1713,7 +1711,7 @@ impl Search<'_> {
         }
         // Any thorn of any release that could come into play (enabled or not).
         let offered = |r: &Requirement| {
-            self.universe.iter().any(|rel| rel.thorns.iter().any(|t| self.ccl.meets(&t.thorn, &t.facts, r)))
+            self.universe.iter().any(|rel| rel.thorns.iter().any(|t| ccl::meets(&t.thorn, &t.facts, r)))
         };
         let hopeless: Vec<(String, PkgId, Requirement)> =
             unmet.into_iter().filter(|(_, _, r)| !offered(r)).collect();
@@ -1901,14 +1899,14 @@ impl Search<'_> {
             Ok(l) => l,
             Err(f) => return Ok(Err(f)),
         };
-        let mut unmet = conflict::unmet_requirements(&chosen, self.ccl);
+        let mut unmet = conflict::unmet_requirements(&chosen);
         // Replacing checkouts (or the flesh) can take away what installed thorns needed.
         if !replaced.is_empty() {
             let before: Vec<(String, ThornFacts)> = (self.present.values())
                 .flat_map(|p| p.enabled.iter().filter_map(|t| p.release.thorn(t)))
                 .map(|t| (t.thorn.clone(), t.facts.clone()))
                 .collect();
-            unmet.extend(conflict::broken_requirements(&chosen, &before, self.ccl));
+            unmet.extend(conflict::broken_requirements(&chosen, &before));
         }
         if !unmet.is_empty() {
             return Ok(Err(Failure::unclaimed(unmet)));

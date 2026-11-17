@@ -4,14 +4,10 @@
 //!   (`PackageVersions`), as the Cactarium serves them, shared by the cases; `pool/snapshots/`
 //!   holds `GET …/versions/{commit|head|master}` answers as `{"slug", "at", "untrusted",
 //!   "served"}`. `fixtures/cactarium/generate.py` writes the pool. A version may carry
-//!   `"review": "pending"` (S6, plan §6), which the crate's `VersionInfo` at 2f2c8f4 does not
-//!   model yet and so ignores; this reads it.
+//!   `"review": "pending"` (S6, plan §6), read as the crate's `VersionInfo.review`.
 //! - `<case>/case.json`, edited by hand: the pool files it uses, the request (specs, present
 //!   packages, options, ignores, overrides, the providers `GET /providers` answers with) or a
 //!   removal, and what must come out.
-//!
-//! `ServerRules` mirrors the Cactarium's dependency check (`deps.rs`: `Need`, `needs_of`,
-//! `meets`) until the crate carries it (S7).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -26,32 +22,6 @@ use super::*;
 
 /// et/carpetx 2026.5.1's commit in the pool (the sha1 of "et/carpetx@2026.5.1").
 const C551: &str = "ba20bf7e830f893466fceda170ebf5b844c342ba";
-
-/// The Cactarium's requirement semantics today: implementations inherited or befriended,
-/// capabilities and thorns required, functions required; names compared case-insensitively.
-struct ServerRules;
-
-impl Requirements for ServerRules {
-    fn of(&self, f: &ThornFacts) -> Vec<Requirement> {
-        let mut v: Vec<Requirement> = Vec::new();
-        v.extend(f.inherits.iter().chain(&f.friends).map(|i| Requirement::Implementation(i.clone())));
-        v.extend(f.requires.iter().map(|c| Requirement::Capability(c.clone())));
-        v.extend(f.requires_thorns.iter().map(|t| Requirement::Thorn(t.clone())));
-        v.extend(f.requires_functions.iter().map(|x| Requirement::Function(x.clone())));
-        v.dedup();
-        v
-    }
-
-    fn meets(&self, thorn: &str, f: &ThornFacts, r: &Requirement) -> bool {
-        let eq = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
-        match r {
-            Requirement::Implementation(i) => f.implements.as_deref().is_some_and(|x| eq(x, i)),
-            Requirement::Capability(c) => f.provides.iter().any(|p| eq(p, c)),
-            Requirement::Thorn(t) => eq(thorn, t),
-            Requirement::Function(x) => f.provides_functions.iter().any(|p| eq(p, x)),
-        }
-    }
-}
 
 /// `implementation:hyperslab`: how a case's `providers` names a requirement.
 fn requirement_key(r: &Requirement) -> String {
@@ -298,11 +268,10 @@ fn read_json(path: &Path) -> Value {
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
-/// A served version, with the review state the crate does not model yet.
+/// A served version.
 fn served(id: &PkgId, v: &Value) -> Release {
-    let pending = v.get("review").and_then(Value::as_str) == Some("pending");
     let pv: PackageVersion = serde_json::from_value(v.clone()).expect("a PackageVersion");
-    Release::from_served(id, &pv, pending).expect("a served release")
+    Release::from_served(id, &pv, None).expect("a served release")
 }
 
 struct Loaded {
@@ -535,7 +504,7 @@ fn run(dir: &Path) -> Vec<String> {
     }
     let specs = specs_of(&case);
     let request = Request { specs: &specs, present: &present, rules: &rules, options: options_of(&case) };
-    match resolve(&request, &mut facts, &ServerRules) {
+    match resolve(&request, &mut facts) {
         Ok(plan) => {
             check_refusal(&case.expect, None, None, &mut errors);
             let rendered = plan.render(&command);
@@ -611,7 +580,7 @@ fn outcome(dir: &Path, reverse: bool) -> String {
         }
     }
     let request = Request { specs: &specs, present: &present, rules: &rules, options: options_of(&case) };
-    match resolve(&request, &mut facts, &ServerRules) {
+    match resolve(&request, &mut facts) {
         Ok(plan) => {
             let mut lines: Vec<String> = plan.render("x").lines().map(collapse).collect();
             lines.extend(plan.choices.iter().map(|c| format!("choice {} {c}", c.dependent)));
@@ -653,7 +622,7 @@ fn versions_are_loaded_in_waves() {
     let Loaded { case, mut facts, present, rules } = load(&cases_dir().join("any-of-first-listed"));
     let specs = specs_of(&case);
     let request = Request { specs: &specs, present: &present, rules: &rules, options: Options::default() };
-    resolve(&request, &mut facts, &ServerRules).unwrap();
+    resolve(&request, &mut facts).unwrap();
     let waves: Vec<Vec<String>> = facts.waves.iter().map(|w| w.iter().map(ToString::to_string).collect()).collect();
     assert_eq!(waves, [vec!["max/z4c"], vec!["et/cactuspugh", "et/carpet"]]);
 }
@@ -662,7 +631,7 @@ fn plan_of(name: &str) -> Plan {
     let Loaded { case, mut facts, present, rules } = load(&cases_dir().join(name));
     let specs = specs_of(&case);
     let request = Request { specs: &specs, present: &present, rules: &rules, options: options_of(&case) };
-    resolve(&request, &mut facts, &ServerRules).unwrap()
+    resolve(&request, &mut facts).unwrap()
 }
 
 /// A plan of only what was named is not confirmed; anything brought in, moved or replaced is.
@@ -731,7 +700,7 @@ fn a_package_present_twice_is_refused() {
     let Loaded { mut facts, mut present, rules, .. } = load(&cases_dir().join("fixed-when-it-fits"));
     present.push(present[0].clone());
     let request = Request { specs: &[], present: &present, rules: &rules, options: Options::default() };
-    let e = resolve(&request, &mut facts, &ServerRules).unwrap_err();
+    let e = resolve(&request, &mut facts).unwrap_err();
     assert!(e.downcast_ref::<Refusal>().is_none() && e.to_string().contains("in the installation twice"), "{e}");
 }
 
@@ -762,7 +731,7 @@ fn bad_server_data_is_refused() {
     for bad in [Value::Null, "".into(), "zz".into(), "abc".into()] {
         v["commit"] = bad;
         let pv: PackageVersion = serde_json::from_value(v.clone()).unwrap();
-        assert!(Release::from_served(&id, &pv, false).is_err(), "{}", v["commit"]);
+        assert!(Release::from_served(&id, &pv, None).is_err(), "{}", v["commit"]);
     }
     // A fork-of claim whose sha or range does not read is no claim (never a panic later).
     let fork = read_json(&cases_dir().join("pool/max--carpetx-mp--bad-sha.json"))["versions"][0].clone();
@@ -856,14 +825,14 @@ fn refusals_carry_their_constraints() {
     let Loaded { case, mut facts, present, rules } = load(&cases_dir().join("unclaimed-one-provider"));
     let specs = specs_of(&case);
     let request = Request { specs: &specs, present: &present, rules: &rules, options: options_of(&case) };
-    let e = resolve(&request, &mut facts, &ServerRules).unwrap_err();
+    let e = resolve(&request, &mut facts).unwrap_err();
     let Some(Refusal::Unclaimed(unmet)) = e.downcast_ref::<Refusal>() else { panic!("{e}") };
     let u: &Unmet = &unmet[0];
     assert_eq!((u.thorn.as_str(), u.package.as_str(), u.providers.len()), ("Z4c", "max/z4c", 1));
     let Loaded { case, mut facts, present, rules } = load(&cases_dir().join("no-release-fits"));
     let specs = specs_of(&case);
     let request = Request { specs: &specs, present: &present, rules: &rules, options: options_of(&case) };
-    let e = resolve(&request, &mut facts, &ServerRules).unwrap_err();
+    let e = resolve(&request, &mut facts).unwrap_err();
     let Some(Refusal::NoReleaseFits { constraints, .. }) = e.downcast_ref::<Refusal>() else { panic!("{e}") };
     let ignores: Vec<Option<&str>> = constraints.iter().map(|l: &Live| l.ignore.as_deref()).collect();
     assert_eq!(ignores, [Some("max/grhydro:dependency:et/carpetx"), Some("max/z4c:dependency:et/carpetx")]);
@@ -1028,7 +997,7 @@ fn decisions(plan: &Plan, back: &dyn Fn(&PkgId) -> PkgId) -> std::collections::B
 }
 
 fn decided(request: &Request, facts: &mut FixtureFacts, back: &dyn Fn(&PkgId) -> PkgId) -> std::collections::BTreeSet<String> {
-    match resolve(request, facts, &ServerRules) {
+    match resolve(request, facts) {
         Ok(plan) => decisions(&plan, back),
         Err(e) => [format!("refused {}", e.downcast_ref::<Refusal>().map(variant).unwrap_or_default())].into(),
     }
@@ -1130,7 +1099,7 @@ fn running_out_reports_the_best_refusal_seen() {
     let request = Request { specs: &specs, present: &present, rules: &rules, options: options_of(&case) };
     // One step short of the plan: the branch that refused (et/carpet's thorn clash) was seen.
     super::resolve::BUDGET.with(|b| b.set(Some(steps - 1)));
-    let result = resolve(&request, &mut facts, &ServerRules);
+    let result = resolve(&request, &mut facts);
     super::resolve::BUDGET.with(|b| b.set(None));
     let e = result.expect_err("out of steps");
     assert_eq!(e.downcast_ref::<Refusal>().map(variant).as_deref(), Some("SameThorn"), "{e}");
@@ -1257,7 +1226,7 @@ fn timed_with(clash: Option<&str>, options: Options) -> (Res<Plan>, usize, std::
     let rules = Rules::default();
     let request = Request { specs: &specs, present: &present, rules: &rules, options };
     let start = std::time::Instant::now();
-    let result = resolve(&request, &mut facts, &ServerRules);
+    let result = resolve(&request, &mut facts);
     (result, super::resolve::STEPS.with(|s| s.get()), start.elapsed())
 }
 
@@ -1353,7 +1322,7 @@ fn a_search_that_cannot_jump_back_still_finishes_and_ticks() {
     let specs = vec![NamedSpec::parse("new/top").unwrap()];
     let rules = Rules::default();
     let request = Request { specs: &specs, present: &present, rules: &rules, options: Options::default() };
-    let e = resolve(&request, &mut facts, &ServerRules).unwrap_err();
+    let e = resolve(&request, &mut facts).unwrap_err();
     let steps = super::resolve::STEPS.with(|s| s.get());
     assert_eq!(e.downcast_ref::<Refusal>().map(variant).as_deref(), Some("SameThorn"), "{e}");
     assert!(steps > 64, "{steps} steps: no chronological search?");
