@@ -66,9 +66,14 @@ cactup sim export mysim --trim
 ```
 
 `--trim` cuts the thornlist down to the thorns your parfile's `ActiveThorns`
-name, plus everything their `.ccl` files say they need. The rest are not
+name, plus everything their `.ccl` files say they need and every thorn whose
+headers they include. The rest are not
 deleted but turned into `#DISABLED Arrangement/Thorn` lines, so they are
 neither fetched nor built, yet one edit brings any of them back.
+
+Trimmed or not, `export` (and `pack -I`) refuses a thornlist that builds a
+thorn without what it needs, the same check `cactup build` makes before it
+builds: a `.sim` like that would fail every import's build.
 
 ## Packing loose files
 

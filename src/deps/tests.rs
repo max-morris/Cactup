@@ -30,6 +30,7 @@ fn requirement_key(r: &Requirement) -> String {
         Requirement::Capability(n) => ("capability", n),
         Requirement::Thorn(n) => ("thorn", n),
         Requirement::Function(n) => ("function", n),
+        Requirement::Include(n) => ("include", n),
     };
     format!("{kind}:{}", name.to_ascii_lowercase())
 }
@@ -1144,6 +1145,8 @@ fn sized_facts(implements: &str, inherits: &[String]) -> ThornFacts {
         requires_thorns: vec![],
         optional: vec![],
         provides: vec![],
+        provides_includes: vec![],
+        needs_includes: vec![],
     }
 }
 

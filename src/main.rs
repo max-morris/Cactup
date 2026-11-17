@@ -2,6 +2,7 @@ mod args;
 mod build;
 mod build_info;
 mod cactarium;
+mod closure;
 mod commands;
 mod database;
 mod deps;

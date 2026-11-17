@@ -847,6 +847,8 @@ installation rather than a job.
 
 **"was built from optionlist \<path\>, which is no longer readable"**: the file you built this config from was moved or deleted, and the config has no snapshot to fall back on. Pass `--optionlist` with the file's new location, or `--flavor` to switch to one of the machine's own.
 
+**"the thornlist builds thorns without what they need, so they would not compile"**: before it runs `make` (or queues the build), cactup checks that every thorn the list builds has what its `.ccl` files require, and every header it includes from another thorn. Each line names a thorn, what it needs, and which thorn in the repos you fetched would meet it, for example `EinsteinInitialData/TwoPuncturesX includes the header TP_Guts.h; TwoPunctures (repo einsteininitialdata) would meet it`. Add that thorn to the thornlist, or stop building the one that needs it.
+
 **Build fails**: `cactup build show myconfig` reports the most recent attempt's outcome, and `cactup build log myconfig` shows its output. Both find the right attempt automatically — there's no build log path to remember (see "Where build output goes" above).
 
 **"Universe not found"**: If the machine defines optional universes, use `cactup machine show` to see available ones.

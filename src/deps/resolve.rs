@@ -1867,10 +1867,17 @@ impl Search<'_> {
         None
     }
 
+    /// Whether an unmet requirement counts against a plan (`ccl::counts`): a header counts only
+    /// where some thorn of some release of the universe provides it. One nothing provides is a
+    /// hook others may fill (ADMMacros' `CalcTmunu.inc`), and compiles empty.
+    fn counts(&self, facts: &ThornFacts, r: &Requirement) -> bool {
+        ccl::counts(facts, r, self.universe.iter().flat_map(|rel| rel.thorns.iter().map(|t| &t.facts)))
+    }
+
     /// A requirement of a settled package's new thorn that nothing in play meets and that no
     /// release of the universe offers: no deeper decision can meet it.
     fn prune_unclaimed(&self, d: &Derived, settled: &dyn Fn(&PkgId) -> bool) -> Option<Failure> {
-        let unmet: Vec<(String, PkgId, Requirement)> = (conflict::unmet_requirements(&d.chosen))
+        let unmet: Vec<(String, PkgId, Requirement)> = (conflict::unmet_requirements(&d.chosen, &|f, r| self.counts(f, r)))
             .into_iter()
             .filter(|(_, p, _)| settled(p))
             .collect();
@@ -2067,7 +2074,7 @@ impl Search<'_> {
             Ok(l) => l,
             Err(f) => return Ok(Err(f)),
         };
-        let mut unmet = conflict::unmet_requirements(&chosen);
+        let mut unmet = conflict::unmet_requirements(&chosen, &|f, r| self.counts(f, r));
         // Replacing checkouts (or the flesh) can take away what installed thorns needed.
         if !replaced.is_empty() {
             let before: Vec<(String, ThornFacts)> = (self.present.values())

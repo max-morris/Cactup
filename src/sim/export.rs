@@ -51,6 +51,9 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
     let parfile = parfile_at(&sim.cactup_dir().join("par").join(&sim.meta.parfile))?;
     let (source_text, list) =
         if args.trim { trimmed(source_text, &list, &sim.meta.sourcedir, &parfile)? } else { (source_text, list) };
+    // A `.sim` whose list builds a thorn without what it needs would fail
+    // every import's build (§8.9): never written, whatever built here.
+    crate::closure::refuse_unmet(&list, &sim.meta.sourcedir, &format!("Not exporting \"{}\"", sim.name))?;
 
     // The pins, and the checks that decide whether anyone else could fetch them.
     let fetched = FetchState::read(&inst.root)?;
@@ -333,6 +336,9 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
         let inst = Installation::resolve(ctx)?;
         let (text, list) =
             if args.trim { trimmed(text, &list, &inst.cactus_root()?, &parfile)? } else { (text, list) };
+        // Without an installation there are no sources to read: the
+        // Cactarium's check is then the one that refuses.
+        crate::closure::refuse_unmet(&list, &inst.cactus_root()?, &format!("Not packing '{}'", file.display()))?;
         let repos_dir = inst.cactus_root()?.join("repos");
         let states = installed_states(&repos_dir, &list)?;
         let hashes = installed_download_hashes(&inst.root, &list)?;

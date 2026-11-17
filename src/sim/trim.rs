@@ -15,7 +15,7 @@ use anyhow::{bail, Context};
 use cactup_ecosystem_common::ccl::{self, Need, ThornFacts};
 use colored::Colorize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The thorns a parfile activates: every `ActiveThorns = "…"` statement (the
 /// key case-insensitive, as Cactus reads it), comments dropped, names
@@ -72,7 +72,7 @@ pub(crate) fn thorn_facts(list: &Thornlist, cactus_root: &Path) -> Res<BTreeMap<
 /// the shared crate's rule for its own tree scan: a `.ccl` that is a symlink
 /// could read anything (or `/dev/zero`, forever), and none is a megabyte.
 /// The thorn's directory itself may be a link, as every fetched one is.
-fn read_ccl(path: &Path) -> Option<String> {
+pub(crate) fn read_ccl(path: &Path) -> Option<String> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.file_type().is_file() || meta.len() > cactup_ecosystem_common::ccl::MAX_CCL_BYTES {
         return None;
@@ -121,6 +121,24 @@ pub fn needed(list: &Thornlist, cactus_root: &Path, par: &str) -> Res<BTreeSet<S
             Some((checkout.as_str(), name.as_str(), f))
         })
         .collect();
+    // The headers a thorn cannot compile without, read from its sources where
+    // the list builds a thorn providing one of its `USES INCLUDE`s: the only
+    // place such a need can be met here, so the only reading that can keep
+    // a thorn (EinsteinInitialData/TwoPunctures for TwoPuncturesX).
+    let provided: BTreeSet<String> =
+        readable.iter().flat_map(|(_, _, f)| f.provides_includes.iter().map(|h| h.to_ascii_lowercase())).collect();
+    let includes: Vec<(&str, PathBuf)> = readable
+        .iter()
+        .filter(|(_, _, f)| f.uses_includes.iter().any(|h| provided.contains(&h.to_ascii_lowercase())))
+        .map(|(checkout, _, _)| (*checkout, cactus_root.join("arrangements").join(checkout)))
+        .collect();
+    let scanned = crate::par::parallel_map(&includes, |(checkout, dir)| {
+        let mut f = facts[*checkout].1.clone().expect("readable facts");
+        f.scan_sources(dir);
+        f.needs_includes
+    })?;
+    let needed_includes: BTreeMap<&str, Vec<String>> =
+        includes.iter().map(|(checkout, _)| *checkout).zip(scanned).collect();
     // Who meets a need, across the whole list (asked once per need).
     let mut met_by: HashMap<Need, Vec<&str>> = HashMap::new();
 
@@ -133,8 +151,12 @@ pub fn needed(list: &Thornlist, cactus_root: &Path, par: &str) -> Res<BTreeSet<S
         let kept: Vec<String> = keep.iter().cloned().collect();
         for checkout in &kept {
             let Some((_, Some(facts))) = facts.get(checkout) else { continue };
+            let mut facts = facts.clone();
+            if let Some(needs) = needed_includes.get(checkout.as_str()) {
+                facts.needs_includes = needs.clone();
+            }
             let mut add: Vec<&str> = Vec::new();
-            for need in ccl::needs_of(facts) {
+            for need in ccl::needs_of(&facts) {
                 // A thorn by name is the one checkout of that name the list
                 // builds, the same one ActiveThorns names.
                 if let Need::Thorn(thorn) = &need {
@@ -151,6 +173,10 @@ pub fn needed(list: &Thornlist, cactus_root: &Path, par: &str) -> Res<BTreeSet<S
                         unmet.insert(format!("capability {capability} (required by {checkout})"));
                     }
                     Need::Capability(_) | Need::Thorn(_) => add.extend(by.iter().copied()),
+                    // A header: every provider, as for a capability. One
+                    // nothing in the list provides is a hook (it compiles
+                    // empty), nothing to keep or warn about.
+                    Need::Include(_) => add.extend(by.iter().copied()),
                     // Implementations and functions: providers only when no
                     // kept thorn already offers one — the parfile chose that one.
                     Need::Implementation(_) | Need::Function(_) => {
@@ -283,6 +309,39 @@ mod tests {
                    activethorns = \"IOUtil\"\n";
         let active: Vec<String> = active_thorns(par).into_iter().collect();
         assert_eq!(active, ["carpetx", "ioutil", "loop", "odesolvers"]);
+    }
+
+    /// A thorn that includes another's header outside any conditional keeps
+    /// it (EinsteinInitialData/TwoPuncturesX and TwoPunctures); one included
+    /// only under a conditional does not.
+    #[test]
+    fn trim_keeps_the_thorn_whose_header_a_kept_thorn_includes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = tmp.path().join("Cactus");
+        let thorn = |checkout: &str, interface: &str, source: Option<&str>| {
+            let dir = cactus.join("arrangements").join(checkout);
+            std::fs::create_dir_all(dir.join("src")).unwrap();
+            std::fs::write(dir.join("interface.ccl"), interface).unwrap();
+            if let Some(text) = source {
+                std::fs::write(dir.join("src/a.cc"), text).unwrap();
+            }
+        };
+        thorn(
+            "EID/TwoPuncturesX",
+            "IMPLEMENTS: TwoPuncturesX\nUSES INCLUDE: TP_Guts.h\nUSES INCLUDE: nompi.h\n",
+            Some("#include \"TP_Guts.h\"\n#ifndef CCTK_MPI\n#include \"nompi.h\"\n#endif\n"),
+        );
+        thorn("EID/TwoPunctures", "IMPLEMENTS: TwoPunctures\nINCLUDE HEADER: TP_Guts.h in TP_Guts.h\n", None);
+        thorn("U/NoMPI", "IMPLEMENTS: NoMPI\nINCLUDE HEADER: nompi.h in nompi.h\n", None);
+        let text = "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\
+                    !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://x/eid.git\n!REPO_PATH = $2\n\
+                    !CHECKOUT =\nEID/TwoPuncturesX\nEID/TwoPunctures\n\n\
+                    !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://x/u.git\n!REPO_PATH = $2\n\
+                    !CHECKOUT =\nU/NoMPI\n";
+        let list = crate::thornlist::parse(text).unwrap();
+        let keep = needed(&list, &cactus, "ActiveThorns = \"TwoPuncturesX\"\n").unwrap();
+        let keep: Vec<&str> = keep.iter().map(String::as_str).collect();
+        assert_eq!(keep, ["EID/TwoPunctures", "EID/TwoPuncturesX"]);
     }
 
     /// A tree whose thorns exercise each rule: a capability two thorns
