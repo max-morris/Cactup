@@ -72,6 +72,9 @@ struct Fake {
     down_at: Vec<String>,
     /// Repos (by URL) the lookup says are a registered flesh's.
     flesh: Vec<String>,
+    /// Commits whose reads a proxy in front gives up on: its own 504, with
+    /// no API generation.
+    proxy_timeout_at: Vec<String>,
     /// What a read at a commit no version froze answers (the package read
     /// now), by package and commit.
     snapshots: Vec<(String, String, String)>,
@@ -98,6 +101,7 @@ impl Fake {
             bad_at: Vec::new(),
             down_at: Vec::new(),
             flesh: Vec::new(),
+            proxy_timeout_at: Vec::new(),
             snapshots: Vec::new(),
         }
     }
@@ -207,6 +211,9 @@ impl Fake {
             if self.bad_at.iter().any(|c| c == at) {
                 let message = format!("{id} at commit {}: invalid manifest: no [package] table", &at[..12]);
                 return error("400 Bad Request", "bad-request", message);
+            }
+            if self.proxy_timeout_at.iter().any(|c| c == at) {
+                return ("504 Gateway Timeout", String::new(), b"<html><body>Gateway Timeout</body></html>".to_vec());
             }
             if self.down_at.iter().any(|c| c == at) {
                 return error("502 Bad Gateway", "upstream", "the git host did not answer".into());
@@ -1624,11 +1631,12 @@ fn the_lookup_says_which_unfrozen_base_repo_is_the_flesh() {
 #[test]
 fn an_unread_base_package_says_why() {
     type Answer = fn(&mut Fake, &str);
-    let cases: [(&str, Answer, String); 4] = [
+    let cases: [(&str, Answer, String); 5] = [
         ("404", |f, _| f.snapshots.clear(), "et/admbase is at a commit the Cactarium does not have (is it pushed?)".into()),
         ("400", |f, a1| f.bad_at.push(a1.to_owned()), "invalid manifest: no [package] table".into()),
         ("403", |f, a1| f.refuse_at.push(a1.to_owned()), "it reads an untrusted package only at released versions".into()),
         ("502", |f, a1| f.down_at.push(a1.to_owned()), "it could not reach the package's repository just now".into()),
+        ("504 from a proxy", |f, a1| f.proxy_timeout_at.push(a1.to_owned()), "it (or a proxy in front of it) failed (504); try again later".into()),
     ];
     for (status, set, why) in cases {
         let it = admbase_unfrozen("^1.0");

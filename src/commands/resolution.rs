@@ -112,12 +112,15 @@ thread_local! {
 /// A read at a commit the Cactarium did not answer with the package: its
 /// status and why, in words that say what is true (they follow "the
 /// Cactarium did not read <id> there: ").
-fn unanswered_why(status: u16, message: &str) -> Unanswered {
-    let (kind, why) = match status {
-        429 => (UnreadKind::Retry, "its read limit held after waiting; try again in a few minutes".to_owned()),
-        403 => (UnreadKind::Untrusted, "it reads an untrusted package only at released versions".to_owned()),
-        400 => (UnreadKind::Invalid, message.to_owned()),
-        502 => (UnreadKind::Retry, "it could not reach the package's repository just now".to_owned()),
+fn unanswered_why(r: &crate::cactarium::Refused) -> Unanswered {
+    let (status, message) = (r.status, r.message.as_str());
+    let (kind, why) = match (status, r.code.as_deref()) {
+        (429, _) => (UnreadKind::Retry, "its read limit held after waiting; try again in a few minutes".to_owned()),
+        (403, _) => (UnreadKind::Untrusted, "it reads an untrusted package only at released versions".to_owned()),
+        (400, _) => (UnreadKind::Invalid, message.to_owned()),
+        (502, Some("upstream")) => (UnreadKind::Retry, "it could not reach the package's repository just now".to_owned()),
+        // No Cactarium error body: a proxy in front of it answered.
+        (_, None) => (UnreadKind::Retry, format!("it (or a proxy in front of it) failed ({status}); try again later")),
         _ => (UnreadKind::Retry, format!("it failed ({status}): {message}")),
     };
     Unanswered { kind, why }
@@ -298,20 +301,21 @@ impl Registry {
             // Rate-limited: read again, one at a time, once the limit lifts.
             // Any other refusal of the read: that package is unread, the
             // command goes on.
-            let refused = (answer.as_ref().err()).and_then(refused_read).map(|r| (r.status, r.message.clone()));
-            let answer = match refused {
-                Some((429, _)) => match self.read_one(id, commit)? {
+            let refused = (answer.as_ref().err()).and_then(refused_read).map(unanswered_why);
+            let status = (answer.as_ref().err()).and_then(refused_read).map(|r| r.status);
+            let answer = match (status, refused) {
+                (Some(429), _) => match self.read_one(id, commit)? {
                     Ok(read) => Ok(read),
                     Err(why) => {
                         out.push(Read::Refused(why));
                         continue;
                     }
                 },
-                Some((status, message)) => {
-                    out.push(Read::Refused(unanswered_why(status, &message)));
+                (_, Some(why)) => {
+                    out.push(Read::Refused(why));
                     continue;
                 }
-                None => answer,
+                _ => answer,
             };
             out.push(match answer {
                 Ok(Some((version, _))) => Read::Found(Box::new(Release::from_served(id, &version, self.contact(id))?)),
@@ -353,7 +357,7 @@ impl Registry {
                         return Ok(Err(Unanswered { kind: UnreadKind::Retry, why }));
                     }
                 }
-                Some(r) => return Ok(Err(unanswered_why(r.status, &r.message))),
+                Some(r) => return Ok(Err(unanswered_why(r))),
             }
         }
         unreachable!("the last attempt answers")

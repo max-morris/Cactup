@@ -438,10 +438,22 @@ impl Client {
 
     /// [`Client::send`] for a request that changes something on the
     /// Cactarium (`what`): interrupted in flight, it may have done so.
+    /// The same for a server (or a proxy in front of it) failing with a 5xx:
+    /// the change may have landed before it did (a proxy timing out on an
+    /// upload, say).
     fn send_change(&self, request: reqwest::blocking::RequestBuilder, what: &str) -> Res<Answer> {
-        self.send(request).map_err(|e| match e.downcast_ref::<InFlight>() {
-            Some(_) => anyhow!("Interrupted; {what} may have reached the Cactarium: check before trying again"),
-            None => e,
+        self.send(request).map_err(|e| {
+            if e.downcast_ref::<InFlight>().is_some() {
+                return anyhow!("Interrupted; {what} may have reached the Cactarium: check before trying again");
+            }
+            match e.downcast_ref::<Refused>() {
+                Some(r) if r.status >= 500 => {
+                    let mut what = what.to_owned();
+                    what[..1].make_ascii_uppercase();
+                    anyhow!("{}. {what} may have reached the Cactarium all the same: check before trying again", r.message)
+                }
+                _ => e,
+            }
         })
     }
 
@@ -500,12 +512,18 @@ impl Client {
                 .map_err(|e| self.unreachable_read(e, &url))?;
             return Ok(Ok(Answer { headers, body, url }));
         }
-        // Any error from a server that does not speak a Cactarium API, on
-        // any of its routes, whatever its status: the address is wrong. (An
-        // answer from where a route redirected, a download's store, is not
-        // the Cactarium's.)
-        if generation.is_none() && response.url().as_str().starts_with(&self.base) {
+        // An answer from a route of the Cactarium (not from where a route
+        // redirected, a download's store) that does not say which API
+        // generation it speaks: no route there (404, 405, 501) means the
+        // address is wrong; a 5xx is the server or a proxy in front of it
+        // (Apache's own 502/503/504 say nothing of the API) failing now.
+        let ours = generation.is_none() && self.is_ours(response.url());
+        if ours && NO_ROUTE.contains(&status) {
             return Err(self.not_a_cactarium(status, response.url().path()));
+        }
+        if ours && status.is_server_error() {
+            let message = format!("The Cactarium (or a proxy in front of it) failed: {status}; try again");
+            return Err(anyhow::Error::new(Refused { status: status.as_u16(), message, retry_after: None, code: None }));
         }
         if missing.contains(&status) {
             return Ok(Err(Missing { status }));
@@ -521,11 +539,23 @@ impl Client {
         } else {
             String::new()
         };
-        let message = match serde_json::from_str::<ErrorBody>(&text) {
-            Ok(body) => format!("{}{login}", body.error.message),
-            Err(_) => format!("The Cactarium at {} answered {status}", self.base),
+        let (message, code) = match serde_json::from_str::<ErrorBody>(&text) {
+            Ok(body) => (format!("{}{login}", body.error.message), Some(body.error.code)),
+            Err(_) => (format!("The Cactarium at {} answered {status}", self.base), None),
         };
-        Err(anyhow::Error::new(Refused { status: status.as_u16(), message, retry_after }))
+        Err(anyhow::Error::new(Refused { status: status.as_u16(), message, retry_after, code }))
+    }
+
+    /// Whether `url` is under this client's base: the same scheme, host and
+    /// port (as URLs compare them: case, a default port), and a path under
+    /// the base's.
+    fn is_ours(&self, url: &reqwest::Url) -> bool {
+        let Ok(base) = reqwest::Url::parse(&self.base) else { return false };
+        let path = base.path().trim_end_matches('/');
+        base.scheme() == url.scheme()
+            && base.host() == url.host()
+            && base.port_or_known_default() == url.port_or_known_default()
+            && (url.path() == path || url.path().starts_with(&format!("{path}/")))
     }
 
     /// A body that stopped arriving: said as [`Client::unreachable`] says a
@@ -541,6 +571,14 @@ impl Client {
         anyhow::Error::new(e).context(format!("Failed to read the answer from {url}"))
     }
 }
+
+/// The statuses that say a server has no such route, from a server that does
+/// not speak a Cactarium API: the address is no Cactarium's.
+const NO_ROUTE: &[reqwest::StatusCode] = &[
+    reqwest::StatusCode::NOT_FOUND,
+    reqwest::StatusCode::METHOD_NOT_ALLOWED,
+    reqwest::StatusCode::NOT_IMPLEMENTED,
+];
 
 /// The statuses a server without a route answers: 404, and 405 when another
 /// route of that path takes another method.
@@ -560,6 +598,9 @@ pub struct Refused {
     pub message: String,
     /// A 429's `Retry-After`: seconds until the limit lifts.
     pub retry_after: Option<u64>,
+    /// The error body's `code` (`not-found`, `upstream`, …); `None` when the
+    /// answer had no Cactarium error body (a proxy's own error page).
+    pub code: Option<String>,
 }
 
 impl std::fmt::Display for Refused {
@@ -1208,11 +1249,13 @@ mod tests {
         let err = client.providers(&Need::Capability("HDF5".into())).unwrap_err();
         assert!(err.downcast_ref::<OldCactarium>().is_none(), "{err:#}");
 
-        // Any route, any status: an error without the API generation is a
-        // wrong address (a path prefix the server does not have, a plain
-        // web server's 501), said in the same words.
-        for status in ["404 Not Found", "405 Method Not Allowed", "501 Not Implemented", "500 Internal Server Error"] {
+        // Any route: no such route without the API generation is a wrong
+        // address (a path prefix the server does not have, a plain web
+        // server's 501), said in the same words, however the base is
+        // spelled (a host in capitals).
+        for status in ["404 Not Found", "405 Method Not Allowed", "501 Not Implemented"] {
             let (base, _) = serve_with(4, move |_| (status, String::new(), b"<html>nope</html>".to_vec()));
+            let base = base.replace("127.0.0.1", "LocalHost");
             let client = Client::at(&format!("{base}/nonexistent-prefix"));
             let errs = [
                 client.resolve("max/fielduser", "package").map(|_| ()).unwrap_err(),
@@ -1223,6 +1266,23 @@ mod tests {
             for err in errs {
                 let err = format!("{err:#}");
                 assert!(err.contains("does not look like a Cactarium") && err.contains("Check the cactarium-url knob (or CACTARIUM_URL)"), "{status}: {err}");
+            }
+        }
+
+        // A proxy in front of a Cactarium failing (Apache's own 502/503/504,
+        // no API generation): the server failing now, a read left unread,
+        // never a wrong address.
+        for status in ["500 Internal Server Error", "502 Bad Gateway", "503 Service Unavailable", "504 Gateway Timeout"] {
+            let (base, _) = serve_with(2, move |_| (status, String::new(), b"<html>proxy</html>".to_vec()));
+            let client = Client::at(&base);
+            for err in [
+                client.package_at_if_any("et", "x", &"b".repeat(40)).map(|_| ()).unwrap_err(),
+                client.resolve("max/fielduser", "package").map(|_| ()).unwrap_err(),
+            ] {
+                let refused = err.downcast_ref::<Refused>().unwrap_or_else(|| panic!("{status}: {err:#}"));
+                assert!(refused.is_unread() && refused.code.is_none(), "{status}");
+                let text = format!("{err:#}");
+                assert!(text.contains("(or a proxy in front of it) failed") && !text.contains("cactarium-url"), "{status}: {text}");
             }
         }
 
@@ -1274,6 +1334,17 @@ mod tests {
         assert_eq!(interruptibly(|| Ok(7), &AtomicBool::new(false)).unwrap(), 7);
     }
 
+    /// A change a proxy gave up on (a 504 on an upload that took too long)
+    /// may have landed: it says so, and never that the address is wrong.
+    #[test]
+    fn a_change_a_proxy_failed_may_have_reached_the_cactarium() {
+        let (base, _) = serve_with(1, |_| ("504 Gateway Timeout", String::new(), b"<html>timeout</html>".to_vec()));
+        let client = Client::at(&base);
+        let err = format!("{:#}", client.send_change(http_post(&client), "the refresh").unwrap_err());
+        assert!(err.contains("(or a proxy in front of it) failed: 504 Gateway Timeout"), "{err}");
+        assert!(err.contains("The refresh may have reached the Cactarium all the same"), "{err}");
+    }
+
     /// After Ctrl-C nothing goes out; a change interrupted in flight says it
     /// may have reached the Cactarium.
     #[test]
@@ -1313,7 +1384,7 @@ mod tests {
     /// own, and a 404 is an answer (no such commit).
     #[test]
     fn unread_statuses() {
-        let refused = |status| Refused { status, message: String::new(), retry_after: None }.is_unread();
+        let refused = |status| Refused { status, message: String::new(), retry_after: None, code: None }.is_unread();
         assert!(refused(400) && refused(429) && refused(403) && refused(502) && refused(500));
         assert!(!refused(404) && !refused(401));
     }
