@@ -295,19 +295,23 @@ impl Client {
     /// A route `endpoint` the server does not have. Only for endpoints that
     /// never answer 404 about what they are asked (a lookup answers every
     /// pin, a provider search an empty list): their 404 (or 405) can only
-    /// mean the route is missing. A Cactarium says so with its API
-    /// generation, as every answer under its API carries one (its fallback
-    /// route too): then it is older than this cactup. Without one, the
-    /// address is no Cactarium's.
-    fn missing(&self, endpoint: &'static str, m: Missing) -> anyhow::Error {
-        if m.generation {
-            return anyhow::Error::new(OldCactarium { base: self.base.clone(), endpoint });
-        }
+    /// mean the route is missing, and the answer said which API generation
+    /// it speaks (one that did not is no Cactarium's: [`Client::exchange`]):
+    /// a Cactarium older than this cactup.
+    fn missing(&self, endpoint: &'static str, _: Missing) -> anyhow::Error {
+        anyhow::Error::new(OldCactarium { base: self.base.clone(), endpoint })
+    }
+
+    /// An error answer that did not say which API generation it speaks:
+    /// every answer of a Cactarium's API does (its fallback route too), so
+    /// the address is some other server's, or a Cactarium's under another
+    /// path.
+    fn not_a_cactarium(&self, status: reqwest::StatusCode, path: &str) -> anyhow::Error {
+        let route = path.find(API_PREFIX).map_or(path, |i| &path[i + API_PREFIX.len()..]);
         anyhow!(
-            "The server at {} does not look like a Cactarium: it answered {} to {endpoint}, without saying which \
+            "The server at {} does not look like a Cactarium: it answered {status} to {route}, without saying which \
              Cactarium API it speaks. Check the {URL_KNOB} knob (or CACTARIUM_URL)",
-            self.base,
-            m.status
+            self.base
         )
     }
 
@@ -496,8 +500,15 @@ impl Client {
                 .map_err(|e| self.unreachable_read(e, &url))?;
             return Ok(Ok(Answer { headers, body, url }));
         }
+        // Any error from a server that does not speak a Cactarium API, on
+        // any of its routes, whatever its status: the address is wrong. (An
+        // answer from where a route redirected, a download's store, is not
+        // the Cactarium's.)
+        if generation.is_none() && response.url().as_str().starts_with(&self.base) {
+            return Err(self.not_a_cactarium(status, response.url().path()));
+        }
         if missing.contains(&status) {
-            return Ok(Err(Missing { status, generation: generation.is_some() }));
+            return Ok(Err(Missing { status }));
         }
         // A rate limit says when it lifts, in whole seconds.
         let retry_after = (response.headers().get(reqwest::header::RETRY_AFTER))
@@ -538,9 +549,8 @@ const MISSING_ROUTE: &[reqwest::StatusCode] = &[reqwest::StatusCode::NOT_FOUND, 
 /// An answer the server had nothing for.
 #[derive(Debug)]
 struct Missing {
+    #[allow(dead_code)]
     status: reqwest::StatusCode,
-    /// It said which API generation it speaks: a Cactarium.
-    generation: bool,
 }
 
 /// An error status the registry answered, with its message.
@@ -909,7 +919,7 @@ mod tests {
     #[test]
     fn errors_carry_the_registrys_message_and_newer_generations_are_refused() {
         let body = r#"{"error":{"code":"not-found","message":"No sim mmorris/nope"}}"#;
-        let (base, _) = serve_with(1, move |_| ("404 Not Found", String::new(), body.as_bytes().to_vec()));
+        let (base, _) = serve_with(1, move |_| ("404 Not Found", "api-generation: 1\r\n".into(), body.as_bytes().to_vec()));
         let err = format!("{:#}", Client::at(&base).resolve("mmorris/nope", "sim").unwrap_err());
         assert_eq!(err, "No sim mmorris/nope");
 
@@ -1197,6 +1207,24 @@ mod tests {
         assert!(err.contains("does not look like a Cactarium") && err.contains("cactarium-url"), "{err}");
         let err = client.providers(&Need::Capability("HDF5".into())).unwrap_err();
         assert!(err.downcast_ref::<OldCactarium>().is_none(), "{err:#}");
+
+        // Any route, any status: an error without the API generation is a
+        // wrong address (a path prefix the server does not have, a plain
+        // web server's 501), said in the same words.
+        for status in ["404 Not Found", "405 Method Not Allowed", "501 Not Implemented", "500 Internal Server Error"] {
+            let (base, _) = serve_with(4, move |_| (status, String::new(), b"<html>nope</html>".to_vec()));
+            let client = Client::at(&format!("{base}/nonexistent-prefix"));
+            let errs = [
+                client.resolve("max/fielduser", "package").map(|_| ()).unwrap_err(),
+                client.package_versions_if_any("et", "x").map(|_| ()).unwrap_err(),
+                client.package_at_if_any("et", "x", &"b".repeat(40)).map(|_| ()).unwrap_err(),
+                client.lookup(&pins).map(|_| ()).unwrap_err(),
+            ];
+            for err in errs {
+                let err = format!("{err:#}");
+                assert!(err.contains("does not look like a Cactarium") && err.contains("Check the cactarium-url knob (or CACTARIUM_URL)"), "{status}: {err}");
+            }
+        }
 
         // A 405 for a package is no missing package.
         let (base, _) = serve_with(2, |_| ("405 Method Not Allowed", "api-generation: 1\r\n".into(), Vec::new()));
