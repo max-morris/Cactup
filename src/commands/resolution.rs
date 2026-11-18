@@ -30,6 +30,8 @@ use crate::Res;
 const ASK: &str = "ask the Cactarium";
 /// The line a long search shows on.
 const SEARCH: &str = "look for a plan";
+/// The line a wait for the Cactarium's read limit shows on.
+const READ_LIMIT: &str = "the Cactarium's read limit";
 /// The headline over reading the installation's clones.
 const CLONES: &str = "read the installation's clones";
 /// How many search steps go by between two updates of the search line.
@@ -53,7 +55,7 @@ pub(crate) struct Registry {
     loaded: BTreeMap<PkgId, Option<Vec<Release>>>,
     contacts: BTreeMap<PkgId, String>,
     progress: std::sync::Arc<prodash::tree::Root>,
-    renderer: Option<prodash::render::line::JoinHandle>,
+    renderer: Option<crate::manifest::JoinHandle>,
     layout: Layout,
     search: Option<Line>,
     last_tick: usize,
@@ -139,7 +141,7 @@ impl Registry {
     pub(crate) fn new<'a>(client: &Client, names: impl IntoIterator<Item = &'a str>) -> Registry {
         // Only bars: no line here ever calls `info`/`fail`.
         let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
-        let layout = Layout::for_names([ASK, SEARCH, CLONES].into_iter().chain(names));
+        let layout = Layout::for_names([ASK, SEARCH, CLONES, READ_LIMIT].into_iter().chain(names));
         Registry {
             client: client.clone().patient(),
             loaded: BTreeMap::new(),
@@ -371,8 +373,17 @@ impl Registry {
         let now = std::time::Instant::now();
         let until = now + wait_length(retry_after, self.window_start, now, left_in_budget);
         let mut headline = self.headline(1, "waits");
-        let line = Line::over(headline.add_child("read limit"), "read limit", self.layout.clone());
+        // The seconds waited fill the bar and count up beside it; what
+        // changes stays at the front of the text, which the layout clips.
+        let mut line = Line::counting(headline.add_child(READ_LIMIT), READ_LIMIT, self.layout.clone());
+        let total = until.saturating_duration_since(now).as_secs().max(1) as usize;
+        prodash::Progress::init(&mut line, Some(total), Some(prodash::unit::label("s")));
         let waited_before = self.waited;
+        if !waited_before.is_zero() {
+            line.phase(format!("waiting, {} in all before", minutes(waited_before)));
+        } else {
+            line.phase("waiting".to_owned());
+        }
         let outcome = loop {
             if gix::interrupt::is_triggered() {
                 break Err(anyhow!("Interrupted"));
@@ -383,11 +394,7 @@ impl Registry {
             if left.is_zero() {
                 break Ok(());
             }
-            line.phase(format!(
-                "waiting for the Cactarium's read limit, {} s ({} in all)",
-                left.as_secs() + 1,
-                minutes(self.waited)
-            ));
+            prodash::Count::set(&line, at.saturating_duration_since(now).as_secs() as usize);
             std::thread::sleep(left.min(std::time::Duration::from_millis(50)));
         };
         drop(line);

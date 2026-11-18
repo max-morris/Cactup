@@ -202,7 +202,7 @@ fn write_stamp(root: &Path, generation: u32, stamp: &SyncStamp) {
 
 /// Shuts the progress renderer down on every way out of [`sync_at`], so an
 /// error is never printed underneath a live bar.
-struct Renderer(Option<prodash::render::line::JoinHandle>);
+struct Renderer(Option<crate::manifest::JoinHandle>);
 
 impl Drop for Renderer {
     fn drop(&mut self) {

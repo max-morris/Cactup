@@ -6,7 +6,7 @@ use anyhow::{anyhow, Context};
 use gix::protocol::fetch::Tags;
 use gix::refs::transaction::{Change, PreviousValue, RefEdit, RefLog};
 use gix::remote::Direction;
-use prodash::render::line::{JoinHandle, StreamKind};
+use prodash::render::line::StreamKind;
 use prodash::Root;
 use crate::Res;
 
@@ -34,31 +34,149 @@ pub(crate) fn setup_prodash_if_tty() -> (ProgressHandle, Option<JoinHandle>) {
 /// Like [`setup_prodash`], but lets a caller cap which tree levels the
 /// renderer draws (e.g. hiding gix's per-thread delta-resolution children)
 /// and opt into throughput display (needed for byte-unit progress like
-/// downloads). Every renderer gets a 500ms initial delay regardless — a run
-/// that finishes (or finds nothing to do) inside that window never flashes a
-/// bar at all.
+/// downloads). Every renderer starts drawing after a 500ms delay regardless
+/// — a run that finishes (or finds nothing to do) inside that window never
+/// flashes a bar at all — and draws the whole tree as it is then.
 pub(crate) fn setup_prodash_with(
     level_filter: Option<std::ops::RangeInclusive<prodash::progress::key::Level>>,
     throughput: bool,
 ) -> (ProgressHandle, JoinHandle) {
     let progress = prodash::tree::Root::new();
-
-    let progress_renderer_options = prodash::render::line::Options {
+    let options = prodash::render::line::Options {
         frames_per_second: 6.0,
         hide_cursor: true, // signal-hook feature restores cursor on exit
         level_filter,
         throughput,
-        initial_delay: Some(std::time::Duration::from_millis(500)),
+        // The delay is ours (see `JoinHandle`): prodash's draws a frame only
+        // when the tree changed, and counts changes during its delay as
+        // seen, so a line that settled in the first 500ms was never drawn.
+        initial_delay: None,
         ..Default::default()
-    }.auto_configure(StreamKind::Stderr);
+    }
+    .auto_configure(StreamKind::Stderr);
+    let renderer = JoinHandle::start(&progress, options, std::time::Duration::from_millis(500), Arc::new(stderr));
+    (progress, renderer)
+}
 
-    let progress_renderer = prodash::render::line::render(
-        std::io::stderr(),
-        progress.downgrade(),
-        progress_renderer_options
-    );
+/// The renderer of a phase's progress, started only once the phase has run
+/// for `delay`. prodash's own initial delay cannot stand in for this: its
+/// renderer draws a frame only when the tree has changed since the last
+/// tick, and the ticks during its delay count, so whatever settled before
+/// the delay was over (a request that takes a minute, the line of a wait)
+/// stayed blank until something moved. Started late, its first frame draws
+/// the whole tree. Shut down before it started, it starts nothing, but
+/// prints the messages items left (the renderer prints those, terminal or
+/// not).
+pub(crate) struct JoinHandle {
+    out: Output,
+    state: Arc<std::sync::Mutex<Started>>,
+    starter: Option<std::thread::JoinHandle<()>>,
+    stop: Option<std::sync::mpsc::Sender<()>>,
+    progress: std::sync::Weak<prodash::tree::Root>,
+    options: Option<prodash::render::line::Options>,
+}
 
-    (progress, progress_renderer)
+/// Where a renderer draws: stderr, but for a test.
+type Output = Arc<dyn Fn() -> Box<dyn std::io::Write + Send> + Send + Sync>;
+
+fn stderr() -> Box<dyn std::io::Write + Send> {
+    Box::new(std::io::stderr())
+}
+
+#[derive(Default)]
+struct Started {
+    renderer: Option<prodash::render::line::JoinHandle>,
+    /// The phase is over: never start.
+    done: bool,
+}
+
+impl JoinHandle {
+    fn start(
+        progress: &ProgressHandle,
+        options: prodash::render::line::Options,
+        delay: std::time::Duration,
+        out: Output,
+    ) -> JoinHandle {
+        let state = Arc::new(std::sync::Mutex::new(Started::default()));
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let weak = Arc::downgrade(progress);
+        let starter = {
+            let (state, weak, options, out) = (state.clone(), weak.clone(), copy_options(&options), out.clone());
+            std::thread::Builder::new()
+                .name("progress delay".into())
+                .spawn(move || {
+                    // Woken early (or orphaned) by a shutdown: nothing to draw.
+                    if !matches!(stopped.recv_timeout(delay), Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
+                        return;
+                    }
+                    let mut state = state.lock().expect("progress renderer poisoned");
+                    if !state.done {
+                        state.renderer = Some(prodash::render::line::render(out(), weak, options));
+                    }
+                })
+                .expect("failed to spawn the progress delay thread")
+        };
+        JoinHandle { out, state, starter: Some(starter), stop: Some(stop), progress: weak, options: Some(options) }
+    }
+
+    /// Stop drawing, clear the bars, and wait for the renderer to finish.
+    pub(crate) fn shutdown_and_wait(mut self) {
+        self.finish();
+    }
+
+    fn finish(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(starter) = self.starter.take() {
+            let _ = starter.join();
+        }
+        let renderer = {
+            let mut state = self.state.lock().expect("progress renderer poisoned");
+            state.done = true;
+            state.renderer.take()
+        };
+        match renderer {
+            Some(renderer) => renderer.shutdown_and_wait(),
+            None => self.print_messages(),
+        }
+    }
+
+    /// The messages a phase that ended before drawing left, printed as the
+    /// renderer prints them, and no bar.
+    fn print_messages(&mut self) {
+        let (Some(progress), Some(mut options)) = (self.progress.upgrade(), self.options.take()) else { return };
+        let mut messages = Vec::new();
+        progress.copy_messages(&mut messages);
+        if messages.is_empty() {
+            return;
+        }
+        options.output_is_terminal = false;
+        options.hide_cursor = false;
+        prodash::render::line::render((self.out)(), Arc::downgrade(&progress), options).shutdown_and_wait();
+    }
+}
+
+impl Drop for JoinHandle {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+/// prodash's options are not `Clone`.
+fn copy_options(o: &prodash::render::line::Options) -> prodash::render::line::Options {
+    prodash::render::line::Options {
+        output_is_terminal: o.output_is_terminal,
+        colored: o.colored,
+        timestamp: o.timestamp,
+        terminal_dimensions: o.terminal_dimensions,
+        hide_cursor: o.hide_cursor,
+        level_filter: o.level_filter.clone(),
+        initial_delay: o.initial_delay,
+        frames_per_second: o.frames_per_second,
+        throughput: o.throughput,
+        keep_running_if_progress_is_empty: o.keep_running_if_progress_is_empty,
+    }
 }
 
 /// `1..=default_max`, overridable via `CACTUP_PROGRESS_DEPTH` (any `u8 >=
@@ -306,6 +424,80 @@ impl<'repo> Release<'repo> {
                 .data
                 .clone()
         )
+    }
+}
+
+#[cfg(test)]
+mod renderer_tests {
+    use super::*;
+
+    /// What a renderer wrote, shared with the test.
+    #[derive(Clone, Default)]
+    struct Sink(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Sink {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn renderer(progress: &ProgressHandle, sink: &Sink) -> JoinHandle {
+        let options = prodash::render::line::Options {
+            output_is_terminal: true,
+            colored: false,
+            frames_per_second: 20.0,
+            terminal_dimensions: (100, 20),
+            ..Default::default()
+        };
+        let sink = sink.clone();
+        let out: Output = Arc::new(move || Box::new(sink.clone()) as Box<dyn std::io::Write + Send>);
+        JoinHandle::start(progress, options, std::time::Duration::from_millis(300), out)
+    }
+
+    /// A line that settled before the renderer's delay was over (a request
+    /// that takes a minute, started at once) is drawn once the delay is
+    /// over, not when something next moves.
+    #[test]
+    fn a_line_that_settled_early_is_drawn() {
+        let progress = prodash::tree::Root::new();
+        let sink = Sink::default();
+        let renderer = renderer(&progress, &sink);
+        let layout = crate::progress::Layout::for_names(["a request"]);
+        let mut headline = crate::progress::Headline::over(progress.add_child("ask"), "ask", 1, "requests", layout.clone());
+        let line = crate::progress::Line::over(headline.add_child("a request"), "a request", layout);
+        line.phase("waiting for the answer".to_owned());
+        std::thread::sleep(std::time::Duration::from_millis(900));
+        let drawn = String::from_utf8_lossy(&sink.0.lock().unwrap()).into_owned();
+        assert!(drawn.contains("waiting for the answer"), "{drawn:?}");
+        drop(line);
+        headline.inc();
+        renderer.shutdown_and_wait();
+    }
+
+    /// A phase over before the delay draws nothing at all (no bar flashes,
+    /// not even the cursor escapes); one that left a message prints it.
+    #[test]
+    fn a_short_phase_draws_nothing_but_its_messages() {
+        for message in [false, true] {
+            let progress = prodash::tree::Root::new();
+            let sink = Sink::default();
+            let renderer = renderer(&progress, &sink);
+            let mut item = progress.add_child("quick");
+            if message {
+                item.info("something worth saying".to_owned());
+            }
+            drop(item);
+            renderer.shutdown_and_wait();
+            let drawn = String::from_utf8_lossy(&sink.0.lock().unwrap()).into_owned();
+            assert_eq!(drawn.contains("something worth saying"), message, "{drawn:?}");
+            if !message {
+                assert!(drawn.is_empty(), "{drawn:?}");
+            }
+        }
     }
 }
 
