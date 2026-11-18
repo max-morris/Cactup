@@ -369,6 +369,13 @@ POOL = {
     "max--symuser": ("max/symuser", [V("1.0.0", [T("SymUser", requires_thorns=["SymBase"])],
                                        [dep("et/cactusbase", None, ["SymBase"], needed_by=["SymUser"])])]),
     "et--cactusbase": ("et/cactusbase", [V("2026.5.0", ["Boundary", "SymBase"])]),
+    # Notes on releases left out for want of a read: from what each asks itself.
+    "et--zpx": ("et/zpx", [V("2.0.0", ["ZX"], [dep("et/admbase", None, ["StaticConformal"])]), V("1.0.0", ["ZX"])]),
+    "max--zpapp": ("max/zpapp", [V("2.0.0", ["ZP"], [dep("et/zpx", "^2", ["ZX"])]),
+                                 V("1.0.0", ["ZP"], [dep("et/zpx", "^1", ["ZX"])])]),
+    "max--zpapq": ("max/zpapq", [V("2.0.0", ["ZQ"], [dep("et/admbase", None, ["StaticConformal"]),
+                                                    dep("et/cactusbase", None, ["SymBase"])]),
+                                 V("1.0.0", ["ZQ"])]),
     "max--kadath--fuka-at-commit": ("max/kadath", [V("1.0.0", ["Kadath"], [dep("et/fuka", sha=FUKA_SNAP, into="src/fuka")])]),
 
     # Remove.

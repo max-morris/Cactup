@@ -73,20 +73,24 @@ impl UnreadNeed {
         }
     }
 
-    /// The note a plan found without it carries: `skipped` is the release the branch had chosen
-    /// (`keeping`: the package itself, at the commit it is at).
-    pub(super) fn note(&self, skipped: Option<(&str, bool)>) -> String {
-        let (wanted, id, why) = (self.wanted(), &self.id, &self.why.why);
-        match skipped {
-            Some((_, true)) => format!(
-                "keeping {} was not considered: {} needs {wanted}, and the Cactarium did not read {id} there: {why}",
-                self.package, self.by
-            ),
-            Some((label, false)) if label == self.by => {
-                format!("{label} was not considered: it needs {wanted}, and the Cactarium did not read {id} there: {why}")
-            }
-            _ => format!("not considered: {self}"),
-        }
+    /// The note a plan carries for a release it was not considered: `skipped` (or keeping the
+    /// package where it is, `keeping`), with everything it needs that the Cactarium did not read.
+    pub(super) fn note(skipped: &str, keeping: bool, needs: &[UnreadNeed]) -> String {
+        // In the order of what is needed (thorn names), so that it does not follow package ids.
+        let mut needs: Vec<&UnreadNeed> = needs.iter().collect();
+        needs.sort_by(|a, b| (&a.what, &a.by, &a.id).cmp(&(&b.what, &b.by, &b.id)));
+        let parts: Vec<String> = (needs.iter())
+            .map(|n| {
+                let (wanted, id, why) = (n.wanted(), &n.id, &n.why.why);
+                if keeping {
+                    format!("{} needs {wanted}, and the Cactarium did not read {id} there: {why}", n.by)
+                } else {
+                    format!("it needs {wanted}, and the Cactarium did not read {id} there: {why}")
+                }
+            })
+            .collect();
+        let what = if keeping { format!("keeping {skipped}") } else { skipped.to_owned() };
+        format!("{what} was not considered: {}", parts.join("; "))
     }
 }
 

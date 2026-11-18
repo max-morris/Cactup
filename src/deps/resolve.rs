@@ -195,7 +195,7 @@ fn run(request: &Request, cat: &mut Catalog, mode: Mode) -> Res<Result<Plan, Opt
         tried: BTreeSet::new(),
         wanted_thorns: BTreeMap::new(),
         followed: BTreeMap::new(),
-        hits: BTreeMap::new(),
+        hits: BTreeSet::new(),
     };
     s.cat.ensure(request.specs.iter().map(|x| x.id.clone()))?;
     // A named tip is read once, up front: the need is for the commit it is at now.
@@ -699,14 +699,14 @@ struct Failure {
     fixed: Vec<PkgId>,
     /// It failed for want of the claims of a stand-in the Cactarium did not read: what needed
     /// them, and the release (or the stand-in kept where it is) the branch had chosen.
-    unread: Option<(UnreadNeed, Option<Rel>)>,
+    unread: Vec<UnreadNeed>,
 }
 
 impl Failure {
     fn of(refusal: Refusal, lives: Vec<Live>, parties: Vec<PkgId>) -> Failure {
         let refusal = Pending::Refusal(refusal);
         let (needs, fixed) = (Vec::new(), Vec::new());
-        Failure { refusal, lives, weak: false, parties, needs, all: false, fixed, unread: None }
+        Failure { refusal, lives, weak: false, parties, needs, all: false, fixed, unread: Vec::new() }
     }
 
     fn everything(mut self) -> Failure {
@@ -718,7 +718,7 @@ impl Failure {
     fn unclaimed(unmet: Vec<(String, PkgId, Requirement)>) -> Failure {
         let (lives, parties, needs) = (Vec::new(), Vec::new(), Vec::new());
         let fixed = Vec::new();
-        Failure { refusal: Pending::Unclaimed(unmet), lives, weak: false, parties, needs, all: true, fixed, unread: None }
+        Failure { refusal: Pending::Unclaimed(unmet), lives, weak: false, parties, needs, all: true, fixed, unread: Vec::new() }
     }
 }
 
@@ -774,8 +774,8 @@ struct Search<'a, 'c, 'f> {
     wanted_thorns: BTreeMap<PkgId, BTreeSet<String>>,
     /// Each stand-in read, with the thorns its claims were followed for (`None`: all).
     followed: BTreeMap<PkgId, Option<BTreeSet<String>>>,
-    /// What branches of the search failed for want of a read, and the release each left out.
-    hits: BTreeMap<UnreadNeed, Option<Rel>>,
+    /// What branches of the search failed for want of a read.
+    hits: BTreeSet<UnreadNeed>,
 }
 
 /// The dependency as people read it: `et/carpet@^1.2`, or `any of et/carpet, et/cactuspugh`.
@@ -923,7 +923,7 @@ impl Search<'_, '_, '_> {
     /// The refusal when no plan was found and some branch failed for want of a read: what needed
     /// which stand-in, for what, and why it was not read (its ways past are checked after).
     fn unreadable_refusal(&self) -> Refusal {
-        Refusal::Unreadable { needs: self.hits.keys().cloned().collect(), ways: Ways::default() }
+        Refusal::Unreadable { needs: self.hits.iter().cloned().collect(), ways: Ways::default() }
     }
 
     /// A present stand-in not read yet.
@@ -1417,6 +1417,9 @@ impl Search<'_, '_, '_> {
     /// release's claims are known). What failed is the decisions behind the needs, and the
     /// stand-in's own where it could move: never a verdict on the stand-in.
     fn unread_thorns(&self, d: &Derived) -> Option<Failure> {
+        // Every stand-in it would need, each with every need asking: what is said does not
+        // depend on which comes first.
+        let (mut unread, mut needs, mut parties) = (Vec::new(), BTreeSet::new(), Vec::new());
         for (id, names) in &d.given {
             let Some(p) = self.present.get(id).filter(|p| p.stand_in && !id.is_repo()) else { continue };
             let Some(e) = d.chosen.get(id).filter(|e| !e.is_new()) else { continue };
@@ -1437,30 +1440,28 @@ impl Search<'_, '_, '_> {
                 Thorns::All => true,
                 Thorns::Some(v) => intersects(v, &new),
             };
-            let needs: Vec<usize> = (d.needs.iter().enumerate())
+            for (i, rec) in (d.needs.iter().enumerate())
                 .filter(|(_, r)| r.kind == Kind::Active && r.taken_by() == Some(id) && asks(r))
-                .map(|(i, _)| i)
-                .collect();
-            let first = &d.needs[*needs.first()?];
-            let what = match &first.need.thorns {
-                Thorns::All => UnreadFor::Every,
-                Thorns::Some(v) => UnreadFor::Thorns(v.iter().filter(|n| contains(&new, n)).cloned().collect()),
-            };
-            let by = first.need.live(first.kind).source;
-            // What the branch chose that failed: keeping the stand-in where it is when it could
-            // move, else the release whose claim asked.
-            let movable = e.decided && self.movable(id, d);
-            let skipped = match first.need.source_id().filter(|s| *s != id) {
-                _ if movable => Some(e.release.clone()),
-                Some(source) => d.chosen.get(source).map(|e| e.release.clone()),
-                None => None,
-            };
-            let parties = if movable { vec![id.clone()] } else { Vec::new() };
-            let need = UnreadNeed { id: id.clone(), package: e.release.label(), by, what, why };
-            let r = Refusal::Unreadable { needs: vec![need.clone()], ways: Ways::default() };
-            return Some(Failure { needs, unread: Some((need, skipped)), ..Failure::of(r, Vec::new(), parties) });
+            {
+                needs.insert(i);
+                let what = match &rec.need.thorns {
+                    Thorns::All => UnreadFor::Every,
+                    Thorns::Some(v) => UnreadFor::Thorns(v.iter().filter(|n| contains(&new, n)).cloned().collect()),
+                };
+                let by = rec.need.live(rec.kind).source;
+                unread.push(UnreadNeed { id: id.clone(), package: e.release.label(), by, what, why: why.clone() });
+            }
+            // Moving it (to a release whose claims are known) is the other way.
+            if e.decided && self.movable(id, d) {
+                parties.push(id.clone());
+            }
         }
-        None
+        if unread.is_empty() {
+            return None;
+        }
+        let r = Refusal::Unreadable { needs: unread.clone(), ways: Ways::default() };
+        let needs = needs.into_iter().collect();
+        Some(Failure { needs, unread, ..Failure::of(r, Vec::new(), parties) })
     }
 
     /// A thorn-name clash between a present stand-in the Cactarium did not read and a package a
@@ -1483,42 +1484,157 @@ impl Search<'_, '_, '_> {
         let (i, rec) = (d.needs.iter().enumerate())
             .find(|(_, r)| r.kind == Kind::Active && r.taker == Taker::Itself && &r.need.target == other)?;
         let by = rec.need.live(rec.kind).source;
-        let skipped = rec.need.source_id().and_then(|s| d.chosen.get(s)).map(|e| e.release.clone());
         let what = UnreadFor::ForkCheck { other: other.clone(), thorn: thorn.clone() };
         let need = UnreadNeed { id: x.clone(), package: d.chosen[x].release.label(), by, what, why };
         let f = Failure::of(r.clone(), Vec::new(), vec![other.clone()]);
-        Some(Failure { needs: vec![i], unread: Some((need, skipped)), ..f })
+        Some(Failure { needs: vec![i], unread: vec![need], ..f })
     }
 
-    /// The notes of a plan found although branches failed for want of a read: each release they
-    /// left out, unless the plan's own constraints rule it out anyway (a release of a package the
-    /// plan has at another release that does not meet what the plan asks of it).
+    /// The notes of a plan: every release the search would have preferred to the one the plan
+    /// has (or keeping a present package where it is, before moving it) that needs what the
+    /// Cactarium did not read. Worked out from the plan and the facts alone, never from which
+    /// branches the search happened to explore, so they do not depend on package ids; and from
+    /// what each release asks itself, never from constraints the plan has only because it went
+    /// without that release.
     fn skipped_notes(&self, d: &Derived) -> Vec<String> {
+        if self.unreadable.is_empty() {
+            return Vec::new();
+        }
         let mut out: BTreeSet<String> = BTreeSet::new();
-        for (need, skipped) in &self.hits {
-            let keeping = skipped.as_ref().is_some_and(|r| r.id == need.id);
-            if let Some(rel) = skipped
-                && let Some(e) = d.chosen.get(&rel.id)
-                && !e.release.same(rel)
-            {
-                let on_it = |r: &&Rec| {
-                    r.kind == Kind::Active && r.taker == Taker::Itself && r.need.target == rel.id
-                        && r.need.source_id() != Some(&rel.id)
-                };
-                if d.needs.iter().filter(on_it).any(|r| violates(rel, &r.need)) {
-                    continue;
+        for (id, e) in &d.chosen {
+            // Only a release the search chose: brought in, or present and free to move.
+            if e.present.is_some() && !(e.decided && self.movable(id, d)) {
+                continue;
+            }
+            let ranked = self.ranking(id, e);
+            if !ranked.iter().any(|r| r.same(&e.release)) {
+                continue;
+            }
+            for r in ranked.iter().take_while(|r| !r.same(&e.release)) {
+                let keeping = e.present.as_ref().is_some_and(|p| p.release.same(r));
+                let needs = if keeping { self.keeping_needs(id, d) } else { self.unread_needs_of(r, &e.enabled, d) };
+                if !needs.is_empty() {
+                    out.insert(UnreadNeed::note(&r.label(), keeping, &needs));
                 }
             }
-            let label = skipped.as_ref().map(|r| r.label());
-            out.insert(need.note(label.as_deref().map(|l| (l, keeping))));
         }
         out.into_iter().collect()
     }
 
-    fn record(&mut self, depth: usize, f: Failure) {
-        if let Some((need, skipped)) = &f.unread {
-            self.hits.entry(need.clone()).or_insert_with(|| skipped.clone());
+    /// The releases of `t` in the order the search would try them, narrowed only by what the
+    /// command line asks of it and by the thorns the plan gives it.
+    fn ranking(&self, t: &PkgId, e: &Entry) -> Vec<Rel> {
+        let named = self.named(t);
+        let reqs: Vec<Req> = named.map(|s| s.req.clone()).into_iter().collect();
+        let present = self.present_rel.get(t).cloned();
+        let mut all: Vec<Rel> = self.cat.releases(t).to_vec();
+        if let Some(p) = &present
+            && !all.iter().any(|r| r.same(p))
+        {
+            all.push(p.clone());
         }
+        let ok = eligible(&all, &reqs, &reqs, present.as_deref());
+        let ok: Vec<&Rel> = ok.into_iter().filter(|r| !r.library && e.enabled.iter().all(|th| r.thorn(th).is_some())).collect();
+        let ok = preferred(ok);
+        let newest_first = match present.as_ref().map(|_| &self.present[t].origin) {
+            None => true,
+            Some(Origin::Added) => named.is_some() || self.request.options.upgrade_all,
+            Some(Origin::Base { .. }) => {
+                (named.is_some() && self.request.options.upgrade) || self.request.options.upgrade_all
+            }
+        };
+        let flesh = ok.iter().any(|r| r.flesh);
+        let mut out: Vec<Rel> = Vec::new();
+        if let Some(p) = present.as_ref().filter(|_| !newest_first || flesh)
+            && let Some(r) = ok.iter().find(|r| r.same(p))
+        {
+            out.push((*r).clone());
+        }
+        let rest: Vec<Rel> = ok.into_iter().filter(|r| !out.iter().any(|o| o.same(r))).cloned().collect();
+        out.extend(rest);
+        out
+    }
+
+    /// What release `r` needs, for the thorns `thorns`, of present stand-ins the Cactarium did not
+    /// read: thorns of one it has not enabled (or every thorn, when it has more), or a package
+    /// with a thorn named as one it has enabled (whether it forks that is unknown).
+    fn unread_needs_of(&self, r: &Rel, thorns: &BTreeSet<String>, d: &Derived) -> Vec<UnreadNeed> {
+        let mut out: Vec<UnreadNeed> = Vec::new();
+        let unread = |x: &PkgId| {
+            let p = self.present.get(x).filter(|p| p.stand_in && !x.is_repo())?;
+            let why = self.unreadable.get(x)?;
+            d.chosen.get(x).filter(|e| !e.is_new()).map(|e| (p, e, why))
+        };
+        for c in self.parsed(r).iter() {
+            if !(c.needed_by.is_empty() || intersects(&c.needed_by, thorns)) {
+                continue;
+            }
+            // An any-of may take another alternative.
+            let Body::Single(t, _, th) = &c.body else { continue };
+            if let Some((p, e, why)) = unread(t) {
+                let new: BTreeSet<String> = match th {
+                    Thorns::All => e.release.thorn_names().into_iter().filter(|n| !contains(&p.enabled, n)).collect(),
+                    Thorns::Some(v) => v.iter().filter(|n| !contains(&p.enabled, n) && e.release.thorn(n).is_some()).cloned().collect(),
+                };
+                if !new.is_empty() {
+                    let what = match th {
+                        Thorns::All => UnreadFor::Every,
+                        Thorns::Some(_) => UnreadFor::Thorns(new.into_iter().collect()),
+                    };
+                    out.push(UnreadNeed { id: t.clone(), package: e.release.label(), by: r.label(), what, why: why.clone() });
+                }
+                continue;
+            }
+            // A package it brings in with a thorn named as one an unread stand-in has enabled.
+            if self.present.contains_key(t) || d.chosen.contains_key(t) {
+                continue;
+            }
+            for (x, p) in self.present.iter() {
+                let Some((_, e, why)) = unread(x) else { continue };
+                let shared = (self.cat.releases(t).iter())
+                    .flat_map(|q| q.thorns.iter())
+                    .find(|q| contains(&p.enabled, &q.thorn))
+                    .map(|q| q.thorn.clone());
+                if let Some(thorn) = shared {
+                    let what = UnreadFor::ForkCheck { other: t.clone(), thorn };
+                    out.push(UnreadNeed { id: x.clone(), package: e.release.label(), by: r.label(), what, why: why.clone() });
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// What needs the plan gives a present stand-in it moved, kept where it is instead: thorns it
+    /// has not enabled, whose claims the Cactarium did not read.
+    fn keeping_needs(&self, id: &PkgId, d: &Derived) -> Vec<UnreadNeed> {
+        let (Some(p), Some(why)) = (self.present.get(id).filter(|p| p.stand_in), self.unreadable.get(id)) else {
+            return Vec::new();
+        };
+        let mut out: Vec<UnreadNeed> = Vec::new();
+        for rec in d.needs.iter().filter(|r| r.kind == Kind::Active && r.taken_by() == Some(id)) {
+            let new: Vec<String> = match &rec.need.thorns {
+                Thorns::All => p.release.thorn_names().into_iter().filter(|n| !contains(&p.enabled, n)).collect(),
+                Thorns::Some(v) => v.iter().filter(|n| !contains(&p.enabled, n) && p.release.thorn(n).is_some()).cloned().collect(),
+            };
+            if new.is_empty() {
+                continue;
+            }
+            let what = match &rec.need.thorns {
+                Thorns::All => UnreadFor::Every,
+                Thorns::Some(_) => UnreadFor::Thorns(new),
+            };
+            let by = rec.need.live(rec.kind).source;
+            out.push(UnreadNeed { id: id.clone(), package: p.release.label(), by, what, why: why.clone() });
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn record(&mut self, depth: usize, f: Failure) {
+        self.hits.extend(f.unread.iter().cloned());
         let specific = !f.weak;
         if self.best.as_ref().is_none_or(|(s, d, _)| (specific, depth) > (*s, *d)) {
             self.best = Some((specific, depth, f));

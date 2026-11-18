@@ -1,0 +1,93 @@
+{
+  "slug": "max/zpapp",
+  "versions": [
+    {
+      "version": "2.0.0",
+      "track": null,
+      "tag": "v2.0.0",
+      "commit": "a8754f888c21e5d59720a9d378e730a4d91538ea",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/zpapp.git",
+      "thorns": [
+        {
+          "arrangement": "Zpapp",
+          "thorn": "ZP",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "ZP",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/zpx",
+          "range": "^2",
+          "needs": [
+            "ZX"
+          ],
+          "note": null
+        }
+      ]
+    },
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "2ccd8795e8c1f137da07710f894537126d70ff01",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/zpapp.git",
+      "thorns": [
+        {
+          "arrangement": "Zpapp",
+          "thorn": "ZP",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "ZP",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/zpx",
+          "range": "^1",
+          "needs": [
+            "ZX"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

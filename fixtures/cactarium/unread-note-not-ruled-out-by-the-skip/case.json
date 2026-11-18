@@ -1,0 +1,34 @@
+{
+  "about": "The newest of a package needs a dependency's newest, which needs a thorn of an unread base package: the plan takes the older two, and notes the release left out, though the plan's own constraints (from the older dependent) rule it out",
+  "packages": [
+    "max--zpapp",
+    "et--zpx",
+    "et--admbase"
+  ],
+  "specs": [
+    "max/zpapp"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "unknown": "abababababababababababababababababababab",
+      "thorns": [
+        "ADMBase",
+        "ADMCoupling",
+        "StaticConformal"
+      ],
+      "base": "admbase",
+      "enabled": [
+        "ADMBase"
+      ],
+      "stand_in": true
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/zpapp@1.0.0 ZP named",
+      "add et/zpx@1.0.0 ZX needed by max/zpapp@1.0.0, ^1",
+      "note: et/zpx@2.0.0 was not considered: it needs StaticConformal of et/admbase#abababababab, and the Cactarium did not read et/admbase there: et/admbase is at a commit the Cactarium does not have (is it pushed?)"
+    ]
+  }
+}

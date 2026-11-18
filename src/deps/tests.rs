@@ -1068,6 +1068,22 @@ fn decisions(plan: &Plan, back: &dyn Fn(&PkgId) -> PkgId) -> std::collections::B
         out.insert(format!("library {} {} {}", back(&l.release.id), at(&l.release), ps.join(",")));
     }
     out.extend(plan.untrusted.iter().map(|u| format!("untrusted {} {}", back(&u.id), u.commit)));
+    // The notes on releases left out for want of a read, every package named in them put back
+    // (`et/x#…`, `max/y@1.0.0`, `et/x:`): which releases, and why, never depend on ids.
+    let token = |t: &str| {
+        let end = t.trim_end_matches([':', ';', ',']);
+        let (id, rest) = match end.find(['#', '@']) {
+            Some(i) => end.split_at(i),
+            None => (end, ""),
+        };
+        match PkgId::parse(id) {
+            Ok(id) if id.as_str().contains('/') => format!("{}{rest}{}", back(&id), &t[end.len()..]),
+            _ => t.to_owned(),
+        }
+    };
+    for n in &plan.skipped {
+        out.insert(format!("skipped {}", n.split(' ').map(token).collect::<Vec<_>>().join(" ")));
+    }
     out
 }
 
