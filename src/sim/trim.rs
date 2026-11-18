@@ -158,6 +158,9 @@ pub fn needed(list: &Thornlist, cactus_root: &Path, par: &str) -> Res<BTreeSet<S
                             add.extend(by.iter().copied());
                         }
                     }
+                    // Header includes are feature/include-closure's: until it
+                    // lands, a trim does as before the crate produced them.
+                    Need::Include(_) => {}
                 }
             }
             keep.extend(add.into_iter().map(str::to_owned));

@@ -110,6 +110,12 @@ pub(super) fn conflicts(
     None
 }
 
+/// A thorn's hard requirements, header includes left out: those are
+/// feature/include-closure's, and this branch checks as before the crate produced them.
+fn needs_of(facts: &ThornFacts) -> Vec<Requirement> {
+    ccl::needs_of(facts).into_iter().filter(|r| !matches!(r, Requirement::Include(_))).collect()
+}
+
 /// The enabled thorns, with their facts.
 fn enabled_facts(chosen: &BTreeMap<PkgId, Entry>) -> Vec<(&str, &ThornFacts)> {
     chosen
@@ -132,7 +138,7 @@ pub(super) fn unmet_requirements(
     for (id, e) in entries {
         for name in e.enabled.iter().filter(|t| e.thorn_is_new(t)) {
             let Some(thorn) = e.release.thorn(name) else { continue };
-            for r in ccl::needs_of(&thorn.facts) {
+            for r in needs_of(&thorn.facts) {
                 if !enabled.iter().any(|(n, f)| ccl::meets(n, f, &r)) {
                     out.push((thorn.thorn.clone(), id.clone(), r));
                 }
@@ -153,7 +159,7 @@ pub(super) fn broken_requirements(
     for (id, e) in chosen.iter().filter(|(_, e)| !e.is_new()) {
         for name in e.enabled.iter().filter(|t| !e.thorn_is_new(t)) {
             let Some(thorn) = e.release.thorn(name) else { continue };
-            for r in ccl::needs_of(&thorn.facts) {
+            for r in needs_of(&thorn.facts) {
                 let now = enabled.iter().any(|(n, f)| ccl::meets(n, f, &r));
                 if !now && before.iter().any(|(n, f)| ccl::meets(n, f, &r)) {
                     out.push((thorn.thorn.clone(), id.clone(), r));
@@ -162,4 +168,17 @@ pub(super) fn broken_requirements(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    /// A header a thorn includes is no requirement on this branch (feature/include-closure's);
+    /// every other kind is as the crate gives it.
+    #[test]
+    fn includes_are_left_out() {
+        let mut facts = cactup_ecosystem_common::ccl::ThornFacts::scan("IMPLEMENTS: z\nINHERITS: grid", None);
+        facts.needs_includes = vec!["loop.hxx".into()];
+        assert_eq!(cactup_ecosystem_common::ccl::needs_of(&facts).len(), 2);
+        assert_eq!(super::needs_of(&facts), [super::Requirement::Implementation("grid".into())]);
+    }
 }
