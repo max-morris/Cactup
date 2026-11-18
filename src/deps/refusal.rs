@@ -104,6 +104,9 @@ pub struct Unmet {
     pub package: PkgId,
     pub requirement: Requirement,
     pub providers: Vec<Provider>,
+    /// The `--ignore-claim` patterns that dropped dependencies of `package` (one may have
+    /// declared it).
+    pub ignored: Vec<String>,
 }
 
 /// Why resolution stopped. Each one's text ends with what to do about it.
@@ -412,9 +415,16 @@ impl fmt::Display for Refusal {
                 list(placements)
             )?,
             Refusal::Unclaimed(unmet) => {
-                write!(f, "Requirements nothing in the installation meets, which no manifest declares:")?;
+                if unmet.iter().any(|u| !u.ignored.is_empty()) {
+                    write!(f, "Requirements nothing in the installation meets:")?;
+                } else {
+                    write!(f, "Requirements nothing in the installation meets, which no manifest declares:")?;
+                }
                 for u in unmet {
                     write!(f, "\n  {} ({}) {}", u.thorn, u.package, u.requirement)?;
+                    if !u.ignored.is_empty() {
+                        write!(f, "; --ignore-claim {} dropped a dependency that may declare it", u.ignored.join(", "))?;
+                    }
                     if u.providers.is_empty() {
                         write!(f, "; no registered package provides it")?;
                     }

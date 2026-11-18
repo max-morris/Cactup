@@ -1165,10 +1165,20 @@ pub(crate) fn show_and_confirm(lines: &[(LineKind, String)], beyond_named: bool,
 pub(crate) fn refusal_text(e: anyhow::Error, finished: &Finished) -> anyhow::Error {
     match e.downcast::<deps::Refusal>() {
         Ok(deps::Refusal::Unclaimed(unmet)) if finished.no_providers => {
-            let lines: Vec<String> =
-                unmet.iter().map(|u| format!("\n  {} ({}) {}", u.thorn, u.package, u.requirement)).collect();
+            let line = |u: &deps::Unmet| match u.ignored.as_slice() {
+                [] => format!("\n  {} ({}) {}", u.thorn, u.package, u.requirement),
+                ignored => format!(
+                    "\n  {} ({}) {}; --ignore-claim {} dropped a dependency that may declare it",
+                    u.thorn,
+                    u.package,
+                    u.requirement,
+                    ignored.join(", ")
+                ),
+            };
+            let lines: Vec<String> = unmet.iter().map(line).collect();
+            let undeclared = if unmet.iter().any(|u| !u.ignored.is_empty()) { "" } else { ", which no manifest declares" };
             anyhow!(
-                "Requirements nothing in the installation meets, which no manifest declares:{}.\nThe Cactarium at {} \
+                "Requirements nothing in the installation meets{undeclared}:{}.\nThe Cactarium at {} \
                  is older than this cactup and cannot list what provides them. Cactup adds only what a manifest \
                  declares: add a provider yourself first, or ask the package's authors to declare the dependency",
                 lines.concat(),

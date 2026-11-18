@@ -359,6 +359,16 @@ POOL = {
     "max--needs-zzp": ("max/needs-zzp", [V("1.0.0", ["NP"], [dep("max/zzp", None, ["ADMBase"])])]),
     "max--zzc": ("max/zzc", [V("1.0.0", ["C"])]),
     "et--zzw--needs-zzq": ("et/zzw", [V("1.0.0", ["W"], [dep("et/zzq", None, ["A2"])])]),
+    # A requirement a declared dependency would meet if it moved is that dependency's conflict.
+    "max--fieldlib": ("max/fieldlib", [V("3.0.0", ["FieldA", "FieldD"]), V("mp:1.0.0", ["FieldA", "FieldMP"]),
+                                       V("1.0.0", ["FieldA"])]),
+    "max--duser": ("max/duser", [V("1.0.0", [T("DUser", requires_thorns=["FieldD"])],
+                                   [dep("max/fieldlib", "^3", ["FieldD"], needed_by=["DUser"])])]),
+    "max--mpuser": ("max/mpuser", [V("1.0.0", [T("MPUser", requires_thorns=["FieldMP"])],
+                                     [dep("max/fieldlib", "mp:^1", ["FieldMP"], needed_by=["MPUser"])])]),
+    "max--symuser": ("max/symuser", [V("1.0.0", [T("SymUser", requires_thorns=["SymBase"])],
+                                       [dep("et/cactusbase", None, ["SymBase"], needed_by=["SymUser"])])]),
+    "et--cactusbase": ("et/cactusbase", [V("2026.5.0", ["Boundary", "SymBase"])]),
     "max--kadath--fuka-at-commit": ("max/kadath", [V("1.0.0", ["Kadath"], [dep("et/fuka", sha=FUKA_SNAP, into="src/fuka")])]),
 
     # Remove.

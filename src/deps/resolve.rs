@@ -1546,7 +1546,16 @@ impl Search<'_, '_, '_> {
                         asked.insert(requirement.clone(), found);
                     }
                     let providers = asked[&requirement].clone();
-                    out.push(Unmet { thorn, package, requirement, providers });
+                    // `--ignore-claim` patterns that dropped dependencies of the package: one of
+                    // them may have declared what it needs.
+                    let ignored = (self.request.rules.ignore.iter())
+                        .filter(|p| {
+                            p.package == package
+                                && p.kind.as_ref().is_none_or(|(k, _)| *k == super::ClaimKind::Dependency)
+                        })
+                        .map(ToString::to_string)
+                        .collect();
+                    out.push(Unmet { thorn, package, requirement, providers, ignored });
                 }
                 Refusal::Unclaimed(out)
             }
@@ -2125,10 +2134,13 @@ impl Search<'_, '_, '_> {
             }
         }
         for (t, e) in &d.chosen {
-            if !e.decided {
+            let fixed = e.present.is_some() && !self.movable(t, d);
+            // A present package that cannot move here is at its release whether decided or not:
+            // a constraint it fails is that conflict now, before anything that only follows from
+            // it (a requirement only its other releases would meet) is reported in its place.
+            if !e.decided && !(fixed && !self.may_move(t)) {
                 continue;
             }
-            let fixed = e.present.is_some() && !self.movable(t, d);
             let on_t: Vec<(usize, &Rec)> = (d.needs.iter().enumerate())
                 .filter(|(_, r)| &r.need.target == t && r.taker == Taker::Itself && self.binds(r, last))
                 .filter(|(_, r)| !(fixed && r.kind != Kind::Active))
