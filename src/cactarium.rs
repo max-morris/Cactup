@@ -1334,6 +1334,24 @@ mod tests {
         assert_eq!(interruptibly(|| Ok(7), &AtomicBool::new(false)).unwrap(), 7);
     }
 
+    /// Whether an answer came from this client's Cactarium is a URL
+    /// comparison: scheme, host and port as URLs compare them (case, a
+    /// default port written out), then the base's path as a prefix of whole
+    /// segments.
+    #[test]
+    fn an_answer_is_the_cactariums_by_url_not_by_spelling() {
+        let url = |s: &str| reqwest::Url::parse(s).unwrap();
+        let client = Client::at("HTTP://Cactarium.Example.ORG:80/prefix/");
+        assert!(client.is_ours(&url("http://cactarium.example.org/prefix/api/v1/resolve?req=a/b")));
+        assert!(client.is_ours(&url("http://cactarium.example.org:80/prefix")));
+        assert!(!client.is_ours(&url("http://cactarium.example.org/prefixed/api/v1/resolve")));
+        assert!(!client.is_ours(&url("http://cactarium.example.org:8080/prefix/api/v1/resolve")));
+        assert!(!client.is_ours(&url("https://cactarium.example.org/prefix/api/v1/resolve")));
+        assert!(!client.is_ours(&url("http://store.example.org/prefix/api/v1/resolve")));
+        let https = Client::at("https://cactarium.example.org:443");
+        assert!(https.is_ours(&url("https://cactarium.example.org/api/v1/lookup")));
+    }
+
     /// A change a proxy gave up on (a 504 on an upload that took too long)
     /// may have landed: it says so, and never that the address is wrong.
     #[test]
