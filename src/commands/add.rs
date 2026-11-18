@@ -440,6 +440,61 @@ fn narrow_linking(plan: &mut crate::fetch::Plan, repos: &BTreeSet<&str>, linked:
     plan.skipped.clear();
 }
 
+/// What restoring the base repos `touched` (that removed packages replaced)
+/// takes, or a refusal when one is left alone; `None` with nothing to
+/// restore.
+fn restore_plan(
+    inst: &crate::installation::Installation,
+    composed: &str,
+    touched: &BTreeSet<&str>,
+    gone: &[String],
+) -> Res<Option<crate::fetch::Plan>> {
+    if touched.is_empty() {
+        return Ok(None);
+    }
+    let list = thornlist::parse(composed)?;
+    let (progress, renderer) = crate::manifest::setup_prodash();
+    let mut classify = progress.add_child("classify repos");
+    let fetch_plan = crate::fetch::plan(&list, &inst.root, &mut classify);
+    drop(classify);
+    renderer.shutdown_and_wait();
+    let mut fetch_plan = fetch_plan?;
+    if let Some(skipped) = fetch_plan.skipped.iter().find(|s| touched.contains(s.repo.as_str())) {
+        bail!(
+            "Repo {} has {}; it was left alone, and {} is still added",
+            skipped.repo,
+            skipped.reason.describe(),
+            gone.join(", ")
+        );
+    }
+    narrow(&mut fetch_plan, touched);
+    Ok(Some(fetch_plan))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What a test does to the installation while the prompt waits (`add`).
+    pub(crate) static AFTER_PROMPT: std::cell::Cell<Option<fn(&std::path::Path)>> = const { std::cell::Cell::new(None) };
+}
+
+/// A refusal of the fetch made under the lock, as the clones changing while
+/// the plan waited.
+fn clones_changed(e: anyhow::Error) -> anyhow::Error {
+    anyhow!("The installation's clones changed while the plan waited ({e:#}); run the command again")
+}
+
+/// Under the lock: the fetch made now must be the one checked before the
+/// prompt. Nothing re-probes the clones once it runs (and a checkout
+/// overwrites), so a clone edited, committed in or moved while the question
+/// waited, or by a concurrent `inst refetch`, refuses here, as `recheck`
+/// refuses a changed record.
+fn same_fetch(checked: &crate::fetch::Plan, now: &crate::fetch::Plan) -> Res<()> {
+    if format!("{checked:?}") != format!("{now:?}") {
+        bail!("The installation's clones changed while the plan waited; run the command again");
+    }
+    Ok(())
+}
+
 /// What fetching the `composed` list takes for `added`: those repos (each
 /// package's own, and its libraries'), never the rest of the installation,
 /// and only links into a base clone a package gives more thorns. Every
@@ -764,6 +819,9 @@ fn plan_add(
         Options { upgrade: flags.upgrade, upgrade_all: flags.upgrade_all, no_deps: flags.no_deps, replace: flags.replace };
     let request = Request { specs: &named, present: &set.present, rules: &rules, options };
     let plan = deps::resolve(&request, &mut reg);
+    // A base package the resolver read at its commit is checked after all.
+    let mut set = set;
+    set.forget_read(&reg);
     let finished = reg.finish();
     let plan = plan.map_err(|e| super::resolution::refusal_text(e, &finished))?;
     refuse_flesh(&plan)?;
@@ -975,8 +1033,12 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
     }
     confirm_untrusted(&plan, ctx.globals.risky_allow_untrusted_artifacts, how.interactive)?;
 
+    #[cfg(test)]
+    AFTER_PROMPT.with(|h| h.get().map(|h| h(&start.inst.root)));
     let locked = start.inst.locked()?;
     let mut meta = start.recheck(&locked)?;
+    let now = fetch_plan_for(&start.inst, &composed, &base, &added).map_err(clones_changed)?;
+    same_fetch(&fetch_plan, &now)?;
     let believed = super::resolution::added_for(&meta);
     let old_commits: std::collections::BTreeMap<String, String> =
         meta.added.iter().map(|a| (a.package.clone(), a.commit.clone())).collect();
@@ -1584,30 +1646,16 @@ pub fn remove(ctx: &Ctx, packages: &[String], flags: &RemoveFlags) -> Res<()> {
 
     // The replaced base repos go back to what the base pins.
     let touched: BTreeSet<&str> = removed.iter().flat_map(|r| r.replaces.iter().map(String::as_str)).collect();
-    let mut restore = None;
-    if !touched.is_empty() {
-        let list = thornlist::parse(&composed)?;
-        let (progress, renderer) = crate::manifest::setup_prodash();
-        let mut classify = progress.add_child("classify repos");
-        let mut fetch_plan = crate::fetch::plan(&list, &inst.root, &mut classify)?;
-        drop(classify);
-        renderer.shutdown_and_wait();
-        if let Some(skipped) = fetch_plan.skipped.iter().find(|s| touched.contains(s.repo.as_str())) {
-            bail!(
-                "Repo {} has {}; it was left alone, and {} is still added",
-                skipped.repo,
-                skipped.reason.describe(),
-                gone.join(", ")
-            );
-        }
-        narrow(&mut fetch_plan, &touched);
-        restore = Some(fetch_plan);
-    }
+    let restore = restore_plan(inst, &composed, &touched, &gone)?;
     if !super::resolution::show_and_confirm(&plan.lines(&command), plan.beyond_named(), how)? {
         return Ok(());
     }
     let locked = inst.locked()?;
     let mut meta = start.recheck(&locked)?;
+    if let Some(checked) = &restore {
+        let now = restore_plan(inst, &composed, &touched, &gone).map_err(clones_changed)?;
+        same_fetch(checked, now.as_ref().expect("the same repos to restore"))?;
+    }
     meta.added.retain(|a| !gone.contains(&a.package));
     meta.added_for.retain(|name, _| !gone.contains(name));
     // After every refusal: their libraries' links and exclude lines go with

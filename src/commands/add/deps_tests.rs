@@ -1422,6 +1422,72 @@ fn a_base_clone_moved_by_hand_is_read_at_its_head() {
     let _ = (&it.a1, &it.log, &it.fake);
 }
 
+/// The fetch checked before the prompt is made again under the lock and
+/// must be the same: a clone edited, or taken away, while the question
+/// waited refuses as the installation having changed.
+#[test]
+fn clones_changed_while_the_prompt_waits_are_caught() {
+    let it = admbase("^1.0");
+    let s = &it.setup;
+    s.add(&["max/solo"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let start = Start::read(&s.ctx, false, Doing::Adding).unwrap();
+    let base = thornlist::parse(&start.pristine).unwrap();
+    let added: Vec<AddedPackage> = start.meta.added.clone();
+    let composed = super::compose(&start.pristine, &start.meta.added).unwrap();
+    let checked = super::fetch_plan_for(&start.inst, &composed, &base, &added).unwrap();
+    let again = super::fetch_plan_for(&start.inst, &composed, &base, &added).unwrap();
+    super::same_fetch(&checked, &again).unwrap();
+
+    // Edited: the fetch would now leave it alone.
+    let solo = s.inst.root.join("Cactus/repos/solo");
+    std::fs::write(solo.join("Solo/interface.ccl"), "IMPLEMENTS: solo\n# edited\n").unwrap();
+    let err = super::fetch_plan_for(&start.inst, &composed, &base, &added).map_err(super::clones_changed).unwrap_err();
+    assert!(format!("{err:#}").contains("changed while the plan waited"), "{err:#}");
+
+    // The same through `add`, the clone edited while its prompt waits.
+    std::fs::write(solo.join("Solo/interface.ccl"), "IMPLEMENTS: solo\n").unwrap();
+    super::AFTER_PROMPT.with(|h| {
+        h.set(Some(|root| std::fs::write(root.join("Cactus/repos/solo/Solo/interface.ccl"), "# edited\n").unwrap()))
+    });
+    let err = s.add(&["max/solo"], yes());
+    super::AFTER_PROMPT.with(|h| h.set(None));
+    let err = format!("{:#}", err.unwrap_err());
+    assert!(err.contains("changed while the plan waited"), "{err}");
+    std::fs::write(solo.join("Solo/interface.ccl"), "IMPLEMENTS: solo\n").unwrap();
+
+    // Taken away: the fetch would now clone it.
+    std::fs::remove_dir_all(&solo).unwrap();
+    let now = super::fetch_plan_for(&start.inst, &composed, &base, &added).unwrap();
+    let err = super::same_fetch(&checked, &now).unwrap_err();
+    assert!(format!("{err:#}").contains("changed while the plan waited"), "{err:#}");
+    let _ = (&it.a1, &it.a2, &it.log, &it.fake);
+}
+
+/// A base package at an unfrozen commit the resolver read (a dependency
+/// needs a thorn of it) is no longer one whose dependencies are unknown: the
+/// "cannot check" count leaves it out, as `remove` does.
+#[test]
+fn a_stand_in_the_resolver_read_is_checked() {
+    let (s, _, _) = unfrozen_base(3, |tmp, fake| {
+        let (url, c) = upstream(tmp, "dep", &[("Dep/interface.ccl", "IMPLEMENTS: dep\n")]);
+        let claims = format!("[{}]", depends("et/r0", ">=0.0.0", &["U0"]));
+        fake.package("max/dep0", vec![version("1.0.0", &c, &url, "Dep", &["Dep"], &claims)])
+    });
+    let pristine = std::fs::read_to_string(s.inst.source_thornlist()).unwrap();
+    let list = thornlist::parse(&pristine).unwrap();
+    let client = crate::cactarium::Client::new(&s.ctx.db.read().unwrap());
+    let mut reg = super::super::resolution::Registry::new(&client, []);
+    let mut set = super::super::resolution::present(&mut reg, &s.inst.root, &list, &[], None, &Default::default()).unwrap();
+    assert_eq!(set.unchecked.len(), 3);
+    let specs = [crate::deps::NamedSpec::parse("max/dep0").unwrap()];
+    let rules = crate::deps::Rules::default();
+    let request = crate::deps::Request { specs: &specs, present: &set.present, rules: &rules, options: Default::default() };
+    crate::deps::resolve(&request, &mut reg).unwrap_or_else(|e| panic!("{e:#}"));
+    set.forget_read(&reg);
+    reg.finish();
+    assert_eq!(set.unchecked.iter().map(|u| u.split('#').next().unwrap()).collect::<Vec<_>>(), ["et/r1", "et/r2"]);
+}
+
 /// A base clone the user detached at an unfrozen commit: more thorns of its
 /// package are only links into it (never fetched or pinned), so the add
 /// goes ahead. A repo the add does fetch, left alone by the fetch (local

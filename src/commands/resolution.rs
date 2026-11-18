@@ -68,6 +68,8 @@ pub(crate) struct Registry {
     window_start: Option<std::time::Instant>,
     /// How long this command has waited for the read limit so far.
     waited: std::time::Duration,
+    /// The packages read at a commit, and the commits (full) they were read at.
+    read: BTreeSet<(PkgId, String)>,
 }
 
 /// An older server's read limit without `Retry-After`: 12 reads a minute,
@@ -158,6 +160,7 @@ impl Registry {
             unanswered: BTreeMap::new(),
             window_start: None,
             waited: std::time::Duration::ZERO,
+            read: BTreeSet::new(),
         }
     }
 
@@ -518,7 +521,10 @@ impl Facts for Registry {
         };
         let Some((version, untrusted)) = read else { return Ok(None) };
         match Release::from_served(id, &version, self.contact(id)) {
-            Ok(release) => Ok(Some(Snapshot { release, untrusted })),
+            Ok(release) => {
+                self.read.insert((id.clone(), release.commit.clone()));
+                Ok(Some(Snapshot { release, untrusted }))
+            }
             // An answer that is no release: that package unread, the command goes on.
             Err(e) => {
                 let why = Unanswered { kind: UnreadKind::Invalid, why: e.to_string() };
@@ -607,6 +613,18 @@ impl Unread {
     /// `max/z4c@1.0.0: the Cactarium does not serve version 1.0.0 at commit …`.
     pub fn line(&self) -> String {
         format!("{}: {}", self.label, self.why)
+    }
+}
+
+impl PresentSet {
+    /// Forgets, among the base packages whose dependencies are unknown, those
+    /// `reg` has read at their commits since (the resolver read them).
+    pub(crate) fn forget_read(&mut self, reg: &Registry) {
+        let read: Vec<String> = (self.present.iter())
+            .filter(|p| p.stand_in && reg.read.contains(&(p.release.id.clone(), p.release.commit.clone())))
+            .map(|p| format!("{}#", p.release.id))
+            .collect();
+        self.unchecked.retain(|u| !read.iter().any(|r| u.starts_with(r.as_str())));
     }
 }
 
