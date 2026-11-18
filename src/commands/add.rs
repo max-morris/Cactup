@@ -440,6 +440,40 @@ fn narrow_linking(plan: &mut crate::fetch::Plan, repos: &BTreeSet<&str>, linked:
     plan.skipped.clear();
 }
 
+/// What fetching the `composed` list takes for `added`: those repos (each
+/// package's own, and its libraries'), never the rest of the installation,
+/// and only links into a base clone a package gives more thorns. Every
+/// refusal it can make (a library directory that is another repository's, a
+/// repo the fetch would leave alone) comes here, before anyone is asked
+/// about the plan. A base clone that is only linked into is never fetched or
+/// pinned, so a detached HEAD or local changes there are no refusal.
+fn fetch_plan_for(
+    inst: &crate::installation::Installation,
+    composed: &str,
+    base: &thornlist::Thornlist,
+    added: &[AddedPackage],
+) -> Res<crate::fetch::Plan> {
+    let repos: BTreeSet<String> = added.iter().flat_map(all_repos).collect();
+    let repos: BTreeSet<&str> = repos.iter().map(String::as_str).collect();
+    let list = thornlist::parse(composed)?;
+    check_library_dirs(&inst.root, list.root(), added)?;
+    let (progress, renderer) = crate::manifest::setup_prodash();
+    let mut classify = progress.add_child("classify repos");
+    let fetch_plan = crate::fetch::plan(&list, &inst.root, &mut classify);
+    drop(classify);
+    renderer.shutdown_and_wait();
+    let mut fetch_plan = fetch_plan?;
+    // More thorns of a base package: links into the base's clone, as it is.
+    let linked: BTreeSet<&str> =
+        added.iter().filter_map(|a| base_clone_of(a, base)).map(|c| c.repo.as_str()).collect();
+    let fetched = |r: &str| repos.contains(r) && !linked.contains(r);
+    if let Some(skipped) = fetch_plan.skipped.iter().find(|s| fetched(s.repo.as_str())) {
+        bail!("Repo {} in the installation has {}; it was left alone", skipped.repo, skipped.reason.describe());
+    }
+    narrow_linking(&mut fetch_plan, &repos, &linked);
+    Ok(fetch_plan)
+}
+
 /// A library's clone goes at `repos/<name>`, a name the registry chooses
 /// (the last part of `into`). One already on disk must be a clone cactup
 /// fetched from that same repository (its fetch record says so), never a
@@ -749,8 +783,10 @@ fn plan_add(
     // Base packages whose dependencies are unknown are normal (a base that
     // follows branches): said once, and only when the plan moves something
     // they might need where it is.
-    if !set.unchecked.is_empty() && !moved.is_empty() {
-        println!("{}", unchecked_line(set.unchecked.len(), &format!("moving {}", moved.join(", "))).yellow());
+    let moved_ids: Vec<&str> = moved.iter().map(|m| m.split(' ').next().unwrap_or(m)).collect();
+    let unchecked = still_unchecked(&set.unchecked, &moved_ids);
+    if unchecked > 0 && !moved.is_empty() {
+        println!("{}", unchecked_line(unchecked, &format!("moving {}", moved.join(", "))).yellow());
     }
     let unread: Vec<&super::resolution::Unread> = set.unread.iter().filter(|u| !renewed.contains(&&u.id)).collect();
     if !unread.is_empty() {
@@ -836,6 +872,12 @@ fn moves_of(plan: &crate::deps::Plan) -> Vec<String> {
         })
 }
 
+/// How many of the base packages whose dependencies are unknown
+/// (`owner/name#commit`) stay so: one the plan moves to a release is known.
+fn still_unchecked(unchecked: &[String], moved: &[&str]) -> usize {
+    unchecked.iter().filter(|u| !moved.contains(&u.split('#').next().unwrap_or(u))).count()
+}
+
 /// `remove`'s line about base packages whose dependencies are unknown.
 fn unchecked_short(gone: &[&str]) -> String {
     format!("Not checked: whether base packages at unreleased commits need {}.", gone.join(", "))
@@ -908,6 +950,15 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
     let mut notes: Vec<String> = Vec::new();
     let records = records_of(&plan, &present, &start.meta)?;
     let added = place(&base, &start.meta, records, &plan, &mut notes, &heads)?;
+    // The list as it will be, and what fetching it takes: the record cannot
+    // change without the recheck below refusing, so neither can these.
+    let mut entries = start.meta.added.clone();
+    for package in &added {
+        entries.retain(|a| a.package != package.package);
+        entries.push(package.clone());
+    }
+    let composed = compose(&start.pristine, &entries)?;
+    let fetch_plan = fetch_plan_for(&start.inst, &composed, &base, &added)?;
     if !super::resolution::show_and_confirm(&plan.lines(&command), plan.beyond_named(), how)? {
         return Ok(());
     }
@@ -965,27 +1016,9 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
         }
     }
     keep_as_named(&mut meta, &promoted);
-    let composed = compose(&start.pristine, &meta.added)?;
-
-    // Fetch those repos (each package's own, and its libraries') — never
-    // the rest of the installation.
+    debug_assert!(meta.added == entries, "the record changed after the plan was checked");
     let inst = &start.inst;
     let repos: BTreeSet<String> = added.iter().flat_map(all_repos).collect();
-    let repos: BTreeSet<&str> = repos.iter().map(String::as_str).collect();
-    let list = thornlist::parse(&composed)?;
-    check_library_dirs(&inst.root, list.root(), &added)?;
-    let (progress, renderer) = crate::manifest::setup_prodash();
-    let mut classify = progress.add_child("classify repos");
-    let mut fetch_plan = crate::fetch::plan(&list, &inst.root, &mut classify)?;
-    drop(classify);
-    renderer.shutdown_and_wait();
-    if let Some(skipped) = fetch_plan.skipped.iter().find(|s| repos.contains(s.repo.as_str())) {
-        bail!("Repo {} in the installation has {}; it was left alone", skipped.repo, skipped.reason.describe());
-    }
-    // More thorns of a base package: links into the base's clone, as it is.
-    let linked: BTreeSet<&str> =
-        added.iter().filter_map(|a| base_clone_of(a, &base)).map(|c| c.repo.as_str()).collect();
-    narrow_linking(&mut fetch_plan, &repos, &linked);
     // After every refusal, just before the fetch: a placement the add drops
     // (its `into` changed, or the base took the library over) loses its link
     // and exclude line, since a stale link would have the new list's
@@ -1000,7 +1033,7 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
         // cactup made it.
         crate::fetch::FetchState::record(&inst.root, &report.records())?;
         let why: Vec<String> = report.failures.iter().map(|f| format!("{}: {}", f.what, f.error)).collect();
-        bail!("Failed to fetch {}:\n  {}", repos.iter().copied().collect::<Vec<_>>().join(", "), why.join("\n  "));
+        bail!("Failed to fetch {}:\n  {}", repos.iter().cloned().collect::<Vec<_>>().join(", "), why.join("\n  "));
     }
     crate::fetch::FetchState::record(&inst.root, &report.records())?;
 
@@ -1539,19 +1572,15 @@ pub fn remove(ctx: &Ctx, packages: &[String], flags: &RemoveFlags) -> Res<()> {
         dry_run: flags.dry_run,
         interactive: crate::cactarium::interactive(),
     };
-    if !super::resolution::show_and_confirm(&plan.lines(&command), plan.beyond_named(), how)? {
-        return Ok(());
-    }
     let gone: Vec<String> =
         plan.removed.iter().chain(plan.orphans.iter().map(|o| &o.id)).map(ToString::to_string).collect();
-
     let inst = &start.inst;
-    let locked = inst.locked()?;
-    let mut meta = start.recheck(&locked)?;
-    let removed: Vec<AddedPackage> = meta.added.iter().filter(|a| gone.contains(&a.package)).cloned().collect();
-    meta.added.retain(|a| !gone.contains(&a.package));
-    meta.added_for.retain(|name, _| !gone.contains(name));
-    let composed = compose(&start.pristine, &meta.added)?;
+    // The list as it will be, and restoring what the removed packages
+    // replaced, before anyone is asked: the recheck below refuses if the
+    // record changes meanwhile.
+    let removed: Vec<AddedPackage> = start.meta.added.iter().filter(|a| gone.contains(&a.package)).cloned().collect();
+    let entries: Vec<AddedPackage> = start.meta.added.iter().filter(|a| !gone.contains(&a.package)).cloned().collect();
+    let composed = compose(&start.pristine, &entries)?;
 
     // The replaced base repos go back to what the base pins.
     let touched: BTreeSet<&str> = removed.iter().flat_map(|r| r.replaces.iter().map(String::as_str)).collect();
@@ -1574,6 +1603,13 @@ pub fn remove(ctx: &Ctx, packages: &[String], flags: &RemoveFlags) -> Res<()> {
         narrow(&mut fetch_plan, &touched);
         restore = Some(fetch_plan);
     }
+    if !super::resolution::show_and_confirm(&plan.lines(&command), plan.beyond_named(), how)? {
+        return Ok(());
+    }
+    let locked = inst.locked()?;
+    let mut meta = start.recheck(&locked)?;
+    meta.added.retain(|a| !gone.contains(&a.package));
+    meta.added_for.retain(|name, _| !gone.contains(name));
     // After every refusal: their libraries' links and exclude lines go with
     // them (only what placing made; whatever else is at those paths is left,
     // with a note). Until the new list and record are written, any failure
@@ -2730,6 +2766,11 @@ mod tests {
         assert_eq!(moves_of(&plan), ["et/admbase (in place of base repo admbase)"]);
         assert!(unchecked_line(3, "removing max/a").ends_with("breaks 3 base packages whose dependencies are unknown here."));
         assert_eq!(unchecked_short(&["max/a", "et/b"]), "Not checked: whether base packages at unreleased commits need max/a, et/b.");
+        // A moved base package is no longer one whose dependencies are unknown.
+        let unchecked = ["et/admbase#abababababab".to_owned(), "et/cactusbase#cacacacacaca".to_owned()];
+        let moved = moves_of(&plan);
+        let moved: Vec<&str> = moved.iter().map(|m| m.split(' ').next().unwrap()).collect();
+        assert_eq!(still_unchecked(&unchecked, &moved), 1);
     }
 
     /// `cactup add` again at a version that moves FUKA to `ext/fuka` and also

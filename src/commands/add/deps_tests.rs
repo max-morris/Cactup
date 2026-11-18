@@ -199,6 +199,11 @@ impl Fake {
             if self.refuse_at.iter().any(|c| c == at) {
                 return error("403 Forbidden", "forbidden", "not served: the package isn't trusted".into());
             }
+            // An abbreviated commit too short to look up; one that matches
+            // nothing is a 404 below, as any commit the repo lacks.
+            if at.len() < 7 && at.chars().all(|c| c.is_ascii_hexdigit()) {
+                return error("400 Bad Request", "bad-request", "abbreviated commits need at least 7 hex digits".into());
+            }
             if self.bad_at.iter().any(|c| c == at) {
                 let message = format!("{id} at commit {}: invalid manifest: no [package] table", &at[..12]);
                 return error("400 Bad Request", "bad-request", message);
@@ -1407,6 +1412,36 @@ fn a_base_clone_moved_by_hand_is_read_at_its_head() {
             assert!(!macros.exists());
         }
     }
+    let _ = (&it.a1, &it.log, &it.fake);
+}
+
+/// A base clone the user detached at an unfrozen commit: more thorns of its
+/// package are only links into it (never fetched or pinned), so the add
+/// goes ahead. A repo the add does fetch, left alone by the fetch (local
+/// changes in its clone), refuses before anyone is asked: under `--dry-run`
+/// too.
+#[test]
+fn a_detached_base_clone_takes_more_thorns_and_refusals_come_before_the_prompt() {
+    // The base follows its branch, now at a2 (2.0.0); the user detaches
+    // HEAD there.
+    let it = admbase_full("^2.0", false, true, |f| f);
+    let s = &it.setup;
+    let clone = s.inst.root.join("Cactus/repos/admbase");
+    std::fs::write(clone.join(".git/HEAD"), format!("{}\n", it.a2)).unwrap();
+    assert_eq!(super::clone_head(&s.inst.root, "Cactus", "admbase").as_deref(), Some(it.a2.as_str()));
+    s.add(&["max/app"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let added = s.added();
+    assert!(added.contains(&("et/admbase".to_owned(), vec!["ADMBase/StaticConformal".to_owned()])), "{added:?}");
+    assert!(s.inst.root.join("Cactus/arrangements/ADMBase/StaticConformal/interface.ccl").is_file());
+
+    s.add(&["max/solo"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let solo = s.inst.root.join("Cactus/repos/solo");
+    std::fs::write(solo.join("Solo/interface.ccl"), "IMPLEMENTS: solo\n# edited\n").unwrap();
+    let before = std::fs::read_to_string(s.inst.live_thornlist().unwrap()).unwrap();
+    let flags = AddFlags { dry_run: true, ..AddFlags::default() };
+    let err = format!("{:#}", s.add(&["max/solo", "max/app3"], flags).unwrap_err());
+    assert!(err.contains("Repo solo in the installation has local modifications"), "{err}");
+    assert_eq!(std::fs::read_to_string(s.inst.live_thornlist().unwrap()).unwrap(), before);
     let _ = (&it.a1, &it.log, &it.fake);
 }
 
