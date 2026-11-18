@@ -373,6 +373,9 @@ POOL = {
     "et--zpx": ("et/zpx", [V("2.0.0", ["ZX"], [dep("et/admbase", None, ["StaticConformal"])]), V("1.0.0", ["ZX"])]),
     "max--zpapp": ("max/zpapp", [V("2.0.0", ["ZP"], [dep("et/zpx", "^2", ["ZX"])]),
                                  V("1.0.0", ["ZP"], [dep("et/zpx", "^1", ["ZX"])])]),
+    # A fork standing in for a base package --replace takes out of play.
+    "max--zprobe": ("max/zprobe", [V("1.0.0", ["ZProbe"], [dep("et/carpetx", "^2026.5", ["CarpetX"]),
+                                                          dep("max/carpetx-mp", None, ["CarpetX"])])]),
     "max--zpapq": ("max/zpapq", [V("2.0.0", ["ZQ"], [dep("et/admbase", None, ["StaticConformal"]),
                                                     dep("et/cactusbase", None, ["SymBase"])]),
                                  V("1.0.0", ["ZQ"])]),

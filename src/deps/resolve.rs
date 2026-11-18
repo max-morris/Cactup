@@ -2254,7 +2254,13 @@ impl Search<'_, '_, '_> {
             // A present package that cannot move here is at its release whether decided or not:
             // a constraint it fails is that conflict now, before anything that only follows from
             // it (a requirement only its other releases would meet) is reported in its place.
-            if !e.decided && !(fixed && !self.may_move(t)) {
+            if !e.decided && (!fixed || self.may_move(t)) {
+                continue;
+            }
+            // One a decision still to come could take out of play (a fork the plan brings in
+            // replacing its base repo under --replace, a flesh coming in) is checked once every
+            // decision is made: then it is in play or not, and a fork may stand in for it.
+            if fixed && !last && !self.stays(t, d) {
                 continue;
             }
             let on_t: Vec<(usize, &Rec)> = (d.needs.iter().enumerate())
@@ -2650,9 +2656,12 @@ impl Search<'_, '_, '_> {
             let reason = (active.iter())
                 .filter(|(_, taker)| taker == t)
                 .filter(from_depth)
-                .min_by_key(|(r, _)| {
+                .min_by_key(|(r, taker)| {
                     let n = &r.need;
-                    (n.source_id().is_some(), n.any_of.is_some(), n.source_id(), n.index)
+                    // A dependency on the package itself before one it stands in for, then by
+                    // what it names: the order claims are declared in decides nothing.
+                    let through = &n.target != taker;
+                    (n.source_id().is_some(), n.any_of.is_some(), n.source_id(), through, n.target.clone(), n.req.to_string(), n.index)
                 });
             if let Some((r, _)) = reason {
                 why.insert(t.clone(), r.need.why(r.rule));
