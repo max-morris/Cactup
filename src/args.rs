@@ -398,14 +398,6 @@ pub(crate) enum Commands {
         #[clap(long, value_name = "TOKEN")]
         token: Option<String>,
     },
-    // §3.1
-    /// Delete an installation (same as `installation delete`)
-    Uninstall {
-        #[clap(help = "The alias of the installation to delete.")]
-        alias: String,
-        #[clap(short, long, help = "Do not ask for confirmation, and delete even while a build is running.")]
-        force: bool,
-    },
     /// Manage Einstein Toolkit installations
     #[clap(subcommand)]
     Installation(InstallationCommand),
@@ -1617,7 +1609,6 @@ mod tests {
             vec!["cactup", "install", "ET_2025_05", "--silent"],
             vec!["cactup", "install", "master", "--silent"],
             vec!["cactup", "install", "--thornlist", "my/list.th", "--silent"],
-            vec!["cactup", "uninstall", "old", "-f"],
             vec!["cactup", "inst", "delete", "old"],
             vec!["cactup", "installation", "delete", "old", "--force"],
             // A bare positional beside an optional subcommand is the likeliest

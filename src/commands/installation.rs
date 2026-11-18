@@ -158,7 +158,7 @@ pub fn dispatch(ctx: &Ctx, cmd: InstallationCommand) -> Res<()> {
         InstallationCommand::Use { alias } => super::use_cmd::dispatch(ctx, alias),
         InstallationCommand::Refetch(args) => super::refetch::dispatch(ctx, args),
         InstallationCommand::Delta { alias } => super::delta::installation_delta(ctx, alias),
-        InstallationCommand::Delete { alias, force } => super::uninstall::dispatch(ctx, alias, force),
+        InstallationCommand::Delete { alias, force } => super::delete::dispatch(ctx, alias, force),
     }
 }
 

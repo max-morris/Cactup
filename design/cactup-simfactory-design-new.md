@@ -629,8 +629,6 @@ path flag.
 
 ```
 cactup install [release] [--alias …] [--silent] [--install-prefix …] …   (existing)
-cactup uninstall <alias> [-f]                                             (new; see §3.1;
-                                                                          same as `installation delete`)
 cactup show                        (aggregate state view: active installation +
                                     active config + resolved machine; read-only,
                                     never prompts, never writes the DB)

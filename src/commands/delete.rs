@@ -1,5 +1,4 @@
-//! `cactup installation delete <alias>` (also `cactup uninstall <alias>`):
-//! remove an installation (spec §3.1).
+//! `cactup installation delete <alias>`: remove an installation (spec §3.1).
 //!
 //! Only what cactup put in the installation home is deleted: the Cactus tree,
 //! `.cactup/`, the pristine thornlist and `imports/`. The home itself goes only

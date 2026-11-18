@@ -148,7 +148,7 @@ cactup --installation myrelease config list
 
 ## Deleting an installation
 
-Delete an installation (`cactup uninstall myrelease` does the same):
+Delete an installation:
 
 ```sh
 cactup inst delete myrelease
@@ -369,8 +369,6 @@ rebuilding would cost — use `cactup config delta`.
 {{cactup:cli command="installation show"}}
 
 {{cactup:cli command="use"}}
-
-{{cactup:cli command="uninstall"}}
 
 ## Installation locations
 

@@ -221,7 +221,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     }
 
     // Back the dirty repos actually being forced up outside the installation
-    // (uninstall deletes the installation), then fetch them like clean repos.
+    // (`inst delete` deletes the installation), then fetch them like clean repos.
     if !forced_repo_names.is_empty() {
         let to_force: Vec<&fetch::SkippedRepo> =
             plan.skipped.iter().filter(|s| forced_repo_names.contains(&s.repo)).collect();
@@ -1220,7 +1220,7 @@ fn print_dry_run(
 /// saving here — a retargeted repo can also be locally edited (the
 /// fork-adoption workflow is exactly "edit a thorn, then repoint origin at
 /// your fork"), and forcing replaces the whole worktree either way. Outside
-/// the installation because `uninstall` deletes the installation directory.
+/// the installation because `inst delete` deletes the installation directory.
 /// `Ok(None)` when none of `skipped` actually has file contents to save (e.g.
 /// a --overwrite selection that only hit local-commit/detached-HEAD repos) —
 /// callers must not report a backup path, or create a backup dir, in that case.
