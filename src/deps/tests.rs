@@ -45,6 +45,10 @@ struct FixtureFacts {
     ticks: Vec<usize>,
     /// Each snapshot asked for, `owner/name@at`, in order.
     reads: Vec<String>,
+    /// How many had been asked for when the search started.
+    reads_at_search: Option<usize>,
+    /// Packages whose reads the Cactarium does not answer, with why.
+    unanswered: BTreeMap<PkgId, Unanswered>,
 }
 
 impl Facts for FixtureFacts {
@@ -60,8 +64,20 @@ impl Facts for FixtureFacts {
 
     fn snapshot(&mut self, id: &PkgId, at: &str) -> Res<Option<Snapshot>> {
         self.reads.push(format!("{id}@{}", at.get(..12).unwrap_or(at)));
+        if self.unanswered.contains_key(id) {
+            return Ok(None);
+        }
         let found = self.snapshots.iter().find(|((i, a), _)| i == id && (a == at || a.starts_with(at)));
         Ok(found.map(|(_, s)| s.clone()))
+    }
+
+    fn unanswered(&self, id: &PkgId, _at: &str) -> Option<Unanswered> {
+        self.unanswered.get(id).cloned()
+    }
+
+    fn searching(&mut self) {
+        assert!(self.reads_at_search.is_none(), "the search started twice");
+        self.reads_at_search = Some(self.reads.len());
     }
 
     fn providers(&mut self, r: &Requirement) -> Res<Vec<Provider>> {
@@ -98,6 +114,10 @@ struct Case {
     providers: BTreeMap<String, Vec<ProviderSpec>>,
     #[serde(default)]
     remove: Option<RemoveSpec>,
+    /// Packages whose reads at a commit the Cactarium does not answer: `retry` (its read limit,
+    /// the server failing), `untrusted`, `invalid` (a 400).
+    #[serde(default)]
+    unanswered: BTreeMap<String, String>,
     expect: Expect,
 }
 
@@ -334,6 +354,16 @@ fn load(dir: &Path) -> Loaded {
             .collect();
         facts.providers.insert(key.clone(), providers);
     }
+    for (id, kind) in &case.unanswered {
+        let kind = match kind.as_str() {
+            "retry" => UnreadKind::Retry,
+            "untrusted" => UnreadKind::Untrusted,
+            "invalid" => UnreadKind::Invalid,
+            other => panic!("{}: {other} is no kind of unanswered read", dir.display()),
+        };
+        let why = format!("a {kind:?} answer");
+        facts.unanswered.insert(PkgId::parse(id).unwrap(), Unanswered { kind, why });
+    }
     let mut present = Vec::new();
     for p in &case.present {
         let id = PkgId::parse(&p.package).unwrap();
@@ -538,6 +568,10 @@ fn run(dir: &Path) -> Vec<String> {
     let request = Request { specs: &specs, present: &present, rules: &rules, options: options_of(&case) };
     let result = resolve(&request, &mut facts);
     compare("reads", &case.expect.reads, facts.reads.clone(), &mut errors);
+    // Every read is made before the search starts (and none after, checking ways past).
+    if facts.reads_at_search.is_some_and(|n| n != facts.reads.len()) {
+        errors.push(format!("read during the search: {:?}", &facts.reads[facts.reads_at_search.unwrap()..]));
+    }
     match result {
         Ok(plan) => {
             check_refusal(&case.expect, None, None, &mut errors);

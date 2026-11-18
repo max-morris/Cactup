@@ -1,0 +1,34 @@
+{
+  "about": "One package's newest needs an unread thorn, another rules that version out anyway: the same plan whichever is decided first, and no note",
+  "packages": [
+    "max--zzg",
+    "max--zzh",
+    "et--admbase"
+  ],
+  "specs": [
+    "max/zzg",
+    "max/zzh"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "unknown": "abababababababababababababababababababab",
+      "thorns": [
+        "ADMBase",
+        "ADMCoupling",
+        "StaticConformal"
+      ],
+      "base": "admbase",
+      "enabled": [
+        "ADMBase"
+      ],
+      "stand_in": true
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/zzg@1.0.0 G named",
+      "add max/zzh@2.0.0 H named"
+    ]
+  }
+}

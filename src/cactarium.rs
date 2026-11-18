@@ -561,12 +561,14 @@ impl std::fmt::Display for Refused {
 impl std::error::Error for Refused {}
 
 impl Refused {
-    /// Not answered now, rather than answered: rate-limited (429), not
-    /// served to this caller (403), or the server failing (5xx). A read
-    /// refused so leaves that one package unread; it never fails a command
-    /// on its own.
-    pub fn is_unanswered(&self) -> bool {
-        self.status == 429 || self.status == 403 || self.status >= 500
+    /// A read at a commit not answered with the package, for a reason of
+    /// that read's own: the package cannot be read there (400, a bad
+    /// manifest or a commit prefix that matches nothing), not served to this
+    /// caller (403), rate-limited (429), or the server or the git host
+    /// failing (5xx). A read refused so leaves that one package unread; it
+    /// never fails a command on its own.
+    pub fn is_unread(&self) -> bool {
+        matches!(self.status, 400 | 403 | 429) || self.status >= 500
     }
 }
 
@@ -1278,13 +1280,14 @@ mod tests {
         client.http().post(client.url("/packages/et/x/refresh"))
     }
 
-    /// Rate limits, refusals to serve and failing servers are answers not
-    /// given now; anything else is an answer.
+    /// A package that cannot be read there, refusals to serve, rate limits
+    /// and failing servers leave a read unread; a missing token is no read's
+    /// own, and a 404 is an answer (no such commit).
     #[test]
-    fn unanswered_statuses() {
-        let refused = |status| Refused { status, message: String::new(), retry_after: None }.is_unanswered();
-        assert!(refused(429) && refused(403) && refused(502) && refused(500));
-        assert!(!refused(404) && !refused(400) && !refused(401));
+    fn unread_statuses() {
+        let refused = |status| Refused { status, message: String::new(), retry_after: None }.is_unread();
+        assert!(refused(400) && refused(429) && refused(403) && refused(502) && refused(500));
+        assert!(!refused(404) && !refused(401));
     }
 
     /// A client with a whole-request limit gives up on an answer whose body

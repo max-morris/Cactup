@@ -191,6 +191,9 @@ pub struct Plan {
     pub steps: Vec<Step>,
     pub choices: Vec<Choice>,
     pub notes: Vec<String>,
+    /// Releases the search could not consider because they need what the Cactarium did not
+    /// read, each with why: such a plan is always shown and confirmed.
+    pub skipped: Vec<String>,
     /// Releases awaiting review that the plan chose, `owner/name@version`.
     pub pending: Vec<String>,
     pub untrusted: Vec<Untrusted>,
@@ -206,15 +209,17 @@ impl Plan {
         self.steps.iter().all(|s| matches!(s, Step::Keep { .. }))
     }
 
-    /// Whether the plan goes beyond what was named, so it is shown and confirmed.
+    /// Whether the plan goes beyond what was named (or passed over releases it could not
+    /// check), so it is shown and confirmed.
     pub fn beyond_named(&self) -> bool {
-        self.steps.iter().any(|s| match s {
-            Step::Add { why, .. } | Step::AddThorns { why, .. } | Step::Upgrade { why, .. } => {
-                why != &Why::Named
-            }
-            Step::Replace { explicit, .. } => !explicit,
-            Step::Readd { .. } | Step::Keep { .. } => false,
-        })
+        !self.skipped.is_empty()
+            || self.steps.iter().any(|s| match s {
+                Step::Add { why, .. } | Step::AddThorns { why, .. } | Step::Upgrade { why, .. } => {
+                    why != &Why::Named
+                }
+                Step::Replace { explicit, .. } => !explicit,
+                Step::Readd { .. } | Step::Keep { .. } => false,
+            })
     }
 
     /// The plan as people read it, each line with its kind: the header, one line per step, then
@@ -235,6 +240,9 @@ impl Plan {
             out.push((LineKind::Rebuild, text.to_owned()));
         }
         for n in &self.notes {
+            out.push((LineKind::Note, format!("  note: {n}")));
+        }
+        for n in &self.skipped {
             out.push((LineKind::Note, format!("  note: {n}")));
         }
         out

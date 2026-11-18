@@ -4,7 +4,7 @@
   "snapshots": ["et--admbase--at-efef"],
   "specs": ["max/needs-adm-all"],
   "present": [
-    {"package": "et/admbase", "unknown": "efefefefefefefefefefefefefefefefefefefef", "thorns": ["ADMBase"], "base": "admbase", "enabled": ["ADMBase"], "stand_in": true}
+    {"package": "et/admbase", "unknown": "efefefefefefefefefefefefefefefefefefefef", "thorns": ["ADMBase", "StaticConformal"], "base": "admbase", "enabled": ["ADMBase"], "stand_in": true}
   ],
   "expect": {
     "plan": ["add max/needs-adm-all@1.0.0 NA named", "add et/admbase#efefefefefef StaticConformal needed by max/needs-adm-all@1.0.0"],

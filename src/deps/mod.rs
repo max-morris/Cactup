@@ -43,7 +43,7 @@ pub use plan::{
     Choice, ChoiceKey, ChoiceRule, Library, LineKind, Placement, Plan, Record, Replaced, Step, Untrusted,
 };
 #[allow(unused_imports)]
-pub use refusal::{Live, Refusal, Unmet};
+pub use refusal::{Live, Refusal, UnreadNeed, Unmet, Ways};
 #[allow(unused_imports)]
 pub use remove::{is_requested, plan_remove, AddedFor, Extension, Orphan, RemovePlan};
 #[allow(unused_imports)]
@@ -292,11 +292,13 @@ pub struct Present {
     /// The libraries it placed, held where they are while it does not change.
     pub libraries: Vec<InstalledLibrary>,
     /// `release` stands in for one not read yet (a base package at a commit no version froze):
-    /// its enabled thorns as the tree has them, no other thorns, and only the claims known
+    /// every thorn its clone has at that commit, as the tree has them, and only the claims known
     /// without reading it. The resolver reads it at its commit ([`Facts::snapshot`]) when the
     /// search comes to depend on it: a named spec or a need's thorns name it, or it may be a fork
-    /// of a package the plan could bring in. One it cannot read then refuses
-    /// ([`Refusal::Unreadable`]).
+    /// of a package the plan could bring in. Where it could not be read, only its claims are
+    /// unknown: a branch that would need them (enabling a thorn of it, or telling whether it is a
+    /// fork of a package coming in) fails, and a plan found without them carries a note; no plan
+    /// at all because of them is [`Refusal::Unreadable`].
     pub stand_in: bool,
 }
 
@@ -492,6 +494,27 @@ pub struct Provider {
     pub thorn: String,
 }
 
+/// Why the Cactarium did not answer a read at a commit, as far as what to do about it goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UnreadKind {
+    /// It has no such commit (not pushed?).
+    Missing,
+    /// It cannot read the package there (a bad manifest, a thorn problem): its message says why.
+    Invalid,
+    /// It reads this package only at released versions.
+    Untrusted,
+    /// Not now: its read limit, or the server or the git host failing.
+    Retry,
+}
+
+/// A read at a commit the Cactarium did not answer with the package: the kind, and why in words
+/// that say what is true.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Unanswered {
+    pub kind: UnreadKind,
+    pub why: String,
+}
+
 /// A package read at a commit or branch tip.
 #[derive(Clone, Debug)]
 pub struct Snapshot {
@@ -520,10 +543,14 @@ pub trait Facts {
     /// an untrusted snapshot is only marked, and confirmed by the caller once the plan is known.
     fn snapshot(&mut self, id: &PkgId, at: &str) -> Res<Option<Snapshot>>;
     /// Why a snapshot just answered `None` was not answered (rate-limited, not served to this
-    /// caller, the server failing), rather than not found; `None` when it was not found.
-    fn unanswered(&self, _id: &PkgId, _at: &str) -> Option<String> {
+    /// caller, a package the Cactarium cannot read there, the server failing), rather than not
+    /// found; `None` when it was not found.
+    fn unanswered(&self, _id: &PkgId, _at: &str) -> Option<Unanswered> {
         None
     }
+    /// Called once, after every read the search may need is done and before the search starts:
+    /// the search itself never reads (a read there would be waited for inside its time limit).
+    fn searching(&mut self) {}
     /// The registered thorns meeting a requirement (to list in a refusal; never planned).
     fn providers(&mut self, requirement: &Requirement) -> Res<Vec<Provider>>;
     /// Called every few search steps with the number taken so far, so the caller can show that a

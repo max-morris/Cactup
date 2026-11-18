@@ -1,0 +1,39 @@
+{
+  "slug": "max/zzp",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "36f1d3499e21c92202de3f3ab20369c9f822e917",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/zzp.git",
+      "thorns": [
+        {
+          "arrangement": "Zzp",
+          "thorn": "ADMBase",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "ADMBase",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    }
+  ]
+}

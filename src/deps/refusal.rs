@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use super::{PkgId, Provider, Requirement};
+use super::{PkgId, Provider, Requirement, Unanswered, UnreadKind};
 
 /// A live constraint, as a refusal lists it: what it asks and where it comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,6 +25,77 @@ impl fmt::Display for Live {
     }
 }
 
+/// The flags a refusal may suggest: each one only when a search with it (on the facts already
+/// read) found a plan, so a way past is never a guess.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Ways {
+    pub upgrade: bool,
+    pub replace: bool,
+    pub no_deps: bool,
+}
+
+/// What a branch of the search needed of a present package the Cactarium did not read at its
+/// commit (its thorns are known from the tree; what they depend on, and what it forks, are not).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UnreadNeed {
+    pub id: PkgId,
+    /// As installed: `et/admbase#abababababab`.
+    pub package: String,
+    /// What needed it: `max/zza@2.0.0`, `the command line`.
+    pub by: String,
+    pub what: UnreadFor,
+    pub why: Unanswered,
+}
+
+/// What an [`UnreadNeed`] was for.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UnreadFor {
+    /// Thorns of it not enabled now: what they depend on.
+    Thorns(Vec<String>),
+    /// Every thorn of it.
+    Every,
+    /// A package coming in has a thorn of the same name as one it has enabled: whether it is a
+    /// fork of that package (it would stand in for it) or not (the two clash).
+    ForkCheck { other: PkgId, thorn: String },
+}
+
+impl UnreadNeed {
+    /// What it needed: `StaticConformal of et/admbase#abababababab`.
+    fn wanted(&self) -> String {
+        let UnreadNeed { id, package, what, .. } = self;
+        match what {
+            UnreadFor::Thorns(thorns) => format!("{} of {package}", thorns.join(", ")),
+            UnreadFor::Every => format!("every thorn of {package}"),
+            UnreadFor::ForkCheck { other, thorn } => format!(
+                "{other}, which has a thorn {thorn} as {package} has (only a read of {id} tells whether it is a fork \
+                 of {other})"
+            ),
+        }
+    }
+
+    /// The note a plan found without it carries: `skipped` is the release the branch had chosen
+    /// (`keeping`: the package itself, at the commit it is at).
+    pub(super) fn note(&self, skipped: Option<(&str, bool)>) -> String {
+        let (wanted, id, why) = (self.wanted(), &self.id, &self.why.why);
+        match skipped {
+            Some((_, true)) => format!(
+                "keeping {} was not considered: {} needs {wanted}, and the Cactarium did not read {id} there: {why}",
+                self.package, self.by
+            ),
+            Some((label, false)) if label == self.by => {
+                format!("{label} was not considered: it needs {wanted}, and the Cactarium did not read {id} there: {why}")
+            }
+            _ => format!("not considered: {self}"),
+        }
+    }
+}
+
+impl fmt::Display for UnreadNeed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} needs {}; the Cactarium did not read {} there: {}", self.by, self.wanted(), self.id, self.why.why)
+    }
+}
+
 /// An unmet CCL requirement of a thorn the plan enables.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unmet {
@@ -38,10 +109,11 @@ pub struct Unmet {
 /// Why resolution stopped. Each one's text ends with what to do about it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// A present package that may not move is outside a new constraint.
-    PresentOutsideRange { installed: String, live: Live },
+    /// A present package that may not move is outside a new constraint. `upgrade`: `--upgrade`
+    /// finds a plan.
+    PresentOutsideRange { installed: String, live: Live, upgrade: bool },
     /// A present package that may not move lacks thorns a dependency needs.
-    PresentLacksThorns { installed: String, thorns: Vec<String>, live: Live },
+    PresentLacksThorns { installed: String, thorns: Vec<String>, live: Live, upgrade: bool },
     /// Two packages enable a thorn of one name.
     SameThorn {
         thorn: String,
@@ -51,11 +123,20 @@ pub enum Refusal {
         base_repo: Option<String>,
         /// The claim that brings the newcomer in, when one does.
         ignore: Option<String>,
+        /// `--replace` finds a plan.
+        replace: bool,
     },
     /// `by` declares itself incompatible with `target`.
     Incompatible { by: PkgId, by_label: String, target: PkgId, target_label: String },
     /// A fork and its upstream are both in the plan.
-    ForkAndUpstream { fork: PkgId, fork_label: String, upstream: PkgId, upstream_base_repo: Option<String> },
+    /// `replace`: `--replace` finds a plan.
+    ForkAndUpstream {
+        fork: PkgId,
+        fork_label: String,
+        upstream: PkgId,
+        upstream_base_repo: Option<String>,
+        replace: bool,
+    },
     /// A chosen fork of a dependency's target does not stand in for the versions it asks.
     ForkDoesNotStandIn { fork: PkgId, fork_label: String, live: Live },
     /// No release meets every constraint on a package.
@@ -95,11 +176,10 @@ pub enum Refusal {
     NotRegistered { target: PkgId, by: Option<Live> },
     /// A claim cactup cannot read.
     BadClaim { by: String, claim: String, detail: String, ignore: String },
-    /// Present packages the plan depends on that the Cactarium did not read at their commits:
-    /// each as installed, and why. The ways past that work: moving it to a release (`upgrade`),
-    /// leaving dependencies out (`no_deps`), naming a released version (`released`, for a named
-    /// one).
-    Unreadable { packages: Vec<(String, String)>, upgrade: bool, no_deps: bool, released: bool },
+    /// No plan, and some branch failed for want of the claims of present packages the Cactarium
+    /// did not read at their commits: what needed which, and why it was not read; with the ways
+    /// past that find a plan.
+    Unreadable { needs: Vec<UnreadNeed>, ways: Ways },
     /// Removing these would leave dependents without what they need.
     HasDependents { removed: Vec<PkgId>, dependents: Vec<(String, String)> },
 }
@@ -108,14 +188,15 @@ impl Refusal {
     /// What gets past it.
     pub fn way_past(&self) -> String {
         match self {
-            Refusal::PresentOutsideRange { live, .. } | Refusal::PresentLacksThorns { live, .. } => {
-                match &live.ignore {
-                    Some(ignore) => format!("Pass --upgrade to move it, or --ignore-claim {ignore}"),
-                    None => "Pass --upgrade to move it".to_owned(),
-                }
-            }
+            Refusal::PresentOutsideRange { live, upgrade, .. }
+            | Refusal::PresentLacksThorns { live, upgrade, .. } => match (upgrade, &live.ignore) {
+                (true, Some(ignore)) => format!("Pass --upgrade to move it, or --ignore-claim {ignore}"),
+                (true, None) => "Pass --upgrade to move it".to_owned(),
+                (false, Some(ignore)) => format!("Pass --ignore-claim {ignore}"),
+                (false, None) => "Change what asks for it: moving it (--upgrade) finds no plan either".to_owned(),
+            },
             // P4: or `cactup claims override satisfies repo:<repo> <newcomer>`.
-            Refusal::SameThorn { newcomer, base_repo: Some(repo), .. } => {
+            Refusal::SameThorn { newcomer, base_repo: Some(repo), replace: true, .. } => {
                 format!("Pass --replace to use {newcomer} in place of base repo {repo}")
             }
             Refusal::SameThorn { ignore: Some(ignore), .. } => format!(
@@ -129,7 +210,7 @@ impl Refusal {
             Refusal::Incompatible { by, target, .. } => {
                 format!("Pass --ignore-claim {by}:incompatible-with:{target}")
             }
-            Refusal::ForkAndUpstream { fork, upstream, upstream_base_repo: Some(repo), .. } => format!(
+            Refusal::ForkAndUpstream { fork, upstream, upstream_base_repo: Some(repo), replace: true, .. } => format!(
                 "Pass --replace to use {fork} in place of base repo {repo}, or --ignore-claim {fork}:fork-of:{upstream}"
             ),
             Refusal::ForkAndUpstream { fork, upstream, .. } => {
@@ -196,25 +277,42 @@ impl Refusal {
             Refusal::BadClaim { ignore, .. } => {
                 format!("Pass --ignore-claim {ignore} (and tell the package's authors)")
             }
-            Refusal::Unreadable { upgrade, no_deps, released, .. } => {
-                let mut ways: Vec<&str> = Vec::new();
-                if *upgrade {
-                    ways.push("pass --upgrade to move it to a release");
+            Refusal::Unreadable { needs, ways } => {
+                let mut out: Vec<String> = Vec::new();
+                if ways.upgrade {
+                    out.push("pass --upgrade to move it to a release".to_owned());
                 }
-                if *released {
-                    ways.push("name a released version");
+                if ways.replace {
+                    out.push("pass --replace to use the package coming in in place of its base repo".to_owned());
                 }
-                if *no_deps {
-                    ways.push("pass --no-deps to add exactly the packages named");
+                if ways.no_deps {
+                    out.push("pass --no-deps to add exactly the packages named".to_owned());
                 }
-                match ways.as_slice() {
-                    [] => "Try again later".to_owned(),
-                    ways => {
-                        let mut s = ways.join(", or ");
-                        s[..1].make_ascii_uppercase();
-                        s
-                    }
+                if out.is_empty() {
+                    // Nothing cactup can do here finds a plan: what would.
+                    let mut causes: Vec<(UnreadKind, &PkgId)> = needs.iter().map(|n| (n.why.kind, &n.id)).collect();
+                    causes.sort();
+                    causes.dedup();
+                    out = (causes.into_iter())
+                        .map(|(kind, id)| match kind {
+                            UnreadKind::Retry => "try again later".to_owned(),
+                            UnreadKind::Missing => format!("push the commit {id} is at, then try again"),
+                            UnreadKind::Untrusted => {
+                                format!("the Cactarium reads {id} only at released versions: put it at one")
+                            }
+                            UnreadKind::Invalid => {
+                                format!("put {id} at a commit the Cactarium can read, such as a released version")
+                            }
+                        })
+                        .collect();
+                    out.dedup();
+                    let mut s = out.join("; ");
+                    s[..1].make_ascii_uppercase();
+                    return s;
                 }
+                let mut s = out.join(", or ");
+                s[..1].make_ascii_uppercase();
+                s
             }
             Refusal::HasDependents { .. } => {
                 "Pass --no-deps to remove only what was named, leaving its dependents without it".to_owned()
@@ -250,12 +348,12 @@ impl fmt::Display for Refusal {
         }
         match self {
             Refusal::GaveUp { .. } => unreachable!("written above"),
-            Refusal::PresentOutsideRange { installed, live } => write!(
+            Refusal::PresentOutsideRange { installed, live, .. } => write!(
                 f,
                 "The installation has {installed}, outside {} which {} asks",
                 live.req, live.source
             )?,
-            Refusal::PresentLacksThorns { installed, thorns, live } => write!(
+            Refusal::PresentLacksThorns { installed, thorns, live, .. } => write!(
                 f,
                 "The installation has {installed}, which has no {}, which {} needs",
                 thorns.join(", "),
@@ -339,10 +437,10 @@ impl fmt::Display for Refusal {
             Refusal::BadClaim { by, claim, detail, .. } => {
                 write!(f, "{by} has a claim cactup cannot read ({claim}): {detail}")?
             }
-            Refusal::Unreadable { packages, .. } => {
-                write!(f, "This plan depends on installed packages the Cactarium did not read at their commits:")?;
-                for (label, why) in packages {
-                    write!(f, "\n  {label} ({why})")?;
+            Refusal::Unreadable { needs, .. } => {
+                write!(f, "No plan works without what the Cactarium did not read:")?;
+                for n in needs {
+                    write!(f, "\n  {n}")?;
                 }
             }
             Refusal::HasDependents { removed, dependents } => {

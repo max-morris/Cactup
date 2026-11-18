@@ -1,0 +1,31 @@
+{
+  "about": "Naming the older version: the plan, with no note",
+  "packages": [
+    "max--zza",
+    "et--admbase"
+  ],
+  "specs": [
+    "max/zza@=1.0.0"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "unknown": "abababababababababababababababababababab",
+      "thorns": [
+        "ADMBase",
+        "ADMCoupling",
+        "StaticConformal"
+      ],
+      "base": "admbase",
+      "enabled": [
+        "ADMBase"
+      ],
+      "stand_in": true
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/zza@1.0.0 ZA named"
+    ]
+  }
+}

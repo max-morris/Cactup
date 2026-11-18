@@ -3,7 +3,7 @@
   "packages": ["max--newcarpet"],
   "specs": ["max/newcarpet"],
   "present": [
-    {"package": "max/carpet-mp", "unknown": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd", "thorns": ["Carpet"], "base": "carpet-mp", "enabled": ["Carpet"], "stand_in": true}
+    {"package": "max/carpet-mp", "unknown": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd", "thorns": ["Carpet", "CarpetSlab"], "base": "carpet-mp", "enabled": ["Carpet"], "stand_in": true}
   ],
   "options": {"replace": true},
   "expect": {

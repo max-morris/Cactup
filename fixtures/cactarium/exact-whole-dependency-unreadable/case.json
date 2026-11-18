@@ -3,7 +3,7 @@
   "packages": ["max--needs-adm-all", "et--admbase"],
   "specs": ["max/needs-adm-all"],
   "present": [
-    {"package": "et/admbase", "unknown": "efefefefefefefefefefefefefefefefefefefef", "thorns": ["ADMBase"], "base": "admbase", "enabled": ["ADMBase"], "stand_in": true}
+    {"package": "et/admbase", "unknown": "efefefefefefefefefefefefefefefefefefefef", "thorns": ["ADMBase", "StaticConformal"], "base": "admbase", "enabled": ["ADMBase"], "stand_in": true}
   ],
   "expect": {
     "refusal": "Unreadable",

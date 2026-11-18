@@ -1,0 +1,47 @@
+{
+  "about": "A thorn of a frozen base package the plan enables needs every thorn of a stand-in: it is read, and every thorn enabled",
+  "packages": [
+    "max--zzn",
+    "et--zzf--needs-every-zzs",
+    "et--zzs"
+  ],
+  "snapshots": [
+    "et--zzs--at-5656"
+  ],
+  "specs": [
+    "max/zzn"
+  ],
+  "present": [
+    {
+      "package": "et/zzf",
+      "version": "1.0.0",
+      "base": "zzf",
+      "enabled": [
+        "F1"
+      ]
+    },
+    {
+      "package": "et/zzs",
+      "unknown": "5656565656565656565656565656565656565656",
+      "thorns": [
+        "S1",
+        "S2"
+      ],
+      "base": "zzs",
+      "enabled": [
+        "S1"
+      ],
+      "stand_in": true
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/zzn@1.0.0 N named",
+      "add et/zzf@1.0.0 F2 needed by max/zzn@1.0.0",
+      "add et/zzs#565656565656 S2 needed by et/zzf@1.0.0 (F2)"
+    ],
+    "reads": [
+      "et/zzs@565656565656"
+    ]
+  }
+}

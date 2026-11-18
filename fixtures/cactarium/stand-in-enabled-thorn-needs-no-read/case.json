@@ -1,0 +1,33 @@
+{
+  "about": "A dependency on a thorn an unfrozen base package has enabled already: nothing new hinges on what it claims, so it is not read, and the plan carries no note",
+  "packages": [
+    "max--z4c--admbase-2026-5",
+    "et--admbase"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "unknown": "abababababababababababababababababababab",
+      "thorns": [
+        "ADMBase",
+        "ADMCoupling",
+        "StaticConformal"
+      ],
+      "base": "admbase",
+      "enabled": [
+        "ADMBase"
+      ],
+      "stand_in": true
+    }
+  ],
+  "expect": {
+    "reads": [],
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named",
+      "note: et/admbase#abababababab is at a commit no version names; taken to meet ^2026.5 (from max/z4c@1.2.0)"
+    ]
+  }
+}

@@ -1,5 +1,5 @@
 {
-  "about": "A named thorn of a base package the Cactarium does not read, under --no-deps: the ways past are --upgrade or a released version, never --no-deps again",
+  "about": "A named thorn of a base package the Cactarium does not read, under --no-deps: the way past is --upgrade, never --no-deps again (nor naming a released version, which a held base package does not take)",
   "packages": [
     "et--admbase"
   ],
@@ -10,9 +10,7 @@
     {
       "package": "et/admbase",
       "unknown": "abababababababababababababababababababab",
-      "thorns": [
-        "ADMBase"
-      ],
+      "thorns": ["ADMBase", "ADMCoupling", "StaticConformal"],
       "base": "admbase",
       "enabled": [
         "ADMBase"
@@ -27,10 +25,11 @@
     "refusal": "Unreadable",
     "message": [
       "et/admbase#abababababab",
-      "Pass --upgrade to move it to a release, or name a released version"
+      "Pass --upgrade to move it to a release"
     ],
     "not_in_message": [
-      "--no-deps"
+      "--no-deps",
+      "name a released version"
     ]
   }
 }

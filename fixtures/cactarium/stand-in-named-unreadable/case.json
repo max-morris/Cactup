@@ -3,7 +3,7 @@
   "packages": ["et--admbase"],
   "specs": ["et/admbase/StaticConformal"],
   "present": [
-    {"package": "et/admbase", "unknown": "abababababababababababababababababababab", "thorns": ["ADMBase"], "base": "admbase", "enabled": ["ADMBase"], "stand_in": true}
+    {"package": "et/admbase", "unknown": "abababababababababababababababababababab", "thorns": ["ADMBase", "ADMCoupling", "StaticConformal"], "base": "admbase", "enabled": ["ADMBase"], "stand_in": true}
   ],
   "expect": {
     "refusal": "Unreadable",

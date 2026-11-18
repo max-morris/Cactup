@@ -1,0 +1,29 @@
+{
+  "about": "A named range no release of a base package meets: --upgrade finds no plan either, so it is not suggested",
+  "packages": [
+    "et--admbase"
+  ],
+  "specs": [
+    "et/admbase@^2027"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "version": "2026.5.1",
+      "base": "admbase",
+      "enabled": [
+        "ADMBase",
+        "StaticConformal"
+      ]
+    }
+  ],
+  "expect": {
+    "refusal": "PresentOutsideRange",
+    "message": [
+      "Change what asks for it: moving it (--upgrade) finds no plan either"
+    ],
+    "not_in_message": [
+      "Pass --upgrade"
+    ]
+  }
+}

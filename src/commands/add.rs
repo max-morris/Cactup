@@ -683,7 +683,7 @@ fn plan_add(
     local: Option<&super::resolution::LocalFacts>,
     specs: &[String],
     flags: &AddFlags,
-) -> Res<(crate::deps::Plan, Vec<crate::deps::Present>)> {
+) -> Res<(crate::deps::Plan, Vec<crate::deps::Present>, std::collections::BTreeMap<String, String>)> {
     use crate::deps::{self, ClaimPattern, NamedSpec, Options, Request, Rules, Step};
     use super::resolution::{PresentOptions, Registry};
     let named: Vec<NamedSpec> = specs.iter().map(|s| NamedSpec::parse(s)).collect::<Res<_>>()?;
@@ -768,7 +768,7 @@ fn plan_add(
             format!("Cannot check what {} depend on: the Cactarium cannot read them.", labels.join(", ")).yellow()
         );
     }
-    Ok((plan, set.present))
+    Ok((plan, set.present, set.heads))
 }
 
 /// The `[[added]]` entries giving a base repo's package more thorns, brought
@@ -879,7 +879,7 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
     let live = thornlist::parse(&start.before)?;
     let local = super::resolution::local_facts(&live, &start.inst.cactus_root()?)?;
     let client = crate::cactarium::Client::new(&ctx.db.read()?);
-    let (plan, present) = plan_add(&client, &start.inst.root, &base, &start.meta, Some(&local), specs, flags)?;
+    let (plan, present, heads) = plan_add(&client, &start.inst.root, &base, &start.meta, Some(&local), specs, flags)?;
 
     let command = format!("cactup add {}", specs.join(" "));
     let how = super::resolution::Confirm {
@@ -907,7 +907,7 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
     // Everything that can refuse the plan, before anyone is asked about it.
     let mut notes: Vec<String> = Vec::new();
     let records = records_of(&plan, &present, &start.meta)?;
-    let added = place(&base, &start.meta, records, &plan, &mut notes, &on_disk(&start.inst.root, base.root())?)?;
+    let added = place(&base, &start.meta, records, &plan, &mut notes, &heads)?;
     if !super::resolution::show_and_confirm(&plan.lines(&command), plan.beyond_named(), how)? {
         return Ok(());
     }
@@ -1300,21 +1300,6 @@ fn record_of_release(release: &crate::deps::Release, thorns: &[String], plan: &c
     })
 }
 
-/// The commit each clone of the installation is at, as its last fetch left it.
-/// The commit HEAD is at in each clone the last fetch recorded: read from
-/// the clone itself (a pull by hand moves it without the record), else the
-/// record's.
-fn on_disk(install_root: &std::path::Path, root: &str) -> Res<std::collections::BTreeMap<String, String>> {
-    let state = crate::fetch::FetchState::read(install_root)?;
-    let heads = state.map(|s| s.repos).unwrap_or_default();
-    Ok((heads.into_iter())
-        .map(|(name, r)| {
-            let head = clone_head(install_root, root, &name).unwrap_or(r.head);
-            (name, head)
-        })
-        .collect())
-}
-
 /// The commit HEAD is at in clone `repo` of the installation, when it can be
 /// read.
 pub(crate) fn clone_head(install_root: &std::path::Path, root: &str, repo: &str) -> Option<String> {
@@ -1461,7 +1446,7 @@ fn plan_remove_with_deps(
     reg.finish();
     let (set, unread_extensions) = set.map_err(|e| needs_the_cactarium(e, &way))?;
     if !unread_extensions.is_empty() {
-        let lines: Vec<String> = unread_extensions.iter().map(|(id, why)| format!("\n  {id} ({why})")).collect();
+        let lines: Vec<String> = unread_extensions.iter().map(|(id, u)| format!("\n  {id}: {}", u.why)).collect();
         bail!(
             "Cactup cannot tell what the thorns it added to these base packages need, so it cannot tell what still \
              needs {}:{}\nPass --no-deps to remove exactly what was named",
@@ -1858,7 +1843,7 @@ mod tests {
         let list = thornlist::parse("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n")?;
         let meta = crate::installation::InstallationMeta::default();
         let specs: Vec<String> = specs.iter().map(|s| (*s).to_owned()).collect();
-        let (plan, present) = plan_add(&client, tmp.path(), &list, &meta, None, &specs, flags)?;
+        let (plan, present, _) = plan_add(&client, tmp.path(), &list, &meta, None, &specs, flags)?;
         confirm_untrusted(&plan, false, false)?;
         let records = records_of(&plan, &present, &meta)?;
         place(&list, &meta, records, &plan, &mut Vec::new(), &Default::default())

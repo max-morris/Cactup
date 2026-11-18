@@ -1,0 +1,40 @@
+{
+  "about": "A package a dependency brings in has a thorn named as one of an unread base package: only a read tells whether that one forks it (and would stand in); the ways past that find a plan are --replace and --no-deps, not --upgrade",
+  "packages": [
+    "max--needs-zzp",
+    "max--zzp--admbase-thorn",
+    "et--admbase"
+  ],
+  "specs": [
+    "max/needs-zzp"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "unknown": "abababababababababababababababababababab",
+      "thorns": [
+        "ADMBase",
+        "ADMCoupling",
+        "StaticConformal"
+      ],
+      "base": "admbase",
+      "enabled": [
+        "ADMBase"
+      ],
+      "stand_in": true
+    }
+  ],
+  "expect": {
+    "refusal": "Unreadable",
+    "reads": [
+      "et/admbase@abababababab"
+    ],
+    "message": [
+      "max/needs-zzp@1.0.0 needs max/zzp, which has a thorn ADMBase as et/admbase#abababababab has (only a read of et/admbase tells whether it is a fork of max/zzp)",
+      "Pass --replace to use the package coming in in place of its base repo, or pass --no-deps to add exactly the packages named"
+    ],
+    "not_in_message": [
+      "--upgrade"
+    ]
+  }
+}

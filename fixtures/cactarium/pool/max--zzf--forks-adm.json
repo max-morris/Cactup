@@ -1,0 +1,98 @@
+{
+  "slug": "max/zzf",
+  "versions": [
+    {
+      "version": "2.0.0",
+      "track": null,
+      "tag": "v2.0.0",
+      "commit": "b9ac1a79fcf9aebdbe743416fa3da4518ca77b25",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/zzf.git",
+      "thorns": [
+        {
+          "arrangement": "Zzf",
+          "thorn": "ADMBase",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "ADMBase",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        },
+        {
+          "arrangement": "Zzf",
+          "thorn": "FX",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "FX",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "fork-of",
+          "target": "et/admbase",
+          "range": null,
+          "note": null
+        }
+      ]
+    },
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "7e63e96fadf9b3827702b1a994cde2e67eda3e14",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/zzf.git",
+      "thorns": [
+        {
+          "arrangement": "Zzf",
+          "thorn": "FX",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "FX",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    }
+  ]
+}

@@ -66,6 +66,12 @@ struct Fake {
     always_limited: bool,
     /// Commits whose reads answer 403 (not served to this caller).
     refuse_at: Vec<String>,
+    /// Commits whose reads answer 400 (the package cannot be read there).
+    bad_at: Vec<String>,
+    /// Commits whose reads answer 502 (the git host is unreachable).
+    down_at: Vec<String>,
+    /// Repos (by URL) the lookup says are a registered flesh's.
+    flesh: Vec<String>,
     /// What a read at a commit no version froze answers (the package read
     /// now), by package and commit.
     snapshots: Vec<(String, String, String)>,
@@ -89,6 +95,9 @@ impl Fake {
             retry_after: false,
             always_limited: false,
             refuse_at: Vec::new(),
+            bad_at: Vec::new(),
+            down_at: Vec::new(),
+            flesh: Vec::new(),
             snapshots: Vec::new(),
         }
     }
@@ -160,8 +169,9 @@ impl Fake {
                         .map_or("null".to_owned(), |v| format!("\"{v}\""));
                     // The real server often cannot say whether its mirror has
                     // the commit: null.
+                    let flesh = self.flesh.contains(&p.url);
                     format!(
-                        r#"{{"url":"{}","commit":"{}","package":{package},"version":{version},"flesh":false,
+                        r#"{{"url":"{}","commit":"{}","package":{package},"version":{version},"flesh":{flesh},
                         "fork-of":null,"commit-known":null}}"#,
                         p.url, p.commit
                     )
@@ -181,9 +191,20 @@ impl Fake {
             if at.is_empty() {
                 return ok(format!(r#"{{"slug":"{id}","versions":[{}]}}"#, versions.join(",")));
             }
+            // The statuses of a read at a commit, as the server answers them.
+            let error = |status: &'static str, code: &str, message: String| {
+                let body = serde_json::json!({"error": {"code": code, "message": message}}).to_string();
+                (status, "api-generation: 1\r\n".to_owned(), body.into_bytes())
+            };
             if self.refuse_at.iter().any(|c| c == at) {
-                let body = r#"{"error":{"code":"forbidden","message":"not served: the package isn't trusted"}}"#;
-                return ("403 Forbidden", "api-generation: 1\r\n".to_owned(), body.as_bytes().to_vec());
+                return error("403 Forbidden", "forbidden", "not served: the package isn't trusted".into());
+            }
+            if self.bad_at.iter().any(|c| c == at) {
+                let message = format!("{id} at commit {}: invalid manifest: no [package] table", &at[..12]);
+                return error("400 Bad Request", "bad-request", message);
+            }
+            if self.down_at.iter().any(|c| c == at) {
+                return error("502 Bad Gateway", "upstream", "the git host did not answer".into());
             }
             // Several versions at one commit (tracks): this fake answers the
             // last listed, as a server might any of them.
@@ -205,7 +226,7 @@ impl Fake {
             self.unfrozen_reads += 1;
             return match self.snapshots.iter().find(|(p, c, _)| p == id && c == at) {
                 Some((_, _, json)) => ok(json.clone()),
-                None => missing(),
+                None => error("404 Not Found", "not-found", format!("no commit {at} in {id}'s repository (is it pushed?)")),
             };
         }
         no_route()
@@ -582,9 +603,9 @@ fn records(s: &Setup, specs: &[&str], flags: &AddFlags) -> Res<Vec<AddedPackage>
     let meta = s.meta();
     let client = crate::cactarium::Client::new(&s.ctx.db.read().unwrap());
     let specs: Vec<String> = specs.iter().map(|s| (*s).to_owned()).collect();
-    let (plan, present) = plan_add(&client, &s.inst.root, &base, &meta, None, &specs, flags)?;
+    let (plan, present, heads) = plan_add(&client, &s.inst.root, &base, &meta, None, &specs, flags)?;
     let records = records_of(&plan, &present, &meta)?;
-    place(&base, &meta, records, &plan, &mut Vec::new(), &on_disk(&s.inst.root, base.root()).unwrap())
+    place(&base, &meta, records, &plan, &mut Vec::new(), &heads)
 }
 
 /// The record of `package` among `records`: version, commit, thorns, replaces.
@@ -1275,8 +1296,8 @@ fn an_unfrozen_base_package_the_server_will_not_read_refuses_what_hinges_on_it()
     it.fake.lock().unwrap().always_limited = true;
     super::super::resolution::TEST_READ_WINDOW.with(|w| w.set(Some(std::time::Duration::from_millis(200))));
     let err = format!("{:#}", s.add(&["max/app"], yes()).unwrap_err());
-    assert!(err.contains("et/admbase#") && err.contains("the Cactarium's read limit; try again in a minute"), "{err}");
-    assert!(err.contains("--upgrade") && err.contains("--no-deps"), "{err}");
+    assert!(err.contains("et/admbase#") && err.contains("its read limit held after waiting"), "{err}");
+    assert!(err.contains("Pass --upgrade") && err.contains("--no-deps"), "{err}");
     s.add(&["max/solo"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
     let _ = (&it.a1, &it.a2, &it.log);
 }
@@ -1456,6 +1477,32 @@ fn fifteen_reads_wait_once_for_the_read_limit() {
     super::super::resolution::TEST_READ_WINDOW.with(|w| w.set(None));
 }
 
+/// A server that keeps answering 429: a command waits at most its budget
+/// in all, then leaves the reads still to make unread, at once.
+#[test]
+fn waiting_for_the_read_limit_stops_at_the_budget() {
+    use super::super::resolution::{TEST_READ_WINDOW, TEST_WAIT_BUDGET};
+    TEST_READ_WINDOW.with(|w| w.set(Some(std::time::Duration::from_secs(1))));
+    TEST_WAIT_BUDGET.with(|w| w.set(Some(std::time::Duration::from_millis(1200))));
+    let (s, log, fake) = unfrozen_base(3, |tmp, fake| {
+        let (url, c) = upstream(tmp, "dep", &[("Dep/interface.ccl", "IMPLEMENTS: dep\n")]);
+        let claims: Vec<String> = (0..3).map(|i| depends(&format!("et/r{i}"), ">=0.0.0", &[&format!("U{i}")])).collect();
+        fake.package("max/dep3", vec![version("1.0.0", &c, &url, "Dep", &["Dep"], &format!("[{}]", claims.join(",")))])
+    });
+    fake.lock().unwrap().always_limited = true;
+    log.lock().unwrap().clear();
+    let started = std::time::Instant::now();
+    let err = format!("{:#}", records(&s, &["max/dep3"], &AddFlags::default()).unwrap_err());
+    // Without the budget: three reads, two waits of a second each.
+    assert!(started.elapsed() < std::time::Duration::from_secs(4), "{:?}", started.elapsed());
+    assert!(err.contains("its read limit held after waiting"), "{err}");
+    // The first read asked three times (two waits, the second cut short by
+    // the budget); the other two once each, without waiting.
+    assert_eq!(commit_reads(&log, &fake), (5, 5));
+    TEST_READ_WINDOW.with(|w| w.set(None));
+    TEST_WAIT_BUDGET.with(|w| w.set(None));
+}
+
 /// A package whose thorns clash by name with fourteen base packages at
 /// unfrozen commits: each is read once (any could be a fork standing in),
 /// and the claims of its thorns nothing enables read nothing more.
@@ -1506,21 +1553,61 @@ fn a_base_repo_renamed_to_a_pseudo_package_is_no_stand_in() {
     assert_eq!(fake.lock().unwrap().unfrozen_reads, 0);
 }
 
-/// Why a base package at an unfrozen commit was not read, said as it is:
-/// not served (403: an untrusted entry is read only at released versions),
-/// not there (404: is it pushed?); the way past names --upgrade.
+/// A base repo at an unfrozen commit that the lookup says is a registered
+/// flesh is one, however its tree is laid out; the tree decides only where
+/// the lookup does not say so.
+#[test]
+fn the_lookup_says_which_unfrozen_base_repo_is_the_flesh() {
+    for registered in [false, true] {
+        let (s, _, fake) = unfrozen_base(1, |_, f| f);
+        if registered {
+            let url = fake.lock().unwrap().pins[0].0.clone();
+            fake.lock().unwrap().flesh.push(url);
+        }
+        let pristine = std::fs::read_to_string(s.inst.source_thornlist()).unwrap();
+        let list = thornlist::parse(&pristine).unwrap();
+        let client = crate::cactarium::Client::new(&s.ctx.db.read().unwrap());
+        let mut reg = super::super::resolution::Registry::new(&client, []);
+        let set = super::super::resolution::present(&mut reg, &s.inst.root, &list, &[], None, &Default::default());
+        reg.finish();
+        let set = set.unwrap_or_else(|e| panic!("{e:#}"));
+        let r0 = set.present.iter().find(|p| p.release.id.as_str() == "et/r0").expect("et/r0");
+        assert!(r0.stand_in);
+        assert_eq!(r0.release.flesh, registered);
+        // Its thorns are its clone's: the one checked out and the one not.
+        let names: Vec<&str> = r0.release.thorns.iter().map(|t| t.thorn.as_str()).collect();
+        assert_eq!(names, ["T0", "U0"], "registered {registered}");
+    }
+}
+
+/// Why a base package at an unfrozen commit was not read, said as it is,
+/// for each status the server answers a read at a commit with: not there
+/// (404: is it pushed?), not readable there (400: the server's own words),
+/// not served (403), the git host down (502). Each leaves that one package
+/// unread and the search goes on: the refusal is the search's, naming what
+/// needed which thorn of it, and the way past that finds a plan.
 #[test]
 fn an_unread_base_package_says_why() {
-    let it = admbase_unfrozen("^1.0");
-    it.fake.lock().unwrap().refuse_at.push(it.a1.clone());
-    let err = format!("{:#}", it.setup.add(&["max/app"], yes()).unwrap_err());
-    assert!(err.contains("will not read et/admbase at that commit (untrusted entries are read only at released versions)"), "{err}");
-    assert!(err.contains("--upgrade"), "{err}");
-    let it = admbase_unfrozen("^1.0");
-    it.fake.lock().unwrap().snapshots.clear();
-    let err = format!("{:#}", it.setup.add(&["max/app"], yes()).unwrap_err());
-    assert!(err.contains(&format!("has no commit {} of et/admbase: is it pushed?", &it.a1[..12])), "{err}");
-    let _ = (&it.a2, &it.log);
+    type Answer = fn(&mut Fake, &str);
+    let cases: [(&str, Answer, String); 4] = [
+        ("404", |f, _| f.snapshots.clear(), "et/admbase is at a commit the Cactarium does not have (is it pushed?)".into()),
+        ("400", |f, a1| f.bad_at.push(a1.to_owned()), "invalid manifest: no [package] table".into()),
+        ("403", |f, a1| f.refuse_at.push(a1.to_owned()), "it reads an untrusted package only at released versions".into()),
+        ("502", |f, a1| f.down_at.push(a1.to_owned()), "it could not reach the package's repository just now".into()),
+    ];
+    for (status, set, why) in cases {
+        let it = admbase_unfrozen("^1.0");
+        set(&mut it.fake.lock().unwrap(), &it.a1);
+        let err = format!("{:#}", it.setup.add(&["max/app"], yes()).unwrap_err());
+        let needs = format!("max/app@1.0.0 needs StaticConformal of et/admbase#{}", &it.a1[..12]);
+        assert!(err.contains(&needs) && err.contains("the Cactarium did not read et/admbase there: "), "{status}: {err}");
+        assert!(err.contains(&why), "{status}: {err}");
+        if status == "400" {
+            assert!(err.contains(&format!("et/admbase at commit {}: ", &it.a1[..12])), "{status}: {err}");
+        }
+        assert!(err.contains("Pass --upgrade to move it to a release"), "{status}: {err}");
+        let _ = (&it.a2, &it.log);
+    }
 }
 
 /// `add` brought in max/lib for a thorn it gave a base package at an

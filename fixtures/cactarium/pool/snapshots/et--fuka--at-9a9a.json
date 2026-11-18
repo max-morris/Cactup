@@ -1,0 +1,21 @@
+{
+  "slug": "et/fuka",
+  "at": "9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+  "untrusted": false,
+  "served": {
+    "version": "9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+    "track": null,
+    "tag": null,
+    "commit": "9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+    "tree": "0000000000000000000000000000000000000000",
+    "yanked": false,
+    "yank-reason": null,
+    "state": "ok",
+    "curated": false,
+    "published": 1793000000,
+    "url": "https://github.com/et/fuka.git",
+    "library": true,
+    "thorns": [],
+    "claims": []
+  }
+}

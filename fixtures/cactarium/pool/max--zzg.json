@@ -1,0 +1,83 @@
+{
+  "slug": "max/zzg",
+  "versions": [
+    {
+      "version": "2.0.0",
+      "track": null,
+      "tag": "v2.0.0",
+      "commit": "a8eaeb161d7e7578811bd1cf26df3fc0a4554c15",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/zzg.git",
+      "thorns": [
+        {
+          "arrangement": "Zzg",
+          "thorn": "G",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "G",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/admbase",
+          "range": null,
+          "needs": [
+            "StaticConformal"
+          ],
+          "note": null
+        }
+      ]
+    },
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "189c232234516febf79181fd19a424b81c08bbc0",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/zzg.git",
+      "thorns": [
+        {
+          "arrangement": "Zzg",
+          "thorn": "G",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "G",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    }
+  ]
+}

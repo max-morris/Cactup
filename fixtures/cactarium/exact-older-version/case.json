@@ -3,7 +3,7 @@
   "packages": ["max--x--old-needs-adm", "et--admbase"],
   "specs": ["max/x"],
   "present": [
-    {"package": "et/admbase", "unknown": "abababababababababababababababababababab", "thorns": ["ADMBase"], "base": "admbase", "enabled": ["ADMBase"], "stand_in": true}
+    {"package": "et/admbase", "unknown": "abababababababababababababababababababab", "thorns": ["ADMBase", "ADMCoupling", "StaticConformal"], "base": "admbase", "enabled": ["ADMBase"], "stand_in": true}
   ],
   "expect": {
     "plan": ["add max/x@2.0.0 X named"],

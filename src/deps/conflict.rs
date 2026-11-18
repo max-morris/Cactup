@@ -52,6 +52,8 @@ pub(super) fn conflicts(
                         fork_label: ef.release.label(),
                         upstream: (*up).clone(),
                         upstream_base_repo: eu.base_repo().map(str::to_owned),
+                        // Checked by a search with it, when it is suggested.
+                        replace: eu.base_repo().is_some(),
                     };
                     return Some((r, vec![(*fork).clone(), (*up).clone()]));
                 }
@@ -97,6 +99,8 @@ pub(super) fn conflicts(
                     newcomer: newcomer.clone(),
                     base_repo: other.base_repo().map(str::to_owned),
                     ignore: None,
+                    // Checked by a search with it, when it is suggested.
+                    replace: other.base_repo().is_some(),
                 };
                 let _ = first;
                 return Some((r, vec![(*a).clone(), (*b).clone()]));
