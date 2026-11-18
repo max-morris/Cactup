@@ -41,7 +41,7 @@ pub(crate) fn setup_prodash_with(
     level_filter: Option<std::ops::RangeInclusive<prodash::progress::key::Level>>,
     throughput: bool,
 ) -> (ProgressHandle, JoinHandle) {
-    let progress = prodash::tree::Root::new();
+    let progress = new_root();
     let options = prodash::render::line::Options {
         frames_per_second: 6.0,
         hide_cursor: true, // signal-hook feature restores cursor on exit
@@ -56,6 +56,16 @@ pub(crate) fn setup_prodash_with(
     .auto_configure(StreamKind::Stderr);
     let renderer = JoinHandle::start(&progress, options, std::time::Duration::from_millis(500), Arc::new(stderr));
     (progress, renderer)
+}
+
+/// How many scrollback messages (`done`, `info`, `fail`) the tree keeps
+/// between two frames: prodash's default of 20 loses the start of a burst (a
+/// refetch pinning 80 repos), and a frame drains only what is still there.
+const MESSAGES: usize = 1000;
+
+/// A progress tree that keeps [`MESSAGES`] messages.
+fn new_root() -> ProgressHandle {
+    prodash::tree::root::Options { initial_capacity: 100, message_buffer_capacity: MESSAGES }.into()
 }
 
 /// The renderer of a phase's progress, started only once the phase has run
@@ -446,8 +456,12 @@ mod renderer_tests {
     }
 
     fn renderer(progress: &ProgressHandle, sink: &Sink) -> JoinHandle {
+        renderer_on(progress, sink, true)
+    }
+
+    fn renderer_on(progress: &ProgressHandle, sink: &Sink, terminal: bool) -> JoinHandle {
         let options = prodash::render::line::Options {
-            output_is_terminal: true,
+            output_is_terminal: terminal,
             colored: false,
             frames_per_second: 20.0,
             terminal_dimensions: (100, 20),
@@ -476,6 +490,34 @@ mod renderer_tests {
         drop(line);
         headline.inc();
         renderer.shutdown_and_wait();
+    }
+
+    /// A burst of a hundred messages, before the renderer starts and while
+    /// it runs, all reach the scrollback, in order (not a terminal: only the
+    /// messages are written).
+    #[test]
+    fn a_burst_of_messages_is_printed_whole_and_in_order() {
+        for after_start in [false, true] {
+            let progress = new_root();
+            let sink = Sink::default();
+            let renderer = renderer_on(&progress, &sink, false);
+            if after_start {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            let mut item = progress.add_child("refetch");
+            for i in 0..100 {
+                item.done(format!("message {i:03}"));
+            }
+            drop(item);
+            if after_start {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            renderer.shutdown_and_wait();
+            let drawn = String::from_utf8_lossy(&sink.0.lock().unwrap()).into_owned();
+            let seen: Vec<usize> = (0..100).filter_map(|i| drawn.find(&format!("message {i:03}"))).collect();
+            assert_eq!(seen.len(), 100, "after start {after_start}: {drawn:?}");
+            assert!(seen.windows(2).all(|w| w[0] < w[1]), "after start {after_start}: out of order");
+        }
     }
 
     /// A phase over before the delay draws nothing at all (no bar flashes,
