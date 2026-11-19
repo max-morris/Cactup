@@ -346,7 +346,8 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
         for r in &report.repos {
             let mark = if r.changed { "updated" } else { "up to date" };
             let forced = r.forced.as_deref().map(|f| format!(" (forced: {f})")).unwrap_or_default();
-            println!("  {} @ {}: {mark}{forced}", r.repo, r.branch.as_deref().unwrap_or("<default>"));
+            let warning = r.warning.as_deref().map(|w| format!("; {w}")).unwrap_or_default();
+            println!("  {} @ {}: {mark}{forced}{warning}", r.repo, r.branch.as_deref().unwrap_or("<default>"));
         }
     }
     let blocked: Vec<_> = report
@@ -1157,6 +1158,9 @@ fn print_dry_run(
             (GitAction::Pin, None) => "pin (no commit: a bug)".to_owned(),
         };
         println!("  {}: {target} ({} thorn(s))", item.repo.bold(), item.checkouts.len());
+        if let Some(note) = &item.note {
+            println!("    {}", note.yellow());
+        }
     }
     for c in &plan.downloads {
         println!("  {}: download", c.checkout.bold());

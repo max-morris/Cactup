@@ -2359,6 +2359,73 @@ fn the_base_comes_back_where_the_restore_puts_it() {
     assert_eq!(crate::fetch::git::head_of(&clone).unwrap(), (branch, tip), "back on the clone's own default");
 }
 
+/// `add` and `remove` look at the clones they touch only: a base clone the
+/// list stops pinning (cactup's checkout, detached at the old pin, whose
+/// branch only its remote can tell) is neither probed nor asked about by
+/// either; a whole-list fetch would ask.
+#[test]
+fn add_and_remove_ask_nothing_of_clones_they_do_not_touch() {
+    let (s, _fake) = replaced_base(true, true, None);
+    let pristine_path = s.inst.source_thornlist();
+    let pristine = std::fs::read_to_string(&pristine_path).unwrap();
+    let list = thornlist::parse(&pristine).unwrap();
+    let x = list.components().iter().find(|c| c.repo == "x").unwrap();
+    let (xurl, xpin) = (x.url.clone().unwrap(), x.commit.clone().unwrap());
+    let unpinned = pristine.replacen(&format!("!REPO_COMMIT = {xpin}\n"), "", 1);
+    assert_ne!(unpinned, pristine, "x's pin is in the list as expected");
+    std::fs::write(&pristine_path, &unpinned).unwrap();
+    let asked_x = || crate::fetch::git::ASKED.lock().unwrap().iter().any(|u| u == &xurl);
+    s.add(&["et/carpet@=2.0.0"], AddFlags { upgrade: true, yes: true, ..AddFlags::default() }).unwrap();
+    s.remove(&["et/carpet"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    assert!(!asked_x(), "x was asked about");
+    // A fetch of the whole list asks.
+    let mut progress = prodash::tree::Root::new().add_child("plan");
+    crate::fetch::plan(&thornlist::parse(&unpinned).unwrap(), &s.inst.root, &mut progress).unwrap();
+    assert!(asked_x(), "the whole list's fetch would have asked about x");
+}
+
+/// A clone being restored that no branch can be found for (no `!REPO_BRANCH`,
+/// a clone made pinned that knows no remote branch, no label, a remote that
+/// does not answer) is refused before anyone is asked, never left to fail
+/// the fetch after the confirmation.
+#[test]
+fn a_restore_with_no_branch_is_refused_before_the_prompt() {
+    let (s, fake) = replaced_base(false, true, None);
+    // Nothing depends on et/carpet: the refusal can only be the restore's.
+    {
+        let mut f = fake.lock().unwrap();
+        let needs = depends("et/carpet", ">=1.0.0", &["Carpet"]);
+        let ef = &mut f.packages.iter_mut().find(|(p, _)| p == "et/f").unwrap().1[0];
+        *ef = ef.replace(&format!("[{needs}]"), "[]");
+        for (_, _, x) in f.snapshots.iter_mut().filter(|(p, _, _)| p == "et/x") {
+            *x = x.replace(&format!("[{needs}]"), "[]");
+        }
+    }
+    s.add(&["et/carpet@=2.0.0"], AddFlags { upgrade: true, yes: true, ..AddFlags::default() }).unwrap();
+    let clone = s.inst.root.join("Cactus/repos/carpet");
+    // The clone knows no remote branch, its record no label, and its remote is gone.
+    let git_dir = gix::open(&clone).unwrap().git_dir().to_owned();
+    let _ = std::fs::remove_dir_all(git_dir.join("refs/remotes"));
+    let _ = std::fs::remove_file(git_dir.join("packed-refs"));
+    assert_eq!(crate::fetch::git::default_branch(&clone), None);
+    let state_path = s.inst.root.join(".cactup/fetch-state.toml");
+    let state = std::fs::read_to_string(&state_path).unwrap();
+    let state: String = state.lines().filter(|l| !l.starts_with("branch = ")).map(|l| format!("{l}\n")).collect();
+    std::fs::write(&state_path, state).unwrap();
+    std::fs::remove_dir_all(s.inst.root.parent().unwrap().join("up/carpet")).unwrap();
+    let flags = RemoveFlags { dry_run: true, ..remove_yes() };
+    let err = format!("{:#}", s.remove(&["et/carpet"], flags).unwrap_err());
+    assert!(err.contains("Repo carpet has no branch to go back to") && err.contains("is still added"), "{err}");
+    // A refetch of the list leaves such a clone where it is, skipped as detached, never planned
+    // onto no branch to fail after.
+    let pristine = std::fs::read_to_string(s.inst.source_thornlist()).unwrap();
+    let mut progress = prodash::tree::Root::new().add_child("plan");
+    let plan = crate::fetch::plan(&thornlist::parse(&pristine).unwrap(), &s.inst.root, &mut progress).unwrap();
+    assert!(plan.git.iter().all(|g| g.repo != "carpet"), "{:?}", plan.git);
+    let skipped = plan.skipped.iter().find(|s| s.repo == "carpet").expect("carpet skipped");
+    assert!(matches!(skipped.reason, crate::fetch::git::DirtyReason::DetachedHead(_)), "{:?}", skipped.reason);
+}
+
 /// Only what a removal can bring back is asked for: the bases of the
 /// targets and of what may be swept with them, never of a package the
 /// user named that stays. And an interrupt is never a reading, even with

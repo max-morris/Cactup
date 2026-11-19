@@ -475,7 +475,12 @@ fn restore_plan(
     for g in fetch_plan.git.iter_mut().filter(|g| back.contains(&g.repo)) {
         g.forced = None;
     }
-    if let Some(g) = fetch_plan.git.iter().find(|g| back.contains(&g.repo) && g.commit.is_none() && g.branch.is_none()) {
+    // Any clone being restored that no branch can be found for (forced or planned): refused here,
+    // before anyone is asked, never left to fail the fetch after.
+    let lost = |g: &&crate::fetch::GitRepoPlan| {
+        touched.contains(g.repo.as_str()) && g.commit.is_none() && g.branch.is_none() && !matches!(g.action, crate::fetch::GitAction::Clone)
+    };
+    if let Some(g) = fetch_plan.git.iter().find(lost) {
         bail!(
             "Repo {} has no branch to go back to ({}); it was left alone, and {} is still added",
             g.repo,
@@ -524,7 +529,18 @@ fn clones_changed(e: anyhow::Error) -> anyhow::Error {
 /// waited, or by a concurrent `inst refetch`, refuses here, as `recheck`
 /// refuses a changed record.
 fn same_fetch(checked: &crate::fetch::Plan, now: &crate::fetch::Plan) -> Res<()> {
-    if format!("{checked:?}") != format!("{now:?}") {
+    // Everything the fetch does; not a note's words (a remote that failed to answer in other
+    // words the second time changed no clone).
+    let shape = |p: &crate::fetch::Plan| {
+        let git: Vec<String> = (p.git.iter())
+            .map(|g| {
+                let what = (&g.repo, &g.dir, &g.url, &g.branch, &g.commit, &g.action, &g.checkouts, &g.forced, &g.retarget);
+                format!("{what:?} noted: {}", g.note.is_some())
+            })
+            .collect();
+        format!("{git:?} {:?} {:?} {:?} {:?} {:?} {:?}", p.skipped, p.downloads, p.external, p.links, p.libraries, p.root)
+    };
+    if shape(checked) != shape(now) {
         bail!("The installation's clones changed while the plan waited; run the command again");
     }
     Ok(())
@@ -1344,7 +1360,10 @@ fn record_of_release(release: &crate::deps::Release, thorns: &[String], plan: &c
             crate::progress::Layout::for_names([slug.as_str()]),
         );
         line.phase("asking its repository for its default branch");
-        let branch = crate::fetch::git::ask_remote_default_branch(&release.url, crate::fetch::git::REMOTE_ASK_TIMEOUT);
+        let branch = crate::fetch::git::ask_remote_default_branch(
+            &release.url,
+            std::time::Instant::now() + crate::fetch::git::REMOTE_ASK_TIMEOUT,
+        );
         drop(line);
         if let Some(renderer) = renderer {
             renderer.shutdown_and_wait();
@@ -1564,12 +1583,24 @@ fn plan_remove_with_deps(
     let mut reg = super::resolution::Registry::new(&client, names);
     let options = super::resolution::PresentOptions::default();
     let added_for = super::resolution::added_for(&start.meta);
-    // What may go: the targets, and what may be swept with them (never a package the user named).
-    let bringing: BTreeSet<PkgId> = (start.meta.added.iter())
-        .filter_map(|a| PkgId::parse(&a.package).ok().map(|id| (id, a)))
-        .filter(|(id, a)| targets.contains(id) || !deps::is_requested(added_for.get(id), &a.commit))
-        .map(|(id, _)| id)
-        .collect();
+    let extensions_of = |set: &super::resolution::PresentSet| -> Vec<Extension> {
+        (start.meta.added.iter())
+            .filter_map(|a| {
+                let id = PkgId::parse(&a.package).ok()?;
+                let base = set.present.iter().any(|p| p.release.id == id && matches!(p.origin, Origin::Base { .. }));
+                let thorns: Vec<String> =
+                    a.thorns.iter().map(|t| t.checkout.rsplit('/').next().unwrap_or(&t.checkout).to_owned()).collect();
+                // As the base has the package now (a refetch may have moved it).
+                let at = set.present.iter().find(|p| p.release.id == id).map(|p| p.release.label())?;
+                base.then(|| Extension {
+                    id,
+                    label: format!("{at} ({})", thorns.join(", ")),
+                    thorns,
+                    commit: a.commit.clone(),
+                })
+            })
+            .collect()
+    };
     let set = super::resolution::present(&mut reg, &start.inst.root, base, &start.meta.added, None, &options);
     // A base package at a commit no version froze that cactup gave more
     // thorns: what those thorns claim decides what may go, so it is read
@@ -1580,6 +1611,11 @@ fn plan_remove_with_deps(
             .map(|p| p.release.id.clone())
             .collect();
         let unread = super::resolution::read_stand_ins(&mut reg, &mut set, &extended)?;
+        // What may go: the targets, and what could be swept with them (the orphans with no base
+        // back, which bases coming back only make fewer). Only their bases are read.
+        let rules = Rules::default();
+        let swept = deps::may_sweep(&set.present, &added_for, targets, &rules, &extensions_of(&set));
+        let bringing: BTreeSet<PkgId> = targets.iter().cloned().chain(swept).collect();
         let returning =
             super::resolution::returning_base(&mut reg, &start.inst.root, base, &start.meta.added, &bringing)?;
         Ok((set, unread, returning))
@@ -1606,22 +1642,7 @@ fn plan_remove_with_deps(
             unread_lines(&unread)
         );
     }
-    let extensions: Vec<Extension> = (start.meta.added.iter())
-        .filter_map(|a| {
-            let id = PkgId::parse(&a.package).ok()?;
-            let base = set.present.iter().any(|p| p.release.id == id && matches!(p.origin, Origin::Base { .. }));
-            let thorns: Vec<String> =
-                a.thorns.iter().map(|t| t.checkout.rsplit('/').next().unwrap_or(&t.checkout).to_owned()).collect();
-            // As the base has the package now (a refetch may have moved it).
-            let at = set.present.iter().find(|p| p.release.id == id).map(|p| p.release.label())?;
-            base.then(|| Extension {
-                id,
-                label: format!("{at} ({})", thorns.join(", ")),
-                thorns,
-                commit: a.commit.clone(),
-            })
-        })
-        .collect();
+    let extensions = extensions_of(&set);
     // Claim overrides kept in the installation join with `cactup claims` (P4).
     let mut plan = deps::plan_remove(&set.present, &added_for, targets, &Rules::default(), false, &extensions, &returning)
         .map_err(|r| {
@@ -1787,6 +1808,35 @@ mod tests {
 
     /// A restored base repo is said as it went back: to the base's pin, or
     /// to the branch a base that follows one has.
+    #[test]
+    fn the_fetch_under_the_lock_is_compared_without_its_notes_words() {
+        let plan = |branch: &str, note: Option<&str>| crate::fetch::Plan {
+            git: vec![crate::fetch::GitRepoPlan {
+                repo: "carpet".into(),
+                dir: std::path::PathBuf::new(),
+                url: String::new(),
+                branch: Some(branch.into()),
+                commit: None,
+                action: crate::fetch::GitAction::Align,
+                checkouts: Vec::new(),
+                forced: None,
+                retarget: None,
+                note: note.map(str::to_owned),
+            }],
+            skipped: Vec::new(),
+            downloads: Vec::new(),
+            external: Vec::new(),
+            links: Vec::new(),
+            libraries: Vec::new(),
+            root: "Cactus".into(),
+        };
+        let unknown = |why: &str| format!("its remote's default branch is unknown ({why}); going back to v1");
+        let (a, b) = (unknown("timed out"), unknown("connection refused"));
+        assert!(same_fetch(&plan("v1", Some(&a)), &plan("v1", Some(&b))).is_ok());
+        assert!(same_fetch(&plan("v1", Some(&a)), &plan("master", None)).is_err());
+        assert!(same_fetch(&plan("v1", Some(&a)), &plan("v1", None)).is_err());
+    }
+
     #[test]
     fn a_restore_says_where_it_went() {
         let item = |repo: &str, commit: Option<gix::ObjectId>, branch: Option<&str>| crate::fetch::GitRepoPlan {

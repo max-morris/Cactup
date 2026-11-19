@@ -1317,13 +1317,14 @@ pub(crate) type Returning = Vec<(PkgId, Present)>;
 /// `bringing` that replaced base repos goes (the targets, and the packages
 /// that may be swept with them: never one the user named), each with that
 /// package: every base repo it replaced, where the restore will put it (its
-/// pin; else the tip of the branch [`crate::fetch::branch_after_restore`]
-/// names, the one the restore goes through, asked of the remote), with the
+/// pin; else the tip of the branch [`crate::fetch::known_after_restore`]
+/// names, the decision the restore makes, asked of the remote in one listing),
+/// with the
 /// thorns the base checks out from it, read as present packages are: one
 /// lookup of them all, a version that froze the commit from the version
 /// list, else one batch read of them all (single reads where it reads
-/// nothing). The remotes are asked in parallel, a line each, each within
-/// [`crate::fetch::git::REMOTE_ASK_TIMEOUT`]; Ctrl-C fails it. The ones that
+/// nothing). The remotes are asked on the network fan-out, a line each, all
+/// within one [`crate::fetch::git::REMOTE_ASK_TIMEOUT`]; Ctrl-C fails it. The ones that
 /// cannot be read, said in words, each with the package whose going brings
 /// it back.
 pub(crate) fn returning_base(
@@ -1367,20 +1368,20 @@ pub(crate) fn returning_base(
     } else {
         let headline = Mutex::new(reg.headline(asks.len(), "repos"));
         let layout = reg.layout.clone();
-        let answers = crate::par::parallel_map(&asks, |b| -> Res<Result<String, String>> {
+        let until = std::time::Instant::now() + crate::fetch::git::REMOTE_ASK_TIMEOUT;
+        let answers = crate::fetch::git::ask_all(&asks, |b| -> Res<Result<String, String>> {
             let line = Line::over(headline.lock().expect("headline poisoned").add_child(b.repo.clone()), &b.repo, layout.clone());
-            line.phase("where the base's branch is".to_owned());
-            let record = records.as_ref().and_then(|r| r.repos.get(&b.repo));
-            let timeout = crate::fetch::git::REMOTE_ASK_TIMEOUT;
-            let follow = crate::fetch::branch_after_restore(&repos_dir.join(&b.repo), &b.url, b.listed, record, timeout)?;
             line.phase("its branch's tip".to_owned());
-            let tip = match crate::fetch::git::ask_remote_tip(&b.url, follow.branch.as_deref(), timeout) {
+            let record = records.as_ref().and_then(|r| r.repos.get(&b.repo));
+            // One listing either way: a branch's tip, or the remote's default and its tip.
+            let asked = match crate::fetch::known_after_restore(&repos_dir.join(&b.repo), &b.url, b.listed, record) {
+                crate::fetch::Known::Branch(branch) => crate::fetch::git::ask_remote_tip(&b.url, Some(&branch), until),
+                crate::fetch::Known::RemoteDefault { .. } => crate::fetch::git::ask_remote_head(&b.url, until).map(|(_, id)| id),
+            };
+            let tip = match asked {
                 Ok(id) => Ok(id.to_string()),
                 Err(e) if gix::interrupt::is_triggered() => return Err(e),
-                Err(e) => Err(match &follow.note {
-                    Some(note) => format!("its branch's tip cannot be told ({e:#}; {note})"),
-                    None => format!("its branch's tip cannot be told ({e:#})"),
-                }),
+                Err(e) => Err(format!("its branch's tip cannot be told ({e:#})")),
             };
             drop(line);
             headline.lock().expect("headline poisoned").inc();

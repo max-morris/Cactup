@@ -483,7 +483,6 @@ pub fn align(
         && repo.head_id().ok().map(|id| id.detach()) == Some(target_id)
     {
         clear_align_marker(&repo);
-        set_upstream_if_absent(repo_dir, branch)?;
         return Ok(target_id);
     }
 
@@ -496,7 +495,6 @@ pub fn align(
     // No context on the error: refetch recognizes an interrupted checkout by
     // how its message begins (`INTERRUPTED_CHECKOUT`).
     switch_tree(&repo, target_id, edits, force_overwrite, progress)?;
-    set_upstream_if_absent(repo_dir, branch)?;
     Ok(target_id)
 }
 
@@ -1189,6 +1187,10 @@ pub fn set_upstream_if_absent(repo_dir: &Path, branch: &str) -> Res<()> {
         if file.string_by("branch", Some(name), "remote").is_some() || file.string_by("branch", Some(name), "merge").is_some() {
             return Ok(false);
         }
+        #[cfg(test)]
+        if FAIL_UPSTREAM.lock().expect("test hook poisoned").iter().any(|d| d == repo_dir) {
+            bail!("a test made writing '{}' fail", config_path.display());
+        }
         file.set_raw_value_by("branch", Some(name), "remote", gix::bstr::BStr::new("origin"))
             .and_then(|_| {
                 let merge = format!("refs/heads/{branch}");
@@ -1199,8 +1201,18 @@ pub fn set_upstream_if_absent(repo_dir: &Path, branch: &str) -> Res<()> {
     })
 }
 
+/// Every URL [`ask_remote`] asked, for a test to look for its own.
+#[cfg(test)]
+pub(crate) static ASKED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Clones whose upstream a test makes [`set_upstream_if_absent`] fail to write.
+#[cfg(test)]
+pub(crate) static FAIL_UPSTREAM: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
 /// Edit the repository's own `config` file with `edit` (`true`: it changed
-/// something, and the file is written back, whole and atomically).
+/// something, and the file is written back, whole and atomically, with the
+/// old file's permissions: a Cactus tree is often group-shared, and a
+/// config only its owner can read breaks everyone else's git there).
 fn edit_local_config(
     repo_dir: &Path,
     edit: impl FnOnce(&mut gix::config::File<'static>, &Path) -> Res<bool>,
@@ -1225,6 +1237,11 @@ fn edit_local_config(
             .with_context(|| "Failed to render updated git config")?;
         std::io::Write::flush(&mut writer).with_context(|| "Failed to flush git config temp file")?;
     }
+    let mode = std::fs::metadata(&config_path)
+        .with_context(|| format!("Failed to read the permissions of '{}'", config_path.display()))?
+        .permissions();
+    std::fs::set_permissions(tmp.path(), mode)
+        .with_context(|| format!("Failed to give the new '{}' its permissions", config_path.display()))?;
     tmp.persist(&config_path)
         .with_context(|| format!("Failed to replace '{}'", config_path.display()))?;
     Ok(())
@@ -1484,10 +1501,10 @@ pub fn remote_tip(scratch: &Path, url: &str, git_ref: Option<&str>) -> Res<Objec
     }
 }
 
-/// The name of the remote's default branch (what its `HEAD` points at), as
-/// `git ls-remote --symref <url> HEAD` says it, without fetching anything.
-/// `scratch` is as for [`remote_tip`].
-pub fn remote_default_branch(scratch: &Path, url: &str) -> Res<String> {
+/// The name of the remote's default branch (what its `HEAD` points at) and
+/// the commit at its tip, from one listing (`git ls-remote --symref <url>
+/// HEAD`), without fetching anything. `scratch` is as for [`remote_tip`].
+pub fn remote_head(scratch: &Path, url: &str) -> Res<(String, ObjectId)> {
     const LOCAL: &str = "refs/cactup/head";
     let repo = gix::open(scratch).with_context(|| format!("Failed to open '{}'", scratch.display()))?;
     let spec = format!("HEAD:{LOCAL}");
@@ -1505,19 +1522,26 @@ pub fn remote_default_branch(scratch: &Path, url: &str) -> Res<String> {
         .remote_refs
         .iter()
         .find_map(|r| match r {
-            gix::protocol::handshake::Ref::Symbolic { full_ref_name, target, .. } if full_ref_name == "HEAD" => {
-                Some(target.to_string())
+            gix::protocol::handshake::Ref::Symbolic { full_ref_name, target, object, .. } if full_ref_name == "HEAD" => {
+                Some((target.to_string(), *object))
             }
             _ => None,
         })
         .ok_or_else(|| anyhow!("{url} does not say which branch is its default"))?;
-    Ok(head.strip_prefix("refs/heads/").unwrap_or(&head).to_owned())
+    let (name, id) = head;
+    Ok((name.strip_prefix("refs/heads/").unwrap_or(&name).to_owned(), id))
 }
 
-/// How long a question to a remote about its branches may take before
-/// cactup gives up on it: a firewall that drops packets holds a connection
-/// for gix's own connect timeout, a stalled server for ever.
+/// How long the questions to remotes about their branches that one phase
+/// asks may take, all of them together (each is given what is left of it):
+/// a firewall that drops packets holds a connection for gix's own connect
+/// timeout, a stalled server for ever.
 pub const REMOTE_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How many remotes a phase asks at once: an ask is one small listing, all
+/// waiting, so the fan-out is wide (wider than the disk pool's), and a phase
+/// of up to this many remotes takes one ask's time.
+pub const REMOTE_ASKS_AT_ONCE: usize = 32;
 
 /// A scratch repository at `dir` to ask a remote from, made so that asking
 /// never stops for input while a progress display is drawn: no terminal
@@ -1533,7 +1557,10 @@ fn quiet_scratch(dir: &Path) -> Res<()> {
         || repo.config_snapshot().string("core.sshCommand").is_some();
     let mut extra = String::from("[gitoxide \"credentials\"]\n\tterminalPrompt = false\n");
     if !own_ssh {
-        extra.push_str("[core]\n\tsshCommand = ssh -o BatchMode=yes\n[ssh]\n\tvariant = ssh\n");
+        // A connect timeout too, so an ssh left behind by an ask given up on
+        // ends on its own soon after.
+        let secs = REMOTE_ASK_TIMEOUT.as_secs();
+        extra.push_str(&format!("[core]\n\tsshCommand = ssh -o BatchMode=yes -o ConnectTimeout={secs}\n[ssh]\n\tvariant = ssh\n"));
     }
     let config = repo.git_dir().join("config");
     let mut text = std::fs::read_to_string(&config).context("Failed to read the scratch repository's config")?;
@@ -1542,34 +1569,78 @@ fn quiet_scratch(dir: &Path) -> Res<()> {
     Ok(())
 }
 
+/// Where this process makes the scratch repositories it asks remotes from:
+/// one directory per process (`cactup-remote-asks-<pid>` in the temporary
+/// directory), each ask's repository inside it, removed when the ask ends.
+/// An ask given up on (timed out, interrupted) leaves its repository behind
+/// until its thread ends, or for good if the process ends first; so the
+/// first ask of a process removes the directories of processes that are no
+/// longer running (`/proc/<pid>`), and nothing accumulates.
+fn scratch_parent() -> Option<&'static Path> {
+    static PARENT: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    PARENT
+        .get_or_init(|| {
+            let tmp = std::env::temp_dir();
+            clean_stale_scratch(&tmp);
+            let dir = tmp.join(format!("{SCRATCH_PREFIX}{}", std::process::id()));
+            std::fs::create_dir_all(&dir).ok().map(|()| dir)
+        })
+        .as_deref()
+}
+
+/// How a process's scratch directory for remote asks is named, before its pid.
+const SCRATCH_PREFIX: &str = "cactup-remote-asks-";
+
+/// Remove the scratch directories in `tmp` of processes no longer running
+/// (best effort: another user's, or one in use, stays).
+fn clean_stale_scratch(tmp: &Path) {
+    let Ok(entries) = std::fs::read_dir(tmp) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(pid) = name.strip_prefix(SCRATCH_PREFIX).and_then(|p| p.parse::<u32>().ok()) else { continue };
+        if pid != std::process::id() && !Path::new(&format!("/proc/{pid}")).exists() {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
 /// `ask` (given a quiet scratch repository and `url`) run on a thread of its
 /// own while this one polls the interrupt flag: the gix connection takes no
 /// interrupt flag of its own, and a stalled remote must outlast neither a
-/// Ctrl-C ("Interrupted") nor `timeout` (an error saying so). Either way the
-/// thread is left to finish, or not, on its own.
+/// Ctrl-C ("Interrupted") nor `until` (an error saying so). Either way the
+/// thread is left to finish, or not, on its own (see [`scratch_parent`]).
 fn ask_remote<T: Send + 'static>(
     url: &str,
-    timeout: std::time::Duration,
+    until: std::time::Instant,
     ask: impl FnOnce(&Path, &str) -> Res<T> + Send + 'static,
 ) -> Res<T> {
+    if std::time::Instant::now() >= until {
+        bail!("{url} was not asked: the time for asking remotes was up");
+    }
+    #[cfg(test)]
+    ASKED.lock().expect("test record poisoned").push(url.to_owned());
     let (send, recv) = std::sync::mpsc::channel();
     let owned = url.to_owned();
+    let started = std::time::Instant::now();
     std::thread::spawn(move || {
         let answer = (|| {
-            let scratch = tempfile::tempdir().context("Failed to create a scratch directory")?;
+            let scratch = match scratch_parent() {
+                Some(parent) => tempfile::tempdir_in(parent),
+                None => tempfile::tempdir(),
+            }
+            .context("Failed to create a scratch directory")?;
             quiet_scratch(scratch.path())?;
             ask(scratch.path(), &owned)
         })();
         let _ = send.send(answer);
     });
-    let until = std::time::Instant::now() + timeout;
     loop {
         if gix::interrupt::is_triggered() {
             bail!("Interrupted");
         }
         let left = until.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
-            bail!("{url} did not answer within {} s", timeout.as_secs().max(1));
+            bail!("{url} did not answer within {} s", started.elapsed().as_secs().max(1));
         }
         match recv.recv_timeout(left.min(std::time::Duration::from_millis(100))) {
             Ok(answer) => return answer,
@@ -1579,17 +1650,49 @@ fn ask_remote<T: Send + 'static>(
     }
 }
 
-/// [`remote_default_branch`], asked quietly within `timeout` and Ctrl-C
+/// The remote's default branch, asked quietly by `until` and within Ctrl-C
 /// (see [`ask_remote`]).
-pub fn ask_remote_default_branch(url: &str, timeout: std::time::Duration) -> Res<String> {
-    ask_remote(url, timeout, remote_default_branch)
+pub fn ask_remote_default_branch(url: &str, until: std::time::Instant) -> Res<String> {
+    ask_remote(url, until, remote_head).map(|(name, _)| name)
 }
 
-/// [`remote_tip`], asked quietly within `timeout` and Ctrl-C (see
+/// [`remote_head`], asked quietly by `until` and within Ctrl-C (see
 /// [`ask_remote`]).
-pub fn ask_remote_tip(url: &str, git_ref: Option<&str>, timeout: std::time::Duration) -> Res<ObjectId> {
+pub fn ask_remote_head(url: &str, until: std::time::Instant) -> Res<(String, ObjectId)> {
+    ask_remote(url, until, remote_head)
+}
+
+/// [`remote_tip`], asked quietly by `until` and within Ctrl-C (see
+/// [`ask_remote`]).
+pub fn ask_remote_tip(url: &str, git_ref: Option<&str>, until: std::time::Instant) -> Res<ObjectId> {
     let git_ref = git_ref.map(str::to_owned);
-    ask_remote(url, timeout, move |scratch, url| remote_tip(scratch, url, git_ref.as_deref()))
+    ask_remote(url, until, move |scratch, url| remote_tip(scratch, url, git_ref.as_deref()))
+}
+
+/// Map `f` over `items` on a network fan-out [`REMOTE_ASKS_AT_ONCE`] wide,
+/// in order: for remote asks, which wait on the network rather than read
+/// the disk (the disk pool, `par::parallel_map`, is narrower). Ctrl-C:
+/// nothing more is started, and the map fails ("Interrupted").
+pub fn ask_all<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Res<Vec<R>> {
+    let slots: Vec<std::sync::Mutex<Option<R>>> = items.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..REMOTE_ASKS_AT_ONCE.min(items.len()) {
+            scope.spawn(|| loop {
+                if gix::interrupt::is_triggered() {
+                    return;
+                }
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(item) = items.get(i) else { return };
+                let result = f(item);
+                *slots[i].lock().expect("ask slot poisoned") = Some(result);
+            });
+        }
+    });
+    if gix::interrupt::is_triggered() {
+        bail!("Interrupted");
+    }
+    Ok(slots.into_iter().map(|s| s.into_inner().expect("ask slot poisoned").expect("every item asked")).collect())
 }
 
 /// The URL the clone's `origin` fetches from, as its config says.
@@ -1709,6 +1812,36 @@ pub fn at_local_origin_tip(repo_dir: &Path, branch: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// The scratch directories of processes that are gone are removed; this
+    /// process's, and names that are not such directories, stay.
+    #[test]
+    fn stale_scratch_of_gone_processes_is_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gone = tmp.path().join(format!("{SCRATCH_PREFIX}4294967294"));
+        let mine = tmp.path().join(format!("{SCRATCH_PREFIX}{}", std::process::id()));
+        let other = tmp.path().join("cactup-remote-asks-x");
+        for d in [&gone, &mine, &other] {
+            std::fs::create_dir_all(d.join(".tmpABC/objects")).unwrap();
+        }
+        clean_stale_scratch(tmp.path());
+        assert!(!gone.exists() && mine.exists() && other.exists());
+    }
+
+    /// Remote asks go on a fan-out as wide as [`REMOTE_ASKS_AT_ONCE`], not
+    /// the disk pool: that many waits take one wait's time.
+    #[test]
+    fn remote_asks_go_on_a_wide_fan_out() {
+        let items: Vec<usize> = (0..REMOTE_ASKS_AT_ONCE).collect();
+        let started = std::time::Instant::now();
+        let out = ask_all(&items, |i| {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            *i
+        })
+        .unwrap();
+        assert_eq!(out, items);
+        assert!(started.elapsed() < std::time::Duration::from_millis(900), "{:?}", started.elapsed());
+    }
+
     /// The scratch repository a remote is asked from never lets the ask stop
     /// for input: no terminal prompt for credentials, and ssh in batch mode
     /// (as the ssh variant, so its port and protocol arguments still apply),
@@ -1728,7 +1861,8 @@ mod tests {
             return;
         }
         let options = repo.ssh_connect_options().unwrap();
-        assert_eq!(options.command.as_deref(), Some(std::ffi::OsStr::new("ssh -o BatchMode=yes")), "{options:?}");
+        let command = format!("ssh -o BatchMode=yes -o ConnectTimeout={}", REMOTE_ASK_TIMEOUT.as_secs());
+        assert_eq!(options.command.as_deref(), Some(std::ffi::OsStr::new(&command)), "{options:?}");
         assert_eq!(options.kind, Some(gix::protocol::transport::client::blocking_io::ssh::ProgramKind::Ssh));
     }
 
