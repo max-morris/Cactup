@@ -160,9 +160,10 @@ impl Plan {
             // A pinned repo needs no branch: it is checked out by commit.
             let branch = match s.commit {
                 Some(_) => s.branch,
-                None => s.branch.or_else(|| {
-                    git::head_of(&s.dir).ok().map(|(b, _)| b).filter(|b| b != git::DETACHED)
-                }),
+                None => s
+                    .branch
+                    .or_else(|| git::head_of(&s.dir).ok().map(|(b, _)| b).filter(|b| b != git::DETACHED))
+                    .or_else(|| branch_to_follow(&s.dir, &s.url, None, None)),
             };
             moved.push(s.repo.clone());
             self.git.push(GitRepoPlan {
@@ -179,6 +180,25 @@ impl Plan {
         }
         moved
     }
+}
+
+/// The branch a clone that is no longer pinned goes back onto: the list's
+/// (`!REPO_BRANCH`), else the one the last fetch followed (unpinned), else the
+/// remote's default (as the clone knows it, else as the remote says: a clone
+/// made pinned knows none), else, last, the label a pinned fetch recorded.
+/// A pinned fetch's label is only where its pin came from (a tag, as often
+/// as not): a branch to align to only when nothing else names one, and then
+/// `align` says plainly if it is none. A label that was another real branch
+/// (`develop`) is not followed once the list stops pinning: the remote's
+/// default is, as for a fresh clone.
+fn branch_to_follow(dir: &Path, url: &str, listed: Option<&str>, record: Option<&RepoRecord>) -> Option<String> {
+    let followed = record.filter(|r| r.commit.is_none()).and_then(|r| r.branch.clone());
+    listed
+        .map(str::to_owned)
+        .or(followed)
+        .or_else(|| git::default_branch(dir))
+        .or_else(|| git::ask_remote_default_branch(url).ok())
+        .or_else(|| record.and_then(|r| r.branch.clone()))
 }
 
 /// What [`execute`] did, per item. Failures are collected, not fatal — the
@@ -455,10 +475,13 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                             }
                             (_, Some(branch), _) => git::align(&item.dir, branch, force, &mut line),
                             (_, None, _) => {
-                                // plan() always fills in the probed head
-                                // branch for existing repos; this is a bug
-                                // guard, not a reachable path.
-                                Err(anyhow::anyhow!("No branch resolved for existing repo"))
+                                // Reached only when neither the list, the
+                                // clone nor the remote names a branch.
+                                Err(anyhow::anyhow!(
+                                    "No branch to put {} on: the thornlist names none (!REPO_BRANCH), and neither the \
+                                     clone nor its remote says which is the default",
+                                    item.repo
+                                ))
                             }
                         };
                         // Assert the repo actually landed on its expected
@@ -1256,16 +1279,9 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
                 // anywhere else is the user's doing, unless it is already the
                 // pin itself.
                 let ours = record.is_some_and(|r| r.head == head.to_string());
-                // Back onto a branch: the list's, else the one the last fetch
-                // followed, else the remote's default. A pinned fetch's
-                // recorded branch is only the label its pin came from (a tag,
-                // as often as not), never a branch to align to.
-                let followed = record.filter(|r| r.commit.is_none()).and_then(|r| r.branch.clone());
                 let action = match commit {
                     Some(pin) if pin == head || ours => Some((GitAction::Pin, group.branch.clone())),
-                    None if ours => (group.branch.clone())
-                        .or(followed)
-                        .or_else(|| git::default_branch(&dir))
+                    None if ours => branch_to_follow(&dir, &group.url, group.branch.as_deref(), record)
                         .map(|branch| (GitAction::Align, Some(branch))),
                     _ => None,
                 };
@@ -1906,6 +1922,59 @@ pub(crate) mod tests {
             walk(install_root, &mut found);
         }
         assert!(found.is_empty(), "found stray Cactus dir(s): {found:?}");
+    }
+
+    /// A clone made pinned (it knows no remote branch) from a list naming a
+    /// pin and the tag it came from, then fetched from a list naming neither (a stack
+    /// release's list, then a base that follows its branch): back onto the
+    /// remote's default branch, as the remote says, never skipped as the
+    /// user's detached HEAD; and a forced fetch of it resolves a branch too.
+    #[test]
+    fn a_clone_made_pinned_goes_back_onto_the_remote_s_default_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let upstream = tmp.path().join("sources/upstream");
+        git::testrepo::init(&upstream);
+        let c1 = git::testrepo::commit_tree(&upstream, &[("v", "1\n", false)]);
+        // The pin taken from a tag, which the list names as its branch.
+        gix::open(&upstream).unwrap().reference("refs/tags/v1.0.0", c1, gix::refs::transaction::PreviousValue::Any, "tag").unwrap();
+        git::testrepo::commit_tree(&upstream, &[("v", "2\n", false)]);
+        let (branch, tip) = git::head_of(&upstream).unwrap();
+        let url = upstream.to_string_lossy().into_owned();
+        let root = tmp.path().join("install");
+        let repo_dir = root.join("Cactus/repos/R");
+        let list = |pinned: bool| {
+            let head = if pinned { format!("!REPO_BRANCH = v1.0.0\n!REPO_COMMIT = {c1}\n") } else { String::new() };
+            crate::thornlist::parse(&format!(
+                "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\n!TARGET = $ROOT\n!TYPE = git\n\
+                 !URL = {url}\n{head}!NAME = R\n!CHECKOUT = Makefile\n"
+            ))
+            .unwrap()
+        };
+        let planned = |list: &Thornlist| {
+            let mut progress = prodash::tree::Root::new().add_child("test plan");
+            plan(list, &root, &mut progress).unwrap()
+        };
+        let p = planned(&list(true));
+        let report = execute(&p, &root).unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        FetchState::record(&root, &report.records()).unwrap();
+        assert_eq!(git::default_branch(&repo_dir), None, "a clone made pinned knows no remote branch");
+
+        let p = planned(&list(false));
+        assert!(matches!(p.git[0].action, GitAction::Align), "{:?}", p.git);
+        assert_eq!(p.git[0].branch.as_deref(), Some(branch.as_str()));
+        let report = execute(&p, &root).unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(git::head_of(&repo_dir).unwrap(), (branch.clone(), tip));
+        FetchState::record(&root, &report.records()).unwrap();
+
+        // A detached HEAD the user made, forced: a branch resolved all the same.
+        let mut progress = prodash::tree::Root::new().add_child("test checkout");
+        git::pin(&repo_dir, None, c1, false, &mut progress).unwrap();
+        let mut skipped = planned(&list(false));
+        assert!(skipped.git.is_empty(), "the user's detached HEAD is skipped");
+        skipped.force();
+        assert_eq!(skipped.git[0].branch.as_deref(), Some(branch.as_str()));
     }
 
     /// Regression pin for the split-installation bug's planning half:
