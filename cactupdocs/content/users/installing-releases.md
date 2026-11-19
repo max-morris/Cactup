@@ -146,21 +146,33 @@ You can also override the active installation for a single command:
 cactup --installation myrelease config list
 ```
 
-## Uninstalling
+## Deleting an installation
 
-Remove an installation:
+Delete an installation:
 
 ```sh
-cactup uninstall myrelease
+cactup inst delete myrelease
 ```
 
 cactup will ask for confirmation. Skip the prompt:
 
 ```sh
-cactup uninstall myrelease --force
+cactup inst delete myrelease --force
 ```
 
-This removes the installation directory and any symlinks, but preserves simulation data under `simulation-home`.
+This deletes the Cactus tree, with its configs and builds, and what cactup
+keeps beside it in the installation directory; the directory itself goes too
+once that leaves it empty. Anything else in it is kept, so an installation
+made with `--install-prefix ~/src` takes only `~/src/Cactus` and cactup's own
+files with it. The symlink at the default place (`~/Cactus`) is removed while
+it still points at the deleted tree; a symlink made elsewhere with
+`--symlink-prefix` or `--symlink-name` is left for you to remove. Simulation
+and test output under `simulation-home` and `test-home` is kept, but cactup
+no longer lists those simulations and test runs.
+
+cactup refuses while a build of one of the installation's configs is running
+or queued; stop it first with `cactup build stop`, or pass `--force`. If you
+interrupt the deletion, run the same command again to finish it.
 
 ## Updating an installation (refetch)
 
@@ -346,6 +358,8 @@ rebuilding would cost — use `cactup config delta`.
 
 {{cactup:cli command="installation delta"}}
 
+{{cactup:cli command="installation delete"}}
+
 ## Global flags for installation commands
 
 {{cactup:cli command="install"}}
@@ -355,8 +369,6 @@ rebuilding would cost — use `cactup config delta`.
 {{cactup:cli command="installation show"}}
 
 {{cactup:cli command="use"}}
-
-{{cactup:cli command="uninstall"}}
 
 ## Installation locations
 
