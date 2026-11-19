@@ -1572,6 +1572,28 @@ pub fn head_of(repo_dir: &Path) -> Res<(String, ObjectId)> {
     Ok((branch, id))
 }
 
+/// The branch a clone's remote has as its default: `origin/HEAD`'s target,
+/// else the one branch the clone tracks of it; `None` when neither tells.
+pub fn default_branch(repo_dir: &Path) -> Option<String> {
+    let repo = gix::open(repo_dir).ok()?;
+    if let Ok(head) = repo.find_reference("refs/remotes/origin/HEAD")
+        && let gix::refs::TargetRef::Symbolic(name) = head.target()
+    {
+        return name.as_bstr().to_string().strip_prefix("refs/remotes/origin/").map(str::to_owned);
+    }
+    let refs = repo.references().ok()?;
+    let branches: Vec<String> = (refs.prefixed("refs/remotes/origin/").ok()?)
+        .filter_map(Result::ok)
+        .map(|r| r.name().as_bstr().to_string())
+        .filter_map(|n| n.strip_prefix("refs/remotes/origin/").map(str::to_owned))
+        .filter(|n| n != "HEAD")
+        .collect();
+    match branches.as_slice() {
+        [one] => Some(one.clone()),
+        _ => None,
+    }
+}
+
 /// A cheap early-out for the planner: is the repo already exactly at
 /// origin/<branch> according to local refs alone (no network)?
 pub fn at_local_origin_tip(repo_dir: &Path, branch: &str) -> bool {

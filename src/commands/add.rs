@@ -448,6 +448,7 @@ fn restore_plan(
     composed: &str,
     touched: &BTreeSet<&str>,
     gone: &[String],
+    removed: &[AddedPackage],
 ) -> Res<Option<crate::fetch::Plan>> {
     if touched.is_empty() {
         return Ok(None);
@@ -459,6 +460,25 @@ fn restore_plan(
     drop(classify);
     renderer.shutdown_and_wait();
     let mut fetch_plan = fetch_plan?;
+    // A clone cactup itself left detached, at the commit a removed package
+    // that replaced it in the base's own clone was pinned at: cactup's state
+    // to move back, onto the base's pin or its branch, as for a fresh base.
+    // Detached anywhere else, local changes, local commits: the user's.
+    let ours = |s: &crate::fetch::SkippedRepo| {
+        matches!(&s.reason, crate::fetch::git::DirtyReason::DetachedHead(head)
+            if removed.iter().any(|a| a.replaces.contains(&s.repo) && a.commit == head.to_string()))
+    };
+    for s in fetch_plan.skipped.iter_mut().filter(|s| touched.contains(s.repo.as_str()) && ours(s)) {
+        if s.commit.is_none() && s.branch.is_none() {
+            s.branch = crate::fetch::git::default_branch(&s.dir);
+        }
+    }
+    let back = fetch_plan.force_where(|s| {
+        touched.contains(s.repo.as_str()) && ours(s) && (s.commit.is_some() || s.branch.is_some())
+    });
+    for g in fetch_plan.git.iter_mut().filter(|g| back.contains(&g.repo)) {
+        g.forced = None;
+    }
     if let Some(skipped) = fetch_plan.skipped.iter().find(|s| touched.contains(s.repo.as_str())) {
         bail!(
             "Repo {} has {}; it was left alone, and {} is still added",
@@ -1657,14 +1677,14 @@ pub fn remove(ctx: &Ctx, packages: &[String], flags: &RemoveFlags) -> Res<()> {
 
     // The replaced base repos go back to what the base pins.
     let touched: BTreeSet<&str> = removed.iter().flat_map(|r| r.replaces.iter().map(String::as_str)).collect();
-    let restore = restore_plan(inst, &composed, &touched, &gone)?;
+    let restore = restore_plan(inst, &composed, &touched, &gone, &removed)?;
     if !super::resolution::show_and_confirm(&plan.lines(&command), plan.beyond_named(), how)? {
         return Ok(());
     }
     let locked = inst.locked()?;
     let mut meta = start.recheck(&locked)?;
     if let Some(checked) = &restore {
-        let now = restore_plan(inst, &composed, &touched, &gone).map_err(clones_changed)?;
+        let now = restore_plan(inst, &composed, &touched, &gone, &removed).map_err(clones_changed)?;
         same_fetch(checked, now.as_ref().expect("the same repos to restore"))?;
     }
     meta.added.retain(|a| !gone.contains(&a.package));

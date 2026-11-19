@@ -2071,17 +2071,27 @@ fn removing_a_replacement_counts_the_base_that_comes_back() {
         let upgrade = AddFlags { upgrade: true, yes: true, ..AddFlags::default() };
         s.add(&["et/carpet@=2.0.0"], upgrade).unwrap_or_else(|e| panic!("pinned {pinned}: {e:#}"));
         assert!(s.meta().added.iter().any(|a| a.package == "et/carpet" && a.replaces == ["carpet"]), "pinned {pinned}");
-        if pinned {
-            s.remove(&["et/carpet"], remove_yes()).unwrap_or_else(|e| panic!("pinned {pinned}: {e:#}"));
-        } else {
-            // A base that follows its branch is not restored by a remove (the
-            // replacement left its clone detached): its plan is what is checked.
-            let start = Start::read(&s.ctx, false, Doing::Removing).unwrap();
-            let base = thornlist::parse(&start.pristine).unwrap();
-            let target = [crate::deps::PkgId::parse("et/carpet").unwrap()];
-            super::plan_remove_with_deps(&s.ctx, &start, &base, &target).unwrap_or_else(|e| panic!("{e:#}"));
+        // The replacement left the base's clone detached at its own pin:
+        // cactup's doing, so the remove restores it (onto the branch, for a
+        // base that follows one).
+        s.remove(&["et/carpet"], remove_yes()).unwrap_or_else(|e| panic!("pinned {pinned}: {e:#}"));
+        let clone = s.inst.root.join("Cactus/repos/carpet");
+        let (branch, head) = crate::fetch::git::head_of(&clone).unwrap();
+        if !pinned {
+            let tip = crate::fetch::git::head_of(&s.inst.root.parent().unwrap().join("up/carpet")).unwrap();
+            assert_eq!((branch, head), tip, "back on the base's branch, at its tip");
         }
     }
+    // The user moved HEAD after the add (detached at another commit): theirs,
+    // left alone, and the remove refuses before anything is asked.
+    let (s, _) = replaced_base(false, true);
+    s.add(&["et/carpet@=2.0.0"], AddFlags { upgrade: true, yes: true, ..AddFlags::default() }).unwrap();
+    let clone = s.inst.root.join("Cactus/repos/carpet");
+    let mine = crate::fetch::tests::commit_files(&clone, &[("Carpet/interface.ccl", "IMPLEMENTS: carpet\n"), ("README", "2\n"), ("MINE", "x\n")]);
+    assert_eq!(crate::fetch::git::head_of(&clone).unwrap(), (crate::fetch::git::DETACHED.to_owned(), mine));
+    let flags = RemoveFlags { dry_run: true, ..remove_yes() };
+    let err = format!("{:#}", s.remove(&["et/carpet"], flags).unwrap_err());
+    assert!(err.contains("Repo carpet has detached HEAD") && err.contains("is still added"), "{err}");
     // A base that follows its branch, whose tip the Cactarium cannot read:
     // what comes back is unknown, and the refusal says so.
     let (s, _) = replaced_base(false, false);
