@@ -1506,6 +1506,15 @@ pub(crate) fn refusal_text(e: anyhow::Error, finished: &Finished) -> anyhow::Err
 mod tests {
     use super::*;
 
+    /// After a batch round that read something, the rest are asked again
+    /// shortly; after one that read nothing, a little later.
+    #[test]
+    fn round_waits() {
+        assert_eq!(round_wait(false), std::time::Duration::from_millis(1500));
+        assert_eq!(round_wait(true), std::time::Duration::from_secs(3));
+        assert_eq!(STALLS, 3);
+    }
+
     /// One wait lasts what `Retry-After` says, at most two minutes; without
     /// it, until the window has passed; never past the budget left.
     #[test]
