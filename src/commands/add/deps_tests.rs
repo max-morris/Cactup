@@ -75,6 +75,22 @@ struct Fake {
     /// Commits whose reads a proxy in front gives up on: its own 504, with
     /// no API generation.
     proxy_timeout_at: Vec<String>,
+    /// `POST /packages/read` exists (a Cactarium with batch reads).
+    batch: bool,
+    /// How many packages not in the mirror yet one batch request finishes
+    /// fetching within its time; the rest it starts fetching and answers
+    /// `not-read`, ready on the next ask. What was fetched stays (warm).
+    fetch_budget: usize,
+    warm: std::collections::BTreeSet<(String, String)>,
+    fetching: std::collections::BTreeSet<(String, String)>,
+    /// The next requests that start no fetch (the server's network slots
+    /// are all taken by other callers): what is not warm is not read.
+    stalled: usize,
+    /// Commits whose trees are too large to read (a 400, as the server says).
+    too_large_at: Vec<String>,
+    /// Batch requests answered, and packages they fetched.
+    batch_requests: usize,
+    batch_fetches: usize,
     /// What a read at a commit no version froze answers (the package read
     /// now), by package and commit.
     snapshots: Vec<(String, String, String)>,
@@ -102,6 +118,15 @@ impl Fake {
             down_at: Vec::new(),
             flesh: Vec::new(),
             proxy_timeout_at: Vec::new(),
+            batch: true,
+            // Most bases read warm: everything within one request.
+            fetch_budget: 1000,
+            warm: std::collections::BTreeSet::new(),
+            fetching: std::collections::BTreeSet::new(),
+            stalled: 0,
+            too_large_at: Vec::new(),
+            batch_requests: 0,
+            batch_fetches: 0,
             snapshots: Vec::new(),
         }
     }
@@ -186,6 +211,12 @@ impl Fake {
         if path.starts_with("/providers?") {
             return if self.providers_endpoint { ok(self.providers.clone()) } else { no_route() };
         }
+        if path == "/packages/read" {
+            if !self.batch {
+                return no_route();
+            }
+            return self.read_batch(body);
+        }
         if let Some(rest) = path.strip_prefix("/packages/") {
             let (id, at) = match rest.split_once("/versions") {
                 Some((id, at)) => (id, at.trim_start_matches('/')),
@@ -210,6 +241,10 @@ impl Fake {
             }
             if self.bad_at.iter().any(|c| c == at) {
                 let message = format!("{id} at commit {}: invalid manifest: no [package] table", &at[..12]);
+                return error("400 Bad Request", "bad-request", message);
+            }
+            if self.too_large_at.iter().any(|c| c == at) {
+                let message = format!("{id} at commit {}: its tree is too large to read", &at[..12]);
                 return error("400 Bad Request", "bad-request", message);
             }
             if self.proxy_timeout_at.iter().any(|c| c == at) {
@@ -246,6 +281,85 @@ impl Fake {
 }
 
 impl Fake {
+    /// `POST /packages/read`, as the server answers it: the whole request
+    /// counts once against the window of reads made now (a 429 refuses all
+    /// of it); each item as the single read would answer, but a package not
+    /// fetched yet is fetched only within the request's budget, and answers
+    /// `not-read` past it (or while the fetch slots are held elsewhere).
+    fn read_batch(&mut self, body: &[u8]) -> (&'static str, String, Vec<u8>) {
+        let asked: cactup_ecosystem_common::api::ReadRequest = serde_json::from_slice(body).unwrap();
+        asked.validate().expect("a valid read request");
+        // A proxy giving up on a request that reads one of these.
+        if asked.items.iter().any(|q| self.proxy_timeout_at.contains(&q.commit)) {
+            return ("504 Gateway Timeout", String::new(), b"<html><body>Gateway Timeout</body></html>".to_vec());
+        }
+        let now = std::time::Instant::now();
+        if self.window_start.is_some_and(|s| now.duration_since(s) >= self.window) {
+            (self.window_start, self.in_window) = (None, 0);
+        }
+        if self.always_limited || self.in_window >= 12 {
+            let body = r#"{"error":{"code":"rate-limited","message":"Too many requests; try again in a minute"}}"#;
+            let left = self.window_start.map_or(self.window, |s| self.window.saturating_sub(now.duration_since(s)));
+            let header = if self.retry_after { format!("retry-after: {}\r\n", left.as_secs().max(1)) } else { String::new() };
+            return ("429 Too Many Requests", format!("api-generation: 1\r\n{header}"), body.as_bytes().to_vec());
+        }
+        self.window_start.get_or_insert(now);
+        self.in_window += 1;
+        self.batch_requests += 1;
+        let stalled = self.stalled > 0;
+        self.stalled = self.stalled.saturating_sub(1);
+        // What earlier requests left fetching is in the mirror now.
+        let done = std::mem::take(&mut self.fetching);
+        self.warm.extend(done);
+        let mut fetched = 0;
+        let mut items = Vec::new();
+        for q in &asked.items {
+            let (id, at) = (q.package.as_str(), q.commit.as_str());
+            let item = |status: &str, version: Option<serde_json::Value>, error: Option<String>| {
+                serde_json::json!({"package": id, "commit": at, "status": status, "version": version,
+                    "error": error, "untrusted": false, "unreviewed": false})
+            };
+            let frozen = (self.packages.iter().find(|(p, _)| p == id))
+                .and_then(|(_, vs)| vs.iter().rev().find(|v| v.contains(&format!("\"commit\":\"{at}"))).cloned());
+            items.push(if self.refuse_at.iter().any(|c| c == at) {
+                item("forbidden", None, Some("not served: the package isn't trusted".into()))
+            } else if self.bad_at.iter().any(|c| c == at) {
+                item("bad-request", None, Some(format!("{id} at commit {}: invalid manifest: no [package] table", &at[..12])))
+            } else if self.too_large_at.iter().any(|c| c == at) {
+                item("bad-request", None, Some(format!("{id} at commit {}: its tree is too large to read", &at[..12])))
+            } else if self.down_at.iter().any(|c| c == at) {
+                item("upstream", None, Some("the git host did not answer".into()))
+            } else if let Some(v) = frozen {
+                item("ok", Some(serde_json::from_str(&v).unwrap()), None)
+            } else {
+                match self.snapshots.iter().find(|(p, c, _)| p == id && c == at).map(|(_, _, j)| j.clone()) {
+                    None => item("not-found", None, Some(format!("no commit {at} in {id}'s repository (is it pushed?)"))),
+                    Some(json) => {
+                        let key = (id.to_owned(), at.to_owned());
+                        if self.warm.contains(&key) {
+                            item("ok", Some(serde_json::from_str(&json).unwrap()), None)
+                        } else if stalled {
+                            item("not-read", None, Some("not read this time".into()))
+                        } else if fetched < self.fetch_budget {
+                            fetched += 1;
+                            self.batch_fetches += 1;
+                            self.warm.insert(key);
+                            item("ok", Some(serde_json::from_str(&json).unwrap()), None)
+                        } else {
+                            // Fetched on after the answer: ready on the next ask.
+                            if self.fetching.insert(key) {
+                                self.batch_fetches += 1;
+                            }
+                            item("not-read", None, Some("not read this time".into()))
+                        }
+                    }
+                }
+            });
+        }
+        let body = serde_json::json!({ "items": items }).to_string();
+        ("200 OK", "api-generation: 1\r\n".to_owned(), body.into_bytes())
+    }
+
     /// The version of `package` that froze `commit`, if one did.
     /// On the default track first, as the server's lookup answers.
     fn frozen(&self, package: &str, commit: &str) -> Option<String> {
@@ -1022,12 +1136,12 @@ fn add_needs_the_pristine_thornlist() {
 }
 
 /// A base that follows branches: twenty registered repos at commits no
-/// version froze. Reading a package at such a commit makes the server read it
-/// now (a fetch of its repository, 12 a minute): none is read. `add`, `add
-/// --no-deps`, `add --upgrade` and `remove` all go through, each with a
-/// handful of requests.
+/// version froze. They are read in one batch request (the server reads them
+/// now, 12 requests a minute), never one by one; under `--no-deps` not at
+/// all. `add`, `add --no-deps`, `add --upgrade` and `remove` all go
+/// through, each with a handful of requests.
 #[test]
-fn a_base_at_unfrozen_commits_is_never_read_at_them() {
+fn a_base_at_unfrozen_commits_is_read_in_one_batch() {
     let tmp = tempfile::tempdir().unwrap();
     let mut base = String::new();
     let mut fake = Fake::new();
@@ -1051,13 +1165,15 @@ fn a_base_at_unfrozen_commits_is_never_read_at_them() {
         counts(&log)
     };
     // [resolve, lookup, whole version lists, one version at a commit, other]
-    assert_eq!(count(&["max/new"], AddFlags::default()), [1, 1, 1, 0, 0]);
+    // [resolve, lookup, whole version lists, one version at a commit, other (the batch)]
+    assert_eq!(count(&["max/new"], AddFlags::default()), [1, 1, 1, 0, 1]);
     assert_eq!(count(&["max/new"], AddFlags { no_deps: true, ..AddFlags::default() }), [1, 1, 1, 0, 0]);
-    assert_eq!(count(&["max/new"], AddFlags { upgrade: true, ..AddFlags::default() }), [1, 1, 21, 0, 0]);
+    assert_eq!(count(&["max/new"], AddFlags { upgrade: true, ..AddFlags::default() }), [1, 1, 21, 0, 1]);
     s.add(&["max/new"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
     log.lock().unwrap().clear();
     s.remove(&["max/new"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
-    assert_eq!(counts(&log), [0, 1, 0, 1, 0]);
+    // max/new read at its commit, the base in one batch.
+    assert_eq!(counts(&log), [0, 1, 0, 1, 1]);
     assert_eq!(fake.lock().unwrap().unfrozen_reads, 0);
 }
 
@@ -1281,7 +1397,10 @@ fn a_named_thorn_of_an_unfrozen_base_package_keeps_its_commit() {
         let admbase = meta.added.iter().find(|a| a.package == "et/admbase").unwrap();
         assert_eq!((admbase.commit.as_str(), admbase.replaces.len()), (it.a1.as_str(), 0), "no_deps {no_deps}");
         assert_eq!(admbase.thorns.iter().map(|t| t.checkout.as_str()).collect::<Vec<_>>(), ["ADMBase/StaticConformal"]);
-        assert_eq!(it.fake.lock().unwrap().unfrozen_reads, 1);
+        // Read once: singly under --no-deps (no batch of the base), else in the batch.
+        let f = it.fake.lock().unwrap();
+        assert_eq!(f.unfrozen_reads + f.batch_fetches, 1, "no_deps {no_deps}");
+        drop(f);
         let _ = (&it.a2, &it.log);
     }
 }
@@ -1345,9 +1464,10 @@ fn an_unfrozen_base_fork_stands_in() {
 
 /// The requests on a base of twenty registered repos at commits no version
 /// froze, when a dependency names a thorn of one of them that is not
-/// enabled: that one package is read at its commit, nothing else.
+/// enabled: the whole base is read in one batch request; a Cactarium without
+/// batch reads reads that one package at its commit, nothing else.
 #[test]
-fn a_dependency_on_an_unfrozen_base_package_reads_only_it() {
+fn a_dependency_on_an_unfrozen_base_package_reads_it_in_the_batch_or_alone() {
     let tmp = tempfile::tempdir().unwrap();
     let mut base = String::new();
     let mut fake = Fake::new();
@@ -1375,8 +1495,19 @@ fn a_dependency_on_an_unfrozen_base_package_reads_only_it() {
     log.lock().unwrap().clear();
     let got = records(&s, &["max/dep"], &AddFlags::default()).unwrap_or_else(|e| panic!("{e:#}"));
     assert_eq!(record_of(&got, "et/r0").2, ["Arr0/U0"]);
-    // [resolve, lookup, whole version lists, one version at a commit, other]
-    assert_eq!(counts(&log), [1, 1, 1, 1, 0]);
+    // [resolve, lookup, whole version lists, one version at a commit, other]:
+    // the whole base in one batch request.
+    assert_eq!(counts(&log), [1, 1, 1, 0, 1]);
+    let f = fake.lock().unwrap();
+    assert_eq!((f.unfrozen_reads, f.batch_fetches), (0, 20));
+    drop(f);
+    // A Cactarium without batch reads: only the package the plan depends on,
+    // read singly (after the batch request it does not know).
+    fake.lock().unwrap().batch = false;
+    log.lock().unwrap().clear();
+    let got = records(&s, &["max/dep"], &AddFlags::default()).unwrap_or_else(|e| panic!("{e:#}"));
+    assert_eq!(record_of(&got, "et/r0").2, ["Arr0/U0"]);
+    assert_eq!(counts(&log), [1, 1, 1, 1, 1]);
     assert_eq!(fake.lock().unwrap().unfrozen_reads, 1);
     let _ = r0;
 }
@@ -1463,12 +1594,206 @@ fn clones_changed_while_the_prompt_waits_are_caught() {
     let _ = (&it.a1, &it.a2, &it.log, &it.fake);
 }
 
+/// `n` packages, each read at a commit of its own in the fake (`fake` made
+/// as `change` says), read up front by one registry: the batch requests and
+/// rounds it took, and how many it read.
+fn prefetch_on(n: usize, change: impl FnOnce(&mut Fake)) -> (usize, usize, usize, Shared) {
+    let mut fake = Fake::new();
+    let mut items = Vec::new();
+    for i in 0..n {
+        let (id, c) = (format!("et/p{i:03}"), format!("{:040x}", i + 1));
+        fake.snapshots.push((id.clone(), c.clone(), version(&c, &c, "https://x/p.git", "P", &["P"], "[]")));
+        items.push((crate::deps::PkgId::parse(&id).unwrap(), c));
+    }
+    change(&mut fake);
+    let (base, _, fake) = fake.serve_shared();
+    let client = crate::cactarium::Client::at(&base);
+    let mut reg = super::super::resolution::Registry::new(&client, []);
+    reg.prefetch(&items).unwrap();
+    let read = items.iter().filter(|(id, c)| reg.batch_read(id, c)).count();
+    let (requests, rounds) = (reg.batch_requests, reg.batch_rounds);
+    reg.finish();
+    (requests, rounds, read, fake)
+}
+
+/// Batch reads in rounds: a warm base in one request (two past 200
+/// packages); a cold one (the server fetches some within a request and the
+/// rest on after it, ready on the next ask) in two rounds, asked again soon;
+/// one whose every package is only fetched on after the answer in two, the
+/// first making no progress; rounds the server's busy fetch slots hold up
+/// retried, three times at most, then left to single reads; the wait budget
+/// ending the retries early.
+#[test]
+fn batch_reads_go_in_rounds() {
+    super::super::resolution::TEST_ROUND_WAIT.with(|w| w.set(Some(std::time::Duration::from_millis(20))));
+    // (requests, rounds, read)
+    let warm = |n| { let (q, r, read, _) = prefetch_on(n, |_| ()); (q, r, read) };
+    assert_eq!(warm(80), (1, 1, 80));
+    assert_eq!(warm(250), (2, 1, 250));
+    let cold = |n, budget| {
+        let (q, r, read, _) = prefetch_on(n, |f| f.fetch_budget = budget);
+        (q, r, read)
+    };
+    assert_eq!(cold(80, 8), (2, 2, 80));
+    assert_eq!(cold(250, 8), (4, 2, 250));
+    assert_eq!(cold(80, 0), (2, 2, 80));
+    let stalled = |stalls| {
+        let (q, r, read, _) = prefetch_on(80, |f| f.stalled = stalls);
+        (q, r, read)
+    };
+    // Two rounds held up, the third reads everything: no single reads.
+    assert_eq!(stalled(2), (3, 3, 80));
+    // Held up for good: the first round and three more, then single reads.
+    assert_eq!(stalled(100), (4, 4, 0));
+    // The wait budget spent after the second retry's short wait.
+    super::super::resolution::TEST_WAIT_BUDGET.with(|w| w.set(Some(std::time::Duration::from_millis(30))));
+    assert_eq!(stalled(100), (3, 3, 0));
+    super::super::resolution::TEST_WAIT_BUDGET.with(|w| w.set(None));
+    super::super::resolution::TEST_ROUND_WAIT.with(|w| w.set(None));
+}
+
+/// Rounds held up for good leave the base to single reads, made only for
+/// what the plan depends on.
+#[test]
+fn held_up_batch_reads_fall_back_to_single_reads() {
+    super::super::resolution::TEST_ROUND_WAIT.with(|w| w.set(Some(std::time::Duration::from_millis(20))));
+    let (s, _, fake) = unfrozen_base(3, |tmp, mut fake| {
+        fake.stalled = 100;
+        let (url, c) = upstream(tmp, "dep", &[("Dep/interface.ccl", "IMPLEMENTS: dep\n")]);
+        let claims = format!("[{}]", depends("et/r0", ">=0.0.0", &["U0"]));
+        fake.package("max/dep0", vec![version("1.0.0", &c, &url, "Dep", &["Dep"], &claims)])
+    });
+    let got = records(&s, &["max/dep0"], &AddFlags::default()).unwrap_or_else(|e| panic!("{e:#}"));
+    assert_eq!(record_of(&got, "et/r0").2, ["Arr0/U0"]);
+    let f = fake.lock().unwrap();
+    assert_eq!((f.batch_requests, f.unfrozen_reads), (4, 1));
+    drop(f);
+    super::super::resolution::TEST_ROUND_WAIT.with(|w| w.set(None));
+}
+
+/// A Cactarium from before batch reads (its 404 says its API generation):
+/// single reads, as before, without a word about it. One whose answer says
+/// no API generation is no Cactarium (a wrong address).
+#[test]
+fn a_cactarium_without_batch_reads_reads_singly() {
+    let (requests, rounds, read, fake) = prefetch_on(5, |f| f.batch = false);
+    assert_eq!((requests, rounds, read), (1, 1, 0));
+    assert_eq!(fake.lock().unwrap().batch_requests, 0);
+    let (base, _) = crate::fetch::download::test_server::serve_with_body(1, |_, _| {
+        ("404 Not Found", String::new(), b"<html>nope</html>".to_vec())
+    });
+    let client = crate::cactarium::Client::at(&base);
+    let mut reg = super::super::resolution::Registry::new(&client, []);
+    let items = [(crate::deps::PkgId::parse("et/p").unwrap(), "a".repeat(40))];
+    let err = format!("{:#}", reg.prefetch(&items).unwrap_err());
+    reg.finish();
+    assert!(err.contains("does not look like a Cactarium"), "{err}");
+}
+
+/// A base with et/carpet frozen at 1.0.0 (2.0.0 published too) and et/x at a
+/// commit no version froze, whose read there claims `x_claims`; its one
+/// thorn, MyCarpet, shares no name with et/carpet's. max/new has a thorn of
+/// its own; max/app needs et/carpet's Carpet at ^1.0. Without `carpet`, the
+/// base has et/x alone.
+fn gap_base(x_claims: &str, carpet: bool) -> (Setup, Log, Shared) {
+    let tmp = tempfile::tempdir().unwrap();
+    let (curl, c1) = upstream(tmp.path(), "carpet", &[("Carpet/interface.ccl", "IMPLEMENTS: carpet\n")]);
+    let (xurl, cx) = upstream(tmp.path(), "x", &[("MyCarpet/interface.ccl", "IMPLEMENTS: mycarpet\n")]);
+    let (nurl, n) = upstream(tmp.path(), "new", &[("New/interface.ccl", "IMPLEMENTS: new\n")]);
+    let (aurl, a) = upstream(tmp.path(), "app", &[("App/interface.ccl", "IMPLEMENTS: app\n")]);
+    let mut fake = Fake::new()
+        .package("et/carpet", vec![
+            version("2.0.0", &"2".repeat(40), &curl, "Carpet", &["Carpet"], "[]"),
+            version("1.0.0", &c1, &curl, "Carpet", &["Carpet"], "[]"),
+        ])
+        .package("et/x", vec![version("1.0.0", &"9".repeat(40), &xurl, "X", &["MyCarpet"], "[]")])
+        .package("max/new", vec![version("1.0.0", &n, &nurl, "New", &["New"], "[]")])
+        .package("max/app", vec![version("1.0.0", &a, &aurl, "App", &["App"], &format!("[{}]", depends("et/carpet", "^1.0", &["Carpet"])))])
+        .pin(&curl, "et/carpet", Some("1.0.0"))
+        .pin(&xurl, "et/x", None);
+    fake.snapshots.push(("et/x".into(), cx.clone(), version(&cx, &cx, &xurl, "X", &["MyCarpet"], x_claims)));
+    let mut base = section(&xurl, &cx, &["X/MyCarpet"]);
+    if carpet {
+        base = [section(&curl, &c1, &["Carpet/Carpet"]), base].concat();
+    }
+    let (cactarium, log, fake) = fake.serve_shared();
+    (Setup::new(tmp, &base, &cactarium), log, fake)
+}
+
+/// Gap (i): a base package at an unfrozen commit says it is incompatible
+/// with a package the plan adds. Read in the batch, its claim refuses the
+/// plan; a Cactarium without batch reads leaves it unread, and the plan goes
+/// through (the gap, as before).
+#[test]
+fn a_read_stand_in_s_incompatible_with_refuses_what_the_plan_adds() {
+    let claims = r#"[{"kind":"incompatible-with","target":"max/new","range":null,"note":null}]"#;
+    let (s, _, fake) = gap_base(claims, true);
+    let err = format!("{:#}", records(&s, &["max/new"], &AddFlags::default()).unwrap_err());
+    assert!(err.contains("says it is incompatible with max/new"), "{err}");
+    fake.lock().unwrap().batch = false;
+    records(&s, &["max/new"], &AddFlags::default()).unwrap_or_else(|e| panic!("{e:#}"));
+}
+
+/// Gap (ii): a base package at an unfrozen commit depends on exactly the
+/// release of another base package the plan would move. Read in the batch,
+/// its dependency holds the move back.
+#[test]
+fn a_read_stand_in_s_dependency_holds_back_a_move() {
+    let claims = format!("[{}]", depends("et/carpet", "=1.0.0", &["Carpet"]));
+    let (s, _, fake) = gap_base(&claims, true);
+    let flags = AddFlags { upgrade: true, ..AddFlags::default() };
+    let err = format!("{:#}", records(&s, &["et/carpet@=2.0.0"], &flags).unwrap_err());
+    assert!(err.contains("et/x#") && err.contains("=1.0.0"), "{err}");
+    fake.lock().unwrap().batch = false;
+    records(&s, &["et/carpet@=2.0.0"], &flags).unwrap_or_else(|e| panic!("{e:#}"));
+}
+
+/// Gap (iii): the base has et/x, at a commit no version froze, a fork of
+/// et/carpet whose thorns were renamed (no thorn name in common, so nothing
+/// made a read of it necessary). Read in the batch, it is the fork that takes
+/// max/app's dependency on et/carpet, as a frozen fork would, and lacks the
+/// thorn it names: refused, never et/carpet added beside its fork. A
+/// Cactarium without batch reads leaves it unread, and et/carpet comes in
+/// beside it (the gap, as before).
+#[test]
+fn a_read_stand_in_fork_with_renamed_thorns_stands_in() {
+    let claims = r#"[{"kind":"fork-of","target":"et/carpet","range":"=1.0.0","note":null}]"#;
+    let (s, _, fake) = gap_base(claims, false);
+    let err = format!("{:#}", records(&s, &["max/app"], &AddFlags::default()).unwrap_err());
+    assert!(err.contains("et/x#") && err.contains("has no Carpet, which max/app@1.0.0 needs"), "{err}");
+    fake.lock().unwrap().batch = false;
+    let got = records(&s, &["max/app"], &AddFlags::default()).unwrap_or_else(|e| panic!("{e:#}"));
+    let mut added: Vec<&str> = got.iter().map(|r| r.package.as_str()).collect();
+    added.sort();
+    assert_eq!(added, ["et/carpet", "max/app"], "{got:?}");
+}
+
+/// `remove` reads the base in a batch too: a base package at an unfrozen
+/// commit that depends on what is being removed is a dependent, and
+/// `--no-deps` the way past. Without batch reads it stays unread, and only
+/// the short "not checked" line speaks of it.
+#[test]
+fn remove_finds_a_base_package_that_depends_on_what_goes() {
+    let claims = format!("[{}]", depends("max/new", "^1.0", &["New"]));
+    let (s, _, fake) = gap_base(&claims, false);
+    fake.lock().unwrap().batch = false;
+    s.add(&["max/new"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    fake.lock().unwrap().batch = true;
+    let err = format!("{:#}", s.remove(&["max/new"], remove_yes()).unwrap_err());
+    assert!(err.contains("Other packages depend on max/new") && err.contains("et/x#"), "{err}");
+    assert!(err.contains("--no-deps"), "{err}");
+    fake.lock().unwrap().batch = false;
+    s.remove(&["max/new"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
+}
+
 /// A base package at an unfrozen commit the resolver read (a dependency
 /// needs a thorn of it) is no longer one whose dependencies are unknown: the
 /// "cannot check" count leaves it out, as `remove` does.
 #[test]
 fn a_stand_in_the_resolver_read_is_checked() {
-    let (s, _, _) = unfrozen_base(3, |tmp, fake| {
+    // A Cactarium without batch reads: the resolver reads what it needs.
+    let (s, _, _) = unfrozen_base(3, |tmp, mut fake| {
+        fake.batch = false;
         let (url, c) = upstream(tmp, "dep", &[("Dep/interface.ccl", "IMPLEMENTS: dep\n")]);
         let claims = format!("[{}]", depends("et/r0", ">=0.0.0", &["U0"]));
         fake.package("max/dep0", vec![version("1.0.0", &c, &url, "Dep", &["Dep"], &claims)])
@@ -1564,7 +1889,9 @@ fn fifteen_reads_wait_once_for_the_read_limit() {
         let window = if retry_after { std::time::Duration::from_secs(1) } else { std::time::Duration::from_secs(2) };
         let fallback = if retry_after { std::time::Duration::from_secs(10) } else { window };
         super::super::resolution::TEST_READ_WINDOW.with(|w| w.set(Some(fallback)));
-        let (s, log, fake) = unfrozen_base(15, |tmp, fake| {
+        // Single reads (a Cactarium without batch reads).
+        let (s, log, fake) = unfrozen_base(15, |tmp, mut fake| {
+            fake.batch = false;
             let (url, c) = upstream(tmp, "dep", &[("Dep/interface.ccl", "IMPLEMENTS: dep\n")]);
             let claims: Vec<String> = (0..15).map(|i| depends(&format!("et/r{i}"), ">=0.0.0", &[&format!("U{i}")])).collect();
             fake.package("max/dep15", vec![version("1.0.0", &c, &url, "Dep", &["Dep"], &format!("[{}]", claims.join(",")))])
@@ -1592,7 +1919,9 @@ fn waiting_for_the_read_limit_stops_at_the_budget() {
     use super::super::resolution::{TEST_READ_WINDOW, TEST_WAIT_BUDGET};
     TEST_READ_WINDOW.with(|w| w.set(Some(std::time::Duration::from_secs(1))));
     TEST_WAIT_BUDGET.with(|w| w.set(Some(std::time::Duration::from_millis(1200))));
-    let (s, log, fake) = unfrozen_base(3, |tmp, fake| {
+    // Single reads (a Cactarium without batch reads).
+    let (s, log, fake) = unfrozen_base(3, |tmp, mut fake| {
+        fake.batch = false;
         let (url, c) = upstream(tmp, "dep", &[("Dep/interface.ccl", "IMPLEMENTS: dep\n")]);
         let claims: Vec<String> = (0..3).map(|i| depends(&format!("et/r{i}"), ">=0.0.0", &[&format!("U{i}")])).collect();
         fake.package("max/dep3", vec![version("1.0.0", &c, &url, "Dep", &["Dep"], &format!("[{}]", claims.join(",")))])
@@ -1617,7 +1946,9 @@ fn waiting_for_the_read_limit_stops_at_the_budget() {
 #[test]
 fn a_package_clashing_with_fourteen_base_packages_reads_each_once() {
     super::super::resolution::TEST_READ_WINDOW.with(|w| w.set(Some(std::time::Duration::from_secs(2))));
-    let (s, log, fake) = unfrozen_base(14, |tmp, fake| {
+    // Single reads (a Cactarium without batch reads).
+    let (s, log, fake) = unfrozen_base(14, |tmp, mut fake| {
+        fake.batch = false;
         let (url, c) = upstream(tmp, "wide", &[("W/interface.ccl", "IMPLEMENTS: w\n")]);
         let thorns: Vec<String> = (0..14).map(|i| format!("T{i}")).collect();
         let thorns: Vec<&str> = thorns.iter().map(String::as_str).collect();
@@ -1667,7 +1998,11 @@ fn a_base_repo_renamed_to_a_pseudo_package_is_no_stand_in() {
 #[test]
 fn the_lookup_says_which_unfrozen_base_repo_is_the_flesh() {
     for registered in [false, true] {
-        let (s, _, fake) = unfrozen_base(1, |_, f| f);
+        // A stand-in: a Cactarium without batch reads.
+        let (s, _, fake) = unfrozen_base(1, |_, mut f| {
+            f.batch = false;
+            f
+        });
         if registered {
             let url = fake.lock().unwrap().pins[0].0.clone();
             fake.lock().unwrap().flesh.push(url);
@@ -1697,25 +2032,34 @@ fn the_lookup_says_which_unfrozen_base_repo_is_the_flesh() {
 #[test]
 fn an_unread_base_package_says_why() {
     type Answer = fn(&mut Fake, &str);
-    let cases: [(&str, Answer, String); 5] = [
+    let cases: [(&str, Answer, String); 6] = [
         ("404", |f, _| f.snapshots.clear(), "et/admbase is at a commit the Cactarium does not have (is it pushed?)".into()),
         ("400", |f, a1| f.bad_at.push(a1.to_owned()), "invalid manifest: no [package] table".into()),
+        ("400 too large", |f, a1| f.too_large_at.push(a1.to_owned()), "its tree is too large to read".into()),
         ("403", |f, a1| f.refuse_at.push(a1.to_owned()), "it reads an untrusted package only at released versions".into()),
         ("502", |f, a1| f.down_at.push(a1.to_owned()), "it could not reach the package's repository just now".into()),
         ("504 from a proxy", |f, a1| f.proxy_timeout_at.push(a1.to_owned()), "it (or a proxy in front of it) failed (504); try again later".into()),
     ];
-    for (status, set, why) in cases {
+    // Read in a batch, or singly (a Cactarium without batch reads): the same words.
+    for ((status, set, why), batch) in cases.iter().flat_map(|c| [(c, true), (c, false)]) {
         let it = admbase_unfrozen("^1.0");
         set(&mut it.fake.lock().unwrap(), &it.a1);
+        it.fake.lock().unwrap().batch = batch;
         let err = format!("{:#}", it.setup.add(&["max/app"], yes()).unwrap_err());
         let needs = format!("max/app@1.0.0 needs StaticConformal of et/admbase#{}", &it.a1[..12]);
-        assert!(err.contains(&needs) && err.contains("the Cactarium did not read et/admbase there: "), "{status}: {err}");
-        assert!(err.contains(&why), "{status}: {err}");
-        if status == "400" {
+        assert!(err.contains(&needs) && err.contains("the Cactarium did not read et/admbase there: "), "{status} batch {batch}: {err}");
+        assert!(err.contains(why.as_str()), "{status} batch {batch}: {err}");
+        if *status == "400" {
             assert!(err.contains(&format!("et/admbase at commit {}: ", &it.a1[..12])), "{status}: {err}");
         }
         assert!(err.contains("Pass --upgrade to move it to a release"), "{status}: {err}");
-        let _ = (&it.a2, &it.log);
+        // In a batch, the item's status is the answer: no single read made
+        // (but when a proxy failed the batch request itself).
+        let singles = it.log.lock().unwrap().iter().filter(|(p, _)| p.contains("/versions/")).count();
+        if batch && !status.contains("proxy") {
+            assert_eq!(singles, 0, "{status}");
+        }
+        let _ = &it.a2;
     }
 }
 

@@ -14,7 +14,7 @@ use anyhow::{anyhow, bail, Context};
 use colored::Colorize;
 use cactup_ecosystem_common::api::{
     ErrorBody, LookedUp, LookupRequest, PackageVersion, PackageVersions, PinInfo, PinQuery, Providers,
-    ProvidersQuery, Published, Refreshed, Resolved, StackReleases, VersionInfo, API_GENERATION,
+    ProvidersQuery, Published, ReadAnswer, ReadRequest, Refreshed, Resolved, StackReleases, VersionInfo, API_GENERATION,
     API_GENERATION_HEADER, API_PREFIX, CONTACT_HEADER, MAX_LOOKUP_PINS, SHA256_HEADER, SIM_QUERY,
     UNPINNED_HEADER, UNTRUSTED_HEADER,
 };
@@ -233,6 +233,27 @@ impl Client {
         };
         let untrusted = response.headers().get(UNTRUSTED_HEADER).is_none_or(|v| v.as_bytes() == b"true");
         Ok(Some((response.json()?, untrusted)))
+    }
+
+    /// Packages read at commits, as many as one request takes ([`ReadRequest`]
+    /// is checked as the server checks it before it is sent): one item per
+    /// pair asked, in order. A Cactarium from before batch reads answers
+    /// [`OldCactarium`]; the request as a whole counts once against the
+    /// server's limit on reads made now, and a 429 refuses all of it.
+    pub fn read_packages(&self, request: &ReadRequest) -> Res<ReadAnswer> {
+        request.validate().map_err(|e| anyhow!("Cannot ask the Cactarium to read these packages: {e}"))?;
+        let body = serde_json::to_vec(request).context("Failed to encode the read request")?;
+        let post = self.http().post(self.url("/packages/read")).header("content-type", "application/json").body(body);
+        let response = self.send_found(post, MISSING_ROUTE)?.map_err(|m| self.missing("/packages/read", m))?;
+        let answer: ReadAnswer = response.json()?;
+        if answer.items.len() != request.items.len() {
+            bail!(
+                "The Cactarium answered a read of {} packages with {}; cactup cannot tell which is which",
+                request.items.len(),
+                answer.items.len()
+            );
+        }
+        Ok(answer)
     }
 
     /// Which package, if any, each pinned repo is, in the order asked. Every
