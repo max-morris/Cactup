@@ -16,6 +16,7 @@ pub mod knob;
 pub mod list;
 pub mod machine;
 pub mod refetch;
+pub mod reify;
 pub mod releases;
 pub mod show;
 pub mod sim;

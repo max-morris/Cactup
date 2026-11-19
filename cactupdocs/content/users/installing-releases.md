@@ -199,6 +199,47 @@ alias.
 If you interrupt the copy, nothing is registered; running the same command
 again starts over.
 
+### Symbolic copies
+
+A symbolic copy takes seconds and almost no space, whatever the size of the
+original:
+
+```sh
+cactup inst cp -s myrelease experiment
+```
+
+Each file in it is a link to the same file in `myrelease`, until something
+changes it. A refetch or `cactup add` in `experiment`, or a `git checkout` you
+run there, gives each file it changes a copy of its own and leaves the rest
+as links, so `myrelease` is never touched. `cactup inst list` and
+`cactup inst show` say which installations are symbolic copies, and of what.
+
+Two things to know:
+
+- **Edit by hand only what is its own.** An editor may write through a link
+  into the original's file. Make the files you are about to edit its own
+  first, by path (relative to the Cactus directory, or to where you are):
+
+  ```sh
+  cactup inst reify experiment repos/carpetx
+  ```
+
+- **It follows the original.** A file `experiment` has not made its own
+  changes when `myrelease`'s does, for example when you refetch
+  `myrelease`. cactup says so when you do. To keep the copy as it is, make it
+  wholly its own first:
+
+  ```sh
+  cactup inst reify experiment
+  ```
+
+  After that it no longer depends on `myrelease`. Until then cactup refuses
+  to delete `myrelease`.
+
+Inside a symbolic copy, `git status` shows each linked file as a type change
+(`T`); cactup's own checks (`inst delta`, a refetch's check for local changes)
+know a link stands for its file.
+
 ## Updating an installation (refetch)
 
 `cactup installation refetch` (or `cactup inst refetch`) re-runs the
@@ -386,6 +427,8 @@ rebuilding would cost — use `cactup config delta`.
 {{cactup:cli command="installation delete"}}
 
 {{cactup:cli command="installation cp"}}
+
+{{cactup:cli command="installation reify"}}
 
 ## Global flags for installation commands
 

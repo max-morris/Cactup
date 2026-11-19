@@ -13,11 +13,20 @@
 //! The copy is made in a staging directory inside the destination and moved
 //! into place only once complete, and registered last: an interrupted copy
 //! is never an installation, and running the same command again starts over.
+//!
+//! `--symbolic` makes the same directories, but every file of the tree and of
+//! `imports/` an absolute link to the source's file (`crate::cow`). What the
+//! copy's own commands write goes through copy-on-write; what cactup keeps
+//! about the installation is copied all the same: `.cactup/`, the pristine
+//! thornlist, and the live thornlist, which users edit by hand (an editor
+//! writes through a link). The record names the source (`linked-to`), which
+//! must then outlive the copy.
 
 use super::Ctx;
-use crate::installation::{Installation, LEGACY_THORNLIST, SOURCE_THORNLIST};
-use crate::lock::LinkLock;
-use crate::treecopy::Copier;
+use crate::cow::Cow;
+use crate::installation::{Installation, LEGACY_THORNLIST, LIVE_THORNLIST, SOURCE_THORNLIST};
+use crate::lock::{HeartbeatLock, LinkLock};
+use crate::treecopy::{Copier, Mode};
 use crate::Res;
 use anyhow::{anyhow, bail, Context};
 use colored::Colorize;
@@ -32,7 +41,7 @@ const NOT_COPIED: &[&str] = &["configs", "exe"];
 /// registries are not: those runs belong to the source.
 const STATE_COPIED: &[&str] = &["installation.toml", "fetch-state.toml", "thornlists"];
 
-pub fn dispatch(ctx: &Ctx, source: &str, new_name: &str, install_prefix: Option<&str>) -> Res<()> {
+pub fn dispatch(ctx: &Ctx, source: &str, new_name: &str, install_prefix: Option<&str>, symbolic: bool) -> Res<()> {
     if !super::install::valid_alias(new_name) {
         bail!("\"{new_name}\" is not a valid alias: use only letters, digits, '-', '_', and '.'");
     }
@@ -55,25 +64,25 @@ pub fn dispatch(ctx: &Ctx, source: &str, new_name: &str, install_prefix: Option<
     drop(db);
 
     // Nothing may rewrite the repos while they are read; a refetch waits.
-    fs::create_dir_all(from.cactup_dir())
-        .with_context(|| format!("Failed to create '{}'", from.cactup_dir().display()))?;
-    let _lock = LinkLock::acquire(&from.fetch_lock_path())?.with_heartbeat();
+    let _locks = lock_fetches(&from)?;
 
     fs::create_dir_all(&dest).with_context(|| format!("Failed to create '{}'", dest.display()))?;
     let dest = fs::canonicalize(&dest).with_context(|| format!("Failed to resolve '{}'", dest.display()))?;
-    let plan = Plan::new(&from, &dest, new_name)?;
+    let plan = Plan::new(&from, &dest, new_name, symbolic)?;
     let copied = copy_with_progress(&plan, new_name)?;
 
     let to = Installation::new(new_name, &dest);
     // The record came over as the source's: the active config is the
-    // source's, and the homes are named for its alias. Cleared, then
-    // resolved for this alias as `install` does.
+    // source's, the homes are named for its alias, and a symbolic source's
+    // link is its own. Cleared, then resolved for this alias as `install`
+    // does.
     {
         let locked = to.locked()?;
         let mut meta = locked.meta()?;
         meta.active_config = None;
         meta.sim_home = None;
         meta.test_home = None;
+        meta.linked_to = symbolic.then(|| plan.from_home.clone());
         locked.set_meta(&meta)?;
     }
     to.ensure_meta(&machine, &ctx.db.read()?, None)?;
@@ -94,11 +103,25 @@ pub fn dispatch(ctx: &Ctx, source: &str, new_name: &str, install_prefix: Option<
         Ok(())
     })?;
 
+    let (made, to_as) = if symbolic { ("Made a symbolic copy of", "as") } else { ("Copied", "to") };
     println!(
         "{}",
-        format!("Copied installation {} to {} in '{}'.", source.bold(), new_name.bold(), to.cactus_root()?.display())
-            .bright_green()
+        format!(
+            "{made} installation {} {to_as} {} in '{}'.",
+            source.bold(),
+            new_name.bold(),
+            to.cactus_root()?.display()
+        )
+        .bright_green()
     );
+    if symbolic {
+        println!(
+            "Its files are links to {source}'s, and follow them, until changed: a refetch or a git checkout there \
+             gives each file it changes a copy of its own, but an editor may write through a link into {source}'s \
+             file, so before you edit files by hand, make them its own with `{}`.",
+            format!("cactup inst reify {new_name} PATH").bold()
+        );
+    }
     if !copied.skipped.is_empty() {
         let shown: Vec<String> = copied.skipped.iter().take(3).map(|p| format!("'{}'", p.display())).collect();
         let more = copied.skipped.len().saturating_sub(shown.len());
@@ -120,6 +143,74 @@ pub fn dispatch(ctx: &Ctx, source: &str, new_name: &str, install_prefix: Option<
     Ok(())
 }
 
+/// Hold the fetch lock of `from`, and of every installation its files link
+/// into, for as long as their files are read.
+pub(crate) fn lock_fetches(from: &Installation) -> Res<Vec<HeartbeatLock>> {
+    let mut locks = Vec::new();
+    let mut home = Some(from.root.clone());
+    while let Some(here) = home {
+        let inst = Installation::new("", &here);
+        fs::create_dir_all(inst.cactup_dir())
+            .with_context(|| format!("Failed to create '{}'", inst.cactup_dir().display()))?;
+        locks.push(LinkLock::acquire(&inst.fetch_lock_path())?.with_heartbeat());
+        home = inst.meta()?.linked_to;
+        if locks.len() > 40 {
+            bail!("'{}' is a symbolic copy of a symbolic copy, 40 deep; something is wrong", from.root.display());
+        }
+    }
+    Ok(locks)
+}
+
+/// For a command that writes in `inst`: when it is a symbolic copy, hold the
+/// fetch locks of the installations it reads (as [`lock_fetches`]), and say
+/// when it has symbolic copies of its own, which the changes reach.
+pub(crate) fn lock_sources(ctx: &Ctx, inst: &Installation) -> Res<Vec<HeartbeatLock>> {
+    note_dependents(ctx, inst)?;
+    match Cow::at(&inst.root)?.source() {
+        Some(source) => lock_fetches(&Installation::new("", source)),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Say, before a command changes `inst`'s files, which symbolic copies read
+/// them and so see the change too.
+pub(crate) fn note_dependents(ctx: &Ctx, inst: &Installation) -> Res<()> {
+    let dependents = dependents(&ctx.db.read()?, &inst.root);
+    if let Some(first) = dependents.first() {
+        let (are, copies, they) = match dependents.len() {
+            1 => ("is a", "copy", "it sees"),
+            _ => ("are", "copies", "they see"),
+        };
+        println!(
+            "{}",
+            format!(
+                "{} {are} symbolic {copies} of {}: {they} what this changes in the files not yet made their \
+                 own (`cactup inst reify {first}` first keeps it as it is).",
+                dependents.join(", "),
+                inst.alias
+            )
+            .yellow()
+        );
+    }
+    Ok(())
+}
+
+/// The installations whose files link into the installation home `home`:
+/// its symbolic copies (`linked-to`), in registry order.
+pub(crate) fn dependents(db: &crate::database::Database, home: &Path) -> Vec<String> {
+    let home = fs::canonicalize(home).unwrap_or_else(|_| home.to_owned());
+    db.installations
+        .values()
+        .filter(|entry| entry.copied_from.is_some())
+        .filter(|entry| {
+            // Unreadable: not provably one, and the command it is asked for
+            // reads that record again and says what is wrong with it.
+            Installation::new(&entry.alias, &entry.path).meta().ok().and_then(|m| m.linked_to).is_some_and(|to| to == home)
+        })
+        .map(|entry| entry.alias.clone())
+        .collect()
+}
+
 /// The configs in the source's tree, which the copy does not get.
 fn configs_of(from: &Installation) -> Res<Vec<String>> {
     let Ok(entries) = fs::read_dir(from.cactus_root()?.join("configs")) else { return Ok(Vec::new()) };
@@ -135,6 +226,10 @@ fn configs_of(from: &Installation) -> Res<Vec<String>> {
 /// Where everything goes. Paths under the homes are relative to them.
 struct Plan {
     from_home: PathBuf,
+    /// The source's own copy links, when it is a symbolic copy.
+    source: Cow,
+    /// How the tree's files and `imports/` are copied.
+    mode: Mode,
     dest: PathBuf,
     /// Inside `dest`: the copy is made here, then moved into place.
     staging: PathBuf,
@@ -146,7 +241,7 @@ struct Plan {
 }
 
 impl Plan {
-    fn new(from: &Installation, dest: &Path, new_name: &str) -> Res<Plan> {
+    fn new(from: &Installation, dest: &Path, new_name: &str, symbolic: bool) -> Res<Plan> {
         let from_home = fs::canonicalize(&from.root)
             .with_context(|| format!("Failed to resolve '{}'", from.root.display()))?;
         if dest.starts_with(&from_home) {
@@ -173,7 +268,9 @@ impl Plan {
             }
         }
         let staging = dest.join(format!(".cactup-cp-{new_name}.partial"));
-        Ok(Plan { from_home, dest: dest.to_owned(), staging, root_dir, placed })
+        let source = Cow::linked_to(from.meta()?.linked_to);
+        let mode = if symbolic { Mode::Link } else { Mode::Copy };
+        Ok(Plan { from_home, source, mode, dest: dest.to_owned(), staging, root_dir, placed })
     }
 }
 
@@ -204,13 +301,14 @@ fn copy_until(plan: &Plan, stop: &AtomicBool, counted: &(dyn Fn() + Sync)) -> Re
         // What an interrupted run left: start over.
         super::remove_tree_until(&plan.staging, stop, &|| ())?;
     }
-    let copier = Copier::new(&plan.from_home, &plan.dest, stop, counted);
+    let copier = Copier::new(&plan.from_home, &plan.dest, stop, counted).with_source(plan.source.clone());
     let units = stage(plan, &copier)?;
-    let results = crate::par::parallel_map(&units, |(from, to)| copier.copy(from, to));
+    let results = crate::par::parallel_map(&units, |(from, to, mode)| copier.copy(from, to, *mode));
     let failed = match results {
         Ok(results) => results.into_iter().find_map(Result::err),
         Err(e) => Some(e),
     };
+    let failed = failed.or_else(|| own_live_thornlists(plan).err());
     let failed = failed.or_else(|| finish_staged(plan, &copier).err());
     if let Some(e) = failed {
         let left = format!(
@@ -236,10 +334,28 @@ fn copy_until(plan: &Plan, stop: &AtomicBool, counted: &(dyn Fn() + Sync)) -> Re
     Ok(Copied { skipped: copier.skipped() })
 }
 
-/// Make the staging skeleton and list the units of work, each a
-/// `(source, staged copy)` pair: every repo on its own, since one repo is
-/// what holds a worker the longest, and every other entry of the tree.
-fn stage(plan: &Plan, copier: &Copier) -> Res<Vec<(PathBuf, PathBuf)>> {
+/// A symbolic copy's live thornlist is its own from the start: it is edited
+/// by hand, and an editor writes through a link.
+fn own_live_thornlists(plan: &Plan) -> Res<()> {
+    if plan.mode != Mode::Link {
+        return Ok(());
+    }
+    let thornlists = plan.staging.join(&plan.root_dir).join("thornlists");
+    let links = Cow::linked_to(Some(plan.from_home.clone()));
+    for name in [LIVE_THORNLIST, LEGACY_THORNLIST] {
+        links.reify_quietly(&thornlists.join(name))?;
+    }
+    Ok(())
+}
+
+/// One unit of copying: a source entry, where its copy is staged, and how
+/// its files are copied.
+type Unit = (PathBuf, PathBuf, Mode);
+
+/// Make the staging skeleton and list the units of work: every repo on its
+/// own, since one repo is what holds a worker the longest, and every other
+/// entry of the tree.
+fn stage(plan: &Plan, copier: &Copier) -> Res<Vec<Unit>> {
     let mut units = Vec::new();
     let from_tree = plan.from_home.join(&plan.root_dir);
     let staged_tree = plan.staging.join(&plan.root_dir);
@@ -258,22 +374,24 @@ fn stage(plan: &Plan, copier: &Copier) -> Res<Vec<(PathBuf, PathBuf)>> {
                 copier.make_dir(&staged)?;
                 units.extend(sorted_entries(&entry)?.into_iter().map(|repo| {
                     let to = staged.join(repo.file_name().expect("a directory entry has a name"));
-                    (repo, to)
+                    (repo, to, plan.mode)
                 }));
             } else {
-                units.push((entry, staged));
+                units.push((entry, staged, plan.mode));
             }
         }
     }
     for rel in plan.placed.iter().filter(|rel| **rel != plan.root_dir && **rel != Path::new(".cactup")) {
-        units.push((plan.from_home.join(rel), plan.staging.join(rel)));
+        // The pristine thornlist is cactup's record of the installation.
+        let mode = if *rel == Path::new("imports") { plan.mode } else { Mode::Copy };
+        units.push((plan.from_home.join(rel), plan.staging.join(rel), mode));
     }
     let staged_state = plan.staging.join(".cactup");
     copier.make_dir(&staged_state)?;
     for name in STATE_COPIED {
         let from = plan.from_home.join(".cactup").join(name);
         if fs::symlink_metadata(&from).is_ok() {
-            units.push((from, staged_state.join(name)));
+            units.push((from, staged_state.join(name), Mode::Copy));
         }
     }
     Ok(units)
@@ -351,7 +469,7 @@ mod tests {
     fn copy(from: &Installation, dest: &Path) -> Res<Copied> {
         fs::create_dir_all(dest).unwrap();
         let dest = fs::canonicalize(dest).unwrap();
-        let plan = Plan::new(from, &dest, "copy")?;
+        let plan = Plan::new(from, &dest, "copy", false)?;
         copy_until(&plan, &AtomicBool::new(false), &|| ())
     }
 
@@ -423,7 +541,7 @@ mod tests {
         let dest = tmp.path().join("copy");
         fs::create_dir_all(&dest).unwrap();
         let dest = fs::canonicalize(&dest).unwrap();
-        let plan = Plan::new(&from, &dest, "copy").unwrap();
+        let plan = Plan::new(&from, &dest, "copy", false).unwrap();
 
         let err = copy_until(&plan, &AtomicBool::new(true), &|| ()).err().expect("interrupted");
         assert!(format!("{err:#}").starts_with("Interrupted; nothing was registered"), "{err:#}");

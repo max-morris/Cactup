@@ -93,6 +93,7 @@ pub fn dispatch(ctx: &Ctx, args: ImportArgs) -> Res<()> {
     std::fs::create_dir_all(&imports)
         .with_context(|| format!("Failed to create '{}'", imports.display()))?;
     let parfile = imports.join(&sim_file.parfile.filename);
+    crate::cow::Cow::at(&inst.root)?.before_replace(&parfile)?;
     std::fs::write(&parfile, &sim_file.parfile.text)
         .with_context(|| format!("Failed to write '{}'", parfile.display()))?;
     let mut sim = crate::sim::create(

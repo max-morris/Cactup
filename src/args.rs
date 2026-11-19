@@ -587,6 +587,17 @@ pub(crate) enum InstallationCommand {
         /// The directory the copy is made in (default: <install-home>/<new-name>).
         #[clap(long, value_name = "PATH")]
         install_prefix: Option<String>,
+        /// Make each file a link to the source's instead of a copy, until cactup changes it (see `inst reify`); the source must then outlive the copy.
+        #[clap(short, long)]
+        symbolic: bool,
+    },
+    // §3.1
+    /// Make a symbolic copy's files its own: replace its links to the source's files with copies
+    Reify {
+        /// The alias of the symbolic copy.
+        alias: String,
+        /// Only the files under these paths (absolute, relative to the current directory, or relative to the copy's Cactus directory, like repos/flesh); without any, all of them, and the copy no longer depends on its source.
+        paths: Vec<std::path::PathBuf>,
     },
 }
 

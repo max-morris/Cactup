@@ -3,6 +3,7 @@ mod build;
 mod build_info;
 mod cactarium;
 mod commands;
+mod cow;
 mod database;
 mod fetch;
 mod format;
