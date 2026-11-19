@@ -404,7 +404,8 @@ pub struct RepoResult {
     pub head: String,
     /// The pin this repo was fetched to, if any (see [`RepoRecord::commit`]).
     pub commit: Option<gix::ObjectId>,
-    /// Whether the action moved HEAD (false = already up to date).
+    /// Whether the action moved HEAD, to another commit or from detached onto
+    /// a branch (false = already up to date).
     pub changed: bool,
     /// Carried through from the plan: why this repo needed forcing, if it did.
     pub forced: Option<String>,
@@ -498,8 +499,17 @@ impl ExecReport {
 /// A repo that was already at the wanted commit leaves *nothing*: in a
 /// typical refetch that is most of the tree, and eighty lines of "already up
 /// to date" would bury the handful that moved. The caller's summary reports
-/// how many were already current; the scrollback is for what happened.
-fn announce_repo(line: &crate::progress::Line, item: &GitRepoPlan, head: gix::ObjectId, changed: bool, warning: Option<&str>) {
+/// how many were already current; the scrollback is for what happened. A
+/// detached HEAD put back on a branch at the same commit (`onto_branch`)
+/// did move, and says so.
+fn announce_repo(
+    line: &crate::progress::Line,
+    item: &GitRepoPlan,
+    head: gix::ObjectId,
+    changed: bool,
+    onto_branch: bool,
+    warning: Option<&str>,
+) {
     let head = head.to_string();
     let short = &head[..12.min(head.len())];
     let what = match (&item.action, item.branch.as_deref()) {
@@ -507,6 +517,7 @@ fn announce_repo(line: &crate::progress::Line, item: &GitRepoPlan, head: gix::Ob
         (GitAction::Pin, _) if changed => format!("pinned at {short}"),
         (GitAction::Clone, Some(branch)) => format!("cloned {branch} at {short}"),
         (GitAction::Clone, None) => format!("cloned at {short}"),
+        (_, Some(branch)) if onto_branch => format!("now on branch {branch} at {short}"),
         (_, Some(branch)) if changed => format!("{branch} now at {short}"),
         (_, None) if changed => format!("now at {short}"),
         // Unchanged, but something else about the repo was: say what, since
@@ -644,9 +655,12 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                             top.lock().expect("fetch progress poisoned").inc();
                             continue;
                         }
-                        let before = match item.action {
-                            GitAction::Clone => None,
-                            _ => git::head_of(&item.dir).ok().map(|(_, id)| id),
+                        let (before, was_detached) = match item.action {
+                            GitAction::Clone => (None, false),
+                            _ => match git::head_of(&item.dir) {
+                                Ok((branch, id)) => (Some(id), branch == git::DETACHED),
+                                Err(_) => (None, false),
+                            },
                         };
                         // Forced (backed-up local edits) or repointed: only
                         // a full overwrite is right there.
@@ -709,8 +723,14 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                         let mut report = report.lock().expect("fetch report poisoned");
                         match outcome {
                             Ok(head) => {
-                                let changed = before != Some(head);
-                                announce_repo(&line, item, head, changed, warning.as_deref());
+                                // A detached HEAD put back on a branch at the same
+                                // commit moved too: HEAD names the branch now.
+                                let onto_branch = before == Some(head)
+                                    && was_detached
+                                    && item.commit.is_none()
+                                    && item.branch.is_some();
+                                let changed = before != Some(head) || onto_branch;
+                                announce_repo(&line, item, head, changed, onto_branch, warning.as_deref());
                                 report.repos.push(RepoResult {
                                     repo: item.repo.clone(),
                                     url: item.url.clone(),
@@ -2464,6 +2484,45 @@ pub(crate) mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(gone(), "the ssh command's child {} outlived its fetch", pid.trim());
+    }
+
+    /// A clone made pinned whose list stops pinning goes from its detached
+    /// HEAD onto the remote's default branch at the same commit: that is a
+    /// move, counted as one, and its line says so ("now on branch …"), green
+    /// as an align's, yellow when the plan had to say something.
+    #[test]
+    fn a_detached_clone_put_on_a_branch_at_the_same_commit_gets_a_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, list) = clones_made_pinned(tmp.path(), 1, &tmp.path().join("sources/upstream").to_string_lossy());
+        let dir = root.join("Cactus/repos/R0");
+        let (before, at) = git::head_of(&dir).unwrap();
+        assert_eq!(before, git::DETACHED);
+        let mut progress = prodash::tree::Root::new().add_child("test plan");
+        let p = plan(&list, &root, &mut progress).unwrap();
+        let report = execute(&p, &root).unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        let (branch, now) = git::head_of(&dir).unwrap();
+        assert_ne!(branch, git::DETACHED);
+        assert_eq!(now, at);
+        assert!(report.repos[0].changed, "{:?}", report.repos[0].changed);
+
+        let tree = prodash::tree::Root::new();
+        let layout = crate::progress::Layout::for_names(["R0"]);
+        let line = crate::progress::Line::over(tree.add_child("R0"), "R0", layout);
+        announce_repo(&line, &p.git[0], at, true, true, None);
+        let mut item = GitRepoPlan { note: Some("its remote's default branch is unknown".into()), ..p.git.into_iter().next().unwrap() };
+        announce_repo(&line, &item, at, true, true, None);
+        item.note = None;
+        // An align that moved the commit says so as before.
+        announce_repo(&line, &item, at, true, false, None);
+        let mut said = Vec::new();
+        tree.copy_messages(&mut said);
+        let short = &at.to_string()[..12];
+        let said: Vec<(prodash::messages::MessageLevel, String)> = said.into_iter().map(|m| (m.level, m.message)).collect();
+        assert_eq!(said[0], (prodash::messages::MessageLevel::Success, format!("now on branch {branch} at {short}")));
+        assert_eq!(said[1].0, prodash::messages::MessageLevel::Info, "{said:?}");
+        assert!(said[1].1.contains(&format!("now on branch {branch} at {short}")), "{said:?}");
+        assert_eq!(said[2], (prodash::messages::MessageLevel::Success, format!("{branch} now at {short}")));
     }
 
     /// Where a restore puts a clone, offline: none on disk, the remote's
