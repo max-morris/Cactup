@@ -415,18 +415,18 @@ fn installed_states(repos_dir: &Path, list: &thornlist::Thornlist) -> Res<std::c
 /// Per git repo the list names, the commit it pins (`!REPO_COMMIT`), else
 /// the one its branch or tag (or default branch) names on its remote now.
 /// Any remote that cannot be asked fails the whole pack: a silently unpinned
-/// repo is worse than no file.
+/// repo is worse than no file. Asked on the network fan-out, all within one
+/// [`fetch::git::REMOTE_ASK_TIMEOUT`]; Ctrl-C fails it at once.
 fn remote_tips(list: &thornlist::Thornlist) -> Res<std::collections::BTreeMap<String, gix::ObjectId>> {
     let (pinned, repos): (Vec<_>, Vec<_>) = git_repos(list).into_iter().partition(|r| r.3.is_some());
-    let scratch = tempfile::tempdir().context("Failed to create a scratch directory")?;
-    gix::init_bare(scratch.path()).context("Failed to create a scratch repository")?;
     let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
     let item = progress.add_child("ask remotes for their tips");
     item.init(Some(repos.len()), Some(prodash::unit::label("repos")));
     let item = std::sync::Mutex::new(item);
-    let asked = crate::par::parallel_map(&repos, |(repo, url, git_ref, _)| {
+    let until = std::time::Instant::now() + fetch::git::REMOTE_ASK_TIMEOUT;
+    let asked = fetch::git::ask_all(&repos, |(repo, url, git_ref, _)| {
         let current = item.lock().expect("pack progress poisoned").add_child(repo.clone());
-        let tip = fetch::git::remote_tip(scratch.path(), url, git_ref.as_deref());
+        let tip = fetch::git::ask_remote_tip(url, git_ref.as_deref(), until);
         drop(current);
         item.lock().expect("pack progress poisoned").inc();
         (repo.clone(), tip)

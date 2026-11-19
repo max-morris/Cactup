@@ -360,15 +360,78 @@ fn clean_path(path: &str) -> String {
     path.strip_suffix(".git").unwrap_or(path).to_owned()
 }
 
+/// How long a fetch or clone may go with nothing moving before it is given
+/// up on as stalled: no answer to the connect or the handshake, no byte of
+/// the pack, no step of its indexing. A silence, not a cap: every movement
+/// starts it over, so a large fetch that is making progress runs as long as
+/// it takes. Over http(s) gix's reqwest transport already gives up sooner (a
+/// 20 s connect timeout, 30 s on any one wait for headers or body); this is
+/// what bounds `git://` and ssh remotes, which have no timeout of their own.
+/// Long enough for a server that thinks before it speaks: `git upload-pack`
+/// reports its counting within a couple of seconds.
+pub const FETCH_SILENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long a fetch given up on gets to unwind (and drop gix's lock and temp
+/// files) before it is abandoned. A fetch that sees its cancel flag is out
+/// in milliseconds; one hung in a read never sees it. Short, so a Ctrl-C
+/// still feels instant.
+const FETCH_WIND_DOWN: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// [`FETCH_SILENCE_TIMEOUT`], or a test's for its stalling `git://` server
+/// or ssh command.
+fn silence_timeout(url: &str) -> std::time::Duration {
+    #[cfg(test)]
+    {
+        let ms = TEST_SILENCE_MS.load(std::sync::atomic::Ordering::Relaxed);
+        if ms > 0 && (url.starts_with("git://") || url.starts_with("ssh://")) {
+            return std::time::Duration::from_millis(ms);
+        }
+    }
+    let _ = url;
+    FETCH_SILENCE_TIMEOUT
+}
+
+/// A test's silence bound for `git://` and `ssh://` URLs (0: the real one;
+/// no other test fetches one). Process-wide: fetches run on the pool's
+/// threads.
+#[cfg(test)]
+pub(crate) static TEST_SILENCE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `work`, the network half of a fetch from `url` (connecting through
+/// receiving the pack), on a thread of its own and reporting on a handle of
+/// `progress`'s, watched from this one (`super::watch`): Ctrl-C fails it
+/// ("Interrupted") within a fraction of a second, and so does a silence of
+/// [`FETCH_SILENCE_TIMEOUT`] ("<url> did not answer within N s"), whatever
+/// gix is blocked in. `work` must hand gix the flag it is given, not the
+/// global one: it is how work given up on is stopped, should the remote
+/// ever wake up. Not retried by [`super::retry`]: a remote that went quiet
+/// once is not waited on four more times.
+pub(crate) fn watched<P, T>(
+    url: &str,
+    progress: &mut P,
+    work: impl FnOnce(&mut super::watch::Watched<P>, &std::sync::atomic::AtomicBool) -> Res<T> + Send + 'static,
+) -> Res<T>
+where
+    P: crate::progress::Handoff,
+    T: Send + 'static,
+{
+    use super::watch::{abandonable, Bounds, Stop};
+    let bounds = Bounds { stall: silence_timeout(url), total: None, wind_down: FETCH_WIND_DOWN };
+    match abandonable(progress.handoff(), bounds, work) {
+        Ok(value) => Ok(value),
+        Err(Stop::Failed(e)) => Err(e),
+        Err(Stop::Interrupted) => bail!("Interrupted"),
+        Err(Stop::Stalled(after)) => bail!("{url} did not answer within {} s", after.as_secs().max(1)),
+        Err(Stop::Overran(after)) => bail!("The fetch from {url} did not finish within {} s", after.as_secs()),
+        Err(Stop::Vanished) => bail!("The fetch from {url} stopped unexpectedly"),
+    }
+}
+
 /// Depth-1 single-branch clone of `url` at `branch` into `dest`, with a full
 /// worktree checkout — matching what GetComponents produced ($SHALLOW_CLONE).
 /// `branch: None` clones the remote's default branch (no `!REPO_BRANCH`).
-pub fn clone(
-    url: &str,
-    branch: Option<&str>,
-    dest: &Path,
-    progress: &mut (impl prodash::NestedProgress<SubProgress: 'static> + 'static),
-) -> Res<()> {
+/// The fetch is [`watched`]; the checkout, all local, takes Ctrl-C itself.
+pub fn clone(url: &str, branch: Option<&str>, dest: &Path, progress: &mut impl crate::progress::Handoff) -> Res<()> {
     let _span = crate::timing::span("git clone");
     let branch_desc = branch.unwrap_or("<default>");
 
@@ -376,26 +439,42 @@ pub fn clone(
     // and gix deletes a directory it found empty when the clone into it does
     // not finish, so a failed attempt leaves nothing behind.
     super::retry::with_backoff(progress, |progress| {
+        // What gix cleans up after a clone that fails, and so what is
+        // cleaned up here after one given up on, whose gix may never return.
+        let fresh = dest.read_dir().map_or(true, |mut entries| entries.next().is_none());
         std::fs::create_dir_all(dest)
             .with_context(|| format!("Failed to create '{}'", dest.display()))?;
-        let mut prepare = gix::prepare_clone(url, dest)
-            .with_context(|| format!("Failed to prepare clone of {url}"))?
-            .with_shallow(Shallow::DepthAtRemote(1.try_into().expect("nonzero")))
-            .with_ref_name(branch)
-            .with_context(|| format!("Invalid branch name {branch_desc}"))?;
-        if let Some(branch) = branch {
-            // Single-branch: narrow the remote's fetch refspec to just this
-            // branch, exactly like `git clone --single-branch`.
-            let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
-            prepare = prepare.configure_remote(move |mut r| {
-                r.replace_refspecs(Some(refspec.as_str()), Direction::Fetch)?;
-                Ok(r)
-            });
-        }
-
-        let (mut checkout, _outcome) = prepare
-            .fetch_then_checkout(&mut *progress, &gix::interrupt::IS_INTERRUPTED)
-            .with_context(|| format!("Failed to fetch {url} (branch {branch_desc})"))?;
+        let (owned_url, owned_dest, owned_branch) = (url.to_owned(), dest.to_owned(), branch.map(str::to_owned));
+        let fetched = watched(url, progress, move |progress, cancel| {
+            let (url, branch) = (owned_url.as_str(), owned_branch.as_deref());
+            let mut prepare = gix::prepare_clone(url, &owned_dest)
+                .with_context(|| format!("Failed to prepare clone of {url}"))?
+                .with_shallow(Shallow::DepthAtRemote(1.try_into().expect("nonzero")))
+                .with_ref_name(branch)
+                .with_context(|| format!("Invalid branch name {}", branch.unwrap_or("<default>")))?;
+            if let Some(branch) = branch {
+                // Single-branch: narrow the remote's fetch refspec to just this
+                // branch, exactly like `git clone --single-branch`.
+                let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
+                prepare = prepare.configure_remote(move |mut r| {
+                    r.replace_refspecs(Some(refspec.as_str()), Direction::Fetch)?;
+                    Ok(r)
+                });
+            }
+            let (checkout, _outcome) = prepare
+                .fetch_then_checkout(&mut *progress, cancel)
+                .with_context(|| format!("Failed to fetch {url} (branch {})", branch.unwrap_or("<default>")))?;
+            Ok(checkout)
+        });
+        let mut checkout = match fetched {
+            Ok(checkout) => checkout,
+            Err(e) => {
+                if fresh {
+                    let _ = std::fs::remove_dir_all(dest);
+                }
+                return Err(e);
+            }
+        };
         let (_repo, _outcome) = checkout
             .main_worktree(&mut *progress, &gix::interrupt::IS_INTERRUPTED)
             .with_context(|| format!("Failed to check out {url} (branch {branch_desc})"))?;
@@ -430,7 +509,7 @@ pub fn align(
     repo_dir: &Path,
     branch: &str,
     force_overwrite: bool,
-    progress: &mut (impl prodash::NestedProgress<SubProgress: 'static> + 'static),
+    progress: &mut impl crate::progress::Handoff,
 ) -> Res<ObjectId> {
     let _span = crate::timing::span("git align");
     let mut repo = gix::open(repo_dir)
@@ -443,26 +522,12 @@ pub fn align(
 
     // Fetch the wanted branch explicitly.
     let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
-    let mut remote = repo
-        .find_remote("origin")
-        .with_context(|| "No origin remote")?;
-    remote
-        .replace_refspecs(Some(refspec.as_str()), Direction::Fetch)
-        .with_context(|| "Failed to set fetch refspec")?;
     // Only the fetch is retried on a transient failure: nothing in the repo
     // moves until it has the whole pack. Never what follows — a second run
     // of a checkout cut short would find HEAD already at the tip and call
     // the half-written tree done.
     super::retry::with_backoff(progress, |progress| {
-        remote
-            .connect(Direction::Fetch)
-            .with_context(|| "Failed to connect to origin")?
-            .prepare_fetch(&mut *progress, Default::default())
-            .with_context(|| "Failed to prepare fetch")?
-            .with_shallow(Shallow::DepthAtRemote(1.try_into().expect("nonzero")))
-            .receive(&mut *progress, &gix::interrupt::IS_INTERRUPTED)
-            .with_context(|| format!("Failed to fetch branch {branch}"))?;
-        Ok(())
+        fetch_refspec(&repo, &refspec, depth_one(), progress).with_context(|| format!("Failed to fetch branch {branch}"))
     })?;
 
     let target_id = repo
@@ -567,25 +632,33 @@ fn has_commit(repo: &gix::Repository, commit: ObjectId) -> bool {
     repo.find_commit(commit).ok().and_then(|c| c.tree_id().ok()).is_some_and(|tree| repo.has_object(tree))
 }
 
-/// Fetch `refspec` from `origin` with the given depth.
+/// Fetch `refspec` from `origin` with the given depth, [`watched`].
 fn fetch_refspec(
     repo: &gix::Repository,
     refspec: &str,
     shallow: Shallow,
-    progress: &mut (impl prodash::NestedProgress<SubProgress: 'static> + 'static),
+    progress: &mut impl crate::progress::Handoff,
 ) -> Res<()> {
-    let mut remote = repo.find_remote("origin").with_context(|| "No origin remote")?;
-    remote
-        .replace_refspecs(Some(refspec), Direction::Fetch)
-        .with_context(|| "Failed to set fetch refspec")?;
-    remote
-        .connect(Direction::Fetch)
-        .with_context(|| "Failed to connect to origin")?
-        .prepare_fetch(&mut *progress, Default::default())
-        .with_context(|| "Failed to prepare fetch")?
-        .with_shallow(shallow)
-        .receive(&mut *progress, &gix::interrupt::IS_INTERRUPTED)?;
-    Ok(())
+    let url = repo
+        .find_remote("origin")
+        .with_context(|| "No origin remote")?
+        .url(Direction::Fetch)
+        .map_or_else(|| "origin".to_owned(), |u| u.to_bstring().to_string());
+    let (repo, refspec) = (repo.clone(), refspec.to_owned());
+    watched(&url, progress, move |progress, cancel| {
+        let mut remote = repo.find_remote("origin").with_context(|| "No origin remote")?;
+        remote
+            .replace_refspecs(Some(refspec.as_str()), Direction::Fetch)
+            .with_context(|| "Failed to set fetch refspec")?;
+        remote
+            .connect(Direction::Fetch)
+            .with_context(|| "Failed to connect to origin")?
+            .prepare_fetch(&mut *progress, Default::default())
+            .with_context(|| "Failed to prepare fetch")?
+            .with_shallow(shallow)
+            .receive(&mut *progress, cancel)?;
+        Ok(())
+    })
 }
 
 /// Bring `commit` into a repo that lacks it. First by its id alone at depth 1
@@ -598,7 +671,7 @@ fn fetch_commit(
     repo: &gix::Repository,
     git_ref: Option<&str>,
     commit: ObjectId,
-    progress: &mut (impl prodash::NestedProgress<SubProgress: 'static> + 'static),
+    progress: &mut impl crate::progress::Handoff,
 ) -> Res<()> {
     // Not retried: a server that refuses the want fails this way every time,
     // and a real network failure gets its retries in the fallback below.
@@ -656,7 +729,7 @@ pub fn pin(
     git_ref: Option<&str>,
     commit: ObjectId,
     force_overwrite: bool,
-    progress: &mut (impl prodash::NestedProgress<SubProgress: 'static> + 'static),
+    progress: &mut impl crate::progress::Handoff,
 ) -> Res<ObjectId> {
     let _span = crate::timing::span("git pin");
     let mut repo = gix::open(repo_dir)
@@ -695,7 +768,7 @@ pub fn clone_pinned(
     git_ref: Option<&str>,
     commit: ObjectId,
     dest: &Path,
-    progress: &mut (impl prodash::NestedProgress<SubProgress: 'static> + 'static),
+    progress: &mut impl crate::progress::Handoff,
 ) -> Res<ObjectId> {
     let _span = crate::timing::span("git clone");
     std::fs::create_dir_all(dest).with_context(|| format!("Failed to create '{}'", dest.display()))?;
@@ -1472,7 +1545,7 @@ pub fn is_published(repo_dir: &Path, commit: ObjectId) -> Res<bool> {
 /// ls-remote`, without fetching anything. An annotated tag yields the commit
 /// it tags. `scratch` is any repository on disk: gix needs one to speak to a
 /// remote from, and nothing is written to it.
-pub fn remote_tip(scratch: &Path, url: &str, git_ref: Option<&str>) -> Res<ObjectId> {
+fn remote_tip(scratch: &Path, url: &str, git_ref: Option<&str>) -> Res<ObjectId> {
     const LOCAL: &str = "refs/cactup/tip";
     let repo = gix::open(scratch).with_context(|| format!("Failed to open '{}'", scratch.display()))?;
     let name = git_ref.unwrap_or("HEAD");
@@ -1504,7 +1577,7 @@ pub fn remote_tip(scratch: &Path, url: &str, git_ref: Option<&str>) -> Res<Objec
 /// The name of the remote's default branch (what its `HEAD` points at) and
 /// the commit at its tip, from one listing (`git ls-remote --symref <url>
 /// HEAD`), without fetching anything. `scratch` is as for [`remote_tip`].
-pub fn remote_head(scratch: &Path, url: &str) -> Res<(String, ObjectId)> {
+fn remote_head(scratch: &Path, url: &str) -> Res<(String, ObjectId)> {
     const LOCAL: &str = "refs/cactup/head";
     let repo = gix::open(scratch).with_context(|| format!("Failed to open '{}'", scratch.display()))?;
     let spec = format!("HEAD:{LOCAL}");
@@ -1605,48 +1678,41 @@ fn clean_stale_scratch(tmp: &Path) {
 }
 
 /// `ask` (given a quiet scratch repository and `url`) run on a thread of its
-/// own while this one polls the interrupt flag: the gix connection takes no
+/// own, watched from this one (`super::watch`): the gix connection takes no
 /// interrupt flag of its own, and a stalled remote must outlast neither a
 /// Ctrl-C ("Interrupted") nor `until` (an error saying so). Either way the
-/// thread is left to finish, or not, on its own (see [`scratch_parent`]).
+/// processes the ask started (ssh) are killed and the thread is left to
+/// finish, or not, on its own (see [`scratch_parent`]).
 fn ask_remote<T: Send + 'static>(
     url: &str,
     until: std::time::Instant,
     ask: impl FnOnce(&Path, &str) -> Res<T> + Send + 'static,
 ) -> Res<T> {
-    if std::time::Instant::now() >= until {
+    use super::watch::{abandonable, Bounds, Stop};
+    let left = until.saturating_duration_since(std::time::Instant::now());
+    if left.is_zero() {
         bail!("{url} was not asked: the time for asking remotes was up");
     }
     #[cfg(test)]
     ASKED.lock().expect("test record poisoned").push(url.to_owned());
-    let (send, recv) = std::sync::mpsc::channel();
     let owned = url.to_owned();
-    let started = std::time::Instant::now();
-    std::thread::spawn(move || {
-        let answer = (|| {
-            let scratch = match scratch_parent() {
-                Some(parent) => tempfile::tempdir_in(parent),
-                None => tempfile::tempdir(),
-            }
-            .context("Failed to create a scratch directory")?;
-            quiet_scratch(scratch.path())?;
-            ask(scratch.path(), &owned)
-        })();
-        let _ = send.send(answer);
+    // An ask reports no progress: the silence is the whole ask.
+    let bounds = Bounds { stall: left, total: Some(left), wind_down: std::time::Duration::ZERO };
+    let answer = abandonable(gix::progress::Discard, bounds, move |_, _| {
+        let scratch = match scratch_parent() {
+            Some(parent) => tempfile::tempdir_in(parent),
+            None => tempfile::tempdir(),
+        }
+        .context("Failed to create a scratch directory")?;
+        quiet_scratch(scratch.path())?;
+        ask(scratch.path(), &owned)
     });
-    loop {
-        if gix::interrupt::is_triggered() {
-            bail!("Interrupted");
-        }
-        let left = until.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() {
-            bail!("{url} did not answer within {} s", started.elapsed().as_secs().max(1));
-        }
-        match recv.recv_timeout(left.min(std::time::Duration::from_millis(100))) {
-            Ok(answer) => return answer,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => bail!("Asking {url} failed"),
-        }
+    match answer {
+        Ok(answer) => Ok(answer),
+        Err(Stop::Failed(e)) => Err(e),
+        Err(Stop::Interrupted) => bail!("Interrupted"),
+        Err(Stop::Stalled(_) | Stop::Overran(_)) => bail!("{url} did not answer within {} s", left.as_secs().max(1)),
+        Err(Stop::Vanished) => bail!("Asking {url} failed"),
     }
 }
 
@@ -1712,23 +1778,28 @@ pub fn file_at_commit(
     commit: &str,
     path: &str,
     dest: &Path,
-    progress: &mut (impl prodash::NestedProgress<SubProgress: 'static> + 'static),
+    progress: &mut impl crate::progress::Handoff,
 ) -> Res<()> {
     let id = ObjectId::from_hex(commit.as_bytes()).with_context(|| format!("\"{commit}\" is not a commit id"))?;
     let scratch = tempfile::tempdir().context("Failed to create a scratch directory")?;
     let repo = gix::init_bare(scratch.path()).context("Failed to create a scratch repository")?;
     let spec = format!("+{id}:{PIN_REF}");
-    repo.remote_at(url)
-        .with_context(|| format!("Invalid remote URL {url}"))?
-        .with_refspecs(Some(spec.as_str()), Direction::Fetch)
-        .context("Invalid refspec")?
-        .connect(Direction::Fetch)
-        .with_context(|| format!("Failed to connect to {url}"))?
-        .prepare_fetch(&mut *progress, Default::default())
-        .with_context(|| format!("Failed to prepare a fetch from {url}"))?
-        .with_shallow(depth_one())
-        .receive(&mut *progress, &gix::interrupt::IS_INTERRUPTED)
-        .with_context(|| format!("Failed to fetch commit {commit} from {url}"))?;
+    let (owned_url, owned_commit) = (url.to_owned(), commit.to_owned());
+    let repo = watched(url, progress, move |progress, cancel| {
+        let (url, commit) = (owned_url.as_str(), owned_commit.as_str());
+        repo.remote_at(url)
+            .with_context(|| format!("Invalid remote URL {url}"))?
+            .with_refspecs(Some(spec.as_str()), Direction::Fetch)
+            .context("Invalid refspec")?
+            .connect(Direction::Fetch)
+            .with_context(|| format!("Failed to connect to {url}"))?
+            .prepare_fetch(&mut *progress, Default::default())
+            .with_context(|| format!("Failed to prepare a fetch from {url}"))?
+            .with_shallow(depth_one())
+            .receive(&mut *progress, cancel)
+            .with_context(|| format!("Failed to fetch commit {commit} from {url}"))?;
+        Ok(repo)
+    })?;
     if gix::interrupt::is_triggered() {
         bail!("Interrupted");
     }

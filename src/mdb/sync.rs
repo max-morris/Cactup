@@ -39,15 +39,12 @@ use gix::objs::tree::EntryKind;
 use gix::protocol::fetch::Tags;
 use gix::remote::Direction;
 use gix::ObjectId;
-use prodash::messages::MessageLevel;
-use prodash::progress::{Id, Step, StepShared};
-use prodash::{Count, NestedProgress, Progress, Unit};
+use prodash::{Count, NestedProgress, Progress};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// How long a successful (or failed) sync is trusted before the next one.
@@ -527,12 +524,12 @@ fn stall_timeout() -> Duration {
     if cfg!(test) { Duration::from_secs(2) } else { FETCH_STALL }
 }
 
-/// [`fetch_mdb_branch`] on a helper thread, watched from this one every
-/// 100 ms; returns the repository along with the tip. The calling thread is
-/// what bounds the wait: gix's http transport connects with a hard-coded
-/// 20 s timeout and idles out after 30 s per read, other transports never
-/// time out at all, and gix checks the interrupt flag only between phases
-/// (and behind a proxy no preflight bounds even the connect).
+/// [`fetch_mdb_branch`] on a helper thread, watched from this one
+/// (`crate::fetch::watch`); returns the repository along with the tip. The
+/// calling thread is what bounds the wait: gix's http transport connects
+/// with a hard-coded 20 s timeout and idles out after 30 s per read, other
+/// transports never time out at all, and gix checks the interrupt flag only
+/// between phases (and behind a proxy no preflight bounds even the connect).
 ///
 /// - Nothing reported for [`stall_timeout`], or the whole fetch past
 ///   [`FETCH_MAX`]: the fetch is abandoned and this fails like any other
@@ -544,173 +541,24 @@ fn stall_timeout() -> Duration {
 ///   whether or not the fetch finished.
 ///
 /// An abandoned fetch is never joined and dies with the process; its cancel
-/// flag stops it at gix's next check should the server wake up meanwhile.
-/// The thread reports through its own handle on `line`, watched for
-/// activity.
+/// flag stops it at gix's next check should the server wake up meanwhile,
+/// and the processes it started (ssh) are killed. The thread reports through
+/// its own handle on `line`, watched for activity.
 fn fetch_abandonable(repo: gix::Repository, url: &str, line: &Line) -> Res<(gix::Repository, ObjectId)> {
-    use std::sync::mpsc::RecvTimeoutError;
-    use std::time::Instant;
-    let (tx, rx) = std::sync::mpsc::channel();
-    let activity = Activity::default();
-    let cancel = Arc::new(AtomicBool::new(false));
-    let mut handle = Watched { line: line.another_handle(), activity: activity.clone() };
-    let (worker_url, worker_cancel) = (url.to_owned(), Arc::clone(&cancel));
-    std::thread::spawn(move || {
-        let tip = fetch_mdb_branch(&repo, &worker_url, &mut handle, &worker_cancel);
-        drop(handle);
-        let _ = tx.send(tip.map(|tip| (repo, tip)));
+    use crate::fetch::watch::{abandonable, Bounds, Stop};
+    let bounds = Bounds { stall: stall_timeout(), total: Some(FETCH_MAX), wind_down: FETCH_WIND_DOWN };
+    let worker_url = url.to_owned();
+    let fetched = abandonable(line.another_handle(), bounds, move |progress, cancel| {
+        let tip = fetch_mdb_branch(&repo, &worker_url, progress, cancel)?;
+        Ok((repo, tip))
     });
-    let started = Instant::now();
-    let (mut seen, mut moved) = (activity.reading(), started);
-    loop {
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(result) => return result,
-            Err(RecvTimeoutError::Disconnected) => {
-                bail!("The machine database fetch stopped unexpectedly")
-            }
-            Err(RecvTimeoutError::Timeout) => {}
-        }
-        if gix::interrupt::is_triggered() {
-            cancel.store(true, Ordering::Relaxed);
-            let _ = rx.recv_timeout(FETCH_WIND_DOWN);
-            bail!("Interrupted");
-        }
-        let reading = activity.reading();
-        if reading != seen {
-            (seen, moved) = (reading, Instant::now());
-        }
-        let stall = stall_timeout();
-        if moved.elapsed() >= stall {
-            cancel.store(true, Ordering::Relaxed);
-            bail!("No response for {}s", stall.as_secs());
-        }
-        if started.elapsed() >= FETCH_MAX {
-            cancel.store(true, Ordering::Relaxed);
-            bail!("The fetch did not finish within {} minutes", FETCH_MAX.as_secs() / 60);
-        }
-    }
-}
-
-/// Everything a fetch reports, reduced to one number that changes whenever
-/// anything moves — how [`fetch_abandonable`] tells a slow fetch from a hung
-/// one.
-#[derive(Clone, Default)]
-struct Activity(Arc<ActivityState>);
-
-#[derive(Default)]
-struct ActivityState {
-    /// Bumped by every report made through a [`Watched`] handle.
-    reports: AtomicU64,
-    /// Counters handed out to be incremented directly, never through a
-    /// handle (gix's threaded delta resolution counts that way).
-    counters: Mutex<Vec<StepShared>>,
-}
-
-impl Activity {
-    fn bump(&self) {
-        self.0.reports.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn watch(&self, counter: &StepShared) {
-        let mut counters = self.0.counters.lock().unwrap_or_else(PoisonError::into_inner);
-        if !counters.iter().any(|known| Arc::ptr_eq(known, counter)) {
-            counters.push(Arc::clone(counter));
-        }
-    }
-
-    fn reading(&self) -> u64 {
-        let counters = self.0.counters.lock().unwrap_or_else(PoisonError::into_inner);
-        counters.iter().fold(self.0.reports.load(Ordering::Relaxed), |sum, counter| {
-            sum.wrapping_add(counter.load(Ordering::Relaxed) as u64)
-        })
-    }
-}
-
-/// A [`Line`] handle, and every child it hands out, that records each
-/// report in an [`Activity`] before passing it on.
-struct Watched {
-    line: Line,
-    activity: Activity,
-}
-
-impl Watched {
-    fn child(&self, line: Line) -> Watched {
-        self.activity.bump();
-        Watched { line, activity: self.activity.clone() }
-    }
-}
-
-impl Count for Watched {
-    fn set(&self, step: Step) {
-        self.activity.bump();
-        self.line.set(step);
-    }
-
-    fn step(&self) -> Step {
-        self.line.step()
-    }
-
-    fn inc_by(&self, step: Step) {
-        self.activity.bump();
-        self.line.inc_by(step);
-    }
-
-    fn counter(&self) -> StepShared {
-        let counter = self.line.counter();
-        self.activity.watch(&counter);
-        counter
-    }
-}
-
-impl Progress for Watched {
-    fn init(&mut self, max: Option<Step>, unit: Option<Unit>) {
-        self.activity.bump();
-        self.line.init(max, unit);
-    }
-
-    fn unit(&self) -> Option<Unit> {
-        self.line.unit()
-    }
-
-    fn max(&self) -> Option<Step> {
-        self.line.max()
-    }
-
-    fn set_max(&mut self, max: Option<Step>) -> Option<Step> {
-        self.activity.bump();
-        self.line.set_max(max)
-    }
-
-    fn set_name(&mut self, name: String) {
-        self.activity.bump();
-        self.line.set_name(name);
-    }
-
-    fn name(&self) -> Option<String> {
-        self.line.name()
-    }
-
-    fn id(&self) -> Id {
-        self.line.id()
-    }
-
-    fn message(&self, level: MessageLevel, message: String) {
-        self.activity.bump();
-        self.line.message(level, message);
-    }
-}
-
-impl NestedProgress for Watched {
-    type SubProgress = Watched;
-
-    fn add_child(&mut self, name: impl Into<String>) -> Watched {
-        let line = self.line.add_child(name);
-        self.child(line)
-    }
-
-    fn add_child_with_id(&mut self, name: impl Into<String>, id: Id) -> Watched {
-        let line = self.line.add_child_with_id(name, id);
-        self.child(line)
+    match fetched {
+        Ok(fetched) => Ok(fetched),
+        Err(Stop::Failed(e)) => Err(e),
+        Err(Stop::Interrupted) => bail!("Interrupted"),
+        Err(Stop::Stalled(stall)) => bail!("No response for {}s", stall.as_secs()),
+        Err(Stop::Overran(max)) => bail!("The fetch did not finish within {} minutes", max.as_secs() / 60),
+        Err(Stop::Vanished) => bail!("The machine database fetch stopped unexpectedly"),
     }
 }
 
@@ -721,7 +569,7 @@ impl NestedProgress for Watched {
 fn fetch_mdb_branch(
     repo: &gix::Repository,
     url: &str,
-    progress: &mut Watched,
+    progress: &mut crate::fetch::watch::Watched<Line>,
     cancel: &AtomicBool,
 ) -> Res<ObjectId> {
     let remote = repo

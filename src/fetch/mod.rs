@@ -11,6 +11,7 @@ pub mod git;
 pub mod library;
 pub mod link;
 pub(crate) mod retry;
+pub(crate) mod watch;
 
 use crate::format::{self, Format, Toml};
 use crate::thornlist::{Component, ComponentType, Thornlist};
@@ -2347,6 +2348,122 @@ pub(crate) mod tests {
         let e = plan(&list, &root, &mut progress).unwrap_err();
         assert!(format!("{e:#}").to_lowercase().contains("interrupted"), "{e:#}");
         assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+    }
+
+    /// A list of `n` fresh clones from `url` (each its own repo, so each its
+    /// own fetch): the plan to clone them under `root`.
+    fn fresh_clones(root: &Path, n: usize, url: &str) -> Plan {
+        let sections: String = (0..n)
+            .map(|i| format!("\n!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = {url}\n!NAME = S{i}\n!CHECKOUT = S{i}/T\n"))
+            .collect();
+        let list = crate::thornlist::parse(&format!("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{sections}")).unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("test plan");
+        plan(&list, root, &mut progress).unwrap()
+    }
+
+    /// A remote that accepts the connection and never answers fails each
+    /// fetch from it once nothing has moved for the silence bound — clones,
+    /// and aligns of clones already there — each its own failure saying
+    /// so, rather than holding the fetch (and the process) for ever.
+    #[test]
+    fn a_fetch_from_a_remote_that_never_answers_fails_after_the_silence() {
+        TEST_FOLLOW_TIMEOUT_MS.store(1000, std::sync::atomic::Ordering::Relaxed);
+        git::TEST_SILENCE_MS.store(1000, std::sync::atomic::Ordering::Relaxed);
+        let tmp = tempfile::tempdir().unwrap();
+        let url = stalling_remote("r");
+        let (root, list) = clones_made_pinned(tmp.path(), 2, &url);
+        let mut progress = prodash::tree::Root::new().add_child("test plan");
+        let mut p = plan(&list, &root, &mut progress).unwrap();
+        assert!(p.git.iter().all(|g| matches!(g.action, GitAction::Align)), "{:?}", p.git);
+        p.git.extend(fresh_clones(&root, 2, &url).git);
+        let started = std::time::Instant::now();
+        let report = execute(&p, &root).unwrap();
+        let took = started.elapsed();
+        assert_eq!(report.failures.len(), 4, "{:?}", report.failures);
+        for f in &report.failures {
+            assert!(f.error.contains(&format!("{url} did not answer within 1 s")), "{f:?}");
+        }
+        // Gone too: a clone given up on leaves nothing to trip the next fetch.
+        assert!(!root.join("Cactus/repos/S0").exists());
+        // Four at once, each given up on after its second of silence.
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+    }
+
+    /// Ctrl-C while fetches hang in their handshake fails the fetch at once
+    /// ("Interrupted"), however long the silence bound. The interrupt flag
+    /// is the process's: run in a child of its own.
+    #[test]
+    fn an_interrupt_while_a_fetch_hangs_in_its_handshake_fails_it_at_once() {
+        if std::env::var_os("CACTUP_TEST_INTERRUPT_CHILD").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "fetch::tests::an_interrupt_while_a_fetch_hangs_in_its_handshake_fails_it_at_once",
+                    "--exact",
+                    "--test-threads=1",
+                ])
+                .env("CACTUP_TEST_INTERRUPT_CHILD", "1")
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && said.contains("1 passed"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+            return;
+        }
+        git::TEST_SILENCE_MS.store(60_000, std::sync::atomic::Ordering::Relaxed);
+        let tmp = tempfile::tempdir().unwrap();
+        let url = stalling_remote("r");
+        let root = tmp.path().join("install");
+        let p = fresh_clones(&root, 3, &url);
+        let fetching = std::thread::spawn(move || {
+            let report = execute(&p, &root);
+            (report, std::time::Instant::now())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        gix::interrupt::IS_INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let interrupted = std::time::Instant::now();
+        let (report, returned) = fetching.join().unwrap();
+        let report = report.unwrap();
+        assert_eq!(report.failures.len(), 3, "{:?}", report.failures);
+        assert!(report.failures.iter().all(|f| f.error.to_lowercase().contains("interrupted")), "{:?}", report.failures);
+        let took = returned.duration_since(interrupted);
+        assert!(took < std::time::Duration::from_millis(900), "{took:?}");
+    }
+
+    /// An ssh remote whose command hangs (and runs its own child, as `sh -c
+    /// 'ssh …'` does) is given up on after the silence, and the processes
+    /// it started are killed, not left behind. The ssh command is the
+    /// process's environment: run in a child of its own.
+    #[test]
+    fn a_hung_ssh_command_is_killed_when_its_fetch_is_given_up_on() {
+        let Some(dir) = std::env::var_os("CACTUP_TEST_SSH_CHILD") else {
+            let tmp = tempfile::tempdir().unwrap();
+            let ssh = tmp.path().join("ssh");
+            std::fs::write(&ssh, "#!/bin/sh\nsleep 600 &\necho $! > \"$(dirname \"$0\")/sleep.pid\"\nwait\n").unwrap();
+            std::fs::set_permissions(&ssh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["fetch::tests::a_hung_ssh_command_is_killed_when_its_fetch_is_given_up_on", "--exact", "--test-threads=1"])
+                .env("CACTUP_TEST_SSH_CHILD", tmp.path())
+                .env("GIT_SSH_COMMAND", &ssh)
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && said.contains("1 passed"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        git::TEST_SILENCE_MS.store(1000, std::sync::atomic::Ordering::Relaxed);
+        let dest = dir.join("clone");
+        let mut progress = prodash::tree::Root::new().add_child("test clone");
+        let started = std::time::Instant::now();
+        let e = git::clone("ssh://example.invalid/r.git", None, &dest, &mut progress).unwrap_err();
+        assert!(format!("{e:#}").contains("did not answer within 1 s"), "{e:#}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(4), "{:?}", started.elapsed());
+        let pid = std::fs::read_to_string(dir.join("sleep.pid")).unwrap();
+        let gone = || std::fs::read_to_string(format!("/proc/{}/stat", pid.trim())).map_or(true, |s| s.contains(") Z "));
+        let waited = std::time::Instant::now();
+        while !gone() && waited.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(gone(), "the ssh command's child {} outlived its fetch", pid.trim());
     }
 
     /// Where a restore puts a clone, offline: none on disk, the remote's

@@ -238,25 +238,32 @@ pub fn ensure_manifest_repo(cactup_root: &Path, manifest_url: &str) -> Res<Repos
 
         // Retried from the top on a transient failure: gix deletes the
         // (empty) directory it cloned into when the clone does not finish.
+        // Watched (Ctrl-C, a remote gone quiet): one given up on, whose gix
+        // may never return, is deleted here instead.
         let repo = crate::fetch::retry::with_backoff(&mut headline, |headline| {
             fs::create_dir_all(&manifest_dir)
                .with_context(|| "Failed to create manifest directory")?;
 
-            let mut prepare =
-                gix::prepare_clone(manifest_url, &manifest_dir)?
-                    .configure_remote(|r| {
-                        Ok(r.with_fetch_tags(Tags::All))
-                    });
+            let (url, dir) = (manifest_url.to_owned(), manifest_dir.clone());
+            let fetched = crate::fetch::git::watched(manifest_url, headline, move |headline, cancel| {
+                let mut prepare =
+                    gix::prepare_clone(url.as_str(), &dir)?
+                        .configure_remote(|r| {
+                            Ok(r.with_fetch_tags(Tags::All))
+                        });
 
-            // gix renames whatever item it's given as the fetch moves through
-            // phases and hangs its own bars off it; the Line keeps all of that
-            // on the one headline, so the label follows the phase and the bar
-            // never splits in two.
-            let (repo, _) = prepare.fetch_only(
-                headline,
-                &gix::interrupt::IS_INTERRUPTED
-            ).with_context(|| "Failed to fetch manifest")?;
-            Ok(repo)
+                // gix renames whatever item it's given as the fetch moves through
+                // phases and hangs its own bars off it; the Line keeps all of that
+                // on the one headline, so the label follows the phase and the bar
+                // never splits in two.
+                let (repo, _) = prepare.fetch_only(&mut *headline, cancel)
+                    .with_context(|| "Failed to fetch manifest")?;
+                Ok(repo)
+            });
+            if fetched.is_err() {
+                let _ = fs::remove_dir_all(&manifest_dir);
+            }
+            fetched
         })?;
 
         headline.succeeded("fetched");
@@ -292,17 +299,22 @@ pub fn ensure_manifest_repo(cactup_root: &Path, manifest_url: &str) -> Res<Repos
 
         repo.edit_references(tag_deletions)?;
 
-        let remote =
-            repo.find_fetch_remote(None)? // origin
-                .with_fetch_tags(Tags::All);
+        let url = repo.find_fetch_remote(None)? // origin
+            .url(Direction::Fetch)
+            .map_or_else(|| manifest_url.to_owned(), |u| u.to_bstring().to_string());
 
         // Nothing moves until the pack is in, so a transient failure is
-        // retried from the connect.
+        // retried from the connect. Watched: Ctrl-C, a remote gone quiet.
         crate::fetch::retry::with_backoff(&mut headline, |headline| {
-            remote.connect(Direction::Fetch)?
-                  .prepare_fetch(&mut *headline, Default::default())?
-                  .receive(&mut *headline, &gix::interrupt::IS_INTERRUPTED)?;
-            Ok(())
+            let repo = repo.clone();
+            crate::fetch::git::watched(&url, headline, move |headline, cancel| {
+                repo.find_fetch_remote(None)? // origin
+                    .with_fetch_tags(Tags::All)
+                    .connect(Direction::Fetch)?
+                    .prepare_fetch(&mut *headline, Default::default())?
+                    .receive(&mut *headline, cancel)?;
+                Ok(())
+            })
         })?;
 
         headline.succeeded("up to date");
