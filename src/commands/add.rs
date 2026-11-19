@@ -497,6 +497,17 @@ thread_local! {
     pub(crate) static AFTER_PROMPT: std::cell::Cell<Option<fn(&std::path::Path)>> = const { std::cell::Cell::new(None) };
 }
 
+/// What restoring the base repos did, one line each: back at the base's
+/// pin, or on the branch a base that follows one has.
+fn restored_lines(plan: &crate::fetch::Plan) -> Vec<String> {
+    (plan.git.iter())
+        .map(|g| match (&g.commit, &g.branch) {
+            (None, Some(branch)) => format!("Restored {} to the base's branch {branch}.", g.repo),
+            _ => format!("Restored {} to the base's commit.", g.repo),
+        })
+        .collect()
+}
+
 /// A refusal of the fetch made under the lock, as the clones changing while
 /// the plan waited.
 fn clones_changed(e: anyhow::Error) -> anyhow::Error {
@@ -1694,6 +1705,7 @@ pub fn remove(ctx: &Ctx, packages: &[String], flags: &RemoveFlags) -> Res<()> {
     // with a note). Until the new list and record are written, any failure
     // puts them back.
     let mut undo = crate::fetch::library::PutBack::drop_placements(&inst.root, &start.before, &composed)?;
+    let restored: Vec<String> = restore.as_ref().map(restored_lines).unwrap_or_default();
     if let Some(fetch_plan) = restore {
         let report = crate::fetch::execute(&fetch_plan, &inst.root)?;
         undo.made(&fetch_plan, &report);
@@ -1733,8 +1745,8 @@ pub fn remove(ctx: &Ctx, packages: &[String], flags: &RemoveFlags) -> Res<()> {
     if !left.is_empty() {
         println!("Their repos {} stay on disk; `cactup inst refetch --prune` removes them.", left.join(", "));
     }
-    if !touched.is_empty() {
-        println!("Restored {} to the base's commit.", touched.iter().copied().collect::<Vec<_>>().join(", "));
+    for line in &restored {
+        println!("{line}");
     }
     println!("Rebuild configs that compiled their thorns, e.g. `{}`.", "cactup build <config>".bold());
     Ok(())
@@ -1743,6 +1755,37 @@ pub fn remove(ctx: &Ctx, packages: &[String], flags: &RemoveFlags) -> Res<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A restored base repo is said as it went back: to the base's pin, or
+    /// to the branch a base that follows one has.
+    #[test]
+    fn a_restore_says_where_it_went() {
+        let item = |repo: &str, commit: Option<gix::ObjectId>, branch: Option<&str>| crate::fetch::GitRepoPlan {
+            repo: repo.into(),
+            dir: std::path::PathBuf::new(),
+            url: String::new(),
+            branch: branch.map(str::to_owned),
+            commit,
+            action: crate::fetch::GitAction::Align,
+            checkouts: Vec::new(),
+            forced: None,
+            retarget: None,
+        };
+        let pin = gix::ObjectId::empty_tree(gix::hash::Kind::Sha1);
+        let plan = crate::fetch::Plan {
+            git: vec![item("carpetx", None, Some("master")), item("cactusbase", Some(pin), Some("v2026.5.0"))],
+            skipped: Vec::new(),
+            downloads: Vec::new(),
+            external: Vec::new(),
+            links: Vec::new(),
+            libraries: Vec::new(),
+            root: "Cactus".into(),
+        };
+        assert_eq!(
+            restored_lines(&plan),
+            ["Restored carpetx to the base's branch master.", "Restored cactusbase to the base's commit."]
+        );
+    }
 
     fn package(repo: &str, checkouts: &[(&str, &str)], replaces: &[&str]) -> AddedPackage {
         AddedPackage {

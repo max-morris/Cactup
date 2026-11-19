@@ -115,7 +115,33 @@ struct Fake {
 }
 
 /// A fake Cactarium's state, changeable while it serves.
-type Shared = Arc<Mutex<Fake>>;
+type Shared = Arc<FakeLock>;
+
+/// The lock on a fake Cactarium's state. A test that waits for it longer
+/// than a minute fails, saying why, rather than hang: the state is only ever
+/// held for a moment (one answer, one assertion), so a wait that long is a
+/// deadlock, such as a statement that locks it twice (a guard lives to the
+/// end of its statement, and `std`'s lock is not reentrant).
+struct FakeLock(Mutex<Fake>, std::time::Duration);
+
+impl FakeLock {
+    /// Shaped as `Mutex::lock` is, so `lock().unwrap()` reads the same.
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Fake>, std::convert::Infallible> {
+        let deadline = std::time::Instant::now() + self.1;
+        loop {
+            match self.0.try_lock() {
+                Ok(guard) => return Ok(guard),
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    panic!("the fake Cactarium's state stayed locked for a minute: is it locked twice in one statement?")
+                }
+            }
+        }
+    }
+}
 
 impl Fake {
     fn new() -> Fake {
@@ -176,7 +202,7 @@ impl Fake {
     fn serve_shared(self) -> (String, Log, Shared) {
         let log: Log = Arc::default();
         let seen = log.clone();
-        let state: Shared = Arc::new(Mutex::new(self));
+        let state: Shared = Arc::new(FakeLock(Mutex::new(self), std::time::Duration::from_secs(60)));
         let fake = state.clone();
         let (base, _) = crate::fetch::download::test_server::serve_with_body(1000, move |path, body| {
             seen.lock().unwrap().push((path.to_owned(), String::from_utf8_lossy(body).into_owned()));
@@ -1923,6 +1949,14 @@ fn a_cactarium_without_batch_reads_reads_singly() {
     let err = format!("{:#}", reg.prefetch(&items).unwrap_err());
     reg.finish();
     assert!(err.contains("does not look like a Cactarium"), "{err}");
+}
+
+/// A statement that locks the fake twice fails, never hangs.
+#[test]
+#[should_panic(expected = "locked twice in one statement")]
+fn a_fake_locked_twice_fails_rather_than_hangs() {
+    let fake = FakeLock(Mutex::new(Fake::new()), std::time::Duration::from_millis(50));
+    let _ = (fake.lock().unwrap().batch_requests, fake.lock().unwrap().batch_fetches);
 }
 
 /// A base with et/carpet frozen at 1.0.0 (2.0.0 published too) and et/x at a
