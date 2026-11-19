@@ -1,0 +1,47 @@
+{
+  "slug": "et/w2",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "9b79607264629efa7f6c4fd5b0d2520422a56e2c",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/w2.git",
+      "thorns": [
+        {
+          "arrangement": "W2",
+          "thorn": "W2",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "W2",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "max/v2",
+          "range": null,
+          "needs": [],
+          "note": null
+        }
+      ]
+    }
+  ]
+}
