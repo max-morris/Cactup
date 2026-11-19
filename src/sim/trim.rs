@@ -376,6 +376,35 @@ mod tests {
         assert_eq!(keep, ["A/Grid", "A/Main"]);
     }
 
+    /// A `.ccl` file with bytes that are no UTF-8 (a Latin-1 comment) is read
+    /// all the same, as the shared crate reads it: its requirements are
+    /// followed, and a thorn nothing needs is trimmed. Before, such a file read
+    /// as unreadable, and its thorn was kept whatever the parfile needed (and
+    /// its requirements were never followed).
+    #[test]
+    fn a_ccl_file_that_is_no_utf8_is_read_lossily() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = tmp.path().join("Cactus");
+        let thorn = |checkout: &str, interface: &[u8], configuration: Option<&[u8]>| {
+            let dir = cactus.join("arrangements").join(checkout);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("interface.ccl"), interface).unwrap();
+            if let Some(c) = configuration {
+                std::fs::write(dir.join("configuration.ccl"), c).unwrap();
+            }
+        };
+        thorn("A/Main", b"# Gr\xfc\xdfe\nIMPLEMENTS: main\n", Some(b"# \xe9t\xe9\nREQUIRES THORNS: Helper\n"));
+        thorn("A/Helper", b"IMPLEMENTS: helper\n", None);
+        thorn("A/Unused", b"# \xa9 2026\nIMPLEMENTS: unused\n", None);
+        let text = "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\
+                    !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://x/a.git\n!REPO_PATH = $2\n\
+                    !CHECKOUT =\nA/Main\nA/Helper\nA/Unused\n";
+        let list = crate::thornlist::parse(text).unwrap();
+        let keep = needed(&list, &cactus, "ActiveThorns = \"Main\"\n").unwrap();
+        let keep: Vec<&str> = keep.iter().map(String::as_str).collect();
+        assert_eq!(keep, ["A/Helper", "A/Main"]);
+    }
+
     /// Max's real list, which writes checkout-only thorns on their
     /// `!CHECKOUT` lines the way the Einstein Toolkit's does: dropping any
     /// one built thorn must leave every other checkout where it was, built or

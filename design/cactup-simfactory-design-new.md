@@ -4601,7 +4601,10 @@ settles on is not ours to guess), `REQUIRES THORNS`, and the implementers of
 an `INHERITS`/`FRIEND` implementation or providers of a `REQUIRES FUNCTION`
 only when no kept thorn already offers it. The flesh and every component that
 is not an arrangement thorn stay, as does a thorn whose `interface.ccl` cannot
-be read. A trimmed thorn is not deleted: it moves out of its `!CHECKOUT` into
+be read (missing, not a regular file, or over the crate's size limit). Bytes
+that are no UTF-8 (a Latin-1 comment) do not make a file unreadable: they are
+replaced, as the crate reads them, so such a thorn's requirements are followed
+and, if nothing needs it, it is trimmed (before November 2026 it was kept). A trimmed thorn is not deleted: it moves out of its `!CHECKOUT` into
 a `#DISABLED Arrangement/Thorn` line, so it is neither fetched nor built but
 stays one edit from coming back. Every kept checkout keeps its place — inline
 on the `!CHECKOUT` line (checkout-only) or on a line of its own (built) — and
