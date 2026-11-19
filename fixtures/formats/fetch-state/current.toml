@@ -3,14 +3,15 @@ schema = 1
 [repos.CarpetX]
 url = "https://github.com/example/CarpetX.git"
 branch = "main"
+named-branch = true
 head = "3f2c9e1a00112233445566778899aabbccddeeff"
 commit = "3f2c9e1a00112233445566778899aabbccddeeff"
 
 [repos.Cactus]
 url = "https://github.com/example/Cactus.git"
 branch = "master"
+follows-default = true
 head = "3f2c9e1a00112233445566778899aabbccddeeff"
-commit = "3f2c9e1a00112233445566778899aabbccddeeff"
 
 [downloads]
 "Cactus/dl/data.tar.gz" = "abababababababababababababababababababababababababababababababab"

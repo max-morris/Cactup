@@ -1090,6 +1090,7 @@ pub fn hidden_by_library_excludes(repo_dir: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::DefaultBranches::Ask;
 
     fn placement(repo: &str, dependent: &str, into: &str) -> Placement {
         Placement {
@@ -1230,7 +1231,7 @@ mod tests {
         fn fetch(&self, list: &str) -> super::super::ExecReport {
             let list = crate::thornlist::parse(list).unwrap_or_else(|e| panic!("{e:#}\n{list}"));
             let mut progress = prodash::tree::Root::new().add_child("plan");
-            let plan = super::super::plan(&list, &self.install(), &mut progress)
+            let plan = super::super::plan(&list, &self.install(), Ask, &mut progress)
                 .unwrap_or_else(|e| panic!("{e:#}"));
             assert!(plan.skipped.is_empty(), "nothing is skipped: {:?}", plan.skipped);
             let report = super::super::execute(&plan, &self.install()).unwrap();
@@ -1244,7 +1245,7 @@ mod tests {
         fn placement(&self, list: &str) -> Placement {
             let list = crate::thornlist::parse(list).unwrap();
             let mut progress = prodash::tree::Root::new().add_child("plan");
-            super::super::plan(&list, &self.install(), &mut progress)
+            super::super::plan(&list, &self.install(), Ask, &mut progress)
                 .unwrap()
                 .libraries
                 .remove(0)
@@ -1333,7 +1334,7 @@ mod tests {
         }
         let list = crate::thornlist::parse(&s.list(&k, &f, &extra)).unwrap();
         let mut progress = prodash::tree::Root::new().add_child("plan");
-        let plan = super::super::plan(&list, &s.install(), &mut progress).unwrap();
+        let plan = super::super::plan(&list, &s.install(), Ask, &mut progress).unwrap();
         let queue: Vec<&str> = plan.git.iter().map(|g| g.repo.as_str()).collect();
         let behind = queue.iter().position(|r| *r == "KadathThorn").unwrap();
         assert!(behind >= super::super::WORKERS, "the dependent waits for a free worker: {queue:?}");
@@ -1401,7 +1402,7 @@ mod tests {
         let list = s.list(&k, &f, &extra);
         let parsed = crate::thornlist::parse(&list).unwrap();
         let mut progress = prodash::tree::Root::new().add_child("plan");
-        let plan = super::super::plan(&parsed, &s.install(), &mut progress).unwrap();
+        let plan = super::super::plan(&parsed, &s.install(), Ask, &mut progress).unwrap();
         let order: Vec<String> = plan.libraries.iter().map(Placement::label).collect();
         assert_eq!(order, ["KadathThorn/src/fuka", "fuka/external/eigen", "eigen/deps/blas"]);
 
@@ -1428,7 +1429,7 @@ mod tests {
         );
         let list = crate::thornlist::parse(&s.list(&k, &f, &extra)).unwrap();
         let mut progress = prodash::tree::Root::new().add_child("plan");
-        let err = super::super::plan(&list, &s.install(), &mut progress).unwrap_err();
+        let err = super::super::plan(&list, &s.install(), Ask, &mut progress).unwrap_err();
         assert!(format!("{err:#}").contains("cycle"), "{err:#}");
         assert!(!s.install().exists(), "nothing written");
     }
@@ -1974,7 +1975,7 @@ mod tests {
         .unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let mut progress = prodash::tree::Root::new().add_child("plan");
-        let err = super::super::plan(&list, tmp.path(), &mut progress).unwrap_err();
+        let err = super::super::plan(&list, tmp.path(), Ask, &mut progress).unwrap_err();
         assert!(format!("{err:#}").contains("differ only in case"), "{err:#}");
     }
 
@@ -2006,7 +2007,7 @@ mod tests {
         );
         let list = crate::thornlist::parse(&s.list(&k2, &f, "")).unwrap();
         let mut progress = prodash::tree::Root::new().add_child("plan");
-        let plan = super::super::plan(&list, &s.install(), &mut progress).unwrap();
+        let plan = super::super::plan(&list, &s.install(), Ask, &mut progress).unwrap();
         let _ = super::super::execute(&plan, &s.install()).unwrap();
         assert_eq!(
             before,
@@ -2029,7 +2030,7 @@ mod tests {
         );
         let list = crate::thornlist::parse(&s.list(&k2, &f, "")).unwrap();
         let mut progress = prodash::tree::Root::new().add_child("plan");
-        let plan = super::super::plan(&list, &s.install(), &mut progress).unwrap();
+        let plan = super::super::plan(&list, &s.install(), Ask, &mut progress).unwrap();
         let _ = super::super::execute(&plan, &s.install()).unwrap();
         assert_eq!(before, snapshot(&s.repos().join("fuka")));
     }
@@ -2048,7 +2049,7 @@ mod tests {
         let k2 = commit_entries(&s.kadath, &[("src", &outside.display().to_string(), true)]);
         let list = crate::thornlist::parse(&s.list(&k2, &f, "")).unwrap();
         let mut progress = prodash::tree::Root::new().add_child("plan");
-        let plan = super::super::plan(&list, &s.install(), &mut progress).unwrap();
+        let plan = super::super::plan(&list, &s.install(), Ask, &mut progress).unwrap();
         let _ = super::super::execute(&plan, &s.install()).unwrap();
         assert_eq!(snapshot(&outside), ["precious = keep\n"]);
     }
@@ -2406,7 +2407,7 @@ mod tests {
             assert_eq!(undo.unplacing().links(), ["KadathThorn/src/fuka"]);
             let list = crate::thornlist::parse(&new).unwrap();
             let mut progress = prodash::tree::Root::new().add_child("plan");
-            let plan = super::super::plan(&list, &install, &mut progress).unwrap();
+            let plan = super::super::plan(&list, &install, Ask, &mut progress).unwrap();
             let report = super::super::execute(&plan, &install).unwrap();
             assert!(report.failures.is_empty(), "{:?}", report.failures);
             undo.made(&plan, &report);
@@ -2449,7 +2450,7 @@ mod tests {
             // The run fetches `placed` again: the link reads Unchanged.
             let list = crate::thornlist::parse(&placed).unwrap();
             let mut progress = prodash::tree::Root::new().add_child("plan");
-            let plan = super::super::plan(&list, &root, &mut progress).unwrap();
+            let plan = super::super::plan(&list, &root, Ask, &mut progress).unwrap();
             let report = super::super::execute(&plan, &root).unwrap();
             undo.made(&plan, &report);
             // ...and then fails: the undo runs as it goes out of scope.

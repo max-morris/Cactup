@@ -268,8 +268,10 @@ pub enum UnfetchedReason {
     /// supported workflow, not an error — `--overwrite-modified`/`-f`
     /// fetches over it if that was not what the user wanted.
     Skipped,
-    /// The fetch was attempted and errored. The user asked for this repo and
-    /// did not get it, so this is an error state, reported more loudly.
+    /// The fetch was attempted and errored, or the repo was not fetched
+    /// because its remote did not say which branch is its default. The user
+    /// asked for this repo and did not get it, so this is an error state,
+    /// reported more loudly.
     Failed,
 }
 
