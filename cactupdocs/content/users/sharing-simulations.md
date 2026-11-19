@@ -211,8 +211,10 @@ range dropped that sim, cactup says so and imports the newest one that has
 it. An entry that is one sim is never named with a third part.
 
 A downloaded sim is kept in `~/.cactup/simfiles/`, so importing the same
-exact version again needs no download, and still works when the Cactarium
-cannot be reached. Naming one sim of several needs a Cactarium that knows
+exact version again still works when the Cactarium cannot be reached. When
+it can, the sim is downloaded again, and if the Cactarium's copy has
+changed since (a version re-read after its tag was moved), cactup says so
+and imports the new one. Naming one sim of several needs a Cactarium that knows
 such entries; an older one is refused with a message saying so.
 
 ### Installing a stack

@@ -4765,7 +4765,12 @@ What uses it, all on the login node (D11):
 - `cactup import owner/name[/sim][@range|=X.Y.Z]` downloads the published sim
   (versions are semver, like packages and stacks; the newest matching, or
   the newest at all) to `~/.cactup/simfiles/<owner>/<name>/<X.Y.Z>.sim`,
-  checked against the registry's `x-sha256`, then imports it as a file. An
+  checked against the registry's `x-sha256`, then imports it as a file. It is
+  downloaded whenever the registry answers, a cached copy of the version
+  notwithstanding: an admin's reread of a moved tag changes a version's file,
+  and a copy kept by version alone would be imported stale for good. A copy
+  that changed is said (yellow); the cached copy stands in only when the
+  registry or the download cannot be reached. An
   entry holding several sims (`[sim.files]`, manifest format 2) names each:
   `owner/name/sim` goes to `/resolve` as is, which answers with the newest
   version in range that has the sim (and `newer-without-sim` when a newer one
