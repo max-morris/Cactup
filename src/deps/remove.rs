@@ -65,6 +65,10 @@ pub struct RemovePlan {
     pub removed_labels: Vec<String>,
     /// Removed too, once confirmed (none under `--no-deps`).
     pub orphans: Vec<Orphan>,
+    /// What any state of the sweep had going, the targets among them: the packages whose
+    /// replaced bases it counted back.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub took: BTreeSet<PkgId>,
 }
 
 impl RemovePlan {
@@ -124,35 +128,6 @@ pub fn plan_remove(
     extensions: &[Extension],
     returning: &[(PkgId, Present)],
 ) -> Result<RemovePlan, Refusal> {
-    plan_remove_checking(present, added_for, targets, rules, no_deps, extensions, returning, true)
-}
-
-/// The added packages removing `targets` could ever sweep with them: the orphans with no base
-/// coming back (a base that comes back only holds more), dependents or not. What a removal
-/// reads of the bases that come back is limited to these and the targets.
-pub fn may_sweep(
-    present: &[Present],
-    added_for: &BTreeMap<PkgId, AddedFor>,
-    targets: &[PkgId],
-    rules: &Rules,
-    extensions: &[Extension],
-) -> BTreeSet<PkgId> {
-    let plan = plan_remove_checking(present, added_for, targets, rules, false, extensions, &[], false);
-    plan.map(|p| p.orphans.into_iter().map(|o| o.id).collect()).unwrap_or_default()
-}
-
-/// [`plan_remove`], refusing over dependents only when `refuse`.
-#[allow(clippy::too_many_arguments, clippy::result_large_err)]
-fn plan_remove_checking(
-    present: &[Present],
-    added_for: &BTreeMap<PkgId, AddedFor>,
-    targets: &[PkgId],
-    rules: &Rules,
-    no_deps: bool,
-    extensions: &[Extension],
-    returning: &[(PkgId, Present)],
-    refuse: bool,
-) -> Result<RemovePlan, Refusal> {
     let mut all: BTreeMap<PkgId, Present> = BTreeMap::new();
     for p in present {
         let mut p = p.clone();
@@ -199,7 +174,8 @@ fn plan_remove_checking(
     let removed: Vec<PkgId> = targets.iter().map(node_of).collect();
     let removed_labels = removed.iter().map(|id| label(id, &all)).collect();
     if no_deps {
-        return Ok(RemovePlan { removed: targets.to_vec(), removed_labels, orphans: Vec::new() });
+        let took = targets.iter().cloned().collect();
+        return Ok(RemovePlan { removed: targets.to_vec(), removed_labels, orphans: Vec::new(), took });
     }
     let gone: BTreeSet<&PkgId> = removed.iter().collect();
     // After the removal: what stays, and the base packages that come back with what goes (the
@@ -233,7 +209,7 @@ fn plan_remove_checking(
             }
         }
     }
-    if refuse && !dependents.is_empty() {
+    if !dependents.is_empty() {
         return Err(Refusal::HasDependents { removed: targets.to_vec(), dependents });
     }
 
@@ -252,7 +228,9 @@ fn plan_remove_checking(
     };
     let mut seen: Vec<(BTreeSet<PkgId>, BTreeSet<PkgId>)> = Vec::new();
     let mut going = targets_set.clone();
+    let mut took: BTreeSet<PkgId> = BTreeSet::new();
     let orphan_nodes: BTreeSet<PkgId> = loop {
+        took.extend(going.iter().cloned());
         let orphans = orphans_of(&going);
         let next: BTreeSet<PkgId> = targets_set.iter().cloned().chain(orphans.iter().map(&real)).collect();
         if next == going {
@@ -286,7 +264,27 @@ fn plan_remove_checking(
             Orphan { id: real.clone(), label: label(id, &all), by, caveat: None }
         })
         .collect();
-    Ok(RemovePlan { removed: targets.to_vec(), removed_labels, orphans })
+    Ok(RemovePlan { removed: targets.to_vec(), removed_labels, orphans, took })
+}
+
+/// The packages whose going may bring base packages back in a removal of `targets`, so whose
+/// replaced base repos the removal reads: the targets, and every one of `added` (the added
+/// packages and extensions) that its `added-for` entry does not say the user named. A named
+/// package is a root in every state of the sweep and never goes; any other may.
+///
+/// Not narrowed to what the sweep is found to take with no base back: a base that comes back
+/// takes a dependency over (before a fork or a satisfier of it, and before a later alternative
+/// of an any-of), so it can leave a package unheld that held without it, and that package's own
+/// bases then come back too. Which bases come back depends on what goes and the reverse, so
+/// the bases read are those of every package that could go at all: one round of reads, never
+/// a round per state of the sweep.
+pub fn may_bring_back(
+    targets: &[PkgId],
+    added_for: &BTreeMap<PkgId, AddedFor>,
+    added: impl IntoIterator<Item = PkgId>,
+) -> BTreeSet<PkgId> {
+    let named = |id: &PkgId| added_for.get(id).is_some_and(|a| a.requested);
+    targets.iter().cloned().chain(added.into_iter().filter(|id| !named(id))).collect()
 }
 
 struct Graph<'a> {

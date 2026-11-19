@@ -1611,11 +1611,11 @@ fn plan_remove_with_deps(
             .map(|p| p.release.id.clone())
             .collect();
         let unread = super::resolution::read_stand_ins(&mut reg, &mut set, &extended)?;
-        // What may go: the targets, and what could be swept with them (the orphans with no base
-        // back, which bases coming back only make fewer). Only their bases are read.
-        let rules = Rules::default();
-        let swept = deps::may_sweep(&set.present, &added_for, targets, &rules, &extensions_of(&set));
-        let bringing: BTreeSet<PkgId> = targets.iter().cloned().chain(swept).collect();
+        // What may go: the targets, and every added package the user did not name. Not only
+        // what the sweep takes with no base back: a base that comes back can take a dependency
+        // over and leave more to sweep, whose bases come back in turn. Only their bases are read.
+        let added = start.meta.added.iter().filter_map(|a| PkgId::parse(&a.package).ok());
+        let bringing = deps::may_bring_back(targets, &added_for, added);
         let returning =
             super::resolution::returning_base(&mut reg, &start.inst.root, base, &start.meta.added, &bringing)?;
         Ok((set, unread, returning))

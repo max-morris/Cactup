@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # Rewrites fixtures/cactarium/pool/ from the definitions below: python3 fixtures/cactarium/generate.py
+# Not every pool file is defined below: some, the remove cases' among them, were written by hand,
+# and running this script deletes them with the rest of pool/. Define them here before running it.
 """The package pool the resolver's table tests read (src/deps/tests.rs).
 
 Each pool file is one `GET /packages/{o}/{n}/versions` answer (`PackageVersions`, every field as

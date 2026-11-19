@@ -584,16 +584,28 @@ fn run(dir: &Path) -> Vec<String> {
                 (PkgId::parse(&r.replacer).unwrap(), present)
             })
             .collect();
-        match plan_remove(&present, &added_for, &targets, &rules, rm.no_deps, &extensions, &returning) {
+        // As `remove` reads them: only the bases of what may bring one back. Reading every
+        // base the case lists must come to the same plan.
+        let added = (present.iter())
+            .filter(|p| p.origin == Origin::Added)
+            .map(|p| p.release.id.clone())
+            .chain(extensions.iter().map(|e| e.id.clone()));
+        let bringing = may_bring_back(&targets, &added_for, added);
+        let read: Vec<(PkgId, Present)> = returning.iter().filter(|(r, _)| bringing.contains(r)).cloned().collect();
+        let every = plan_remove(&present, &added_for, &targets, &rules, rm.no_deps, &extensions, &returning);
+        match plan_remove(&present, &added_for, &targets, &rules, rm.no_deps, &extensions, &read) {
             Ok(plan) => {
                 check_refusal(&case.expect, None, None, &mut errors);
                 compare("removed", &case.expect.removed, plan.removed.iter().map(ToString::to_string).collect(), &mut errors);
                 let orphans = plan.orphans.iter().map(|o| format!("{}: {}", o.label, o.why())).collect();
                 compare("orphans", &case.expect.orphans, orphans, &mut errors);
-                // What a removal reads the returning bases of covers every orphan.
-                let may = may_sweep(&present, &added_for, &targets, &rules, &extensions);
-                for o in plan.orphans.iter().filter(|o| !may.contains(&o.id)) {
-                    errors.push(format!("orphan {} is not among what may be swept {may:?}", o.id));
+                // What a removal reads the returning bases of covers whatever any state of the
+                // sweep takes along, so every package whose bases it counts back.
+                for id in plan.took.iter().filter(|id| !bringing.contains(*id)) {
+                    errors.push(format!("{id} goes in a state of the sweep but is not among what may bring a base back {bringing:?}"));
+                }
+                if every.as_ref().ok() != Some(&plan) {
+                    errors.push(format!("reading only the bases of {bringing:?} plans otherwise than reading all: {every:?}"));
                 }
                 let rendered = plan.render("cactup remove");
                 compare("plan", &case.expect.plan, rendered.lines().skip(1).map(str::to_owned).collect(), &mut errors);
@@ -957,6 +969,7 @@ fn remove_plans_render() {
         removed: vec![PkgId::parse("max/z4c").unwrap()],
         removed_labels: vec!["max/z4c@1.2.0".into()],
         orphans: vec![Orphan { id: PkgId::parse("et/a").unwrap(), label: "et/a@1.0.0".into(), by: vec!["max/z4c@1.2.0".into()], caveat: None }],
+        took: std::collections::BTreeSet::new(),
     };
     assert!(plan.beyond_named());
     let lines = plan.lines("cactup remove max/z4c");
