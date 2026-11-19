@@ -434,11 +434,31 @@ fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) ->
         );
     }
     let dest = cached(&version);
-    if !dest.is_file() {
-        // Checked (hash, and for one sim of several its stamp) before it is
-        // put in the cache, whose copies are used again unchecked.
-        client.download_sim(owner, name, &version.to_string(), sim, &dest)?;
-        println!("Downloaded {shown}@{version} from {}", client.base());
+    // Downloaded whenever the Cactarium answers, even when a copy of this
+    // version is cached: a version's file can change under it (an admin
+    // rereads a tag that was moved), and a copy kept by version alone would
+    // be imported stale forever. The cached copy only stands in offline.
+    // Checked (hash, and for one sim of several its stamp) before it is put
+    // in the cache.
+    let before = std::fs::read(&dest).ok();
+    if let Err(e) = client.download_sim(owner, name, &version.to_string(), sim, &dest) {
+        if before.is_none() {
+            return Err(e);
+        }
+        println!(
+            "{}",
+            format!("Could not download {shown}@{version} ({e:#}); using the copy downloaded before").dimmed()
+        );
+        return Ok(dest);
+    }
+    match before {
+        None => println!("Downloaded {shown}@{version} from {}", client.base()),
+        Some(before) if std::fs::read(&dest).ok().as_deref() != Some(before.as_slice()) => println!(
+            "{}",
+            format!("{shown}@{version} has changed on the Cactarium since it was downloaded before; using the new copy")
+                .yellow()
+        ),
+        Some(_) => {}
     }
     Ok(dest)
 }
@@ -1269,6 +1289,32 @@ pub(crate) mod tests {
         assert!(heads[3].starts_with("GET /api/v1/sims/et/cottonmouth-sims/2026.5.1/download?sim=mag-tov "), "{}", heads[3]);
     }
 
+    /// A version whose file changed on the Cactarium (a moved tag an admin
+    /// reread) is downloaded again, not taken from the cache by its version.
+    #[test]
+    fn a_changed_version_replaces_the_cached_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = served.clone();
+        let (client, heads) = cactarium(
+            4,
+            |_| ("200 OK", resolved("et/cottonmouth-sims/qc0-z4c@2026.5.1", "2026.5.1", Some("qc0-z4c"), None)),
+            move |_| {
+                let stamp = "et/cottonmouth-sims/qc0-z4c@2026.5.1";
+                match count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                    0 => stamped(stamp),
+                    _ => format!("{}# fixed\n", stamped(stamp)),
+                }
+            },
+        );
+        let path = fetch_published(&client, tmp.path(), "et/cottonmouth-sims/qc0-z4c@=2026.5.1").unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("# fixed"));
+        assert_eq!(fetch_published(&client, tmp.path(), "et/cottonmouth-sims/qc0-z4c@=2026.5.1").unwrap(), path);
+        assert!(std::fs::read_to_string(&path).unwrap().ends_with("# fixed\n"));
+        assert_eq!(heads.join().unwrap().len(), 4);
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
     /// An entry that is one sim is addressed and cached as before: no
     /// `?sim=`, and a copy downloaded before (an exact version) is used as it
     /// is, offline too.
@@ -1347,7 +1393,7 @@ pub(crate) mod tests {
     fn a_range_with_a_full_version_is_a_range() {
         let tmp = tempfile::tempdir().unwrap();
         let (client, _) = cactarium(
-            6,
+            7,
             |_| ("200 OK", resolved("et/cottonmouth-sims/qc0-z4c@2026.5.3", "2026.5.3", Some("qc0-z4c"), None)),
             |_| stamped("et/cottonmouth-sims/qc0-z4c@2026.5.3"),
         );
@@ -1373,22 +1419,28 @@ pub(crate) mod tests {
         assert_eq!(err, "invalid: 'qc0-z4c' in 'et/carpetx/qc0-z4c' is not a thorn name");
     }
 
-    /// One sim of several, downloaded before: used again without a second
-    /// download, and, for an exact version, when the Cactarium cannot be
-    /// reached.
+    /// One sim of several, downloaded before: downloaded again while the
+    /// Cactarium answers (the copy is checked against it), and used as it
+    /// is when the download fails, or, for an exact version, when the
+    /// Cactarium cannot be reached.
     #[test]
     fn one_sim_of_several_is_cached_and_used_offline() {
         let tmp = tempfile::tempdir().unwrap();
         let (client, heads) = cactarium(
-            3,
+            5,
             |_| ("200 OK", resolved("et/s/a@1.0.0", "1.0.0", Some("a"), None)),
             |_| stamped("et/s/a@1.0.0"),
         );
         let path = fetch_published(&client, tmp.path(), "et/s/a@1").unwrap();
         assert_eq!(path, tmp.path().join("et/s/a/1.0.0.sim"));
+        let first = std::fs::read(&path).unwrap();
+        assert_eq!(fetch_published(&client, tmp.path(), "et/s/a@=1.0.0").unwrap(), path);
+        assert_eq!(std::fs::read(&path).unwrap(), first);
+        // The server stops after this /resolve: the download fails, and the
+        // copy downloaded before stands in.
         assert_eq!(fetch_published(&client, tmp.path(), "et/s/a@=1.0.0").unwrap(), path);
         let heads = heads.join().unwrap();
-        assert!(heads[2].contains("/resolve?"), "the second import asked only /resolve: {}", heads[2]);
+        assert!(heads[3].contains("/download?sim=a "), "the second import downloaded again: {}", heads[3]);
         let gone = crate::cactarium::Client::at(client.base());
         assert_eq!(fetch_published(&gone, tmp.path(), "et/s/a@=1.0.0").unwrap(), path);
         // Offline, another sim of that version is not that copy.
@@ -1453,7 +1505,7 @@ pub(crate) mod tests {
     fn build_metadata_does_not_tell_versions_apart() {
         let tmp = tempfile::tempdir().unwrap();
         let (client, _) = cactarium(
-            4,
+            5,
             |_| ("200 OK", resolved("et/s/a@1.0.0+b", "1.0.0+b", Some("a"), None)),
             |_| stamped("et/s/a@1.0.0+b"),
         );

@@ -3376,7 +3376,12 @@ compute node's own cactup has already written the outcome into the very
 A machine with no `blocking-submit` key gets the ordinary `submit`, followed
 by polling the attempt until it reports an outcome — reusing the exact loop
 `--follow` already builds on `tail::LogTail` and `tail::PollBackoff` for, just
-in a silent mode that skips the output streaming. Ctrl-C detaches without
+without the output streaming. Neither route is silent (§2.4): from the moment
+it is known the build is queued, one progress line names the job, the state
+the scheduler last gave and the time waited (`--follow` draws it until the
+output starts), and the native route says before it submits that the command
+holds until the job ends, since `sbatch --wait` may report the job id only at
+the end. Ctrl-C detaches without
 touching the queued job, exactly as `--follow` does. Both routes derive the
 verdict identically, from the attempt's own recorded outcome and never a
 relayed exit code, so the only difference a user sees between them is that the
@@ -4633,7 +4638,14 @@ kind of install-time provenance, `simfile`, beside `release` and `thornlist`;
 `cactup import <file.sim>` reproduces a `.sim` in one step: `install
 --simfile` under the file's name (or `--alias`), `cactup build` of a config of
 that name — in the foreground, or, on a machine that queues builds, submitted
-and blocked on (§7.9), with `--flavor` and `-j`/`--make-jobs` passed to it —
+with the plain `submit` and followed (`build submit --follow`, §7.9), with
+`--flavor` and `-j`/`--make-jobs` passed to it: the job is named at once, a
+line shows its state and the time waited until the build's output starts,
+and the output then streams as a foreground build's does. Never through
+`blocking-submit`, which can hold back even the job id until the job ends,
+leaving an import silent for the whole queue wait. Ctrl-C detaches, leaving
+the job running, and the import fails "interrupted"; running the same
+command again once the build is over finishes it —
 then `sim create` from the file's parfile, and with
 `--submit`/`--run` the simulation started. `import` takes every flag of the
 groups `sim submit` and `sim run` start with — the TOPOLOGY flags (§8.5), the
@@ -4759,7 +4771,12 @@ What uses it, all on the login node (D11):
 - `cactup import owner/name[/sim][@range|=X.Y.Z]` downloads the published sim
   (versions are semver, like packages and stacks; the newest matching, or
   the newest at all) to `~/.cactup/simfiles/<owner>/<name>/<X.Y.Z>.sim`,
-  checked against the registry's `x-sha256`, then imports it as a file. An
+  checked against the registry's `x-sha256`, then imports it as a file. It is
+  downloaded whenever the registry answers, a cached copy of the version
+  notwithstanding: an admin's reread of a moved tag changes a version's file,
+  and a copy kept by version alone would be imported stale for good. A copy
+  that changed is said (yellow); the cached copy stands in only when the
+  registry or the download cannot be reached. An
   entry holding several sims (`[sim.files]`, manifest format 2) names each:
   `owner/name/sim` goes to `/resolve` as is, which answers with the newest
   version in range that has the sim (and `newer-without-sim` when a newer one
