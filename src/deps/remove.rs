@@ -124,6 +124,35 @@ pub fn plan_remove(
     extensions: &[Extension],
     returning: &[(PkgId, Present)],
 ) -> Result<RemovePlan, Refusal> {
+    plan_remove_checking(present, added_for, targets, rules, no_deps, extensions, returning, true)
+}
+
+/// The added packages removing `targets` could ever sweep with them: the orphans with no base
+/// coming back (a base that comes back only holds more), dependents or not. What a removal
+/// reads of the bases that come back is limited to these and the targets.
+pub fn may_sweep(
+    present: &[Present],
+    added_for: &BTreeMap<PkgId, AddedFor>,
+    targets: &[PkgId],
+    rules: &Rules,
+    extensions: &[Extension],
+) -> BTreeSet<PkgId> {
+    let plan = plan_remove_checking(present, added_for, targets, rules, false, extensions, &[], false);
+    plan.map(|p| p.orphans.into_iter().map(|o| o.id).collect()).unwrap_or_default()
+}
+
+/// [`plan_remove`], refusing over dependents only when `refuse`.
+#[allow(clippy::too_many_arguments, clippy::result_large_err)]
+fn plan_remove_checking(
+    present: &[Present],
+    added_for: &BTreeMap<PkgId, AddedFor>,
+    targets: &[PkgId],
+    rules: &Rules,
+    no_deps: bool,
+    extensions: &[Extension],
+    returning: &[(PkgId, Present)],
+    refuse: bool,
+) -> Result<RemovePlan, Refusal> {
     let mut all: BTreeMap<PkgId, Present> = BTreeMap::new();
     for p in present {
         let mut p = p.clone();
@@ -204,7 +233,7 @@ pub fn plan_remove(
             }
         }
     }
-    if !dependents.is_empty() {
+    if refuse && !dependents.is_empty() {
         return Err(Refusal::HasDependents { removed: targets.to_vec(), dependents });
     }
 
@@ -230,10 +259,21 @@ pub fn plan_remove(
             break orphans;
         }
         if let Some(at) = seen.iter().position(|(g, _)| *g == next) {
-            // A cycle: what every state of it leaves unheld (held in any, it stays).
+            // A cycle: what every state of it leaves unheld (held in any, it stays), then checked
+            // against the state that set itself implies (only its bases back), until that holds:
+            // what is held there stays too.
             let mut cycle = seen[at..].iter().map(|(_, o)| o.clone()).chain([orphans]);
             let first = cycle.next().unwrap_or_default();
-            break cycle.fold(first, |all, o| all.intersection(&o).cloned().collect());
+            let mut kept: BTreeSet<PkgId> = cycle.fold(first, |all, o| all.intersection(&o).cloned().collect());
+            loop {
+                let going: BTreeSet<PkgId> = targets_set.iter().cloned().chain(kept.iter().map(&real)).collect();
+                let narrowed: BTreeSet<PkgId> = kept.intersection(&orphans_of(&going)).cloned().collect();
+                if narrowed == kept {
+                    break;
+                }
+                kept = narrowed;
+            }
+            break kept;
         }
         seen.push((going, orphans));
         going = next;

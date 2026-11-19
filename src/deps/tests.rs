@@ -590,6 +590,11 @@ fn run(dir: &Path) -> Vec<String> {
                 compare("removed", &case.expect.removed, plan.removed.iter().map(ToString::to_string).collect(), &mut errors);
                 let orphans = plan.orphans.iter().map(|o| format!("{}: {}", o.label, o.why())).collect();
                 compare("orphans", &case.expect.orphans, orphans, &mut errors);
+                // What a removal reads the returning bases of covers every orphan.
+                let may = may_sweep(&present, &added_for, &targets, &rules, &extensions);
+                for o in plan.orphans.iter().filter(|o| !may.contains(&o.id)) {
+                    errors.push(format!("orphan {} is not among what may be swept {may:?}", o.id));
+                }
                 let rendered = plan.render("cactup remove");
                 compare("plan", &case.expect.plan, rendered.lines().skip(1).map(str::to_owned).collect(), &mut errors);
             }
