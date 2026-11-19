@@ -2070,12 +2070,13 @@ mod tests {
     }
 
 
-    /// A loose thornlist of pinned git repos, one section per `(url,
-    /// checkout)`, and a parfile with one input, packed (no remote is asked
-    /// for a tip: every repo is pinned) with `describe` over the defaults.
+    /// A loose thornlist of git repos, one section per `(url, checkout)`,
+    /// and a parfile with one input, packed with `describe` over the
+    /// defaults. When `pinned`, no remote is asked for a tip.
     fn pack_urls(
         tmp: &Path,
         sections: &[(&str, &str)],
+        pinned: bool,
         describe: crate::args::SimDescribeArgs,
     ) -> (crate::Res<()>, PathBuf, String) {
         let mut ctx = fake_ctx(&tmp.join("db"));
@@ -2084,8 +2085,8 @@ mod tests {
         for (url, checkout) in sections {
             list.push_str(&format!(
                 "!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = {url}\n!REPO_BRANCH = main\n\
-                 !REPO_COMMIT = {}\n!CHECKOUT = {checkout}\n",
-                "a".repeat(40)
+                 {}!CHECKOUT = {checkout}\n",
+                if pinned { format!("!REPO_COMMIT = {}\n", "a".repeat(40)) } else { String::new() }
             ));
         }
         let th = tmp.join("list.th");
@@ -2133,7 +2134,7 @@ mod tests {
             input_urls: vec!["data=https://max:hunter2@example.org/f.h5?download=1".to_owned()],
             ..Default::default()
         };
-        let (packed, out, _) = pack_urls(tmp.path(), &sections, describe);
+        let (packed, out, _) = pack_urls(tmp.path(), &sections, true, describe);
         let err = format!("{:#}", packed.unwrap_err());
         for said in [
             "a: https://***@github.com/o/a.git carries credentials",
@@ -2155,6 +2156,7 @@ mod tests {
         let (packed, out, list) = pack_urls(
             tmp.path(),
             &[("git@public.share.test:o/f.git", "F/One"), ("https://github.com/o/g.git", "G/One")],
+            true,
             Default::default(),
         );
         packed.unwrap();
@@ -2163,6 +2165,31 @@ mod tests {
         assert_eq!(url("f"), "https://public.share.test/o/f.git");
         assert_eq!(url("g"), "https://github.com/o/g.git");
         assert_eq!(file.thornlist.text, list.replace("git@public.share.test:o/f.git", "https://public.share.test/o/f.git"));
+    }
+
+    /// A URL refused offline fails before any remote is asked for its tip:
+    /// a pack of unpinned repos, one with a token in its URL, asks nothing
+    /// but the https URL of its ssh remote (named in the same error when it
+    /// does not answer).
+    #[test]
+    fn a_url_refused_offline_fails_before_any_tip_is_asked() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        let tmp = tempfile::tempdir().unwrap();
+        serve("private.offline.test", Mode::Private);
+        let sections = [
+            ("https://TOKEN123@tips.offline.test/o/a.git", "A/One"),
+            ("https://tips.offline.test/o/b.git", "B/One"),
+            ("git@private.offline.test:o/c.git", "C/One"),
+        ];
+        let (packed, out, _) = pack_urls(tmp.path(), &sections, false, Default::default());
+        let err = format!("{:#}", packed.unwrap_err());
+        assert!(err.contains("a: https://***@tips.offline.test/o/a.git carries credentials"), "{err}");
+        assert!(err.contains("c: git@private.offline.test:o/c.git is an ssh URL") && err.contains("401"), "{err}");
+        assert!(!err.contains("TOKEN123") && !out.exists(), "{err}");
+        let asked = crate::fetch::git::ASKED.lock().unwrap().clone();
+        assert!(!asked.iter().any(|u| u.contains(".offline.test")), "tips asked: {asked:?}");
+        let probed = crate::fetch::anonymous::PROBED.lock().unwrap().clone();
+        assert!(probed.iter().any(|u| u == "https://private.offline.test/o/c.git"), "{probed:?}");
     }
 
     /// With --local, the .sim is for use here: every URL goes in as it is,
@@ -2177,7 +2204,7 @@ mod tests {
             ("git@unasked.share.test:o/c.git", "C/One"),
         ];
         let describe = crate::args::SimDescribeArgs { local: true, ..Default::default() };
-        let (packed, out, list) = pack_urls(tmp.path(), &sections, describe);
+        let (packed, out, list) = pack_urls(tmp.path(), &sections, true, describe);
         packed.unwrap();
         let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
         assert_eq!(file.thornlist.text, list);
@@ -2207,7 +2234,7 @@ mod tests {
         let asked = serve("silent.share.test", Mode::Silent);
         let root = tmp.path().to_owned();
         let packing = std::thread::spawn(move || {
-            let (packed, out, _) = pack_urls(&root, &[("git@silent.share.test:o/s.git", "S/One")], Default::default());
+            let (packed, out, _) = pack_urls(&root, &[("git@silent.share.test:o/s.git", "S/One")], true, Default::default());
             (packed, out, std::time::Instant::now())
         });
         asked.recv_timeout(std::time::Duration::from_secs(10)).expect("the https URL was asked");

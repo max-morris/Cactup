@@ -1,7 +1,12 @@
 //! What may go into a `.sim` that leaves this machine (spec §8.9): every
 //! repo URL one anybody can fetch, and no URL that carries credentials.
 //! `sim export` and `sim pack` check every repo and input URL before they
-//! write one, unless `--local` says the file is for use here only.
+//! write one, unless `--local` says the file is for use here only. The
+//! check comes in two halves: [`classify`], offline, before anything else
+//! asks the network (a pack's remote tips), and [`settle`], which asks the
+//! ssh remotes' https URLs and rewrites them. A URL refused offline fails
+//! at once ([`refuse`]), the https asks made too, so one error still names
+//! every URL refused.
 //!
 //! The rules are the shared crate's (`cactup_ecosystem_common::url`), so the
 //! Cactarium refuses exactly what export does. A git repo's URL must be
@@ -26,32 +31,46 @@ use std::collections::BTreeMap;
 /// What every refusal ends with.
 const LOCAL_HINT: &str = "or pass --local to export for use here only";
 
-/// Make `repos` and the thornlist `text` they came from fit to leave this
-/// machine, with `input_urls` (each input's KNOB and URL) checked too:
-/// every ssh remote whose https equivalent answers anonymously is rewritten
-/// to it (one line said for each), and anything that cannot be published
-/// fails the call, every offending URL named in one error. The probes run
-/// on the network fan-out within one [`REMOTE_ASK_TIMEOUT`], a line each;
-/// Ctrl-C fails the call ("Interrupted").
-pub fn make_shareable(repos: &mut [RepoPin], text: &mut String, input_urls: &[(String, String)]) -> Res<()> {
-    let list = thornlist::parse(text).context("The thornlist does not parse")?;
+/// The offline half of the check: what [`classify`] found.
+#[derive(Debug)]
+pub struct Checked {
+    /// A line per URL refused, "<repo>: <why>" or "input <knob>: <why>".
+    refused: Vec<String>,
+    /// The ssh remotes to ask the https equivalents of: (repo, ssh URL,
+    /// https URL).
+    asks: Vec<(String, String, String)>,
+}
+
+impl Checked {
+    /// Whether a URL was refused already, offline.
+    pub fn refuses(&self) -> bool {
+        !self.refused.is_empty()
+    }
+}
+
+/// Each repo URL of `list` (a repo once, by its first component) and each
+/// input's URL in `input_urls` (KNOB, URL) judged without the network: the
+/// refusals, and the ssh remotes whose https equivalents [`settle`] or
+/// [`refuse`] must ask.
+pub fn classify(list: &thornlist::Thornlist, input_urls: &[(String, String)]) -> Checked {
     let mut refused = Vec::new();
     let mut asks = Vec::new();
-    for pin in repos.iter() {
-        let Some(c) = list.components().iter().find(|c| c.repo == pin.name) else { continue };
-        if c.ty == ComponentType::Ignore || pin.url.trim().is_empty() {
+    let mut seen = std::collections::BTreeSet::new();
+    for c in list.components() {
+        let url = c.url.as_deref().unwrap_or("");
+        if !seen.insert(c.repo.as_str()) || c.ty == ComponentType::Ignore || url.trim().is_empty() {
             continue;
         }
         if c.ty != ComponentType::Git {
-            if let Some(why) = download_refusal(&pin.url, true) {
-                refused.push(format!("{}: {why}", pin.name));
+            if let Some(why) = download_refusal(url, true) {
+                refused.push(format!("{}: {why}", c.repo));
             }
             continue;
         }
-        match shareability(&pin.url) {
+        match shareability(url) {
             Shareability::Shareable => {}
-            Shareability::Ssh { https: Some(https) } => asks.push((pin.name.clone(), pin.url.clone(), https)),
-            other => refused.push(format!("{}: {}", pin.name, other.refusal(&pin.url).expect("not shareable"))),
+            Shareability::Ssh { https: Some(https) } => asks.push((c.repo.clone(), url.to_owned(), https)),
+            other => refused.push(format!("{}: {}", c.repo, other.refusal(url).expect("not shareable"))),
         }
     }
     for (knob, url) in input_urls {
@@ -59,7 +78,38 @@ pub fn make_shareable(repos: &mut [RepoPin], text: &mut String, input_urls: &[(S
             refused.push(format!("input {knob}: {why}"));
         }
     }
+    Checked { refused, asks }
+}
 
+/// Fail with every refusal of `checked`, after asking its https URLs so
+/// the one error names those refused too; nothing when `checked` refuses
+/// nothing and every https URL answers. For a caller that will not write
+/// the file anyway: nothing is rewritten.
+pub fn refuse(checked: Checked) -> Res<()> {
+    probed(checked).map(drop)
+}
+
+/// Make `repos` and the thornlist `text` they came from (what `checked`
+/// was classified from) fit to leave this machine: every ssh remote whose
+/// https equivalent answers anonymously is rewritten to it (one line said
+/// for each), and anything that cannot be published fails the call, every
+/// offending URL named in one error. The asks run on the network fan-out
+/// within one [`REMOTE_ASK_TIMEOUT`], a line each; Ctrl-C fails the call
+/// ("Interrupted").
+pub fn settle(checked: Checked, repos: &mut [RepoPin], text: &mut String) -> Res<()> {
+    let rewrites = probed(checked)?;
+    if rewrites.is_empty() {
+        return Ok(());
+    }
+    let list = thornlist::parse(text).context("The thornlist does not parse")?;
+    rewrite(&list, &rewrites, repos, text)
+}
+
+/// The https asks of `checked` made: the error naming every URL refused,
+/// offline or by its answer, else the ssh URLs to rewrite, by repo (ssh
+/// URL, https URL).
+fn probed(checked: Checked) -> Res<BTreeMap<String, (String, String)>> {
+    let Checked { mut refused, asks } = checked;
     let answers = probe_all(&asks)?;
     let mut rewrites = BTreeMap::new();
     for ((name, ssh, https), answer) in asks.into_iter().zip(answers) {
@@ -81,10 +131,17 @@ pub fn make_shareable(repos: &mut [RepoPin], text: &mut String, input_urls: &[(S
             refused.join("\n  ")
         );
     }
-    if rewrites.is_empty() {
-        return Ok(());
-    }
+    Ok(rewrites)
+}
 
+/// `rewrites` (by repo: ssh URL, https URL) made in `repos` and in `text`
+/// (parsed as `list`), checked by parsing the result back.
+fn rewrite(
+    list: &thornlist::Thornlist,
+    rewrites: &BTreeMap<String, (String, String)>,
+    repos: &mut [RepoPin],
+    text: &mut String,
+) -> Res<()> {
     let rewritten = rewrite_urls(text, &rewrites.values().cloned().collect());
     let check = thornlist::parse(&rewritten).context("The thornlist with its ssh URLs rewritten does not parse")?;
     let mut stuck = Vec::new();

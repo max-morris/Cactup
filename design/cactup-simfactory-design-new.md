@@ -4567,9 +4567,13 @@ the config's own record only while that still describes the same `build-id`.
   component's URL (a download, svn) is not probed and may carry a query; it
   is refused for credentials or a local path only. An input's URL
   (`--input-url`, or one typed at the prompt) is refused for userinfo only:
-  download links carry queries (`?download=1`). Every refusal is collected
-  into one error, before any question is asked, ending "or pass --local to
-  export for use here only"; messages show URLs redacted (`url::Redacted`).
+  download links carry queries (`?download=1`). The judgment that needs no
+  network (`shareable::classify`) runs first, before `sim pack` asks any
+  remote for its tip: a URL refused there fails at once, after only the
+  https asks, so one error still names every URL refused. Every refusal is
+  collected into that one error, before any question is asked, ending "or
+  pass --local to export for use here only"; messages show URLs redacted
+  (`url::Redacted`).
   `--local` writes every URL as it is and probes nothing.
 - **Inputs.** Every required `@KNOB(name)@` in a `.par` that is not a
   standard knob (§5) becomes an `[[input]]`: something the simulation needs
