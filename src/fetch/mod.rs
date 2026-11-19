@@ -1256,12 +1256,16 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
                 // anywhere else is the user's doing, unless it is already the
                 // pin itself.
                 let ours = record.is_some_and(|r| r.head == head.to_string());
+                // Back onto a branch: the list's, else the one the last fetch
+                // followed, else the remote's default. A pinned fetch's
+                // recorded branch is only the label its pin came from (a tag,
+                // as often as not), never a branch to align to.
+                let followed = record.filter(|r| r.commit.is_none()).and_then(|r| r.branch.clone());
                 let action = match commit {
                     Some(pin) if pin == head || ours => Some((GitAction::Pin, group.branch.clone())),
-                    None if ours => group
-                        .branch
-                        .clone()
-                        .or_else(|| record.and_then(|r| r.branch.clone()))
+                    None if ours => (group.branch.clone())
+                        .or(followed)
+                        .or_else(|| git::default_branch(&dir))
                         .map(|branch| (GitAction::Align, Some(branch))),
                     _ => None,
                 };

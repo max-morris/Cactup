@@ -2025,7 +2025,9 @@ fn remove_finds_a_base_package_that_depends_on_what_goes() {
 /// pinned at c1 or follows its branch, beside et/x (at a commit no version
 /// froze, read in the batch) and et/f (frozen at 1.0.0), both depending on
 /// et/carpet >=1.0.0. `head`: whether the Cactarium can read et/carpet's tip.
-fn replaced_base(pinned: bool, head: bool) -> (Setup, Shared) {
+/// `tag`: the tag 2.0.0 was frozen from (in the upstream too), which `add`
+/// writes as the replacement's `!REPO_BRANCH`.
+fn replaced_base(pinned: bool, head: bool, tag: Option<&str>) -> (Setup, Shared) {
     let tmp = tempfile::tempdir().unwrap();
     let (curl, c1) = upstream(tmp.path(), "carpet", &[("Carpet/interface.ccl", "IMPLEMENTS: carpet\n")]);
     let (xurl, cx) = upstream(tmp.path(), "x", &[("X/interface.ccl", "IMPLEMENTS: x\n")]);
@@ -2048,10 +2050,18 @@ fn replaced_base(pinned: bool, head: bool) -> (Setup, Shared) {
     let setup = Setup::new(tmp, &base, &cactarium);
     // Then et/carpet 2.0.0, its branch's new tip.
     let up = setup.inst.root.parent().unwrap().join("up/carpet");
-    let c2 = crate::fetch::tests::commit_files(&up, &[("Carpet/interface.ccl", "IMPLEMENTS: carpet\n"), ("README", "2\n")]).to_string();
+    let c2 = crate::fetch::tests::commit_files(&up, &[("Carpet/interface.ccl", "IMPLEMENTS: carpet\n"), ("README", "2\n")]);
+    if let Some(tag) = tag {
+        let repo = gix::open(&up).unwrap();
+        repo.reference(format!("refs/tags/{tag}"), c2, gix::refs::transaction::PreviousValue::Any, "tag").unwrap();
+    }
+    let c2 = c2.to_string();
     {
         let mut f = fake.lock().unwrap();
-        let two = version("2.0.0", &c2, &curl, "Carpet", &["Carpet"], "[]");
+        let mut two = version("2.0.0", &c2, &curl, "Carpet", &["Carpet"], "[]");
+        if let Some(tag) = tag {
+            two = two.replace("\"tag\":null", &format!("\"tag\":\"{tag}\""));
+        }
         f.packages.iter_mut().find(|(p, _)| p == "et/carpet").unwrap().1.insert(0, two);
         if head {
             f.snapshots.push(("et/carpet".into(), "head".into(), version("head", &c2, &curl, "Carpet", &["Carpet"], "[]")));
@@ -2066,25 +2076,42 @@ fn replaced_base(pinned: bool, head: bool) -> (Setup, Shared) {
 /// What comes back that cannot be read is said beside a refusal.
 #[test]
 fn removing_a_replacement_counts_the_base_that_comes_back() {
-    for (pinned, head) in [(true, false), (false, true)] {
-        let (s, _) = replaced_base(pinned, head);
+    // Pinned; following its branch, the replacement frozen from a plain tag,
+    // or from a track's (with a slash): the replacement's `!REPO_BRANCH`,
+    // which the remove must not take for the base's branch.
+    for (pinned, head, tag) in [(true, false, None), (false, true, Some("v2.0.0")), (false, true, Some("mixed-precision/v2.0.0"))] {
+        let (s, _) = replaced_base(pinned, head, tag);
         let upgrade = AddFlags { upgrade: true, yes: true, ..AddFlags::default() };
         s.add(&["et/carpet@=2.0.0"], upgrade).unwrap_or_else(|e| panic!("pinned {pinned}: {e:#}"));
         assert!(s.meta().added.iter().any(|a| a.package == "et/carpet" && a.replaces == ["carpet"]), "pinned {pinned}");
+        if let Some(tag) = tag {
+            // As on a real installation: the fetch record names the tag.
+            let state = crate::fetch::FetchState::read(&s.inst.root).unwrap().unwrap();
+            assert_eq!(state.repos["carpet"].branch.as_deref(), Some(tag));
+            // Any fetch of the base list (an `inst refetch` too) puts the
+            // clone back on the remote's default branch, never on the tag.
+            let pristine = std::fs::read_to_string(s.inst.source_thornlist()).unwrap();
+            let list = thornlist::parse(&pristine).unwrap();
+            let mut progress = prodash::tree::Root::new().add_child("plan");
+            let plan = crate::fetch::plan(&list, &s.inst.root, &mut progress).unwrap();
+            let carpet = plan.git.iter().find(|g| g.repo == "carpet").expect("carpet fetched, not skipped");
+            let (branch, _) = crate::fetch::git::head_of(&s.inst.root.parent().unwrap().join("up/carpet")).unwrap();
+            assert_eq!(carpet.branch.as_deref(), Some(branch.as_str()), "tag {tag}");
+        }
         // The replacement left the base's clone detached at its own pin:
         // cactup's doing, so the remove restores it (onto the branch, for a
         // base that follows one).
-        s.remove(&["et/carpet"], remove_yes()).unwrap_or_else(|e| panic!("pinned {pinned}: {e:#}"));
+        s.remove(&["et/carpet"], remove_yes()).unwrap_or_else(|e| panic!("pinned {pinned} tag {tag:?}: {e:#}"));
         let clone = s.inst.root.join("Cactus/repos/carpet");
         let (branch, head) = crate::fetch::git::head_of(&clone).unwrap();
         if !pinned {
             let tip = crate::fetch::git::head_of(&s.inst.root.parent().unwrap().join("up/carpet")).unwrap();
-            assert_eq!((branch, head), tip, "back on the base's branch, at its tip");
+            assert_eq!((branch, head), tip, "back on the base's branch, at its tip (tag {tag:?})");
         }
     }
     // The user moved HEAD after the add (detached at another commit): theirs,
     // left alone, and the remove refuses before anything is asked.
-    let (s, _) = replaced_base(false, true);
+    let (s, _) = replaced_base(false, true, None);
     s.add(&["et/carpet@=2.0.0"], AddFlags { upgrade: true, yes: true, ..AddFlags::default() }).unwrap();
     let clone = s.inst.root.join("Cactus/repos/carpet");
     let mine = crate::fetch::tests::commit_files(&clone, &[("Carpet/interface.ccl", "IMPLEMENTS: carpet\n"), ("README", "2\n"), ("MINE", "x\n")]);
@@ -2094,7 +2121,7 @@ fn removing_a_replacement_counts_the_base_that_comes_back() {
     assert!(err.contains("Repo carpet has detached HEAD") && err.contains("is still added"), "{err}");
     // A base that follows its branch, whose tip the Cactarium cannot read:
     // what comes back is unknown, and the refusal says so.
-    let (s, _) = replaced_base(false, false);
+    let (s, _) = replaced_base(false, false, None);
     s.add(&["et/carpet@=2.0.0"], AddFlags { upgrade: true, yes: true, ..AddFlags::default() }).unwrap();
     let start = Start::read(&s.ctx, false, Doing::Removing).unwrap();
     let base = thornlist::parse(&start.pristine).unwrap();
