@@ -6,6 +6,7 @@ pub mod add;
 pub mod build;
 pub mod cache;
 pub mod config;
+pub mod copy;
 pub mod delete;
 pub mod delta;
 pub mod import;

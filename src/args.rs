@@ -577,6 +577,17 @@ pub(crate) enum InstallationCommand {
         #[clap(short, long)]
         force: bool,
     },
+    // §3.1
+    /// Copy an installation's source tree to a new installation (configs, builds, simulations and test runs stay behind)
+    Cp {
+        /// The alias of the installation to copy.
+        source: String,
+        /// The alias of the new installation.
+        new_name: String,
+        /// The directory the copy is made in (default: <install-home>/<new-name>).
+        #[clap(long, value_name = "PATH")]
+        install_prefix: Option<String>,
+    },
 }
 
 #[derive(clap::Args, Debug)]

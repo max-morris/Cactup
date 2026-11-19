@@ -174,6 +174,31 @@ cactup refuses while a build of one of the installation's configs is running
 or queued; stop it first with `cactup build stop`, or pass `--force`. If you
 interrupt the deletion, run the same command again to finish it.
 
+## Copying an installation
+
+Copy an installation to a new one, to try something without touching the
+original:
+
+```sh
+cactup inst cp myrelease experiment
+```
+
+The copy lands in `~/.cactup/cacti/experiment` (or wherever your
+`install-home` says); pass `--install-prefix` to put it somewhere else. It
+gets the whole source tree, with every repo's history, local changes and
+commits, the live thornlist and anything else you keep in the Cactus
+directory, and the packages `cactup add` put there.
+
+It does not get the configs and their builds: a build records where its
+sources were, so a copied one would keep reading the original's files. Build
+them again in the copy (`cactup -I experiment build sim`); the build cache
+spares most of the compiling. The copy also starts with no simulations or
+test runs, and with simulation and test homes of its own, named for its
+alias.
+
+If you interrupt the copy, nothing is registered; running the same command
+again starts over.
+
 ## Updating an installation (refetch)
 
 `cactup installation refetch` (or `cactup inst refetch`) re-runs the
@@ -359,6 +384,8 @@ rebuilding would cost — use `cactup config delta`.
 {{cactup:cli command="installation delta"}}
 
 {{cactup:cli command="installation delete"}}
+
+{{cactup:cli command="installation cp"}}
 
 ## Global flags for installation commands
 

@@ -341,6 +341,7 @@ mod tests {
                 current_release: current_release.map(str::to_owned),
                 current_thornlist: current_thornlist.map(str::to_owned),
                 unfetched_repos: Default::default(),
+                copied_from: None,
             }
         };
         // Install-time provenance, never refetched.
@@ -382,6 +383,7 @@ mod tests {
             current_thornlist: None,
             stack_contact: None,
             unfetched_repos: Default::default(),
+            copied_from: None,
         };
         assert_eq!(live_thornlist_source(&partial), "release ET_2026_05");
 

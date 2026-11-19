@@ -72,7 +72,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
 
     // §2.3 item 6: the fetch lock. Dry-run stays read-only but still probes
     // it — classifying 81 worktrees mid-checkout would be garbage.
-    let lock_path = inst.cactup_dir().join(".cactup-fetch.lock");
+    let lock_path = inst.fetch_lock_path();
     fs::create_dir_all(inst.cactup_dir())
         .with_context(|| format!("Failed to create '{}'", inst.cactup_dir().display()))?;
     let _lock = if args.dry_run {
@@ -1585,6 +1585,7 @@ mod tests {
             current_thornlist: None,
             stack_contact: None,
             unfetched_repos: Default::default(),
+            copied_from: None,
         };
         let mp = entry(Some("max/carpetx-mp@mixed-precision:1.2.0"), None);
         assert_eq!(stay_on_track("max/carpetx-mp", Some(&mp)), "max/carpetx-mp@mixed-precision");

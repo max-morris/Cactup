@@ -562,6 +562,13 @@ impl Installation {
         self.root.join(".cactup")
     }
 
+    /// The fetch lock (§2.3 item 6): held by whatever rewrites the source
+    /// tree's repos (`installation refetch`), and by `installation cp` while
+    /// it reads them.
+    pub fn fetch_lock_path(&self) -> PathBuf {
+        self.cactup_dir().join(".cactup-fetch.lock")
+    }
+
     fn meta_path(&self) -> PathBuf {
         self.cactup_dir().join("installation.toml")
     }

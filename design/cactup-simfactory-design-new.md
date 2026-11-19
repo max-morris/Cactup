@@ -649,6 +649,19 @@ cactup installation delete <alias> [-f]           (delete an installation: the
                                                    if it points there; refuses
                                                    while a build is in flight
                                                    unless -f)
+cactup installation cp <alias> <new-name>         (copy an installation: the
+       [--install-prefix P]                        Cactus tree without configs/
+                                                   and exe/, imports/, the
+                                                   pristine thornlist, and the
+                                                   installation record and fetch
+                                                   state; new sim-home/test-home
+                                                   for the new alias, no active
+                                                   config, no simulations or test
+                                                   runs; staged in
+                                                   P/.cactup-cp-<new>.partial and
+                                                   registered last; holds the
+                                                   source's fetch lock; DB entry
+                                                   records `copied-from`)
 cactup inst …                      (short form of `installation`, a duplicate
                                     clap variant routed identically, so the docs
                                     generator renders both)

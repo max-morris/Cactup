@@ -159,6 +159,9 @@ pub fn dispatch(ctx: &Ctx, cmd: InstallationCommand) -> Res<()> {
         InstallationCommand::Refetch(args) => super::refetch::dispatch(ctx, args),
         InstallationCommand::Delta { alias } => super::delta::installation_delta(ctx, alias),
         InstallationCommand::Delete { alias, force } => super::delete::dispatch(ctx, alias, force),
+        InstallationCommand::Cp { source, new_name, install_prefix } => {
+            super::copy::dispatch(ctx, &source, &new_name, install_prefix.as_deref())
+        }
     }
 }
 
@@ -223,6 +226,9 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
             println!("  now on:       thornlist {current} (refetched)")
         }
         _ => {}
+    }
+    if let Some(source) = &entry.copied_from {
+        println!("  copied from:  {source}");
     }
     // §8.10: where to take problems with the stack the tree is on.
     if let Some(contact) = &entry.stack_contact {
@@ -388,6 +394,7 @@ mod tests {
             current_thornlist: None,
             stack_contact: None,
             unfetched_repos,
+            copied_from: None,
         }
     }
 

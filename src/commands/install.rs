@@ -222,13 +222,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     // machine's [paths].install-home (§4.2) — @USER@/@ENV()@ resolved for
     // this host — falling back to ~/.cactup/cacti when neither says.
     // Installs land under <install-home>/<alias>.
-    let install_home_base = machine
-        .meta
-        .path_for(&database, "install-home")
-        .ok()
-        .flatten()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| crate::mdb::meta::fallback_home("install-home").expect("install-home has a fallback"));
+    let install_home_base = install_home(&machine, &database);
     let install_prefix_default = |alias: &str| p2s(install_home_base.join(alias));
 
     let install_prefix = match install_prefix {
@@ -464,6 +458,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
             current_release: None,
             current_thornlist: None,
             unfetched_repos: Default::default(),
+            copied_from: None,
         });
         if database.active_installation.is_none() {
             database.active_installation = Some(alias.clone());
@@ -525,8 +520,21 @@ fn default_symlink_name(root: &str, alias: &str) -> String {
     Path::new(root).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| alias.to_owned())
 }
 
+/// Where installations land by default, each in a directory named for its
+/// alias: the install-home knob, else the machine's `[paths].install-home`
+/// (§4.2), else `~/.cactup/cacti`.
+pub(crate) fn install_home(machine: &crate::mdb::Machine, database: &crate::database::Database) -> PathBuf {
+    machine
+        .meta
+        .path_for(database, "install-home")
+        .ok()
+        .flatten()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::mdb::meta::fallback_home("install-home").expect("install-home has a fallback"))
+}
+
 /// An alias must be usable verbatim as a path component.
-fn valid_alias(alias: &str) -> bool {
+pub(crate) fn valid_alias(alias: &str) -> bool {
     !alias.is_empty()
         && alias != "."
         && alias != ".."

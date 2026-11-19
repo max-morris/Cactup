@@ -29,7 +29,8 @@
           ],
           "detail": "local modifications (Loop/src/loop.cxx)"
         }
-      }
+      },
+      "copied-from": "et-old"
     }
   },
   "active-installation": "et",

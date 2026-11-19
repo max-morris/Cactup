@@ -818,6 +818,7 @@ pub(crate) mod tests {
             current_thornlist: None,
             stack_contact: None,
             unfetched_repos: IndexMap::new(),
+            copied_from: None,
         };
         let ctx = ctx(&tmp.path().join("db"));
         ctx.db
