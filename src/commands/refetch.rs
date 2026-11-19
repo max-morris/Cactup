@@ -243,9 +243,9 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             );
         }
         let moved = if overwrite_modified {
-            plan.force()
+            plan.force()?
         } else {
-            plan.force_where(|s| forced_repo_names.contains(&s.repo))
+            plan.force_where(|s| forced_repo_names.contains(&s.repo))?
         };
         // "local modifications" would be wrong for a repo forced for a
         // changed remote URL, a detached HEAD, or local commits — none of
@@ -1784,6 +1784,7 @@ mod tests {
             reason: fetch::git::DirtyReason::WorktreeModified(vec!["src/foo.c".to_string()]),
             untracked: Vec::new(),
             checkouts: checkouts.iter().map(|s| s.to_string()).collect(),
+            record: None,
         }
     }
 
@@ -1798,6 +1799,7 @@ mod tests {
             checkouts: checkouts.iter().map(|s| s.to_string()).collect(),
             forced: None,
             retarget: None,
+            note: None,
         }
     }
 

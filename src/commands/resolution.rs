@@ -87,6 +87,10 @@ pub(crate) struct Registry {
     /// Items a batch answered in a way cactup cannot use: read singly, never
     /// asked in a batch again in this command.
     unusable: BTreeSet<(PkgId, String)>,
+    /// When batch reads end in this command: set by the first prefetch, and
+    /// shared by every later one (a command reads in batches for at most
+    /// [`BATCH_DEADLINE`] in all, however many phases it reads in).
+    batch_until: Option<std::time::Instant>,
 }
 
 /// What a batch read answered for one package at one commit.
@@ -106,8 +110,12 @@ enum Batched {
 const ROUND_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
 const STALL_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 const STALLS: usize = 3;
-/// The longest the batch phase takes, requests and waits together, and the
-/// most rounds it makes: then what is left is read singly when needed.
+/// The longest batch reads take in a command, requests and waits together,
+/// over every phase that reads in batches (one deadline for the command, set
+/// by its first), and the most rounds one phase makes: then what is left is
+/// read singly when needed. The single reads' [`WAIT_BUDGET`] is apart from
+/// it, so a command waits at most both: 5 minutes of batch reads, then up to
+/// 5 minutes for the read limit of single reads.
 const BATCH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
 const MAX_ROUNDS: usize = 30;
 /// The line the batch phase shows what it is doing on.
@@ -252,6 +260,7 @@ impl Registry {
             batch_rounds: 0,
             pauses: Vec::new(),
             unusable: BTreeSet::new(),
+            batch_until: None,
         }
     }
 
@@ -476,10 +485,11 @@ impl Registry {
     /// `not-read`, and is asked again, round after round: 1.5 s later while
     /// some of it is being read in the background (`in-progress`), 3 s later
     /// when none of it is (the server's network slots were taken, or its
-    /// time ran out), at most [`STALLS`] such rounds in a row. The whole
-    /// phase, requests and rate-limit waits included, keeps within
-    /// [`BATCH_DEADLINE`] (its own, apart from the single reads'
-    /// [`WAIT_BUDGET`]) and [`MAX_ROUNDS`] rounds. What is still not read
+    /// time ran out), at most [`STALLS`] such rounds in a row. The phase,
+    /// requests and rate-limit waits included, keeps within [`MAX_ROUNDS`]
+    /// rounds and the command's batch deadline ([`BATCH_DEADLINE`] from its
+    /// first prefetch, shared by all of them; apart from the single reads'
+    /// [`WAIT_BUDGET`]): one that starts past it asks nothing. What is still not read
     /// then is left to a single read when it is needed; so is an item cactup
     /// cannot use (answered for another package or commit, a version that is
     /// no release of it), which no batch of this command asks for again (it
@@ -498,7 +508,10 @@ impl Registry {
         if pending.is_empty() || self.no_batch {
             return Ok(());
         }
-        let deadline = std::time::Instant::now() + batch_deadline();
+        let deadline = *self.batch_until.get_or_insert_with(|| std::time::Instant::now() + batch_deadline());
+        if std::time::Instant::now() >= deadline {
+            return Ok(());
+        }
         let mut headline = self.headline(pending.len(), "packages");
         let status = Line::over(headline.add_child(BATCH.to_owned()), BATCH, self.layout.clone());
         let mut stalls = 0;
@@ -1300,61 +1313,101 @@ pub(crate) fn present(
 /// Base packages that come back, each with the added package whose removal brings it back.
 pub(crate) type Returning = Vec<(PkgId, Present)>;
 
-/// The base packages that would come back when an added package that
-/// replaced base repos goes (any of them: a target, or an orphan swept with
-/// the targets), each with that package: every base repo it replaced, where
-/// the base has it (its pin, or the tip of the branch it follows, which the
-/// restore aligns to), with the thorns the base checks out from it, read as
-/// present packages are: one lookup of them all, a version that froze the
-/// commit from the version list, else one batch read of them all (single
-/// reads where it reads nothing). The ones that cannot be read, said in
-/// words, each with the package whose going brings it back.
+/// The base packages that would come back when an added package of
+/// `bringing` that replaced base repos goes (the targets, and the packages
+/// that may be swept with them: never one the user named), each with that
+/// package: every base repo it replaced, where the restore will put it (its
+/// pin; else the tip of the branch [`crate::fetch::branch_after_restore`]
+/// names, the one the restore goes through, asked of the remote), with the
+/// thorns the base checks out from it, read as present packages are: one
+/// lookup of them all, a version that froze the commit from the version
+/// list, else one batch read of them all (single reads where it reads
+/// nothing). The remotes are asked in parallel, a line each, each within
+/// [`crate::fetch::git::REMOTE_ASK_TIMEOUT`]; Ctrl-C fails it. The ones that
+/// cannot be read, said in words, each with the package whose going brings
+/// it back.
 pub(crate) fn returning_base(
     reg: &mut Registry,
+    install_root: &Path,
     base: &Thornlist,
     added: &[AddedPackage],
+    bringing: &BTreeSet<PkgId>,
 ) -> Res<(Returning, Vec<(PkgId, String)>)> {
     struct Back<'l> {
         replacer: PkgId,
         repo: String,
         url: String,
-        commit: Result<String, String>,
+        pin: Option<String>,
+        listed: Option<&'l str>,
         checkouts: Vec<(&'l str, &'l str)>,
     }
     let mut backs: Vec<Back> = Vec::new();
     for a in added.iter().filter(|a| !a.replaces.is_empty()) {
         let replacer = PkgId::parse(&a.package)?;
+        if !bringing.contains(&replacer) {
+            continue;
+        }
         for repo in &a.replaces {
             let comps: Vec<&Component> = (base.components().iter())
                 .filter(|c| &c.repo == repo && crate::sim::trim::is_arrangement_thorn(base, c))
                 .collect();
             let Some(first) = comps.first() else { continue };
             let url = first.url.clone().unwrap_or_default();
-            // Where the restore puts it: the pin, else the tip of the branch the base names (or
-            // the remote's default).
-            let commit = match first.commit.clone().filter(|c| is_commit_id(c)) {
-                Some(pin) => Ok(pin),
-                None => crate::fetch::git::ask_remote_tip(&url, first.branch.as_deref())
-                    .map(|id| id.to_string())
-                    .map_err(|e| format!("its branch's tip cannot be told ({e:#})")),
-            };
+            let pin = first.commit.clone().filter(|c| is_commit_id(c));
             let checkouts = comps.iter().map(|c| (c.checkout.as_str(), c.repo_path.as_deref().unwrap_or(""))).collect();
-            backs.push(Back { replacer: replacer.clone(), repo: repo.clone(), url, commit, checkouts });
+            backs.push(Back { replacer: replacer.clone(), repo: repo.clone(), url, pin, listed: first.branch.as_deref(), checkouts });
         }
+    }
+    // Where each that follows a branch comes back: its remote asked, all at once.
+    let records = crate::fetch::FetchState::read(install_root)?;
+    let repos_dir = install_root.join(base.root()).join("repos");
+    let asks: Vec<&Back> = backs.iter().filter(|b| b.pin.is_none()).collect();
+    let tips: Vec<Result<String, String>> = if asks.is_empty() {
+        Vec::new()
+    } else {
+        let headline = Mutex::new(reg.headline(asks.len(), "repos"));
+        let layout = reg.layout.clone();
+        let answers = crate::par::parallel_map(&asks, |b| -> Res<Result<String, String>> {
+            let line = Line::over(headline.lock().expect("headline poisoned").add_child(b.repo.clone()), &b.repo, layout.clone());
+            line.phase("where the base's branch is".to_owned());
+            let record = records.as_ref().and_then(|r| r.repos.get(&b.repo));
+            let timeout = crate::fetch::git::REMOTE_ASK_TIMEOUT;
+            let follow = crate::fetch::branch_after_restore(&repos_dir.join(&b.repo), &b.url, b.listed, record, timeout)?;
+            line.phase("its branch's tip".to_owned());
+            let tip = match crate::fetch::git::ask_remote_tip(&b.url, follow.branch.as_deref(), timeout) {
+                Ok(id) => Ok(id.to_string()),
+                Err(e) if gix::interrupt::is_triggered() => return Err(e),
+                Err(e) => Err(match &follow.note {
+                    Some(note) => format!("its branch's tip cannot be told ({e:#}; {note})"),
+                    None => format!("its branch's tip cannot be told ({e:#})"),
+                }),
+            };
+            drop(line);
+            headline.lock().expect("headline poisoned").inc();
+            Ok(tip)
+        });
+        answers?.into_iter().collect::<Res<Vec<_>>>()?
+    };
+    // However little there was to ask, an interrupt is not a reading.
+    if gix::interrupt::is_triggered() {
+        bail!("Interrupted");
     }
     if backs.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
+    let mut tips = tips.into_iter();
+    let commits: Vec<Result<String, String>> =
+        backs.iter().map(|b| b.pin.clone().map_or_else(|| tips.next().expect("a tip per ask"), Ok)).collect();
     // Which package each is, in one lookup.
-    let pins: Vec<PinQuery> = (backs.iter())
-        .filter_map(|b| b.commit.as_ref().ok().map(|c| PinQuery { url: b.url.clone(), commit: c.clone() }))
+    let pins: Vec<PinQuery> = (backs.iter().zip(&commits))
+        .filter_map(|(b, c)| c.as_ref().ok().map(|c| PinQuery { url: b.url.clone(), commit: c.clone() }))
         .collect();
     let infos = reg.lookup(&pins)?;
     let mut info_of = pins.iter().zip(infos).map(|(p, i)| ((p.url.clone(), p.commit.clone()), i)).collect::<BTreeMap<_, _>>();
     let (mut out, mut unread) = (Vec::new(), Vec::new());
     let mut wanted: Vec<(usize, PkgId, String, Option<String>)> = Vec::new();
-    for (k, b) in backs.iter().enumerate() {
-        let commit = match &b.commit {
+    for (k, (b, commit)) in backs.iter().zip(&commits).enumerate() {
+        let commit = match commit {
             Ok(c) => c.clone(),
             Err(why) => {
                 unread.push((b.replacer.clone(), format!("base repo {}: {why}", b.repo)));

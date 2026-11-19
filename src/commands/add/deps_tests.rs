@@ -137,7 +137,7 @@ impl FakeLock {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
                 Err(std::sync::TryLockError::WouldBlock) => {
-                    panic!("the fake Cactarium's state stayed locked for a minute: is it locked twice in one statement?")
+                    panic!("the fake Cactarium's state stayed locked for {:?}: is it locked twice in one statement?", self.1)
                 }
             }
         }
@@ -1787,6 +1787,38 @@ fn the_batch_phase_is_bounded() {
     super::super::resolution::TEST_ROUND_WAIT.with(|c| c.set(None));
 }
 
+/// The batch deadline is the command's, not each phase's: a second prefetch
+/// after the first used it up has only what is left of it.
+#[test]
+fn every_prefetch_of_a_command_shares_one_batch_deadline() {
+    use super::super::resolution::{TEST_BATCH_DEADLINE, TEST_ROUND_WAIT};
+    TEST_ROUND_WAIT.with(|c| c.set(Some(std::time::Duration::from_millis(5))));
+    TEST_BATCH_DEADLINE.with(|d| d.set(Some(std::time::Duration::from_millis(150))));
+    let mut fake = Fake::new();
+    let mut items = Vec::new();
+    for i in 0..10 {
+        let (id, c) = (format!("et/p{i:03}"), format!("{:040x}", i + 1));
+        fake.snapshots.push((id.clone(), c.clone(), version(&c, &c, "https://x/p.git", "P", &["P"], "[]")));
+        items.push((crate::deps::PkgId::parse(&id).unwrap(), c));
+    }
+    (fake.fetch_budget, fake.fetch_asks, fake.window) = (0, 1000, std::time::Duration::from_millis(1));
+    let (base, _, _fake) = fake.serve_shared();
+    let client = crate::cactarium::Client::at(&base);
+    let mut reg = super::super::resolution::Registry::new(&client, []);
+    reg.prefetch(&items[..5]).unwrap();
+    let first = reg.batch_requests;
+    assert!(first > 1, "the first phase asks until the deadline: {first}");
+    // The first phase stops short of the deadline (no wait that would reach
+    // it): the second has what is left of it, a request's time at most.
+    let started = std::time::Instant::now();
+    reg.prefetch(&items[5..]).unwrap();
+    assert!(reg.batch_requests - first <= 1, "{} requests in the second phase", reg.batch_requests - first);
+    assert!(started.elapsed() < std::time::Duration::from_millis(60), "{:?}", started.elapsed());
+    reg.finish();
+    TEST_BATCH_DEADLINE.with(|d| d.set(None));
+    TEST_ROUND_WAIT.with(|c| c.set(None));
+}
+
 /// The read limit met by a batch request is waited out within the batch
 /// phase's own time: a Retry-After past its deadline is not waited for at
 /// all (the request is not sent again, and what it asked is left to single
@@ -2267,6 +2299,100 @@ fn what_comes_back_holds_only_what_it_meets() {
         let err = format!("{:#}", s.remove(&["et/carpet"], remove_yes()).unwrap_err());
         assert!(err.contains("Other packages depend on et/carpet") && err.contains("max/d@1.0.0"), "{range} {needs}: {err}");
     }
+}
+
+/// What comes back that cannot be read might need what the removal sweeps
+/// away: every orphan is shown with that, so the confirmation covers it,
+/// whether the base that cannot be read comes back with the target or with
+/// an orphan. (No dependent of et/carpet here: et/f and et/x claim nothing.)
+#[test]
+fn an_unread_returning_base_is_said_beside_every_orphan() {
+    let (s, fake) = replaced_base(false, false, None);
+    let up = s.inst.root.parent().unwrap().join("up");
+    crate::fetch::git::testrepo::init(&up.join("p"));
+    let p = crate::fetch::tests::commit_files(&up.join("p"), &[("P/interface.ccl", "IMPLEMENTS: p\n")]).to_string();
+    let purl = up.join("p").display().to_string();
+    {
+        let mut f = fake.lock().unwrap();
+        f.packages.push(("max/p".into(), vec![version("1.0.0", &p, &purl, "P", &["P"], "[]")]));
+        let ef = &mut f.packages.iter_mut().find(|(p, _)| p == "et/f").unwrap().1[0];
+        let needs = depends("et/carpet", ">=1.0.0", &["Carpet"]);
+        assert!(ef.contains(&needs));
+        *ef = ef.replace(&format!("[{needs}]"), "[]");
+        for (_, _, x) in f.snapshots.iter_mut().filter(|(p, _, _)| p == "et/x") {
+            *x = x.replace(&format!("[{needs}]"), "[]");
+        }
+        let carpet = &mut f.packages.iter_mut().find(|(p, _)| p == "et/carpet").unwrap().1[0];
+        assert!(carpet.contains("\"claims\":[]"));
+        *carpet = carpet.replace("\"claims\":[]", &format!("\"claims\":[{}]", depends("max/p", ">=1.0.0", &["P"])));
+    }
+    s.add(&["et/carpet@=2.0.0"], AddFlags { upgrade: true, yes: true, ..AddFlags::default() }).unwrap();
+    assert!(s.meta().added.iter().any(|a| a.package == "max/p"), "{:?}", s.meta().added);
+    let start = Start::read(&s.ctx, false, Doing::Removing).unwrap();
+    let base = thornlist::parse(&start.pristine).unwrap();
+    let target = [crate::deps::PkgId::parse("et/carpet").unwrap()];
+    let plan = super::plan_remove_with_deps(&s.ctx, &start, &base, &target).unwrap();
+    assert_eq!(plan.orphans.len(), 1, "{plan:?}");
+    let why = plan.orphans[0].why();
+    assert!(why.contains("unless what comes back unread needs it"), "{why}");
+    assert!(plan.render("remove").contains("unless what comes back unread needs it"));
+}
+
+/// Where a removal reads the base that comes back is where its restore puts
+/// it: the one decision both make. Here the remote renamed its default
+/// branch after the base was cloned (a new `trunk`, at a commit the
+/// Cactarium cannot read); the clone still knows its own (`master`), and
+/// the restore goes there, so the removal reads the base there too.
+#[test]
+fn the_base_comes_back_where_the_restore_puts_it() {
+    let (s, _fake) = replaced_base(false, true, None);
+    s.add(&["et/carpet@=2.0.0"], AddFlags { upgrade: true, yes: true, ..AddFlags::default() }).unwrap();
+    let up = s.inst.root.parent().unwrap().join("up/carpet");
+    let (branch, tip) = crate::fetch::git::head_of(&up).unwrap();
+    let repo = gix::open(&up).unwrap();
+    repo.reference("refs/heads/trunk", tip, gix::refs::transaction::PreviousValue::Any, "branch").unwrap();
+    std::fs::write(repo.git_dir().join("HEAD"), "ref: refs/heads/trunk\n").unwrap();
+    let c3 = crate::fetch::tests::commit_files(&up, &[("Carpet/interface.ccl", "IMPLEMENTS: carpet\n"), ("README", "3\n")]);
+    assert_eq!(crate::fetch::git::head_of(&up).unwrap(), ("trunk".to_owned(), c3));
+    s.remove(&["et/carpet"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let clone = s.inst.root.join("Cactus/repos/carpet");
+    assert_eq!(crate::fetch::git::head_of(&clone).unwrap(), (branch, tip), "back on the clone's own default");
+}
+
+/// Only what a removal can bring back is asked for: the bases of the
+/// targets and of what may be swept with them, never of a package the
+/// user named that stays. And an interrupt is never a reading, even with
+/// nothing to ask (the flag is the process's: run in a child).
+#[test]
+fn only_what_the_removal_brings_back_is_read() {
+    let (s, _fake) = replaced_base(true, true, None);
+    s.add(&["et/carpet@=2.0.0"], AddFlags { upgrade: true, yes: true, ..AddFlags::default() }).unwrap();
+    let start = Start::read(&s.ctx, false, Doing::Removing).unwrap();
+    let base = thornlist::parse(&start.pristine).unwrap();
+    let client = crate::cactarium::Client::new(&s.ctx.db.read().unwrap());
+    let mut reg = super::super::resolution::Registry::new(&client, ["et/carpet"]);
+    let carpet = crate::deps::PkgId::parse("et/carpet").unwrap();
+    let other = [crate::deps::PkgId::parse("et/x").unwrap()].into_iter().collect();
+    let read = super::super::resolution::returning_base(&mut reg, &s.inst.root, &base, &start.meta.added, &other).unwrap();
+    assert!(read.0.is_empty() && read.1.is_empty(), "nothing of et/carpet's is read: {:?}", read.1);
+    let bringing = [carpet.clone()].into_iter().collect();
+    let (back, unread) = super::super::resolution::returning_base(&mut reg, &s.inst.root, &base, &start.meta.added, &bringing).unwrap();
+    assert_eq!((back.len(), unread.len()), (1, 0), "{unread:?}");
+    assert_eq!(back[0].0, carpet);
+    if std::env::var_os("CACTUP_TEST_INTERRUPT_CHILD").is_some() {
+        gix::interrupt::IS_INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let e = super::super::resolution::returning_base(&mut reg, &s.inst.root, &base, &start.meta.added, &other).unwrap_err();
+        assert!(format!("{e:#}").contains("Interrupted"), "{e:#}");
+        return;
+    }
+    reg.finish();
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["commands::add::deps_tests::only_what_the_removal_brings_back_is_read", "--exact", "--test-threads=1"])
+        .env("CACTUP_TEST_INTERRUPT_CHILD", "1")
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && said.contains("1 passed"), "{said}{}", String::from_utf8_lossy(&out.stderr));
 }
 
 /// Taking away the thorns cactup gave a base package (an extension) gives

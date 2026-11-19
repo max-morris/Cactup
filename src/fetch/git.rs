@@ -483,6 +483,7 @@ pub fn align(
         && repo.head_id().ok().map(|id| id.detach()) == Some(target_id)
     {
         clear_align_marker(&repo);
+        set_upstream_if_absent(repo_dir, branch)?;
         return Ok(target_id);
     }
 
@@ -495,6 +496,7 @@ pub fn align(
     // No context on the error: refetch recognizes an interrupted checkout by
     // how its message begins (`INTERRUPTED_CHECKOUT`).
     switch_tree(&repo, target_id, edits, force_overwrite, progress)?;
+    set_upstream_if_absent(repo_dir, branch)?;
     Ok(target_id)
 }
 
@@ -1170,6 +1172,39 @@ fn keep_unchanged_entries(new: &mut gix::index::File, old: &gix::index::File) {
 /// (src/fetch/mod.rs) — a git config is a file every other git-aware tool
 /// reads too, so a crash here must never leave a half-written one behind.
 pub fn set_origin_url(repo_dir: &Path, url: &str) -> Res<()> {
+    edit_local_config(repo_dir, |file, config_path| {
+        file.set_raw_value_by("remote", Some("origin".into()), "url", gix::bstr::BStr::new(url.as_bytes()))
+            .with_context(|| format!("Failed to set remote.origin.url in '{}'", config_path.display()))?;
+        Ok(true)
+    })
+}
+
+/// Give `branch` its upstream, `origin`'s branch of the same name, as `git
+/// clone` and gix's clone write it (`branch.<name>.remote` and `.merge`):
+/// `git status` and `git pull` in the clone rely on it. Only when the branch
+/// has none: one the user set stays as it is.
+pub fn set_upstream_if_absent(repo_dir: &Path, branch: &str) -> Res<()> {
+    edit_local_config(repo_dir, |file, config_path| {
+        let name: &gix::bstr::BStr = branch.as_bytes().into();
+        if file.string_by("branch", Some(name), "remote").is_some() || file.string_by("branch", Some(name), "merge").is_some() {
+            return Ok(false);
+        }
+        file.set_raw_value_by("branch", Some(name), "remote", gix::bstr::BStr::new("origin"))
+            .and_then(|_| {
+                let merge = format!("refs/heads/{branch}");
+                file.set_raw_value_by("branch", Some(name), "merge", gix::bstr::BStr::new(merge.as_bytes()))
+            })
+            .with_context(|| format!("Failed to set branch {branch}'s upstream in '{}'", config_path.display()))?;
+        Ok(true)
+    })
+}
+
+/// Edit the repository's own `config` file with `edit` (`true`: it changed
+/// something, and the file is written back, whole and atomically).
+fn edit_local_config(
+    repo_dir: &Path,
+    edit: impl FnOnce(&mut gix::config::File<'static>, &Path) -> Res<bool>,
+) -> Res<()> {
     let repo = gix::open(repo_dir)
         .with_context(|| format!("Failed to open '{}'", repo_dir.display()))?;
     let git_dir = repo.git_dir().to_owned();
@@ -1178,8 +1213,9 @@ pub fn set_origin_url(repo_dir: &Path, url: &str) -> Res<()> {
     let mut file =
         gix::config::File::from_path_no_includes(config_path.clone(), gix::config::Source::Local)
             .with_context(|| format!("Failed to read '{}'", config_path.display()))?;
-    file.set_raw_value_by("remote", Some("origin".into()), "url", gix::bstr::BStr::new(url.as_bytes()))
-        .with_context(|| format!("Failed to set remote.origin.url in '{}'", config_path.display()))?;
+    if !edit(&mut file, &config_path)? {
+        return Ok(());
+    }
 
     let tmp = tempfile::NamedTempFile::new_in(&git_dir)
         .with_context(|| format!("Failed to create temp file in '{}'", git_dir.display()))?;
@@ -1478,58 +1514,89 @@ pub fn remote_default_branch(scratch: &Path, url: &str) -> Res<String> {
     Ok(head.strip_prefix("refs/heads/").unwrap_or(&head).to_owned())
 }
 
-/// [`remote_default_branch`] asked on a thread of its own, from a scratch
-/// repository it makes, while this one polls the interrupt flag: the gix
-/// connection takes no interrupt flag of its own, and a stalled remote must
-/// not outlast a Ctrl-C. On interrupt the thread is left to finish (or not)
-/// on its own; cactup is stopping.
-pub fn ask_remote_default_branch(url: &str) -> Res<String> {
+/// How long a question to a remote about its branches may take before
+/// cactup gives up on it: a firewall that drops packets holds a connection
+/// for gix's own connect timeout, a stalled server for ever.
+pub const REMOTE_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A scratch repository at `dir` to ask a remote from, made so that asking
+/// never stops for input while a progress display is drawn: no terminal
+/// prompt for credentials, and ssh in batch mode (it fails where it would
+/// ask for a password or about a host key) unless the user has an ssh
+/// command of their own (`GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`),
+/// which is theirs to make quiet.
+fn quiet_scratch(dir: &Path) -> Res<()> {
+    gix::init_bare(dir).context("Failed to create a scratch repository")?;
+    let repo = gix::open(dir).context("Failed to open the scratch repository")?;
+    let own_ssh = std::env::var_os("GIT_SSH_COMMAND").is_some()
+        || std::env::var_os("GIT_SSH").is_some()
+        || repo.config_snapshot().string("core.sshCommand").is_some();
+    let mut extra = String::from("[gitoxide \"credentials\"]\n\tterminalPrompt = false\n");
+    if !own_ssh {
+        extra.push_str("[core]\n\tsshCommand = ssh -o BatchMode=yes\n[ssh]\n\tvariant = ssh\n");
+    }
+    let config = repo.git_dir().join("config");
+    let mut text = std::fs::read_to_string(&config).context("Failed to read the scratch repository's config")?;
+    text.push_str(&extra);
+    std::fs::write(&config, text).context("Failed to write the scratch repository's config")?;
+    Ok(())
+}
+
+/// `ask` (given a quiet scratch repository and `url`) run on a thread of its
+/// own while this one polls the interrupt flag: the gix connection takes no
+/// interrupt flag of its own, and a stalled remote must outlast neither a
+/// Ctrl-C ("Interrupted") nor `timeout` (an error saying so). Either way the
+/// thread is left to finish, or not, on its own.
+fn ask_remote<T: Send + 'static>(
+    url: &str,
+    timeout: std::time::Duration,
+    ask: impl FnOnce(&Path, &str) -> Res<T> + Send + 'static,
+) -> Res<T> {
     let (send, recv) = std::sync::mpsc::channel();
-    let url = url.to_owned();
+    let owned = url.to_owned();
     std::thread::spawn(move || {
         let answer = (|| {
             let scratch = tempfile::tempdir().context("Failed to create a scratch directory")?;
-            gix::init_bare(scratch.path()).context("Failed to create a scratch repository")?;
-            remote_default_branch(scratch.path(), &url)
+            quiet_scratch(scratch.path())?;
+            ask(scratch.path(), &owned)
         })();
         let _ = send.send(answer);
     });
+    let until = std::time::Instant::now() + timeout;
     loop {
         if gix::interrupt::is_triggered() {
             bail!("Interrupted");
         }
-        match recv.recv_timeout(std::time::Duration::from_millis(100)) {
+        let left = until.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            bail!("{url} did not answer within {} s", timeout.as_secs().max(1));
+        }
+        match recv.recv_timeout(left.min(std::time::Duration::from_millis(100))) {
             Ok(answer) => return answer,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => bail!("Asking for the default branch failed"),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => bail!("Asking {url} failed"),
         }
     }
 }
 
-/// [`remote_tip`] asked on a thread of its own, from a scratch repository it
-/// makes, while this one polls the interrupt flag (as
-/// [`ask_remote_default_branch`] does).
-pub fn ask_remote_tip(url: &str, git_ref: Option<&str>) -> Res<ObjectId> {
-    let (send, recv) = std::sync::mpsc::channel();
-    let (url, git_ref) = (url.to_owned(), git_ref.map(str::to_owned));
-    std::thread::spawn(move || {
-        let answer = (|| {
-            let scratch = tempfile::tempdir().context("Failed to create a scratch directory")?;
-            gix::init_bare(scratch.path()).context("Failed to create a scratch repository")?;
-            remote_tip(scratch.path(), &url, git_ref.as_deref())
-        })();
-        let _ = send.send(answer);
-    });
-    loop {
-        if gix::interrupt::is_triggered() {
-            bail!("Interrupted");
-        }
-        match recv.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(answer) => return answer,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => bail!("Asking for the branch's tip failed"),
-        }
-    }
+/// [`remote_default_branch`], asked quietly within `timeout` and Ctrl-C
+/// (see [`ask_remote`]).
+pub fn ask_remote_default_branch(url: &str, timeout: std::time::Duration) -> Res<String> {
+    ask_remote(url, timeout, remote_default_branch)
+}
+
+/// [`remote_tip`], asked quietly within `timeout` and Ctrl-C (see
+/// [`ask_remote`]).
+pub fn ask_remote_tip(url: &str, git_ref: Option<&str>, timeout: std::time::Duration) -> Res<ObjectId> {
+    let git_ref = git_ref.map(str::to_owned);
+    ask_remote(url, timeout, move |scratch, url| remote_tip(scratch, url, git_ref.as_deref()))
+}
+
+/// The URL the clone's `origin` fetches from, as its config says.
+pub fn origin_url(repo_dir: &Path) -> Option<String> {
+    let repo = gix::open(repo_dir).ok()?;
+    let remote = repo.find_remote("origin").ok()?;
+    remote.url(Direction::Fetch).map(|u| u.to_bstring().to_string())
 }
 
 /// The file `path` of `commit` in the repository at `url`, written to
@@ -1641,6 +1708,29 @@ pub fn at_local_origin_tip(repo_dir: &Path, branch: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The scratch repository a remote is asked from never lets the ask stop
+    /// for input: no terminal prompt for credentials, and ssh in batch mode
+    /// (as the ssh variant, so its port and protocol arguments still apply),
+    /// unless the user has an ssh command of their own.
+    #[test]
+    fn a_remote_is_asked_from_a_scratch_that_never_prompts() {
+        let tmp = tempfile::tempdir().unwrap();
+        quiet_scratch(tmp.path()).unwrap();
+        let repo = gix::open(tmp.path()).unwrap();
+        let config = repo.config_snapshot();
+        assert_eq!(config.boolean("gitoxide.credentials.terminalPrompt"), Some(false));
+        // The user's own ssh command (environment, or their git config as a
+        // plain repository sees it) is left to them.
+        let plain = tempfile::tempdir().unwrap();
+        let theirs = gix::init_bare(plain.path()).unwrap().config_snapshot().string("core.sshCommand").is_some();
+        if theirs || std::env::var_os("GIT_SSH_COMMAND").is_some() || std::env::var_os("GIT_SSH").is_some() {
+            return;
+        }
+        let options = repo.ssh_connect_options().unwrap();
+        assert_eq!(options.command.as_deref(), Some(std::ffi::OsStr::new("ssh -o BatchMode=yes")), "{options:?}");
+        assert_eq!(options.kind, Some(gix::protocol::transport::client::blocking_io::ssh::ProgramKind::Ssh));
+    }
 
     #[test]
     fn url_normalization_tolerates_cosmetics() {

@@ -456,7 +456,8 @@ fn restore_plan(
     let list = thornlist::parse(composed)?;
     let (progress, renderer) = crate::manifest::setup_prodash();
     let mut classify = progress.add_child("classify repos");
-    let fetch_plan = crate::fetch::plan(&list, &inst.root, &mut classify);
+    // Only the clones being restored: no other is looked at, nor its remote asked.
+    let fetch_plan = crate::fetch::plan_only(&list, &inst.root, &mut classify, Some(touched));
     drop(classify);
     renderer.shutdown_and_wait();
     let mut fetch_plan = fetch_plan?;
@@ -468,16 +469,19 @@ fn restore_plan(
         matches!(&s.reason, crate::fetch::git::DirtyReason::DetachedHead(head)
             if removed.iter().any(|a| a.replaces.contains(&s.repo) && a.commit == head.to_string()))
     };
-    for s in fetch_plan.skipped.iter_mut().filter(|s| touched.contains(s.repo.as_str()) && ours(s)) {
-        if s.commit.is_none() && s.branch.is_none() {
-            s.branch = crate::fetch::git::default_branch(&s.dir);
-        }
-    }
-    let back = fetch_plan.force_where(|s| {
-        touched.contains(s.repo.as_str()) && ours(s) && (s.commit.is_some() || s.branch.is_some())
-    });
+    // Where one that follows a branch goes is the fetch's own answer (`branch_to_follow`), as
+    // for any clone cactup left detached; it is what `returning_base` read the base at.
+    let back = fetch_plan.force_where(|s| touched.contains(s.repo.as_str()) && ours(s))?;
     for g in fetch_plan.git.iter_mut().filter(|g| back.contains(&g.repo)) {
         g.forced = None;
+    }
+    if let Some(g) = fetch_plan.git.iter().find(|g| back.contains(&g.repo) && g.commit.is_none() && g.branch.is_none()) {
+        bail!(
+            "Repo {} has no branch to go back to ({}); it was left alone, and {} is still added",
+            g.repo,
+            g.note.as_deref().unwrap_or("nothing names one"),
+            gone.join(", ")
+        );
     }
     if let Some(skipped) = fetch_plan.skipped.iter().find(|s| touched.contains(s.repo.as_str())) {
         bail!(
@@ -543,15 +547,17 @@ fn fetch_plan_for(
     let repos: BTreeSet<&str> = repos.iter().map(String::as_str).collect();
     let list = thornlist::parse(composed)?;
     check_library_dirs(&inst.root, list.root(), added)?;
-    let (progress, renderer) = crate::manifest::setup_prodash();
-    let mut classify = progress.add_child("classify repos");
-    let fetch_plan = crate::fetch::plan(&list, &inst.root, &mut classify);
-    drop(classify);
-    renderer.shutdown_and_wait();
-    let mut fetch_plan = fetch_plan?;
     // More thorns of a base package: links into the base's clone, as it is.
     let linked: BTreeSet<&str> =
         added.iter().filter_map(|a| base_clone_of(a, base)).map(|c| c.repo.as_str()).collect();
+    let (progress, renderer) = crate::manifest::setup_prodash();
+    let mut classify = progress.add_child("classify repos");
+    // Only the clones the packages touch: no other is looked at, nor its remote asked.
+    let only: BTreeSet<&str> = repos.union(&linked).copied().collect();
+    let fetch_plan = crate::fetch::plan_only(&list, &inst.root, &mut classify, Some(&only));
+    drop(classify);
+    renderer.shutdown_and_wait();
+    let mut fetch_plan = fetch_plan?;
     let fetched = |r: &str| repos.contains(r) && !linked.contains(r);
     if let Some(skipped) = fetch_plan.skipped.iter().find(|s| fetched(s.repo.as_str())) {
         bail!("Repo {} in the installation has {}; it was left alone", skipped.repo, skipped.reason.describe());
@@ -1338,7 +1344,7 @@ fn record_of_release(release: &crate::deps::Release, thorns: &[String], plan: &c
             crate::progress::Layout::for_names([slug.as_str()]),
         );
         line.phase("asking its repository for its default branch");
-        let branch = crate::fetch::git::ask_remote_default_branch(&release.url);
+        let branch = crate::fetch::git::ask_remote_default_branch(&release.url, crate::fetch::git::REMOTE_ASK_TIMEOUT);
         drop(line);
         if let Some(renderer) = renderer {
             renderer.shutdown_and_wait();
@@ -1557,6 +1563,13 @@ fn plan_remove_with_deps(
     let names: Vec<&str> = start.meta.added.iter().map(|a| a.package.as_str()).collect();
     let mut reg = super::resolution::Registry::new(&client, names);
     let options = super::resolution::PresentOptions::default();
+    let added_for = super::resolution::added_for(&start.meta);
+    // What may go: the targets, and what may be swept with them (never a package the user named).
+    let bringing: BTreeSet<PkgId> = (start.meta.added.iter())
+        .filter_map(|a| PkgId::parse(&a.package).ok().map(|id| (id, a)))
+        .filter(|(id, a)| targets.contains(id) || !deps::is_requested(added_for.get(id), &a.commit))
+        .map(|(id, _)| id)
+        .collect();
     let set = super::resolution::present(&mut reg, &start.inst.root, base, &start.meta.added, None, &options);
     // A base package at a commit no version froze that cactup gave more
     // thorns: what those thorns claim decides what may go, so it is read
@@ -1567,7 +1580,8 @@ fn plan_remove_with_deps(
             .map(|p| p.release.id.clone())
             .collect();
         let unread = super::resolution::read_stand_ins(&mut reg, &mut set, &extended)?;
-        let returning = super::resolution::returning_base(&mut reg, base, &start.meta.added)?;
+        let returning =
+            super::resolution::returning_base(&mut reg, &start.inst.root, base, &start.meta.added, &bringing)?;
         Ok((set, unread, returning))
     });
     reg.finish();
@@ -1592,7 +1606,6 @@ fn plan_remove_with_deps(
             unread_lines(&unread)
         );
     }
-    let added_for = super::resolution::added_for(&start.meta);
     let extensions: Vec<Extension> = (start.meta.added.iter())
         .filter_map(|a| {
             let id = PkgId::parse(&a.package).ok()?;
@@ -1610,7 +1623,7 @@ fn plan_remove_with_deps(
         })
         .collect();
     // Claim overrides kept in the installation join with `cactup claims` (P4).
-    let plan = deps::plan_remove(&set.present, &added_for, targets, &Rules::default(), false, &extensions, &returning)
+    let mut plan = deps::plan_remove(&set.present, &added_for, targets, &Rules::default(), false, &extensions, &returning)
         .map_err(|r| {
             // What comes back with the targets that could not be read might have held them.
             let lines: Vec<String> = (unread_returning.iter())
@@ -1625,6 +1638,19 @@ fn plan_remove_with_deps(
                 _ => anyhow!("{r}"),
             }
         })?;
+    // What comes back with what goes (the targets and the orphans) that could not be read: what
+    // it needs is unknown, and any orphan might be it, so the plan says so beside each, and the
+    // confirmation covers it.
+    let going: BTreeSet<&PkgId> = plan.removed.iter().chain(plan.orphans.iter().map(|o| &o.id)).collect();
+    let unread_back: Vec<&String> =
+        unread_returning.iter().filter(|(replacer, _)| going.contains(replacer)).map(|(_, why)| why).collect();
+    if !unread_back.is_empty() {
+        let lines: Vec<String> = unread_back.iter().map(|u| format!("\n  {u}")).collect();
+        println!("{}", format!("Not checked: what these base repos need when they come back, as they cannot be read:{}", lines.concat()).yellow());
+        for o in &mut plan.orphans {
+            o.caveat = Some("unless what comes back unread needs it".to_owned());
+        }
+    }
     // Base packages whose dependencies are unknown are normal (a base that
     // follows branches), and nothing tells which of them could claim what
     // goes (their claims are what is unknown): one short line, no count.
@@ -1773,6 +1799,7 @@ mod tests {
             checkouts: Vec::new(),
             forced: None,
             retarget: None,
+            note: None,
         };
         let pin = gix::ObjectId::empty_tree(gix::hash::Kind::Sha1);
         let plan = crate::fetch::Plan {
