@@ -732,7 +732,9 @@ fn create_machine(
 
     // The user/email/allocation knobs (§4.7, §5) — global, since this
     // `~/.cactup` lives on the machine being created. Only knobs never set
-    // before are prompted for (silent takes the derived defaults).
+    // before are prompted for (silent takes the derived defaults). A blank
+    // answer is stored blank, so the question is not asked again; a silent
+    // run stores nothing for an empty default, since nobody answered it.
     let snapshot = db.read()?;
     let mut answers = Vec::new();
     for (knob, question) in [
@@ -742,10 +744,11 @@ fn create_machine(
     ] {
         if snapshot.knob(knob).is_none() {
             let default = snapshot.knob_or_default(knob).unwrap_or_default();
-            let answer = if silent { default } else { prompt_with_default(question, &default)? };
-            if !answer.is_empty() {
-                answers.push((knob, answer));
+            if silent && default.is_empty() {
+                continue;
             }
+            let answer = if silent { default } else { prompt_with_default(question, &default)? };
+            answers.push((knob, answer));
         }
     }
     if !answers.is_empty() {
