@@ -101,8 +101,10 @@ pub struct GitRepoPlan {
     pub retarget: Option<String>,
     /// What the plan could not settle as it should have, said on the repo's
     /// line: the remote's default branch not told, so the clone goes back to
-    /// the label a pinned fetch recorded (which `align` refuses loudly when
-    /// it is a tag).
+    /// the label a pinned fetch recorded. When that label is no branch of the
+    /// remote (a tag) the align fails before anything moves, and the failure
+    /// says plainly that the clone was left as it was until the remote
+    /// answers.
     pub note: Option<String>,
 }
 
@@ -242,9 +244,11 @@ pub enum Known {
 /// same URL), else the remote's default (as the clone knows it, when its
 /// `origin` is that remote; else as the remote says: a clone made pinned
 /// knows none), else, last, the label a pinned fetch from that URL recorded.
-/// A pinned fetch's label is only where its pin came from (a tag, as often
-/// as not): a branch to align to only when nothing else names one, and then
-/// `align` says plainly if it is none. A label that was another real branch
+/// A pinned fetch's label is only where its pin came from, a branch or a tag
+/// (a stack release's list names release tags): a branch to align to only
+/// when nothing else names one. When it is no branch the fetch fails,
+/// leaves the clone as it was, and says that the remote did not answer and a
+/// refetch once it does puts the clone right. A label that was another real branch
 /// (`develop`) is not followed once the list stops pinning: the remote's
 /// default is, as for a fresh clone. This is the part decided offline;
 /// [`branch_to_follow`] asks the remote when it must. Used wherever cactup
@@ -269,7 +273,7 @@ pub fn known_branch(dir: &Path, url: &str, listed: Option<&str>, record: Option<
     Known::RemoteDefault { label: record.and_then(|r| r.branch.clone()) }
 }
 
-/// [`known_branch`], the remote asked when only it can tell (by `until`).
+/// [`known_branch`], the remote asked when only it can tell (within `window`).
 /// Unanswered (offline, timed out), the clone goes back to the label and the
 /// note says why. Ctrl-C fails it ("Interrupted"), never a fallback.
 pub fn branch_to_follow(
@@ -277,11 +281,11 @@ pub fn branch_to_follow(
     url: &str,
     listed: Option<&str>,
     record: Option<&RepoRecord>,
-    until: std::time::Instant,
+    window: git::AskWindow,
 ) -> Res<Follow> {
     match known_branch(dir, url, listed, record) {
         Known::Branch(b) => Ok(Follow { branch: Some(b), note: None }),
-        Known::RemoteDefault { label } => match git::ask_remote_default_branch(url, until) {
+        Known::RemoteDefault { label } => match git::ask_remote_default_branch(url, window) {
             Ok(b) => Ok(Follow { branch: Some(b), note: None }),
             Err(e) if gix::interrupt::is_triggered() => Err(e),
             Err(e) => Ok(unanswered(label, &e)),
@@ -355,7 +359,7 @@ fn follow_all(item: prodash::tree::Item, items: &[ToFollow]) -> Res<Vec<Follow>>
             layout.clone(),
         );
         line.phase("asking for its default branch".to_owned());
-        let follow = branch_to_follow(t.dir, t.url, t.listed, t.record, started + follow_timeout(t.url));
+        let follow = branch_to_follow(t.dir, t.url, t.listed, t.record, git::AskWindow::from(started, follow_timeout(t.url)));
         drop(line);
         headline.lock().expect("follow headline poisoned").inc();
         follow
@@ -747,9 +751,24 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                                 }
                             }
                             Err(e) => {
-                                // Said with what the plan could not settle, which is
-                                // likely why (a pinned fetch's tag taken for a branch).
+                                // The plan sent the clone back to its pinned fetch's
+                                // label because the remote did not say its default
+                                // branch (`unanswered`): going there failed — a tag
+                                // is no branch — before anything moved. Said plainly,
+                                // the fetch's own error after it. Otherwise said with
+                                // what the plan could not settle, which is likely why.
+                                let unmoved = before.is_some()
+                                    && git::head_of(&item.dir).ok().map(|(b, id)| (Some(id), b == git::DETACHED))
+                                        == Some((before, was_detached));
                                 let error = match &item.note {
+                                    Some(_) if unmoved && !gix::interrupt::is_triggered() => format!(
+                                        "its remote {} did not answer when asked for its default branch, so the clone at \
+                                         '{}' was left as it was; refetch once the remote answers (going back to {} \
+                                         instead, the label of its last, pinned fetch, failed: {e:#})",
+                                        item.url,
+                                        item.dir.display(),
+                                        item.branch.as_deref().unwrap_or("its label"),
+                                    ),
                                     Some(note) => format!("{e:#} ({note})"),
                                     None => format!("{e:#}"),
                                 };
@@ -2523,6 +2542,49 @@ pub(crate) mod tests {
         assert_eq!(said[1].0, prodash::messages::MessageLevel::Info, "{said:?}");
         assert!(said[1].1.contains(&format!("now on branch {branch} at {short}")), "{said:?}");
         assert_eq!(said[2], (prodash::messages::MessageLevel::Success, format!("{branch} now at {short}")));
+    }
+
+    /// An unanswered ask says the window it was given, not the part of it
+    /// left when it began (a window of 2 s begun 0.6 s earlier once read
+    /// "within 1 s").
+    #[test]
+    fn an_unanswered_ask_says_its_window() {
+        let url = stalling_remote("r");
+        let window = git::AskWindow::from(std::time::Instant::now() - std::time::Duration::from_millis(600), std::time::Duration::from_secs(2));
+        let e = git::ask_remote_default_branch(&url, window).unwrap_err();
+        assert_eq!(format!("{e:#}"), format!("{url} did not answer within 2 s"));
+    }
+
+    /// A clone the plan sent back to its pinned fetch's label, a tag, since
+    /// the remote did not say its default branch: the fetch fails plainly —
+    /// the remote did not answer, the clone (named) was left as it was, a
+    /// refetch once it answers fixes it — with the fetch's own error last,
+    /// and the clone is indeed as it was.
+    #[test]
+    fn a_clone_sent_back_to_a_tag_fails_plainly_and_is_left_as_it_was() {
+        let tmp = tempfile::tempdir().unwrap();
+        let local = tmp.path().join("sources/upstream").to_string_lossy().into_owned();
+        let (root, list) = clones_made_pinned(tmp.path(), 1, &local);
+        let dir = root.join("Cactus/repos/R0");
+        let before = git::head_of(&dir).unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("test plan");
+        let mut p = plan(&list, &root, &mut progress).unwrap();
+        // What `unanswered` makes of a remote that did not say its default.
+        let window = git::AskWindow::from(std::time::Instant::now(), std::time::Duration::ZERO);
+        let e = git::ask_remote_default_branch(&local, window).unwrap_err();
+        let follow = unanswered(Some("v1.0.0".into()), &e);
+        (p.git[0].branch, p.git[0].note) = (follow.branch, follow.note);
+        let report = execute(&p, &root).unwrap();
+        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+        let error = &report.failures[0].error;
+        let plain = format!(
+            "its remote {local} did not answer when asked for its default branch, so the clone at '{}' was left as it \
+             was; refetch once the remote answers (going back to v1.0.0 instead",
+            dir.display()
+        );
+        assert!(error.starts_with(&plain), "{error}");
+        assert!(error.contains("refs/heads/v1.0.0"), "the fetch's own error comes last: {error}");
+        assert_eq!(git::head_of(&dir).unwrap(), before);
     }
 
     /// Where a restore puts a clone, offline: none on disk, the remote's

@@ -1611,6 +1611,27 @@ fn remote_head(scratch: &Path, url: &str) -> Res<(String, ObjectId)> {
 /// timeout, a stalled server for ever.
 pub const REMOTE_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// The window a phase's remote asks share: they must be answered by
+/// `until`, the end of a window of `length` (what an unanswered ask says it
+/// waited, rather than the part of it left when that ask began).
+#[derive(Clone, Copy, Debug)]
+pub struct AskWindow {
+    pub until: std::time::Instant,
+    pub length: std::time::Duration,
+}
+
+impl AskWindow {
+    /// A window of `length` from `start`.
+    pub fn from(start: std::time::Instant, length: std::time::Duration) -> AskWindow {
+        AskWindow { until: start + length, length }
+    }
+
+    /// A window of [`REMOTE_ASK_TIMEOUT`] from now.
+    pub fn now() -> AskWindow {
+        AskWindow::from(std::time::Instant::now(), REMOTE_ASK_TIMEOUT)
+    }
+}
+
 /// How many remotes a phase asks at once: an ask is one small listing, all
 /// waiting, so the fan-out is wide (wider than the disk pool's), and a phase
 /// of up to this many remotes takes one ask's time.
@@ -1680,16 +1701,16 @@ fn clean_stale_scratch(tmp: &Path) {
 /// `ask` (given a quiet scratch repository and `url`) run on a thread of its
 /// own, watched from this one (`super::watch`): the gix connection takes no
 /// interrupt flag of its own, and a stalled remote must outlast neither a
-/// Ctrl-C ("Interrupted") nor `until` (an error saying so). Either way the
+/// Ctrl-C ("Interrupted") nor `window` (an error saying so). Either way the
 /// processes the ask started (ssh) are killed and the thread is left to
 /// finish, or not, on its own (see [`scratch_parent`]).
 fn ask_remote<T: Send + 'static>(
     url: &str,
-    until: std::time::Instant,
+    window: AskWindow,
     ask: impl FnOnce(&Path, &str) -> Res<T> + Send + 'static,
 ) -> Res<T> {
     use super::watch::{abandonable, Bounds, Stop};
-    let left = until.saturating_duration_since(std::time::Instant::now());
+    let left = window.until.saturating_duration_since(std::time::Instant::now());
     if left.is_zero() {
         bail!("{url} was not asked: the time for asking remotes was up");
     }
@@ -1711,28 +1732,32 @@ fn ask_remote<T: Send + 'static>(
         Ok(answer) => Ok(answer),
         Err(Stop::Failed(e)) => Err(e),
         Err(Stop::Interrupted) => bail!("Interrupted"),
-        Err(Stop::Stalled(_) | Stop::Overran(_)) => bail!("{url} did not answer within {} s", left.as_secs().max(1)),
+        // The window, not what was left of it: an ask begun a moment
+        // into it would round its wait down ("within 29 s").
+        Err(Stop::Stalled(_) | Stop::Overran(_)) => {
+            bail!("{url} did not answer within {} s", window.length.as_secs_f64().round().max(1.0))
+        }
         Err(Stop::Vanished) => bail!("Asking {url} failed"),
     }
 }
 
-/// The remote's default branch, asked quietly by `until` and within Ctrl-C
+/// The remote's default branch, asked quietly within `window` and Ctrl-C
 /// (see [`ask_remote`]).
-pub fn ask_remote_default_branch(url: &str, until: std::time::Instant) -> Res<String> {
-    ask_remote(url, until, remote_head).map(|(name, _)| name)
+pub fn ask_remote_default_branch(url: &str, window: AskWindow) -> Res<String> {
+    ask_remote(url, window, remote_head).map(|(name, _)| name)
 }
 
-/// [`remote_head`], asked quietly by `until` and within Ctrl-C (see
+/// [`remote_head`], asked quietly within `window` and Ctrl-C (see
 /// [`ask_remote`]).
-pub fn ask_remote_head(url: &str, until: std::time::Instant) -> Res<(String, ObjectId)> {
-    ask_remote(url, until, remote_head)
+pub fn ask_remote_head(url: &str, window: AskWindow) -> Res<(String, ObjectId)> {
+    ask_remote(url, window, remote_head)
 }
 
-/// [`remote_tip`], asked quietly by `until` and within Ctrl-C (see
+/// [`remote_tip`], asked quietly within `window` and Ctrl-C (see
 /// [`ask_remote`]).
-pub fn ask_remote_tip(url: &str, git_ref: Option<&str>, until: std::time::Instant) -> Res<ObjectId> {
+pub fn ask_remote_tip(url: &str, git_ref: Option<&str>, window: AskWindow) -> Res<ObjectId> {
     let git_ref = git_ref.map(str::to_owned);
-    ask_remote(url, until, move |scratch, url| remote_tip(scratch, url, git_ref.as_deref()))
+    ask_remote(url, window, move |scratch, url| remote_tip(scratch, url, git_ref.as_deref()))
 }
 
 /// Map `f` over `items` on a network fan-out [`REMOTE_ASKS_AT_ONCE`] wide,

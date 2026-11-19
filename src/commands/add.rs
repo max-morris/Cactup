@@ -1360,10 +1360,7 @@ fn record_of_release(release: &crate::deps::Release, thorns: &[String], plan: &c
             crate::progress::Layout::for_names([slug.as_str()]),
         );
         line.phase("asking its repository for its default branch");
-        let branch = crate::fetch::git::ask_remote_default_branch(
-            &release.url,
-            std::time::Instant::now() + crate::fetch::git::REMOTE_ASK_TIMEOUT,
-        );
+        let branch = crate::fetch::git::ask_remote_default_branch(&release.url, crate::fetch::git::AskWindow::now());
         drop(line);
         if let Some(renderer) = renderer {
             renderer.shutdown_and_wait();

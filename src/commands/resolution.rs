@@ -1368,15 +1368,15 @@ pub(crate) fn returning_base(
     } else {
         let headline = Mutex::new(reg.headline(asks.len(), "repos"));
         let layout = reg.layout.clone();
-        let until = std::time::Instant::now() + crate::fetch::git::REMOTE_ASK_TIMEOUT;
+        let window = crate::fetch::git::AskWindow::now();
         let answers = crate::fetch::git::ask_all(&asks, |b| -> Res<Result<String, String>> {
             let line = Line::over(headline.lock().expect("headline poisoned").add_child(b.repo.clone()), &b.repo, layout.clone());
             line.phase("its branch's tip".to_owned());
             let record = records.as_ref().and_then(|r| r.repos.get(&b.repo));
             // One listing either way: a branch's tip, or the remote's default and its tip.
             let asked = match crate::fetch::known_after_restore(&repos_dir.join(&b.repo), &b.url, b.listed, record) {
-                crate::fetch::Known::Branch(branch) => crate::fetch::git::ask_remote_tip(&b.url, Some(&branch), until),
-                crate::fetch::Known::RemoteDefault { .. } => crate::fetch::git::ask_remote_head(&b.url, until).map(|(_, id)| id),
+                crate::fetch::Known::Branch(branch) => crate::fetch::git::ask_remote_tip(&b.url, Some(&branch), window),
+                crate::fetch::Known::RemoteDefault { .. } => crate::fetch::git::ask_remote_head(&b.url, window).map(|(_, id)| id),
             };
             let tip = match asked {
                 Ok(id) => Ok(id.to_string()),

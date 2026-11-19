@@ -423,10 +423,10 @@ fn remote_tips(list: &thornlist::Thornlist) -> Res<std::collections::BTreeMap<St
     let item = progress.add_child("ask remotes for their tips");
     item.init(Some(repos.len()), Some(prodash::unit::label("repos")));
     let item = std::sync::Mutex::new(item);
-    let until = std::time::Instant::now() + fetch::git::REMOTE_ASK_TIMEOUT;
+    let window = fetch::git::AskWindow::now();
     let asked = fetch::git::ask_all(&repos, |(repo, url, git_ref, _)| {
         let current = item.lock().expect("pack progress poisoned").add_child(repo.clone());
-        let tip = fetch::git::ask_remote_tip(url, git_ref.as_deref(), until);
+        let tip = fetch::git::ask_remote_tip(url, git_ref.as_deref(), window);
         drop(current);
         item.lock().expect("pack progress poisoned").inc();
         (repo.clone(), tip)
