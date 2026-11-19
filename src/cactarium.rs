@@ -245,13 +245,10 @@ impl Client {
         let body = serde_json::to_vec(request).context("Failed to encode the read request")?;
         let post = self.http().post(self.url("/packages/read")).header("content-type", "application/json").body(body);
         let response = self.send_found(post, MISSING_ROUTE)?.map_err(|m| self.missing("/packages/read", m))?;
-        let answer: ReadAnswer = response.json()?;
+        let answer: ReadAnswer = response.json().map_err(|e| UnusableAnswer(format!("{e:#}")))?;
         if answer.items.len() != request.items.len() {
-            bail!(
-                "The Cactarium answered a read of {} packages with {}; cactup cannot tell which is which",
-                request.items.len(),
-                answer.items.len()
-            );
+            let why = format!("{} items for {} asked", answer.items.len(), request.items.len());
+            return Err(UnusableAnswer(why).into());
         }
         Ok(answer)
     }
@@ -693,6 +690,19 @@ impl std::fmt::Display for OldCactarium {
 }
 
 impl std::error::Error for OldCactarium {}
+
+/// A batch read's answer cactup cannot use as a whole (a body that does not
+/// parse, a count of items other than asked): what it asked is read singly.
+#[derive(Debug)]
+pub struct UnusableAnswer(pub String);
+
+impl std::fmt::Display for UnusableAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "The Cactarium's answer to a batch read cannot be used ({})", self.0)
+    }
+}
+
+impl std::error::Error for UnusableAnswer {}
 
 /// The two kinds of registry entry an installation records a version of.
 #[derive(Clone, Copy, Debug)]

@@ -553,7 +553,7 @@ fn run(dir: &Path) -> Vec<String> {
                 Extension { id, thorns: thorns.clone(), label, commit: p.release.commit.clone() }
             })
             .collect();
-        match plan_remove(&present, &added_for, &targets, &rules, rm.no_deps, &extensions) {
+        match plan_remove(&present, &added_for, &targets, &rules, rm.no_deps, &extensions, &[]) {
             Ok(plan) => {
                 check_refusal(&case.expect, None, None, &mut errors);
                 compare("removed", &case.expect.removed, plan.removed.iter().map(ToString::to_string).collect(), &mut errors);

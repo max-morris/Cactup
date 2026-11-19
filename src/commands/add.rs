@@ -1536,10 +1536,11 @@ fn plan_remove_with_deps(
             .map(|p| p.release.id.clone())
             .collect();
         let unread = super::resolution::read_stand_ins(&mut reg, &mut set, &extended)?;
-        Ok((set, unread))
+        let returning = super::resolution::returning_base(&mut reg, base, &start.meta.added, targets)?;
+        Ok((set, unread, returning))
     });
     reg.finish();
-    let (set, unread_extensions) = set.map_err(|e| needs_the_cactarium(e, &way))?;
+    let (set, unread_extensions, (returning, unread_returning)) = set.map_err(|e| needs_the_cactarium(e, &way))?;
     if !unread_extensions.is_empty() {
         let lines: Vec<String> = unread_extensions.iter().map(|(id, u)| format!("\n  {id}: {}", u.why)).collect();
         bail!(
@@ -1578,8 +1579,18 @@ fn plan_remove_with_deps(
         })
         .collect();
     // Claim overrides kept in the installation join with `cactup claims` (P4).
-    let plan = deps::plan_remove(&set.present, &added_for, targets, &Rules::default(), false, &extensions)
-        .map_err(|r| anyhow!("{r}"))?;
+    let plan = deps::plan_remove(&set.present, &added_for, targets, &Rules::default(), false, &extensions, &returning)
+        .map_err(|r| {
+            // What comes back that could not be read might have held them.
+            let lines: Vec<String> = unread_returning.iter().map(|u| format!("\n  {u}")).collect();
+            match (&r, lines.is_empty()) {
+                (deps::Refusal::HasDependents { .. }, false) => anyhow!(
+                    "{r}\nWhat comes back with the removal, which might meet them, cannot be read:{}",
+                    lines.concat()
+                ),
+                _ => anyhow!("{r}"),
+            }
+        })?;
     // Base packages whose dependencies are unknown are normal (a base that
     // follows branches), and nothing tells which of them could claim what
     // goes (their claims are what is unknown): one short line, no count.
@@ -1623,7 +1634,7 @@ pub fn remove(ctx: &Ctx, packages: &[String], flags: &RemoveFlags) -> Res<()> {
     }
     let base = thornlist::parse(&start.pristine)?;
     let plan = if flags.no_deps {
-        deps::plan_remove(&[], &Default::default(), &targets, &Rules::default(), true, &[])
+        deps::plan_remove(&[], &Default::default(), &targets, &Rules::default(), true, &[], &[])
             .map_err(|r| anyhow!("{r}"))?
     } else {
         plan_remove_with_deps(ctx, &start, &base, &targets)?

@@ -82,7 +82,23 @@ struct Fake {
     /// `not-read`, ready on the next ask. What was fetched stays (warm).
     fetch_budget: usize,
     warm: std::collections::BTreeSet<(String, String)>,
-    fetching: std::collections::BTreeSet<(String, String)>,
+    /// What the server goes on reading after answering, with the asks still
+    /// to come before it is ready.
+    fetching: std::collections::BTreeMap<(String, String), usize>,
+    /// How many later asks a read going on after an answer takes to be ready.
+    fetch_asks: usize,
+    /// Answers it cannot use: one item short, a body that is no JSON; an
+    /// item whose version is at another commit; the package's name echoed in
+    /// capitals; an item echoing another commit.
+    short_answer: bool,
+    garbage_answer: bool,
+    wrong_commit_at: Vec<String>,
+    shout: bool,
+    echo_other_at: Vec<String>,
+    /// Items answered untrusted; asks answered with a status this cactup
+    /// does not know, before the item is read.
+    untrusted_at: Vec<String>,
+    novel_status: usize,
     /// The next requests that start no fetch (the server's network slots
     /// are all taken by other callers): what is not warm is not read.
     stalled: usize,
@@ -122,7 +138,15 @@ impl Fake {
             // Most bases read warm: everything within one request.
             fetch_budget: 1000,
             warm: std::collections::BTreeSet::new(),
-            fetching: std::collections::BTreeSet::new(),
+            fetching: std::collections::BTreeMap::new(),
+            fetch_asks: 1,
+            short_answer: false,
+            garbage_answer: false,
+            wrong_commit_at: Vec::new(),
+            shout: false,
+            echo_other_at: Vec::new(),
+            untrusted_at: Vec::new(),
+            novel_status: 0,
             stalled: 0,
             too_large_at: Vec::new(),
             batch_requests: 0,
@@ -308,20 +332,40 @@ impl Fake {
         self.batch_requests += 1;
         let stalled = self.stalled > 0;
         self.stalled = self.stalled.saturating_sub(1);
-        // What earlier requests left fetching is in the mirror now.
-        let done = std::mem::take(&mut self.fetching);
-        self.warm.extend(done);
+        // What earlier requests left reading is one ask nearer being ready.
+        for left in self.fetching.values_mut() {
+            *left = left.saturating_sub(1);
+        }
+        let ready: Vec<(String, String)> = self.fetching.iter().filter(|(_, l)| **l == 0).map(|(k, _)| k.clone()).collect();
+        for key in ready {
+            self.fetching.remove(&key);
+            self.warm.insert(key);
+        }
         let mut fetched = 0;
         let mut items = Vec::new();
         for q in &asked.items {
             let (id, at) = (q.package.as_str(), q.commit.as_str());
+            let fetching = self.fetching.contains_key(&(id.to_owned(), at.to_owned()));
+            let (echo_id, echo_at) = (
+                if self.shout { id.to_ascii_uppercase() } else { id.to_owned() },
+                if self.echo_other_at.iter().any(|c| c == at) { "f".repeat(40) } else { at.to_owned() },
+            );
+            let wrong_commit = self.wrong_commit_at.iter().any(|c| c == at);
+            let untrusted = self.untrusted_at.iter().any(|c| c == at);
             let item = |status: &str, version: Option<serde_json::Value>, error: Option<String>| {
-                serde_json::json!({"package": id, "commit": at, "status": status, "version": version,
-                    "error": error, "untrusted": false, "unreviewed": false})
+                let in_progress = status == "not-read" && (fetching || error.as_deref() == Some("reading on"));
+                let mut version = version;
+                if let (Some(v), true) = (version.as_mut(), wrong_commit) {
+                    v["commit"] = serde_json::json!("e".repeat(40));
+                }
+                serde_json::json!({"package": echo_id, "commit": echo_at, "status": status, "version": version,
+                    "error": error, "untrusted": untrusted, "unreviewed": false, "in-progress": in_progress})
             };
             let frozen = (self.packages.iter().find(|(p, _)| p == id))
                 .and_then(|(_, vs)| vs.iter().rev().find(|v| v.contains(&format!("\"commit\":\"{at}"))).cloned());
-            items.push(if self.refuse_at.iter().any(|c| c == at) {
+            items.push(if self.novel_status > 0 {
+                item("queued", None, Some("a status from a newer server".into()))
+            } else if self.refuse_at.iter().any(|c| c == at) {
                 item("forbidden", None, Some("not served: the package isn't trusted".into()))
             } else if self.bad_at.iter().any(|c| c == at) {
                 item("bad-request", None, Some(format!("{id} at commit {}: invalid manifest: no [package] table", &at[..12])))
@@ -346,17 +390,22 @@ impl Fake {
                             self.warm.insert(key);
                             item("ok", Some(serde_json::from_str(&json).unwrap()), None)
                         } else {
-                            // Fetched on after the answer: ready on the next ask.
-                            if self.fetching.insert(key) {
+                            // Read on after the answer: ready in `fetch_asks` asks.
+                            if !self.fetching.contains_key(&key) {
+                                self.fetching.insert(key, self.fetch_asks);
                                 self.batch_fetches += 1;
                             }
-                            item("not-read", None, Some("not read this time".into()))
+                            item("not-read", None, Some("reading on".into()))
                         }
                     }
                 }
             });
         }
-        let body = serde_json::json!({ "items": items }).to_string();
+        self.novel_status = self.novel_status.saturating_sub(1);
+        if self.short_answer {
+            items.pop();
+        }
+        let body = if self.garbage_answer { "{\"items\": [".to_owned() } else { serde_json::json!({ "items": items }).to_string() };
         ("200 OK", "api-generation: 1\r\n".to_owned(), body.into_bytes())
     }
 
@@ -1598,6 +1647,12 @@ fn clones_changed_while_the_prompt_waits_are_caught() {
 /// as `change` says), read up front by one registry: the batch requests and
 /// rounds it took, and how many it read.
 fn prefetch_on(n: usize, change: impl FnOnce(&mut Fake)) -> (usize, usize, usize, Shared) {
+    let (requests, rounds, read, _, fake) = prefetch_waits(n, change);
+    (requests, rounds, read, fake)
+}
+
+/// [`prefetch_on`], with the waits between rounds.
+fn prefetch_waits(n: usize, change: impl FnOnce(&mut Fake)) -> (usize, usize, usize, Vec<std::time::Duration>, Shared) {
     let mut fake = Fake::new();
     let mut items = Vec::new();
     for i in 0..n {
@@ -1611,9 +1666,9 @@ fn prefetch_on(n: usize, change: impl FnOnce(&mut Fake)) -> (usize, usize, usize
     let mut reg = super::super::resolution::Registry::new(&client, []);
     reg.prefetch(&items).unwrap();
     let read = items.iter().filter(|(id, c)| reg.batch_read(id, c)).count();
-    let (requests, rounds) = (reg.batch_requests, reg.batch_rounds);
+    let (requests, rounds, pauses) = (reg.batch_requests, reg.batch_rounds, reg.pauses.clone());
     reg.finish();
-    (requests, rounds, read, fake)
+    (requests, rounds, read, pauses, fake)
 }
 
 /// Batch reads in rounds: a warm base in one request (two past 200
@@ -1645,11 +1700,164 @@ fn batch_reads_go_in_rounds() {
     assert_eq!(stalled(2), (3, 3, 80));
     // Held up for good: the first round and three more, then single reads.
     assert_eq!(stalled(100), (4, 4, 0));
-    // The wait budget spent after the second retry's short wait.
+    // The wait budget spent during the first stall's wait.
     super::super::resolution::TEST_WAIT_BUDGET.with(|w| w.set(Some(std::time::Duration::from_millis(30))));
-    assert_eq!(stalled(100), (3, 3, 0));
+    assert_eq!(stalled(100), (2, 2, 0));
     super::super::resolution::TEST_WAIT_BUDGET.with(|w| w.set(None));
+    // A read the server goes on with for three asks: asked again shortly,
+    // never taken for a stall, however long it takes.
+    let (q, r, read, _) = prefetch_on(80, |f| (f.fetch_budget, f.fetch_asks) = (0, 3));
+    assert_eq!((q, r, read), (4, 4, 80));
     super::super::resolution::TEST_ROUND_WAIT.with(|w| w.set(None));
+}
+
+/// What follows which round: a short wait after one with reads still going
+/// on, twice that after one with none (the server's network taken).
+#[test]
+fn the_wait_after_a_round_depends_on_what_is_still_being_read() {
+    let w = std::time::Duration::from_millis(20);
+    super::super::resolution::TEST_ROUND_WAIT.with(|c| c.set(Some(w)));
+    let (_, _, read, pauses, _) = prefetch_waits(10, |f| (f.fetch_budget, f.fetch_asks) = (0, 2));
+    assert_eq!((read, pauses), (10, vec![w, w]));
+    let (_, _, read, pauses, _) = prefetch_waits(10, |f| f.stalled = 2);
+    assert_eq!((read, pauses), (10, vec![w * 2, w * 2]));
+    super::super::resolution::TEST_ROUND_WAIT.with(|c| c.set(None));
+}
+
+/// The batch phase is bounded as a whole, requests and waits together, and
+/// in rounds: what is left then is read singly when needed.
+#[test]
+fn the_batch_phase_is_bounded() {
+    super::super::resolution::TEST_ROUND_WAIT.with(|c| c.set(Some(std::time::Duration::from_millis(5))));
+    // Never ready: thirty rounds at most (the server's window of twelve
+    // requests made short, so its limit costs no time here).
+    let never = |f: &mut Fake| (f.fetch_budget, f.fetch_asks, f.window) = (0, 1000, std::time::Duration::from_millis(1));
+    let (_, rounds, read, _) = prefetch_on(5, never);
+    assert_eq!((rounds, read), (30, 0));
+    // A deadline that the rounds' requests and waits reach first.
+    super::super::resolution::TEST_BATCH_DEADLINE.with(|d| d.set(Some(std::time::Duration::from_millis(60))));
+    let started = std::time::Instant::now();
+    let (_, rounds, read, _) = prefetch_on(5, never);
+    assert!(rounds < 30 && read == 0, "{rounds} rounds");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    super::super::resolution::TEST_BATCH_DEADLINE.with(|d| d.set(None));
+    super::super::resolution::TEST_ROUND_WAIT.with(|c| c.set(None));
+}
+
+/// Answers cactup cannot use never fail a command: an unusable item (a
+/// version at another commit, another commit echoed) is read singly and not
+/// asked again; an unusable answer (one item short, a body that is no JSON)
+/// ends the batch phase, everything in it read singly. A package's name
+/// echoed in other case is the same package.
+#[test]
+fn unusable_batch_answers_fall_back_to_single_reads() {
+    let one = format!("{:040x}", 1);
+    // (requests, rounds, read)
+    let (q, r, read, _) = prefetch_on(5, |f| f.wrong_commit_at.push(one.clone()));
+    assert_eq!((q, r, read), (1, 1, 4));
+    let (q, r, read, _) = prefetch_on(5, |f| f.echo_other_at.push(one.clone()));
+    assert_eq!((q, r, read), (1, 1, 4));
+    let (q, r, read, _) = prefetch_on(5, |f| f.shout = true);
+    assert_eq!((q, r, read), (1, 1, 5));
+    let (q, r, read, _) = prefetch_on(5, |f| f.short_answer = true);
+    assert_eq!((q, r, read), (1, 1, 0));
+    let (q, r, read, _) = prefetch_on(5, |f| f.garbage_answer = true);
+    assert_eq!((q, r, read), (1, 1, 0));
+    // Through a whole add: the base read singly where the plan needs it.
+    for unusable in 0..3 {
+        let (s, _, fake) = unfrozen_base(3, |tmp, mut fake| {
+            match unusable {
+                0 => fake.short_answer = true,
+                1 => fake.garbage_answer = true,
+                _ => fake.shout = true,
+            }
+            let (url, c) = upstream(tmp, "dep", &[("Dep/interface.ccl", "IMPLEMENTS: dep\n")]);
+            let claims = format!("[{}]", depends("et/r0", ">=0.0.0", &["U0"]));
+            fake.package("max/dep0", vec![version("1.0.0", &c, &url, "Dep", &["Dep"], &claims)])
+        });
+        let got = records(&s, &["max/dep0"], &AddFlags::default()).unwrap_or_else(|e| panic!("{unusable}: {e:#}"));
+        assert_eq!(record_of(&got, "et/r0").2, ["Arr0/U0"]);
+        let singles = if unusable == 2 { 0 } else { 1 };
+        assert_eq!(fake.lock().unwrap().unfrozen_reads, singles, "{unusable}");
+    }
+}
+
+/// What the batch keeps for the resolver: a package read untrusted is a
+/// snapshot that says so (the plan's untrusted confirmation rests on it);
+/// a status this cactup does not know is taken as not read, and asked
+/// again; a 429 on the request is waited out, and the request sent again.
+#[test]
+fn batch_reads_keep_what_the_single_read_would() {
+    use crate::deps::Facts;
+    let one = format!("{:040x}", 1);
+    let mut fake = Fake::new();
+    fake.snapshots.push(("et/p".into(), one.clone(), version(&one, &one, "https://x/p.git", "P", &["P"], "[]")));
+    fake.untrusted_at.push(one.clone());
+    let (base, _, _fake) = fake.serve_shared();
+    let client = crate::cactarium::Client::at(&base);
+    let mut reg = super::super::resolution::Registry::new(&client, []);
+    let id = crate::deps::PkgId::parse("et/p").unwrap();
+    reg.prefetch(&[(id.clone(), one.clone())]).unwrap();
+    let snap = reg.snapshot(&id, &one).unwrap().expect("read in the batch");
+    assert!(snap.untrusted);
+    reg.finish();
+
+    super::super::resolution::TEST_ROUND_WAIT.with(|c| c.set(Some(std::time::Duration::from_millis(5))));
+    let (q, r, read, _) = prefetch_on(5, |f| f.novel_status = 1);
+    assert_eq!((q, r, read), (2, 2, 5));
+    super::super::resolution::TEST_ROUND_WAIT.with(|c| c.set(None));
+
+    // The server's window full when the batch asks: Retry-After, then read.
+    let (q, r, read, _) = prefetch_on(5, |f| {
+        (f.in_window, f.window_start, f.window, f.retry_after) =
+            (12, Some(std::time::Instant::now()), std::time::Duration::from_secs(1), true);
+    });
+    assert_eq!((q, r, read), (2, 1, 5));
+}
+
+/// A batch request counts in the server's window of reads made now: a single
+/// read that meets the limit after it waits for the window the batch opened,
+/// not for a whole window from then.
+#[test]
+fn a_batch_request_opens_the_read_window() {
+    use crate::deps::Facts;
+    super::super::resolution::TEST_READ_WINDOW.with(|w| w.set(Some(std::time::Duration::from_secs(1))));
+    let (one, two) = (format!("{:040x}", 1), format!("{:040x}", 2));
+    let mut fake = Fake::new();
+    for c in [&one, &two] {
+        fake.snapshots.push(("et/p".into(), c.clone(), version(c, c, "https://x/p.git", "P", &["P"], "[]")));
+    }
+    let mut fake = fake.package("et/p", vec![version("1.0.0", &"9".repeat(40), "https://x/p.git", "P", &["P"], "[]")]);
+    (fake.in_window, fake.window_start, fake.window) = (11, Some(std::time::Instant::now()), std::time::Duration::from_secs(1));
+    let (base, _, _fake) = fake.serve_shared();
+    let client = crate::cactarium::Client::at(&base);
+    let mut reg = super::super::resolution::Registry::new(&client, []);
+    let id = crate::deps::PkgId::parse("et/p").unwrap();
+    reg.prefetch(&[(id.clone(), one.clone())]).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    let started = std::time::Instant::now();
+    assert!(reg.snapshot(&id, &two).unwrap().is_some());
+    reg.finish();
+    assert!(started.elapsed() < std::time::Duration::from_millis(700), "{:?}", started.elapsed());
+    super::super::resolution::TEST_READ_WINDOW.with(|w| w.set(None));
+}
+
+/// An added package at a commit is read in the batch, like the base, never
+/// singly.
+#[test]
+fn an_added_package_at_a_commit_is_read_in_the_batch() {
+    let (s, log, fake) = unfrozen_base(1, |tmp, mut fake| {
+        let (url, c) = upstream(tmp, "c", &[("C/interface.ccl", "IMPLEMENTS: c\n")]);
+        fake.snapshots.push(("max/c".into(), c.clone(), version(&c, &c, &url, "C", &["C"], "[]")));
+        fake.package("max/c", vec![version("1.0.0", &"7".repeat(40), &url, "C", &["C"], "[]")])
+    });
+    let c = fake.lock().unwrap().snapshots.iter().find(|(p, _, _)| p == "max/c").unwrap().1.clone();
+    s.add(&[&format!("max/c#{c}")], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    log.lock().unwrap().clear();
+    s.remove(&["max/c"], RemoveFlags { dry_run: true, ..remove_yes() }).unwrap_or_else(|e| panic!("{e:#}"));
+    let log = log.lock().unwrap();
+    assert!(!log.iter().any(|(p, _)| p.contains(&format!("/versions/{c}"))), "{log:?}");
+    assert!(log.iter().any(|(p, b)| p.ends_with("/packages/read") && b.contains("max/c")), "{log:?}");
 }
 
 /// Rounds held up for good leave the base to single reads, made only for
@@ -1784,6 +1992,101 @@ fn remove_finds_a_base_package_that_depends_on_what_goes() {
     assert!(err.contains("--no-deps"), "{err}");
     fake.lock().unwrap().batch = false;
     s.remove(&["max/new"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
+}
+
+/// A base whose et/carpet (1.0.0 at c1; 2.0.0 at c2, its branch's tip) is
+/// pinned at c1 or follows its branch, beside et/x (at a commit no version
+/// froze, read in the batch) and et/f (frozen at 1.0.0), both depending on
+/// et/carpet >=1.0.0. `head`: whether the Cactarium can read et/carpet's tip.
+fn replaced_base(pinned: bool, head: bool) -> (Setup, Shared) {
+    let tmp = tempfile::tempdir().unwrap();
+    let (curl, c1) = upstream(tmp.path(), "carpet", &[("Carpet/interface.ccl", "IMPLEMENTS: carpet\n")]);
+    let (xurl, cx) = upstream(tmp.path(), "x", &[("X/interface.ccl", "IMPLEMENTS: x\n")]);
+    let (furl, cf) = upstream(tmp.path(), "f", &[("F/interface.ccl", "IMPLEMENTS: f\n")]);
+    let needs = format!("[{}]", depends("et/carpet", ">=1.0.0", &["Carpet"]));
+    let mut fake = Fake::new()
+        .package("et/carpet", vec![version("1.0.0", &c1, &curl, "Carpet", &["Carpet"], "[]")])
+        .package("et/x", vec![version("1.0.0", &"9".repeat(40), &xurl, "X", &["X"], "[]")])
+        .package("et/f", vec![version("1.0.0", &cf, &furl, "F", &["F"], &needs)])
+        .pin(&curl, "et/carpet", Some("1.0.0"))
+        .pin(&xurl, "et/x", None)
+        .pin(&furl, "et/f", Some("1.0.0"));
+    fake.snapshots.push(("et/x".into(), cx.clone(), version(&cx, &cx, &xurl, "X", &["X"], &needs)));
+    let mut carpet = section(&curl, &c1, &["Carpet/Carpet"]);
+    if !pinned {
+        carpet = carpet.replace(&format!("!REPO_COMMIT = {c1}\n"), "");
+    }
+    let base = [carpet, section(&xurl, &cx, &["X/X"]), section(&furl, &cf, &["F/F"])].concat();
+    let (cactarium, _, fake) = fake.serve_shared();
+    let setup = Setup::new(tmp, &base, &cactarium);
+    // Then et/carpet 2.0.0, its branch's new tip.
+    let up = setup.inst.root.parent().unwrap().join("up/carpet");
+    let c2 = crate::fetch::tests::commit_files(&up, &[("Carpet/interface.ccl", "IMPLEMENTS: carpet\n"), ("README", "2\n")]).to_string();
+    {
+        let mut f = fake.lock().unwrap();
+        let two = version("2.0.0", &c2, &curl, "Carpet", &["Carpet"], "[]");
+        f.packages.iter_mut().find(|(p, _)| p == "et/carpet").unwrap().1.insert(0, two);
+        if head {
+            f.snapshots.push(("et/carpet".into(), "head".into(), version("head", &c2, &curl, "Carpet", &["Carpet"], "[]")));
+        }
+    }
+    (setup, fake)
+}
+
+/// Removing a package that replaced a base repo brings that base repo back,
+/// at the base's pin (or its branch's tip): what depends on the package and
+/// is met by what comes back is no dependent, frozen or read in the batch.
+/// What comes back that cannot be read is said beside a refusal.
+#[test]
+fn removing_a_replacement_counts_the_base_that_comes_back() {
+    for (pinned, head) in [(true, false), (false, true)] {
+        let (s, _) = replaced_base(pinned, head);
+        let upgrade = AddFlags { upgrade: true, yes: true, ..AddFlags::default() };
+        s.add(&["et/carpet@=2.0.0"], upgrade).unwrap_or_else(|e| panic!("pinned {pinned}: {e:#}"));
+        assert!(s.meta().added.iter().any(|a| a.package == "et/carpet" && a.replaces == ["carpet"]), "pinned {pinned}");
+        if pinned {
+            s.remove(&["et/carpet"], remove_yes()).unwrap_or_else(|e| panic!("pinned {pinned}: {e:#}"));
+        } else {
+            // A base that follows its branch is not restored by a remove (the
+            // replacement left its clone detached): its plan is what is checked.
+            let start = Start::read(&s.ctx, false, Doing::Removing).unwrap();
+            let base = thornlist::parse(&start.pristine).unwrap();
+            let target = [crate::deps::PkgId::parse("et/carpet").unwrap()];
+            super::plan_remove_with_deps(&s.ctx, &start, &base, &target).unwrap_or_else(|e| panic!("{e:#}"));
+        }
+    }
+    // A base that follows its branch, whose tip the Cactarium cannot read:
+    // what comes back is unknown, and the refusal says so.
+    let (s, _) = replaced_base(false, false);
+    s.add(&["et/carpet@=2.0.0"], AddFlags { upgrade: true, yes: true, ..AddFlags::default() }).unwrap();
+    let start = Start::read(&s.ctx, false, Doing::Removing).unwrap();
+    let base = thornlist::parse(&start.pristine).unwrap();
+    let target = [crate::deps::PkgId::parse("et/carpet").unwrap()];
+    let err = format!("{:#}", super::plan_remove_with_deps(&s.ctx, &start, &base, &target).unwrap_err());
+    assert!(err.contains("Other packages depend on et/carpet"), "{err}");
+    assert!(err.contains("cannot be read") && err.contains("base repo carpet: et/carpet at its tip"), "{err}");
+}
+
+/// Taking away the thorns cactup gave a base package (an extension) gives
+/// back the base as it was: a base package depending on that package with
+/// no thorns named lived with that, and is no dependent of the extension.
+#[test]
+fn removing_an_extension_is_not_held_by_a_base_package_s_whole_dependency() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (zurl, cz) = upstream(tmp.path(), "z", &[("A/interface.ccl", "IMPLEMENTS: a\n"), ("B/interface.ccl", "IMPLEMENTS: b\n")]);
+    let (yurl, cy) = upstream(tmp.path(), "y", &[("Y/interface.ccl", "IMPLEMENTS: y\n")]);
+    let whole = format!("[{}]", depends("et/z", ">=0.0.0", &[]));
+    let fake = Fake::new()
+        .package("et/z", vec![version("1.0.0", &cz, &zurl, "Z", &["A", "B"], "[]")])
+        .package("et/y", vec![version("1.0.0", &cy, &yurl, "Y", &["Y"], &whole)])
+        .pin(&zurl, "et/z", Some("1.0.0"))
+        .pin(&yurl, "et/y", Some("1.0.0"));
+    let base = [section(&zurl, &cz, &["Z/A"]), section(&yurl, &cy, &["Y/Y"])].concat();
+    let (cactarium, _, _fake) = fake.serve_shared();
+    let s = Setup::new(tmp, &base, &cactarium);
+    s.add(&["et/z/B"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    s.remove(&["et/z"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    assert!(s.meta().added.is_empty());
 }
 
 /// A base package at an unfrozen commit the resolver read (a dependency

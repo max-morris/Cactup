@@ -105,7 +105,9 @@ pub struct Extension {
 /// (to a fixpoint, cycles included). A package nothing reached before the removal (one an
 /// earlier `--no-deps` left behind) counts as named: it is never swept, nor what it needs.
 /// A target, or an orphan, that is one of `extensions` is that extension: its thorns go, the
-/// base package stays.
+/// base package stays. `returning` are the base packages that come back with the targets (the
+/// base repos they replaced, at the base's pin, as read): they hold what they meet after the
+/// removal, never before.
 pub fn plan_remove(
     present: &[Present],
     added_for: &BTreeMap<PkgId, AddedFor>,
@@ -113,12 +115,23 @@ pub fn plan_remove(
     rules: &Rules,
     no_deps: bool,
     extensions: &[Extension],
+    returning: &[Present],
 ) -> Result<RemovePlan, Refusal> {
     let mut all: BTreeMap<PkgId, Present> = BTreeMap::new();
     for p in present {
         let mut p = p.clone();
         rules.apply(&mut p.release);
         all.insert(p.release.id.clone(), p);
+    }
+    // Each returning base package a node of its own (its package may be the very target going).
+    let mut back: BTreeMap<PkgId, PkgId> = BTreeMap::new();
+    for p in returning {
+        let mut p = p.clone();
+        rules.apply(&mut p.release);
+        // Keyed apart, its release its own (a label, claims, forks read as the package's).
+        let node = PkgId(format!("{}#base", p.release.id));
+        back.insert(node.clone(), p.release.id.clone());
+        all.insert(node, p);
     }
     // Each extension its own node, beside the base node of its package, which keeps the rest.
     let mut ext: BTreeMap<PkgId, (PkgId, &Extension)> = BTreeMap::new();
@@ -148,8 +161,9 @@ pub fn plan_remove(
     }
     let gone: BTreeSet<&PkgId> = removed.iter().collect();
     let remaining: BTreeSet<&PkgId> = all.keys().filter(|id| !gone.contains(id)).collect();
-    let everything: BTreeSet<&PkgId> = all.keys().collect();
-    let g = Graph { all: &all, rules, added_for, ext: &ext };
+    // Before the removal, the returning base packages are not there.
+    let everything: BTreeSet<&PkgId> = all.keys().filter(|id| !back.contains_key(*id)).collect();
+    let g = Graph { all: &all, rules, added_for, ext: &ext, back: &back };
 
     // Each dependent once per dependency: a claim of a base package that applies to a base thorn
     // and an added one is the base node's and the extension node's alike.
@@ -192,6 +206,8 @@ struct Graph<'a> {
     added_for: &'a BTreeMap<PkgId, AddedFor>,
     /// Extension node → (its base package, the extension).
     ext: &'a BTreeMap<PkgId, (PkgId, &'a Extension)>,
+    /// Returning base package node → its package.
+    back: &'a BTreeMap<PkgId, PkgId>,
 }
 
 impl Graph<'_> {
@@ -203,6 +219,9 @@ impl Graph<'_> {
         if let Some(id) = set.iter().find(|id| id.as_str() == target) {
             return Some(id);
         }
+        if let Some(id) = set.iter().find(|id| self.back.get(**id).is_some_and(|b| b.as_str() == target)) {
+            return Some(id);
+        }
         let t = PkgId::parse(target).ok()?;
         for x in self.rules.satisfiers(&t) {
             if let Some(id) = set.iter().find(|id| **id == x) {
@@ -212,12 +231,21 @@ impl Graph<'_> {
         set.iter().find(|id| forks(&self.all[**id].release, &t)).copied()
     }
 
-    /// The holder of a dependency that `taker` takes, needing `needs` of it: the taker, or
-    /// its extension node when the dependency needs one of the extension's thorns (every thorn,
-    /// when it names none); `None` when that node is not in `set`.
-    fn holder<'s>(&self, taker: &'s PkgId, needs: &[String], set: &BTreeSet<&'s PkgId>) -> Option<&'s PkgId> {
+    /// The holder of a dependency of `dependent` that `taker` takes, needing `needs` of it: the
+    /// taker, or its extension node when the dependency needs one of the extension's thorns;
+    /// `None` when that node is not in `set`. A dependency naming no thorns (every thorn) holds
+    /// the extension only for a dependent cactup added: a base package's claims never asked for
+    /// more than the base it came with, which removing the extension gives back.
+    fn holder<'s>(
+        &self,
+        dependent: &Present,
+        taker: &'s PkgId,
+        needs: &[String],
+        set: &BTreeSet<&'s PkgId>,
+    ) -> Option<&'s PkgId> {
         let Some((node, (_, e))) = self.ext.iter().find(|(_, (b, _))| b == taker) else { return Some(taker) };
-        let touches = needs.is_empty() || needs.iter().any(|n| e.thorns.iter().any(|t| t.eq_ignore_ascii_case(n)));
+        let every = needs.is_empty() && !matches!(dependent.origin, Origin::Base { .. });
+        let touches = every || needs.iter().any(|n| e.thorns.iter().any(|t| t.eq_ignore_ascii_case(n)));
         if !touches {
             return Some(taker);
         }
@@ -241,7 +269,7 @@ impl Graph<'_> {
             let label = claim_label(c);
             let held: Vec<&PkgId> = if c.alternatives.is_empty() {
                 let taker = self.taker(&c.target, set);
-                taker.and_then(|t| self.holder(t, &c.needs, set)).into_iter().collect()
+                taker.and_then(|t| self.holder(p, t, &c.needs, set)).into_iter().collect()
             } else {
                 let alternatives: Option<Vec<PkgId>> =
                     c.alternatives.iter().map(|a| PkgId::parse(&a.target).ok()).collect();
@@ -257,7 +285,7 @@ impl Graph<'_> {
                     key.as_ref().is_some_and(|k| choices.contains(k))
                 });
                 let chosen = recorded.or(takers.first());
-                chosen.and_then(|(t, needs)| self.holder(t, needs, set)).into_iter().collect()
+                chosen.and_then(|(t, needs)| self.holder(p, t, needs, set)).into_iter().collect()
             };
             out.push((label, held));
         }

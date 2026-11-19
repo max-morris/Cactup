@@ -81,6 +81,8 @@ pub(crate) struct Registry {
     /// Batch requests sent, and rounds of them (for a test's count).
     pub(crate) batch_requests: usize,
     pub(crate) batch_rounds: usize,
+    /// The waits between batch rounds, in order (for a test).
+    pub(crate) pauses: Vec<std::time::Duration>,
 }
 
 /// What a batch read answered for one package at one commit.
@@ -100,18 +102,36 @@ enum Batched {
 const ROUND_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
 const STALL_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 const STALLS: usize = 3;
+/// The longest the batch phase takes, requests and waits together, and the
+/// most rounds it makes: then what is left is read singly when needed.
+const BATCH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
+const MAX_ROUNDS: usize = 30;
+/// The line the batch phase shows what it is doing on.
+const BATCH: &str = "batch reads";
 
 #[cfg(test)]
 thread_local! {
-    /// Both waits between batch rounds, scaled down for a test.
+    /// Both waits between batch rounds, scaled down for a test (the stall's
+    /// twice the other's, as the real ones are).
     pub(crate) static TEST_ROUND_WAIT: std::cell::Cell<Option<std::time::Duration>> =
         const { std::cell::Cell::new(None) };
+    /// The batch phase's deadline, scaled down for a test.
+    pub(crate) static TEST_BATCH_DEADLINE: std::cell::Cell<Option<std::time::Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn batch_deadline() -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(d) = TEST_BATCH_DEADLINE.with(|d| d.get()) {
+        return d;
+    }
+    BATCH_DEADLINE
 }
 
 fn round_wait(stalled: bool) -> std::time::Duration {
     #[cfg(test)]
     if let Some(w) = TEST_ROUND_WAIT.with(|w| w.get()) {
-        return w;
+        return if stalled { w * 2 } else { w };
     }
     if stalled { STALL_WAIT } else { ROUND_WAIT }
 }
@@ -121,7 +141,11 @@ fn batch_why(id: &PkgId, status: &ReadStatus, error: Option<&str>) -> Option<Una
     let message = error.unwrap_or_default();
     let (kind, why) = match status {
         ReadStatus::Forbidden => (UnreadKind::Untrusted, "it reads an untrusted package only at released versions".to_owned()),
-        ReadStatus::NotFound => return Some(missing_commit(id)),
+        // The server's words say which: no such commit (is it pushed?), or no such package.
+        ReadStatus::NotFound => match error {
+            Some(error) => (UnreadKind::Missing, error.to_owned()),
+            None => return Some(missing_commit(id)),
+        },
         ReadStatus::BadRequest => (UnreadKind::Invalid, message.to_owned()),
         ReadStatus::Upstream => (UnreadKind::Retry, "it could not reach the package's repository just now".to_owned()),
         ReadStatus::Ok | ReadStatus::NotRead | ReadStatus::Unknown => return None,
@@ -203,7 +227,7 @@ impl Registry {
     pub(crate) fn new<'a>(client: &Client, names: impl IntoIterator<Item = &'a str>) -> Registry {
         // Only bars: no line here ever calls `info`/`fail`.
         let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
-        let layout = Layout::for_names([ASK, SEARCH, CLONES, READ_LIMIT].into_iter().chain(names));
+        let layout = Layout::for_names([ASK, SEARCH, CLONES, READ_LIMIT, BATCH].into_iter().chain(names));
         Registry {
             client: client.clone().patient(),
             loaded: BTreeMap::new(),
@@ -222,6 +246,7 @@ impl Registry {
             no_batch: false,
             batch_requests: 0,
             batch_rounds: 0,
+            pauses: Vec::new(),
         }
     }
 
@@ -355,7 +380,7 @@ impl Registry {
         // What a batch read answered first; the rest read one by one.
         let mut batched: Vec<Option<Read>> = Vec::with_capacity(at.len());
         for (id, commit) in at {
-            batched.push(self.batched(id, commit).transpose()?);
+            batched.push(self.batched(id, commit));
         }
         let rest: Vec<(PkgId, String)> =
             at.iter().zip(&batched).filter(|(_, b)| b.is_none()).map(|(k, _)| k.clone()).collect();
@@ -426,7 +451,7 @@ impl Registry {
                 None => return read.map(Ok),
                 Some(r) if r.status == 429 && attempt < 2 => {
                     let retry_after = r.retry_after;
-                    if !self.wait_for_limit(retry_after)? {
+                    if !self.wait_for_limit(retry_after, None)? {
                         let why = format!(
                             "its read limit, and this command has waited {} for it already; try again later",
                             minutes(self.waited)
@@ -442,15 +467,19 @@ impl Registry {
 
     /// Reads `items` (packages at full commits) in batches of at most
     /// [`MAX_READ_ITEMS`], in a stable order, keeping what each answers for
-    /// the reads to come. The server fetches only so much from authors' hosts
-    /// in a request's time and answers the rest `not-read`, fetching them on:
-    /// those are asked again shortly, round after round, while a round reads
-    /// something. A round that reads nothing (the server's fetch slots were
-    /// busy) is sent again after a longer wait, a few times.
-    /// What is still not read then is left to a single read when it is
-    /// needed. Rate limits are waited out within this command's budget. A
-    /// Cactarium without batch reads leaves everything to single reads.
-    /// Shown as packages read out of all, on a line.
+    /// the reads to come. What the server has not read yet comes back
+    /// `not-read`, and is asked again, round after round: 1.5 s later while
+    /// some of it is being read in the background (`in-progress`), 3 s later
+    /// when none of it is (the server's network slots were taken, or its
+    /// time ran out), at most [`STALLS`] such rounds in a row. Rate limits
+    /// are waited out within the command's wait budget, and the whole phase,
+    /// requests included, within [`BATCH_DEADLINE`] and [`MAX_ROUNDS`] rounds.
+    /// What is still not read then, an item cactup cannot use (answered for
+    /// another package or commit, a version that is no release of it), and
+    /// everything of an answer it cannot use, is left to a single read when
+    /// it is needed. A Cactarium without batch reads leaves everything to
+    /// single reads. Shown as packages read out of all, with one line saying
+    /// what the phase is doing.
     pub(crate) fn prefetch(&mut self, items: &[(PkgId, String)]) -> Res<()> {
         let mut pending: Vec<(PkgId, String)> = (items.iter())
             .filter(|(id, c)| !id.is_repo() && is_commit_id(c) && !self.batch.contains_key(&(id.clone(), c.clone())))
@@ -461,40 +490,44 @@ impl Registry {
         if pending.is_empty() || self.no_batch {
             return Ok(());
         }
-        let total = pending.len();
-        let mut headline = self.headline(total, "packages");
+        let deadline = std::time::Instant::now() + batch_deadline();
+        let mut headline = self.headline(pending.len(), "packages");
+        let status = Line::over(headline.add_child(BATCH.to_owned()), BATCH, self.layout.clone());
         let mut stalls = 0;
-        loop {
-            let before = pending.len();
+        for round in 1..=MAX_ROUNDS {
             self.batch_rounds += 1;
-            let mut next: Vec<(PkgId, String)> = Vec::new();
-            let mut stopped = false;
+            let (mut next, mut in_progress, mut stopped) = (Vec::new(), false, false);
             for chunk in pending.chunks(MAX_READ_ITEMS) {
-                if stopped {
-                    next.extend(chunk.iter().cloned());
-                    continue;
-                }
-                let name = format!("round {}: {} packages", self.batch_rounds, chunk.len());
-                let line = Line::over(headline.add_child(name.clone()), &name, self.layout.clone());
-                line.phase("reading them at their commits".to_owned());
-                let answer = self.read_batch(chunk)?;
-                drop(line);
-                let Some(answer) = answer else {
+                if stopped || std::time::Instant::now() >= deadline {
                     stopped = true;
-                    next.extend(chunk.iter().cloned());
-                    continue;
+                    break;
+                }
+                status.phase(format!("round {round}: reading {} packages", chunk.len()));
+                let Some(answer) = self.read_batch(chunk, &status)? else {
+                    stopped = true;
+                    break;
                 };
                 for ((id, commit), item) in chunk.iter().zip(answer.items) {
                     let key = (id.clone(), commit.clone());
-                    if item.package != id.as_str() || item.commit != *commit {
-                        next.push(key);
+                    // Answered for what was asked (a package name in any case, the commit
+                    // exactly), or the item is of no use: read singly, never asked again.
+                    if !item.package.eq_ignore_ascii_case(id.as_str()) || item.commit != *commit {
                         continue;
                     }
                     let read = match (&item.status, item.version) {
-                        (ReadStatus::Ok, Some(version)) => Batched::Read(Box::new(version), item.untrusted),
+                        (ReadStatus::Ok, Some(version)) => {
+                            // Every server with batch reads says `untrusted`; absent, it would
+                            // read as trusted.
+                            match Release::from_served(id, &version, self.contact(id)) {
+                                Ok(r) if r.commit == *commit => Batched::Read(Box::new(version), item.untrusted),
+                                _ => continue,
+                            }
+                        }
+                        (ReadStatus::Ok, None) => continue,
                         (status, _) => match batch_why(id, status, item.error.as_deref()) {
                             Some(why) => Batched::Unread(why),
                             None => {
+                                in_progress |= item.in_progress;
                                 next.push(key);
                                 continue;
                             }
@@ -507,13 +540,15 @@ impl Registry {
             if next.is_empty() || stopped {
                 break;
             }
-            let stalled = next.len() == before;
+            // None of what is left is being read: ask again a little later, a few times.
+            let stalled = !in_progress;
             stalls = if stalled { stalls + 1 } else { 0 };
-            if stalls > STALLS {
+            if stalls > STALLS || round == MAX_ROUNDS {
                 break;
             }
-            let name = if stalled { "the Cactarium's fetch slots" } else { "what the Cactarium is fetching" };
-            if !self.pause(round_wait(stalled), name)? {
+            let wait = round_wait(stalled).min(deadline.saturating_duration_since(std::time::Instant::now()));
+            let doing = if stalled { "waiting for the Cactarium's network" } else { "waiting for what it is reading" };
+            if wait.is_zero() || !self.pause(wait, &status, doing)? {
                 break;
             }
             pending = next;
@@ -522,10 +557,14 @@ impl Registry {
     }
 
     /// One batch request, the read limit waited out (at most twice, within
-    /// the budget). `None`: not answered (a Cactarium without batch reads,
-    /// the limit outlasting the budget, the server failing): those reads are
-    /// left to single ones.
-    fn read_batch(&mut self, chunk: &[(PkgId, String)]) -> Res<Option<cactup_ecosystem_common::api::ReadAnswer>> {
+    /// the budget, shown on `status`). `None`: not answered (a Cactarium
+    /// without batch reads, an answer cactup cannot use, the limit outlasting
+    /// the budget, the server failing): those reads are left to single ones.
+    fn read_batch(
+        &mut self,
+        chunk: &[(PkgId, String)],
+        status: &Line,
+    ) -> Res<Option<cactup_ecosystem_common::api::ReadAnswer>> {
         let request = ReadRequest {
             items: chunk.iter().map(|(id, c)| ReadQuery { package: id.to_string(), commit: c.clone() }).collect(),
         };
@@ -547,10 +586,14 @@ impl Registry {
                 Ok(answer) => return Ok(Some(answer)),
                 Err(e) => e,
             };
+            if e.downcast_ref::<crate::cactarium::UnusableAnswer>().is_some() {
+                self.no_batch = true;
+                return Ok(None);
+            }
             match refused_read(&e) {
                 Some(r) if r.status == 429 && attempt < 2 => {
                     let retry_after = r.retry_after;
-                    if !self.wait_for_limit(retry_after)? {
+                    if !self.wait_for_limit(retry_after, Some(status))? {
                         return Ok(None);
                     }
                 }
@@ -561,34 +604,30 @@ impl Registry {
         Ok(None)
     }
 
-    /// Waits `wait` (never past what is left of the budget) on a line named
-    /// `name`; Ctrl-C ends it at once. `false`: the budget is spent.
-    fn pause(&mut self, wait: std::time::Duration, name: &str) -> Res<bool> {
+    /// Waits `wait` (never past what is left of the budget), saying `doing`
+    /// on `status`; Ctrl-C ends it at once. `false`: the budget is spent.
+    fn pause(&mut self, wait: std::time::Duration, status: &Line, doing: &str) -> Res<bool> {
         let left_in_budget = wait_budget().saturating_sub(self.waited);
         if left_in_budget.is_zero() {
             return Ok(false);
         }
         let now = std::time::Instant::now();
         let until = now + wait.min(left_in_budget);
-        let mut headline = self.headline(1, "waits");
-        let line = Line::over(headline.add_child(name.to_owned()), name, self.layout.clone());
-        line.phase("waiting to ask again".to_owned());
+        status.phase(doing.to_owned());
         let waited_before = self.waited;
-        let outcome = loop {
+        loop {
             if gix::interrupt::is_triggered() {
-                break Err(anyhow!("Interrupted"));
+                bail!("Interrupted");
             }
             let at = std::time::Instant::now();
             self.waited = waited_before + at.saturating_duration_since(now);
             let left = until.saturating_duration_since(at);
             if left.is_zero() {
-                break Ok(());
+                break;
             }
             std::thread::sleep(left.min(std::time::Duration::from_millis(50)));
-        };
-        drop(line);
-        headline.inc();
-        outcome?;
+        }
+        self.pauses.push(wait);
         Ok(true)
     }
 
@@ -599,15 +638,16 @@ impl Registry {
     }
 
     /// What a batch read answered for `id` at `commit`, as a single read
-    /// would have: `None` when no batch read it.
-    fn batched(&mut self, id: &PkgId, commit: &str) -> Option<Res<Read>> {
+    /// would have: `None` when no batch read it (or what it answered is no
+    /// release, which a batch never keeps).
+    fn batched(&mut self, id: &PkgId, commit: &str) -> Option<Read> {
         let read = self.batch.get(&(id.clone(), commit.to_owned()))?.clone();
-        Some(match read {
+        match read {
             Batched::Read(version, _) => {
-                Release::from_served(id, &version, self.contact(id)).map(|r| Read::Found(Box::new(r)))
+                Release::from_served(id, &version, self.contact(id)).ok().map(|r| Read::Found(Box::new(r)))
             }
-            Batched::Unread(why) => Ok(Read::Refused(why)),
-        })
+            Batched::Unread(why) => Some(Read::Refused(why)),
+        }
     }
 
     /// Waits for the server's read limit to lift: `Retry-After` seconds (at
@@ -616,13 +656,32 @@ impl Registry {
     /// [`WAIT_BUDGET`]. Shown on a line with the time waited so far; Ctrl-C
     /// ends it at once. `false`: the budget is spent, and the read is not
     /// tried again.
-    fn wait_for_limit(&mut self, retry_after: Option<u64>) -> Res<bool> {
+    fn wait_for_limit(&mut self, retry_after: Option<u64>, on: Option<&Line>) -> Res<bool> {
         let left_in_budget = wait_budget().saturating_sub(self.waited);
         if left_in_budget.is_zero() {
             return Ok(false);
         }
         let now = std::time::Instant::now();
         let until = now + wait_length(retry_after, self.window_start, now, left_in_budget);
+        // On a line already up (a batch's): said there, no headline of its own.
+        if let Some(status) = on {
+            let waited_before = self.waited;
+            loop {
+                if gix::interrupt::is_triggered() {
+                    bail!("Interrupted");
+                }
+                let at = std::time::Instant::now();
+                self.waited = waited_before + at.saturating_duration_since(now);
+                let left = until.saturating_duration_since(at);
+                if left.is_zero() {
+                    break;
+                }
+                status.phase(format!("waiting for the read limit, {} s", left.as_secs() + 1));
+                std::thread::sleep(left.min(std::time::Duration::from_millis(50)));
+            }
+            self.window_start = None;
+            return Ok(true);
+        }
         let mut headline = self.headline(1, "waits");
         // The seconds waited fill the bar and count up beside it; what
         // changes stays at the front of the text, which the layout clips.
@@ -1064,11 +1123,14 @@ pub(crate) fn present(
     // added package below, a base package when the plan depends on it.
     let mut batch: Vec<(PkgId, String)> = Vec::new();
     if !options.no_base_reads {
+        // A base repo whose package an `[[added]]` entry is becomes a repo of
+        // no package (below): nothing to read for it.
+        let added_ids: BTreeSet<&PkgId> = want_of_added.iter().flatten().map(|w| &wants[*w].id).collect();
         let mut first_of: BTreeSet<&PkgId> = BTreeSet::new();
         for (i, (r, id)) in repos.iter().zip(&mapped).enumerate() {
             let (Some(id), Some(commit)) = (id, &r.commit) else { continue };
             let frozen = info_of(i).is_some_and(|info| info.version.is_some());
-            if first_of.insert(id) && !frozen {
+            if first_of.insert(id) && !frozen && !added_ids.contains(id) {
                 batch.push((id.clone(), commit.clone()));
             }
         }
@@ -1140,7 +1202,7 @@ pub(crate) fn present(
                     libraries = installed_libraries(a);
                 }
                 let batched = match want_of_repo[i] {
-                    None => match reg.batched(id, &commit).transpose()? {
+                    None => match reg.batched(id, &commit) {
                         Some(Read::Found(rel)) => Some(*rel),
                         _ => None,
                     },
@@ -1225,6 +1287,79 @@ pub(crate) fn present(
         }
     }
     Ok(PresentSet { present: out, unread, unchecked, heads })
+}
+
+/// The base packages that come back when `targets` go: each base repo a
+/// target replaced, at the base's pin (or, for a base that follows its
+/// branch, the package's tip), with the thorns the base checks out from it,
+/// read as present packages are (a version that froze the pin from the
+/// version list, else a batch or single read at the commit). The ones that
+/// cannot be read, said in words: `base repo carpet (et/carpet at …): why`.
+pub(crate) fn returning_base(
+    reg: &mut Registry,
+    base: &Thornlist,
+    added: &[AddedPackage],
+    targets: &[PkgId],
+) -> Res<(Vec<Present>, Vec<String>)> {
+    let (mut out, mut unread) = (Vec::new(), Vec::new());
+    for a in added.iter().filter(|a| targets.iter().any(|t| t.as_str() == a.package)) {
+        for repo in &a.replaces {
+            let comps: Vec<&Component> = (base.components().iter())
+                .filter(|c| &c.repo == repo && crate::sim::trim::is_arrangement_thorn(base, c))
+                .collect();
+            let Some(first) = comps.first() else { continue };
+            let url = first.url.clone().unwrap_or_default();
+            let pin = first.commit.clone().filter(|c| is_commit_id(c));
+            let checkouts: Vec<(&str, &str)> =
+                comps.iter().map(|c| (c.checkout.as_str(), c.repo_path.as_deref().unwrap_or(""))).collect();
+            let mut not_read = |why: String| unread.push(format!("base repo {repo}: {why}"));
+            // Which package it is: the lookup's word at a pin; else (a base
+            // that follows its branch) the target's own, when it is the same
+            // repository.
+            let (id, version) = match &pin {
+                Some(commit) => {
+                    let info = reg.lookup(&[PinQuery { url: url.clone(), commit: commit.clone() }])?;
+                    match info.first().and_then(|i| i.package.as_deref()).and_then(|p| PkgId::parse(p).ok()) {
+                        Some(id) => (id, info[0].version.clone()),
+                        None => {
+                            not_read(format!("the Cactarium knows no package at {}", short(commit)));
+                            continue;
+                        }
+                    }
+                }
+                None if cactup_ecosystem_common::url::same_repo_lenient(&a.url, &url) => {
+                    (PkgId::parse(&a.package)?, None)
+                }
+                None => {
+                    not_read("which package it is cannot be told without a pin".to_owned());
+                    continue;
+                }
+            };
+            let release = match (&pin, version) {
+                (Some(commit), Some(v)) => {
+                    reg.load(std::slice::from_ref(&id))?;
+                    let fits = |r: &&Release| &r.commit == commit && r.at.version().is_some_and(|at| at.to_string() == v);
+                    reg.releases(&id).and_then(|rs| rs.iter().find(fits)).cloned()
+                }
+                (Some(commit), None) => {
+                    reg.prefetch(&[(id.clone(), commit.clone())])?;
+                    reg.snapshot(&id, commit)?.map(|s| s.release)
+                }
+                (None, _) => reg.snapshot(&id, "head")?.map(|s| s.release),
+            };
+            let at = pin.as_deref().map_or("its tip".to_owned(), |c| short(c).to_owned());
+            let Some(release) = release else {
+                let why = (reg.unanswered(&id, pin.as_deref().unwrap_or("head")))
+                    .map_or_else(|| "the Cactarium cannot read it there".to_owned(), |u| u.why);
+                not_read(format!("{id} at {at}: {why}"));
+                continue;
+            };
+            let release = with_local_facts(release, &checkouts, None);
+            let enabled = checkouts.iter().map(|(c, _)| thorn_of(c).to_owned()).collect();
+            out.push(Present { release, enabled, origin: Origin::Base { repo: repo.clone() }, libraries: Vec::new(), stand_in: false });
+        }
+    }
+    Ok((out, unread))
 }
 
 /// The lookup's `fork-of` targets (`owner/name@<range>`) as fork claims.
