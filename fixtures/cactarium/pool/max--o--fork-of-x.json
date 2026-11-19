@@ -1,0 +1,46 @@
+{
+  "slug": "max/o",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "d13cb1edd9c735943fb1e4b072a34d3ef8246f0c",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/o.git",
+      "thorns": [
+        {
+          "arrangement": "O",
+          "thorn": "O",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "O",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "fork-of",
+          "target": "et/x",
+          "range": null,
+          "note": null
+        }
+      ]
+    }
+  ]
+}

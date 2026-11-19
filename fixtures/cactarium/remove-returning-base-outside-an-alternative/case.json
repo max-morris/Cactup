@@ -1,0 +1,47 @@
+{
+  "about": "An any-of alternative the base that comes back does not fit holds nothing: with no other alternative present the removal refuses, naming the base's release",
+  "packages": [
+    "et--carpet--two",
+    "max--danyof--carpet-new-or-q"
+  ],
+  "present": [
+    {
+      "package": "et/carpet",
+      "version": "2026.6.0",
+      "enabled": [
+        "Carpet",
+        "CarpetSlab"
+      ]
+    },
+    {
+      "package": "max/danyof",
+      "version": "1.0.0",
+      "enabled": [
+        "DAnyOf"
+      ]
+    }
+  ],
+  "remove": {
+    "targets": [
+      "et/carpet"
+    ],
+    "returning": [
+      {
+        "replacer": "et/carpet",
+        "package": "et/carpet",
+        "version": "2026.5.0",
+        "base": "carpet",
+        "enabled": [
+          "Carpet",
+          "CarpetSlab"
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "refusal": "HasDependents",
+    "message": [
+      "max/danyof@1.0.0"
+    ]
+  }
+}

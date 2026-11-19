@@ -39,15 +39,21 @@ pub struct Orphan {
     pub label: String,
     /// Whose dependencies brought it in, as recorded (informational).
     pub by: Vec<String>,
+    /// What the plan could not check about it, said beside it.
+    pub caveat: Option<String>,
 }
 
 impl Orphan {
     /// `brought in by max/z4c@1.2.0, nothing else needs it`.
     pub fn why(&self) -> String {
-        if self.by.is_empty() {
+        let why = if self.by.is_empty() {
             "brought in as a dependency, nothing else needs it".to_owned()
         } else {
             format!("brought in by {}, nothing else needs it", self.by.join(", "))
+        };
+        match &self.caveat {
+            Some(caveat) => format!("{why} ({caveat})"),
+            None => why,
         }
     }
 }
@@ -205,27 +211,39 @@ pub fn plan_remove(
     let reached_before = g.reach(&everything, &BTreeSet::new());
     let stray: BTreeSet<PkgId> =
         remaining.iter().filter(|id| !reached_before.contains(**id)).map(|id| (*id).clone()).collect();
-    // An orphan that replaced base repos brings them back too: they count, to a fixpoint.
+    // An orphan that replaced base repos brings them back too, and what they hold is held: the
+    // orphans are found again with them, until the set going settles. Should it come round to a
+    // set already seen instead (an orphan whose returning base holds what keeps it, so going
+    // and staying alternate), the sweep takes the conservative side: a package held in any of
+    // the states seen stays, and only what none of them holds goes.
+    let orphans_of = |going: &BTreeSet<PkgId>| -> BTreeSet<PkgId> {
+        let remaining = after(going);
+        let reached = g.reach(&remaining, &stray);
+        remaining.iter().filter(|id| !back.contains_key(**id) && !reached.contains(**id)).map(|id| (*id).clone()).collect()
+    };
+    let mut seen: Vec<(BTreeSet<PkgId>, BTreeSet<PkgId>)> = Vec::new();
     let mut going = targets_set.clone();
-    let mut remaining = remaining;
-    let mut reached_after = g.reach(&remaining, &stray);
-    for _ in 0..8 {
-        let orphaned: BTreeSet<PkgId> =
-            remaining.iter().filter(|id| !reached_after.contains(**id)).map(|id| real(id)).collect();
-        let next: BTreeSet<PkgId> = targets_set.union(&orphaned).cloned().collect();
+    let orphan_nodes: BTreeSet<PkgId> = loop {
+        let orphans = orphans_of(&going);
+        let next: BTreeSet<PkgId> = targets_set.iter().cloned().chain(orphans.iter().map(&real)).collect();
         if next == going {
-            break;
+            break orphans;
         }
+        if let Some(at) = seen.iter().position(|(g, _)| *g == next) {
+            // A cycle: what every state of it leaves unheld (held in any, it stays).
+            let mut cycle = seen[at..].iter().map(|(_, o)| o.clone()).chain([orphans]);
+            let first = cycle.next().unwrap_or_default();
+            break cycle.fold(first, |all, o| all.intersection(&o).cloned().collect());
+        }
+        seen.push((going, orphans));
         going = next;
-        remaining = after(&going);
-        reached_after = g.reach(&remaining, &stray);
-    }
-    let orphans = remaining
+    };
+    let orphans = orphan_nodes
         .iter()
-        .filter(|id| !back.contains_key(**id) && !reached_after.contains(**id))
         .map(|id| {
             let real = real(id);
-            Orphan { id: real.clone(), label: label(id, &all), by: added_for.get(&real).map(|a| a.by.clone()).unwrap_or_default() }
+            let by = added_for.get(&real).map(|a| a.by.clone()).unwrap_or_default();
+            Orphan { id: real.clone(), label: label(id, &all), by, caveat: None }
         })
         .collect();
     Ok(RemovePlan { removed: targets.to_vec(), removed_labels, orphans })
@@ -262,16 +280,32 @@ impl Graph<'_> {
         set.iter().find(|id| forks(&self.all[**id].release, &t)).copied()
     }
 
-    /// Whether `taker`, when it is a base package coming back, meets a dependency asking `range`
-    /// or `sha` of it and `needs` of its thorns: its release fits, and the base enables them. Any
-    /// other taker is taken as is (its versions were checked when it was added).
-    fn back_fits(&self, taker: &PkgId, range: Option<&str>, sha: Option<&str>, needs: &[String]) -> bool {
+    /// Whether `taker`, when it is a base package coming back, meets a dependency of `dependent`
+    /// asking `range` or `sha` of it and `needs` of its thorns: its release fits, and the base
+    /// enables them. A dependency naming no thorns asks for every thorn of the release, as the
+    /// resolver reads it, when cactup added the dependent; a base package's own claims never
+    /// asked for more than the base it came with (as in [`Graph::holder`]). Any other taker is
+    /// taken as is (its versions were checked when it was added).
+    fn back_fits(
+        &self,
+        dependent: &Present,
+        taker: &PkgId,
+        range: Option<&str>,
+        sha: Option<&str>,
+        needs: &[String],
+    ) -> bool {
         if !self.back.contains_key(taker) {
             return true;
         }
         let p = &self.all[taker];
         let fits = super::Req::from_claim(range, sha).is_ok_and(|q| q.fit(&p.release) != super::Fit::No);
-        fits && needs.iter().all(|n| p.enabled.iter().any(|t| t.eq_ignore_ascii_case(n)))
+        let enabled = |n: &str| p.enabled.iter().any(|t| t.eq_ignore_ascii_case(n));
+        let thorns = if needs.is_empty() && !matches!(dependent.origin, Origin::Base { .. }) {
+            p.release.thorns.iter().all(|t| enabled(&t.thorn))
+        } else {
+            needs.iter().all(|n| enabled(n))
+        };
+        fits && thorns
     }
 
     /// The holder of a dependency of `dependent` that `taker` takes, needing `needs` of it: the
@@ -311,7 +345,7 @@ impl Graph<'_> {
             }
             let label = claim_label(c);
             let held: Vec<&PkgId> = if c.alternatives.is_empty() {
-                let taker = self.taker(&c.target, set).filter(|t| self.back_fits(t, c.range.as_deref(), c.sha.as_deref(), &c.needs));
+                let taker = self.taker(&c.target, set).filter(|t| self.back_fits(p, t, c.range.as_deref(), c.sha.as_deref(), &c.needs));
                 taker.and_then(|t| self.holder(p, t, &c.needs, set)).into_iter().collect()
             } else {
                 let alternatives: Option<Vec<PkgId>> =
@@ -322,7 +356,7 @@ impl Graph<'_> {
                 let takers: Vec<(&PkgId, &Vec<String>)> = (c.alternatives.iter())
                     .filter_map(|a| {
                         let t = self.taker(&a.target, set)?;
-                        self.back_fits(t, a.range.as_deref(), a.sha.as_deref(), &a.needs).then_some((t, &a.needs))
+                        self.back_fits(p, t, a.range.as_deref(), a.sha.as_deref(), &a.needs).then_some((t, &a.needs))
                     })
                     .collect();
                 let recorded = takers.iter().find(|(id, _)| {

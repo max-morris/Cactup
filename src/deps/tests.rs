@@ -951,7 +951,7 @@ fn remove_plans_render() {
     let plan = RemovePlan {
         removed: vec![PkgId::parse("max/z4c").unwrap()],
         removed_labels: vec!["max/z4c@1.2.0".into()],
-        orphans: vec![Orphan { id: PkgId::parse("et/a").unwrap(), label: "et/a@1.0.0".into(), by: vec!["max/z4c@1.2.0".into()] }],
+        orphans: vec![Orphan { id: PkgId::parse("et/a").unwrap(), label: "et/a@1.0.0".into(), by: vec!["max/z4c@1.2.0".into()], caveat: None }],
     };
     assert!(plan.beyond_named());
     let lines = plan.lines("cactup remove max/z4c");

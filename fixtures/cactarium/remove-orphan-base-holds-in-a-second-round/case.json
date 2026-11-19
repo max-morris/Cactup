@@ -1,0 +1,76 @@
+{
+  "about": "An orphan that replaced a base repo brings it back, and what that base holds stays: found in a second round of the sweep",
+  "packages": [
+    "max--t--needs-o",
+    "max--o--needs-p",
+    "max--p",
+    "et--b--needs-p"
+  ],
+  "present": [
+    {
+      "package": "max/t",
+      "version": "1.0.0",
+      "enabled": [
+        "T"
+      ]
+    },
+    {
+      "package": "max/o",
+      "version": "1.0.0",
+      "enabled": [
+        "O"
+      ]
+    },
+    {
+      "package": "max/p",
+      "version": "1.0.0",
+      "enabled": [
+        "P"
+      ]
+    }
+  ],
+  "remove": {
+    "targets": [
+      "max/t"
+    ],
+    "added-for": {
+      "max/t": {
+        "requested": true,
+        "for-commit": "current"
+      },
+      "max/o": {
+        "requested": false,
+        "for-commit": "current",
+        "by": [
+          "max/t@1.0.0"
+        ]
+      },
+      "max/p": {
+        "requested": false,
+        "for-commit": "current",
+        "by": [
+          "max/o@1.0.0"
+        ]
+      }
+    },
+    "returning": [
+      {
+        "replacer": "max/o",
+        "package": "et/b",
+        "version": "1.0.0",
+        "base": "b",
+        "enabled": [
+          "B"
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "removed": [
+      "max/t"
+    ],
+    "orphans": [
+      "max/o@1.0.0: brought in by max/t@1.0.0, nothing else needs it"
+    ]
+  }
+}
