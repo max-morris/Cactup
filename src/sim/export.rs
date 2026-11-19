@@ -184,7 +184,19 @@ fn refuse_unfetchable(repos: &[RepoPin], published: &[bool], allow_dirty: bool, 
 /// Settle the descriptive fields — flags, else defaults, offered for editing
 /// on a terminal — then write the file and say what it holds.
 fn finish(ctx: &Ctx, describe: &SimDescribeArgs, file: &Path, parts: Parts) -> Res<()> {
-    let Parts { default_name, fallback_summary, root, thornlist, parfile, repos, run, provenance, knobs } = parts;
+    let Parts { default_name, fallback_summary, root, mut thornlist, parfile, mut repos, run, provenance, knobs } = parts;
+    // §8.9: nothing nobody else could fetch, and no credentials, leaves the
+    // machine, unless the file is for use here only. Before any question is
+    // asked: a refusal should not come after the answers.
+    if !describe.local {
+        let input_urls: Vec<(String, String)> = describe
+            .input_urls
+            .iter()
+            .filter_map(|pair| pair.split_once('='))
+            .map(|(knob, url)| (knob.to_owned(), url.to_owned()))
+            .collect();
+        super::shareable::make_shareable(&mut repos, &mut thornlist.text, &input_urls)?;
+    }
     warn_about_paths(&parfile);
     let (lead_summary, lead_description) = leading_comment(&parfile.text);
     let interactive = !describe.yes && std::io::stdin().is_terminal();
@@ -250,6 +262,11 @@ fn finish(ctx: &Ctx, describe: &SimDescribeArgs, file: &Path, parts: Parts) -> R
             .filter(|u| !u.is_empty()),
             None => None,
         };
+        if let Some(url) = &url
+            && !describe.local
+        {
+            super::shareable::check_input_url(&input.knob, url)?;
+        }
         let Some(url) = url else {
             if members.contains_key(&input.knob) {
                 bail!("--input-path {} needs an --input-url for that input too", input.knob);

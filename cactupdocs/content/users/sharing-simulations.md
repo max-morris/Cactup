@@ -39,6 +39,27 @@ Export refuses what nobody else could reproduce:
   dirty.
 - **Commits that are on no remote branch or tag.** Push them and refetch, or
   pass `--allow-unpushed`.
+- **Repository URLs nobody else can fetch, or that carry credentials.** A
+  local path or `file://` URL, a URL with a user name, password or token in
+  it (`https://TOKEN@host/…`), or a query string (`?private_token=…`), is
+  refused, as the Cactarium refuses it. Remove the credentials, or push the
+  repository somewhere others can reach and point the remote there.
+- **ssh URLs** (`git@github.com:me/thorns.git`) need an account on the
+  host. Export asks the matching https URL (`https://github.com/me/thorns.git`)
+  over the network, with no credentials of any kind: if it answers, the
+  `.sim` names the https URL instead, in the thornlist too, and export says
+  so. If it asks for credentials or does not answer, the URL is refused; if
+  it redirects, the repository has moved, and export names where to.
+
+Every URL refused is listed in one error. An input's download URL
+(`--input-url`) is refused for a user name or password too, though a query
+string is fine there (`?download=1` is how many download links work).
+
+A `.sim` meant only for this machine can keep every URL as it is:
+
+```sh
+cactup sim export mysim --local   # nothing checked, nothing asked
+```
 
 A parfile value that is an absolute path (`/scratch/me/initial-data`) gets a
 warning: whoever imports the simulation will not have that path. Use a knob
@@ -78,6 +99,8 @@ If you have a thornlist and a parfile but no cactup simulation:
 cactup sim pack bhns.th bhns.par                 # pinned to each branch's tip today
 cactup -I myinstall sim pack bhns.th bhns.par    # pinned to what an installation has
 ```
+
+`pack` checks the URLs exactly as `export` does, and takes `--local` too.
 
 ## Unpacking a .sim file
 

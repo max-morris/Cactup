@@ -8,6 +8,7 @@
 
 pub mod cache;
 pub mod export;
+pub mod shareable;
 pub mod trim;
 pub mod manage;
 pub mod restart;

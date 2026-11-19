@@ -1870,6 +1870,8 @@ mod tests {
                 yes: true,
                 authors: vec!["A. Author".to_owned()],
                 license: Some("CC-BY-4.0".to_owned()),
+                // The upstreams here are local paths.
+                local: true,
                 ..Default::default()
             },
             allow_dirty: false,
@@ -1932,9 +1934,15 @@ mod tests {
             crate::sim::create(&ctx, &machine, &inst, &req).unwrap();
         };
 
-        // Clean, published: exported, fully specified.
+        // Clean, published: exported, fully specified; but from a local
+        // path, which nobody else could fetch, only with --local.
         fs::write(&cfg_path, record(&built.to_string())).unwrap();
         create("bhns");
+        let mut shared = export_args("bhns", &out);
+        shared.describe.local = false;
+        let err = format!("{:#}", export("bhns", shared).unwrap_err());
+        assert!(err.contains("carpetx: ") && err.contains("is a local path") && err.contains("--local"), "{err}");
+        assert!(!out.exists(), "nothing written");
         export("bhns", export_args("bhns", &out)).unwrap();
         let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
         assert!(file.is_fully_specified(), "{:?}", file.unspecified());
@@ -2024,7 +2032,7 @@ mod tests {
             thornlist: th.to_owned(),
             parfile: par.clone(),
             file: Some(out.clone()),
-            describe: crate::args::SimDescribeArgs { force: true, yes: true, ..Default::default() },
+            describe: crate::args::SimDescribeArgs { force: true, yes: true, local: true, ..Default::default() },
             allow_dirty: false,
             allow_unpushed: false,
             trim: false,
@@ -2061,6 +2069,157 @@ mod tests {
         assert!(err.contains("carpetx") && err.contains("no-such-branch"), "{err}");
     }
 
+
+    /// A loose thornlist of pinned git repos, one section per `(url,
+    /// checkout)`, and a parfile with one input, packed (no remote is asked
+    /// for a tip: every repo is pinned) with `describe` over the defaults.
+    fn pack_urls(
+        tmp: &Path,
+        sections: &[(&str, &str)],
+        describe: crate::args::SimDescribeArgs,
+    ) -> (crate::Res<()>, PathBuf, String) {
+        let mut ctx = fake_ctx(&tmp.join("db"));
+        ctx.globals.installation = None;
+        let mut list = "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n".to_owned();
+        for (url, checkout) in sections {
+            list.push_str(&format!(
+                "!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = {url}\n!REPO_BRANCH = main\n\
+                 !REPO_COMMIT = {}\n!CHECKOUT = {checkout}\n",
+                "a".repeat(40)
+            ));
+        }
+        let th = tmp.join("list.th");
+        fs::write(&th, &list).unwrap();
+        let par = tmp.join("run.par");
+        fs::write(&par, "# A test run\nK::f = \"@KNOB(data)@\"\n").unwrap();
+        let out = tmp.join("out.sim");
+        let args = crate::args::SimPackArgs {
+            thornlist: th,
+            parfile: par,
+            file: Some(out.clone()),
+            describe: crate::args::SimDescribeArgs { force: true, yes: true, ..describe },
+            allow_dirty: false,
+            allow_unpushed: false,
+            trim: false,
+        };
+        (crate::sim::export::pack(&ctx, args), out, list)
+    }
+
+    /// §8.9: a .sim for others names no URL nobody else could fetch and no
+    /// credentials. A token URL, a local path, an ssh URL with no https
+    /// equivalent, one whose https asks for credentials (401), one whose
+    /// https moved (301), and an input URL with a password are all refused,
+    /// every one named in one error, no credential shown; an ssh URL whose
+    /// https answers anonymously is written as https, in the pins and the
+    /// thornlist alike, and said so.
+    #[test]
+    fn a_sim_for_others_names_only_urls_anyone_can_fetch() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use cactup_ecosystem_common::sim::SimFile;
+        let tmp = tempfile::tempdir().unwrap();
+        serve("private.share.test", Mode::Private);
+        let moved_to = "https://moved.share.test/new/e.git";
+        serve("moved.share.test", Mode::Moved(format!("{moved_to}/info/refs?service=git-upload-pack")));
+        let public = serve("public.share.test", Mode::Public);
+        let sections = [
+            ("https://TOKEN123@github.com/o/a.git", "A/One"),
+            ("file:///srv/b.git", "B/One"),
+            ("ssh://git@home.share.test/~max/c.git", "C/One"),
+            ("git@private.share.test:o/d.git", "D/One"),
+            ("git@moved.share.test:o/e.git", "E/One"),
+            ("git@public.share.test:o/f.git", "F/One"),
+        ];
+        let describe = crate::args::SimDescribeArgs {
+            input_urls: vec!["data=https://max:hunter2@example.org/f.h5?download=1".to_owned()],
+            ..Default::default()
+        };
+        let (packed, out, _) = pack_urls(tmp.path(), &sections, describe);
+        let err = format!("{:#}", packed.unwrap_err());
+        for said in [
+            "a: https://***@github.com/o/a.git carries credentials",
+            "b: file:///srv/b.git is a local path",
+            "c: ssh://git@home.share.test/~max/c.git is an ssh URL, which needs an account on the host, and has no https equivalent",
+            "d: git@private.share.test:o/d.git is an ssh URL, which needs an account on the host, and https://private.share.test/o/d.git doesn't answer",
+            "it answered 401 Unauthorized",
+            "e: git@moved.share.test:o/e.git is an ssh URL, and its https equivalent https://moved.share.test/o/e.git redirects to https://moved.share.test/new/e.git: the repo has moved",
+            "input data: https://***@example.org/f.h5?*** carries credentials",
+            "or pass --local to export for use here only",
+        ] {
+            assert!(err.contains(said), "{said:?} not in: {err}");
+        }
+        assert!(!err.contains("\n  f: ") && !err.contains("TOKEN123") && !err.contains("hunter2"), "{err}");
+        assert!(!out.exists(), "nothing written");
+        assert!(public.try_recv().is_ok(), "every https equivalent asked, for one error naming them all");
+
+        // The one that answers, beside an https URL: written as https.
+        let (packed, out, list) = pack_urls(
+            tmp.path(),
+            &[("git@public.share.test:o/f.git", "F/One"), ("https://github.com/o/g.git", "G/One")],
+            Default::default(),
+        );
+        packed.unwrap();
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        let url = |repo: &str| file.repos.iter().find(|r| r.name == repo).unwrap().url.clone();
+        assert_eq!(url("f"), "https://public.share.test/o/f.git");
+        assert_eq!(url("g"), "https://github.com/o/g.git");
+        assert_eq!(file.thornlist.text, list.replace("git@public.share.test:o/f.git", "https://public.share.test/o/f.git"));
+    }
+
+    /// With --local, the .sim is for use here: every URL goes in as it is,
+    /// and nothing is asked over the network.
+    #[test]
+    fn a_local_sim_keeps_every_url_and_asks_nothing() {
+        use cactup_ecosystem_common::sim::SimFile;
+        let tmp = tempfile::tempdir().unwrap();
+        let sections = [
+            ("https://TOKEN123@github.com/o/a.git", "A/One"),
+            ("file:///srv/b.git", "B/One"),
+            ("git@unasked.share.test:o/c.git", "C/One"),
+        ];
+        let describe = crate::args::SimDescribeArgs { local: true, ..Default::default() };
+        let (packed, out, list) = pack_urls(tmp.path(), &sections, describe);
+        packed.unwrap();
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(file.thornlist.text, list);
+        let urls: Vec<&str> = file.repos.iter().map(|r| r.url.as_str()).collect();
+        assert_eq!(urls, sections.map(|(url, _)| url));
+        let probed = crate::fetch::anonymous::PROBED.lock().unwrap().clone();
+        assert!(!probed.iter().any(|u| u.contains("unasked.share.test")), "{probed:?}");
+    }
+
+    /// Ctrl-C while an ssh remote's https equivalent is being asked (and
+    /// never answers) fails the export at once. The interrupt flag is the
+    /// process's: run in a child of its own.
+    #[test]
+    fn an_interrupt_while_asking_https_fails_the_export_at_once() {
+        if std::env::var_os("CACTUP_TEST_SHARE_INTERRUPT").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["sim::start::tests::an_interrupt_while_asking_https_fails_the_export_at_once", "--exact", "--test-threads=1"])
+                .env("CACTUP_TEST_SHARE_INTERRUPT", "1")
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && said.contains("1 passed"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+            return;
+        }
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        let tmp = tempfile::tempdir().unwrap();
+        let asked = serve("silent.share.test", Mode::Silent);
+        let root = tmp.path().to_owned();
+        let packing = std::thread::spawn(move || {
+            let (packed, out, _) = pack_urls(&root, &[("git@silent.share.test:o/s.git", "S/One")], Default::default());
+            (packed, out, std::time::Instant::now())
+        });
+        asked.recv_timeout(std::time::Duration::from_secs(10)).expect("the https URL was asked");
+        gix::interrupt::IS_INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let interrupted = std::time::Instant::now();
+        let (packed, out, returned) = packing.join().unwrap();
+        let err = format!("{:#}", packed.unwrap_err());
+        assert!(err.contains("Interrupted"), "{err}");
+        assert!(!out.exists());
+        let took = returned.duration_since(interrupted);
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    }
 
     /// §5.1: a simulation's own knob values outrank the global ones in what
     /// its restarts freeze — the parfile's input is the simulation's, set by

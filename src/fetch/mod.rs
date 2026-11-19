@@ -5,6 +5,7 @@
 //! Implemented by the FETCH stream (design/_impl_fetch.md).
 
 // Consumed by refetch/install in Phases 4/5; the allows come off then.
+pub mod anonymous;
 pub mod download;
 pub mod external;
 pub mod git;

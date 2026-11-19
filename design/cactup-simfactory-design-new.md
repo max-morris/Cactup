@@ -4499,7 +4499,7 @@ flag either; internally cactup still tracks `chained-job-id` in `restart.toml`
 
 ```
 cactup sim export <sim> [file] [-f] [-y] [--name N] [--summary S] [--description D]
-                  [--author A]… [--license SPDX] [--allow-dirty] [--allow-unpushed]
+                  [--author A]… [--license SPDX] [--allow-dirty] [--allow-unpushed] [--local]
 ```
 
 Writes a simulation as a `.sim` file (default `<sim>.sim`): the Cactup
@@ -4540,6 +4540,37 @@ the config's own record only while that still describes the same `build-id`.
   the tip or in the history of a remote-tracking branch or tag in the
   installation's repo — read locally, so a commit pushed since the last fetch,
   or below a shallow boundary, reads as unpublished and errs toward asking.
+- **Shareable URLs** (`sim::shareable`; export and pack alike). A `.sim`
+  leaves the machine, so every repo URL in it must be one anybody can fetch
+  and carry no credentials: the shared crate's `url::shareability` decides,
+  the same function the Cactarium checks with, so the two refuse exactly
+  the same URLs. A git repo's URL that is `Credentials` (userinfo,
+  or a query string), `Local`, `Unsupported`, or `Ssh` with no https
+  equivalent is refused with the crate's `refusal()` sentence. An `Ssh` URL
+  with an https equivalent is probed (`fetch::anonymous`): a bare GET of
+  `<https>/info/refs?service=git-upload-pack` with reqwest, not gix (gix
+  consults credential helpers even with prompts off), carrying no
+  credentials of any kind (no auth, cookies, netrc or referer) and following
+  no redirect; only a 200 with `Content-Type:
+  application/x-git-upload-pack-advertisement` is an answer. The probe is
+  kept identical to the Cactarium's, so a borderline host is judged the
+  same on both sides. An answer writes the https URL in place of the ssh one, in
+  the `[[repo]]` pin and in the thornlist's `!URL` line (an import fetches
+  what the thornlist names; a `$1`/`$2` template is rewritten as one, and
+  the result is parsed back and must name exactly the expected URLs, so a
+  URL built from a `!DEFINE` fails, asking for the https URL to be written),
+  and says so on one line. A 3xx is `moved_refusal` naming its `Location`
+  without the suffix; anything else (401/403/404, a silence, an error) is
+  `refusal()` with what happened. The probes run on the network fan-out
+  (`ask_all`, 32 wide) within one 30 s window, a progress line each, through
+  the watcher (§2.4: Ctrl-C fails at once, "Interrupted"). A non-git
+  component's URL (a download, svn) is not probed and may carry a query; it
+  is refused for credentials or a local path only. An input's URL
+  (`--input-url`, or one typed at the prompt) is refused for userinfo only:
+  download links carry queries (`?download=1`). Every refusal is collected
+  into one error, before any question is asked, ending "or pass --local to
+  export for use here only"; messages show URLs redacted (`url::Redacted`).
+  `--local` writes every URL as it is and probes nothing.
 - **Inputs.** Every required `@KNOB(name)@` in a `.par` that is not a
   standard knob (§5) becomes an `[[input]]`: something the simulation needs
   from outside the source tree. `vars` lists the `@VAR@`s used. Both come
