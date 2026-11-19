@@ -72,7 +72,7 @@ pub(crate) fn thorn_facts(list: &Thornlist, cactus_root: &Path) -> Res<BTreeMap<
 /// the shared crate's rule for its own tree scan: a `.ccl` that is a symlink
 /// could read anything (or `/dev/zero`, forever), and none is a megabyte.
 /// The thorn's directory itself may be a link, as every fetched one is.
-fn read_ccl(path: &Path) -> Option<String> {
+pub(crate) fn read_ccl(path: &Path) -> Option<String> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.file_type().is_file() || meta.len() > cactup_ecosystem_common::ccl::MAX_CCL_BYTES {
         return None;

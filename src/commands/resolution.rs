@@ -1210,7 +1210,7 @@ pub(crate) fn present(
         })
         .collect();
     let scanned = reg.local(&scans, "clones", |(_, repo)| repo.clone(), "reading its thorns", |(_, repo)| {
-        cactup_ecosystem_common::ccl::scan_tree(&install_root.join(root).join("repos").join(repo))
+        scan_thorns(&install_root.join(root).join("repos").join(repo))
     })?;
     for ((i, _), thorns) in scans.into_iter().zip(scanned) {
         let p = &mut out[i];
@@ -1307,6 +1307,50 @@ pub(crate) fn read_stand_ins(
         }
     }
     Ok(unread)
+}
+
+/// The thorns of a clone, as the crate's `ccl::scan_tree` finds them (a
+/// directory with an `interface.ccl` at the root, one level down, or two:
+/// hidden directories and symlinks skipped, CCL files read only when they are
+/// regular files of sane size), with their facts from the CCL alone. Unlike
+/// `scan_tree`, it never reads the thorns' sources (thousands of files a
+/// thorn, on a network filesystem): only the thorns' names and CCL facts are
+/// wanted of a stand-in's tree.
+fn scan_thorns(root: &Path) -> Vec<cactup_ecosystem_common::ccl::ScannedThorn> {
+    use std::path::PathBuf;
+    fn subdirs(dir: &Path) -> Vec<PathBuf> {
+        let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+        let mut v: Vec<PathBuf> = rd
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+            .map(|e| PathBuf::from(e.file_name()))
+            .collect();
+        v.sort();
+        v
+    }
+    let scan = |rel: &Path, out: &mut Vec<cactup_ecosystem_common::ccl::ScannedThorn>| {
+        let dir = root.join(rel);
+        let Some(interface) = crate::sim::trim::read_ccl(&dir.join("interface.ccl")) else { return };
+        let configuration = crate::sim::trim::read_ccl(&dir.join("configuration.ccl"));
+        let mut parts = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned());
+        let (arrangement, name) = match (parts.next(), parts.next()) {
+            (Some(a), Some(t)) => (Some(a), Some(t)),
+            (Some(t), None) => (None, Some(t)),
+            _ => (None, None),
+        };
+        let facts = ThornFacts::scan(&interface, configuration.as_deref());
+        out.push(cactup_ecosystem_common::ccl::ScannedThorn { dir: rel.to_owned(), name, arrangement, facts });
+    };
+    let mut out = Vec::new();
+    scan(Path::new(""), &mut out);
+    for a in subdirs(root) {
+        scan(&a, &mut out);
+        for t in subdirs(&root.join(&a)) {
+            scan(&a.join(&t), &mut out);
+        }
+    }
+    out
 }
 
 /// The thorn name of an `Arrangement/Thorn` checkout.
@@ -1505,6 +1549,37 @@ pub(crate) fn refusal_text(e: anyhow::Error, finished: &Finished) -> anyhow::Err
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stand-in's tree scan finds what the crate's `scan_tree` finds, with
+    /// the same CCL facts, and never reads sources: a thorn whose sources
+    /// include a header is scanned as one with none.
+    #[test]
+    fn a_tree_scan_reads_ccl_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let thorn = |rel: &str, iface: &str| {
+            std::fs::create_dir_all(root.join(rel).join("src")).unwrap();
+            std::fs::write(root.join(rel).join("interface.ccl"), iface).unwrap();
+        };
+        thorn("Arr/A", "IMPLEMENTS: a\nUSES INCLUDE HEADER: loop.hxx\n");
+        std::fs::write(root.join("Arr/A/src/a.cc"), "#include \"loop.hxx\"\n").unwrap();
+        thorn("B", "IMPLEMENTS: b\nINHERITS: a\n");
+        std::fs::write(root.join("B/configuration.ccl"), "REQUIRES Loop\n").unwrap();
+        thorn(".hidden/C", "IMPLEMENTS: c\n");
+        let ours = scan_thorns(root);
+        let crate_scan = cactup_ecosystem_common::ccl::scan_tree(root);
+        let names = |v: &[cactup_ecosystem_common::ccl::ScannedThorn]| {
+            v.iter().map(|t| (t.dir.clone(), t.name.clone(), t.arrangement.clone())).collect::<Vec<_>>()
+        };
+        assert_eq!(names(&ours), names(&crate_scan));
+        for (a, b) in ours.iter().zip(&crate_scan) {
+            let mut b = b.facts.clone();
+            b.needs_includes.clear();
+            assert_eq!(a.facts, b);
+        }
+        assert!(crate_scan[0].facts.needs_includes == ["loop.hxx"], "the crate reads sources");
+        assert!(ours.iter().all(|t| t.facts.needs_includes.is_empty()));
+    }
 
     /// After a batch round that read something, the rest are asked again
     /// shortly; after one that read nothing, a little later.
