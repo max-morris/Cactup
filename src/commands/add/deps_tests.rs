@@ -99,6 +99,8 @@ struct Fake {
     /// does not know, before the item is read.
     untrusted_at: Vec<String>,
     novel_status: usize,
+    /// How long each batch request takes.
+    batch_delay: std::time::Duration,
     /// The next requests that start no fetch (the server's network slots
     /// are all taken by other callers): what is not warm is not read.
     stalled: usize,
@@ -147,6 +149,7 @@ impl Fake {
             echo_other_at: Vec::new(),
             untrusted_at: Vec::new(),
             novel_status: 0,
+            batch_delay: std::time::Duration::ZERO,
             stalled: 0,
             too_large_at: Vec::new(),
             batch_requests: 0,
@@ -330,6 +333,7 @@ impl Fake {
         self.window_start.get_or_insert(now);
         self.in_window += 1;
         self.batch_requests += 1;
+        std::thread::sleep(self.batch_delay);
         let stalled = self.stalled > 0;
         self.stalled = self.stalled.saturating_sub(1);
         // What earlier requests left reading is one ask nearer being ready.
@@ -1732,14 +1736,21 @@ fn the_batch_phase_is_bounded() {
     // Never ready: thirty rounds at most (the server's window of twelve
     // requests made short, so its limit costs no time here).
     let never = |f: &mut Fake| (f.fetch_budget, f.fetch_asks, f.window) = (0, 1000, std::time::Duration::from_millis(1));
-    let (_, rounds, read, _) = prefetch_on(5, never);
-    assert_eq!((rounds, read), (30, 0));
+    let (_, rounds, read, pauses, _) = prefetch_waits(5, never);
+    assert_eq!((rounds, read, pauses.len()), (30, 0, 29), "no wait after the last round");
     // A deadline that the rounds' requests and waits reach first.
     super::super::resolution::TEST_BATCH_DEADLINE.with(|d| d.set(Some(std::time::Duration::from_millis(60))));
     let started = std::time::Instant::now();
     let (_, rounds, read, _) = prefetch_on(5, never);
     assert!(rounds < 30 && read == 0, "{rounds} rounds");
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    // Requests count: a deadline passed while one was answered sends no other.
+    super::super::resolution::TEST_BATCH_DEADLINE.with(|d| d.set(Some(std::time::Duration::from_millis(50))));
+    let (requests, _, read, _) = prefetch_on(250, |f| {
+        never(f);
+        f.batch_delay = std::time::Duration::from_millis(80);
+    });
+    assert_eq!((requests, read), (1, 0));
     super::super::resolution::TEST_BATCH_DEADLINE.with(|d| d.set(None));
     super::super::resolution::TEST_ROUND_WAIT.with(|c| c.set(None));
 }
@@ -1754,6 +1765,12 @@ fn unusable_batch_answers_fall_back_to_single_reads() {
     let one = format!("{:040x}", 1);
     // (requests, rounds, read)
     let (q, r, read, _) = prefetch_on(5, |f| f.wrong_commit_at.push(one.clone()));
+    assert_eq!((q, r, read), (1, 1, 4));
+    // The same of a version that froze the commit, answered at another.
+    let (q, r, read, _) = prefetch_on(5, |f| {
+        f.packages.push(("et/p000".into(), vec![version("1.0.0", &one, "https://x/p.git", "P", &["P"], "[]")]));
+        f.wrong_commit_at.push(one.clone());
+    });
     assert_eq!((q, r, read), (1, 1, 4));
     let (q, r, read, _) = prefetch_on(5, |f| f.echo_other_at.push(one.clone()));
     assert_eq!((q, r, read), (1, 1, 4));
@@ -1848,16 +1865,26 @@ fn a_batch_request_opens_the_read_window() {
 fn an_added_package_at_a_commit_is_read_in_the_batch() {
     let (s, log, fake) = unfrozen_base(1, |tmp, mut fake| {
         let (url, c) = upstream(tmp, "c", &[("C/interface.ccl", "IMPLEMENTS: c\n")]);
+        let (durl, d) = upstream(tmp, "d", &[("D/interface.ccl", "IMPLEMENTS: d\n")]);
         fake.snapshots.push(("max/c".into(), c.clone(), version(&c, &c, &url, "C", &["C"], "[]")));
         fake.package("max/c", vec![version("1.0.0", &"7".repeat(40), &url, "C", &["C"], "[]")])
+            .package("max/d", vec![version("1.0.0", &d, &durl, "D", &["D"], "[]")])
     });
     let c = fake.lock().unwrap().snapshots.iter().find(|(p, _, _)| p == "max/c").unwrap().1.clone();
     s.add(&[&format!("max/c#{c}")], yes()).unwrap_or_else(|e| panic!("{e:#}"));
     log.lock().unwrap().clear();
     s.remove(&["max/c"], RemoveFlags { dry_run: true, ..remove_yes() }).unwrap_or_else(|e| panic!("{e:#}"));
-    let log = log.lock().unwrap();
-    assert!(!log.iter().any(|(p, _)| p.contains(&format!("/versions/{c}"))), "{log:?}");
-    assert!(log.iter().any(|(p, b)| p.ends_with("/packages/read") && b.contains("max/c")), "{log:?}");
+    {
+        let log = log.lock().unwrap();
+        assert!(!log.iter().any(|(p, _)| p.contains(&format!("/versions/{c}"))), "{log:?}");
+        assert!(log.iter().any(|(p, b)| p.ends_with("/packages/read") && b.contains("max/c")), "{log:?}");
+    }
+    // Its commit gone from the Cactarium: the batch's own words say so,
+    // beside the package that cannot be read.
+    s.add(&["max/d"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    fake.lock().unwrap().snapshots.retain(|(p, _, _)| p != "max/c");
+    let err = format!("{:#}", s.remove(&["max/d"], remove_yes()).unwrap_err());
+    assert!(err.contains(&format!("no commit {c} in max/c's repository (is it pushed?)")), "{err}");
 }
 
 /// Rounds held up for good leave the base to single reads, made only for
@@ -2158,7 +2185,11 @@ fn unfrozen_base(n: usize, extra: impl FnOnce(&std::path::Path, Fake) -> Fake) -
         let (url, c) = upstream(
             tmp.path(),
             &name,
-            &[(&format!("T{i}/interface.ccl"), "IMPLEMENTS: x\n"), (&format!("U{i}/interface.ccl"), "IMPLEMENTS: u\n")],
+            &[
+                (&format!("T{i}/interface.ccl"), "IMPLEMENTS: x\n"),
+                (&format!("U{i}/interface.ccl"), "IMPLEMENTS: u\nUSES INCLUDE HEADER: u.h\n"),
+                (&format!("U{i}/src/u.c"), "#include \"u.h\"\n"),
+            ],
         );
         base.push_str(&section(&url, &c, &[&format!("Arr{i}/T{i}")]));
         let id = format!("et/{name}");
@@ -2270,7 +2301,7 @@ fn a_package_clashing_with_fourteen_base_packages_reads_each_once() {
 /// only extend) becomes a repo of no package: no stand-in, never read.
 #[test]
 fn a_base_repo_renamed_to_a_pseudo_package_is_no_stand_in() {
-    let (s, _, fake) = unfrozen_base(1, |_, f| f);
+    let (s, log, fake) = unfrozen_base(1, |_, f| f);
     let added = AddedPackage {
         package: "et/r0".into(),
         version: "1.0.0".into(),
@@ -2293,6 +2324,9 @@ fn a_base_repo_renamed_to_a_pseudo_package_is_no_stand_in() {
     let pseudo = set.present.iter().find(|p| p.release.id.as_str() == "repo:r0").expect("the base repo as a pseudo-package");
     assert!(!pseudo.stand_in);
     assert_eq!(fake.lock().unwrap().unfrozen_reads, 0);
+    // Not asked for in a batch either.
+    let log = log.lock().unwrap();
+    assert!(!log.iter().any(|(p, b)| p.ends_with("/packages/read") && b.contains("et/r0")), "{log:?}");
 }
 
 /// A base repo at an unfrozen commit that the lookup says is a registered
@@ -2323,6 +2357,8 @@ fn the_lookup_says_which_unfrozen_base_repo_is_the_flesh() {
         // Its thorns are its clone's: the one checked out and the one not.
         let names: Vec<&str> = r0.release.thorns.iter().map(|t| t.thorn.as_str()).collect();
         assert_eq!(names, ["T0", "U0"], "registered {registered}");
+        // Read from the CCL alone: the thorn's sources (which include a header) never.
+        assert!(r0.release.thorns[1].facts.needs_includes.is_empty());
     }
 }
 
