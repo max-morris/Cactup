@@ -71,13 +71,16 @@ pub(crate) fn thorn_facts(list: &Thornlist, cactus_root: &Path) -> Res<BTreeMap<
 /// A `.ccl` file's text, read only when it is a regular file of sane size —
 /// the shared crate's rule for its own tree scan: a `.ccl` that is a symlink
 /// could read anything (or `/dev/zero`, forever), and none is a megabyte.
-/// The thorn's directory itself may be a link, as every fetched one is.
+/// The thorn's directory itself may be a link, as every fetched one is. Bytes
+/// that are no UTF-8 (a Latin-1 comment) are replaced, as the crate reads
+/// them, never a reason to drop the file.
 pub(crate) fn read_ccl(path: &Path) -> Option<String> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.file_type().is_file() || meta.len() > cactup_ecosystem_common::ccl::MAX_CCL_BYTES {
         return None;
     }
-    std::fs::read_to_string(path).ok()
+    let bytes = std::fs::read(path).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// A thorn the list builds from an arrangement — what a trim decides on. A

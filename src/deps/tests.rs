@@ -238,6 +238,19 @@ struct RemoveSpec {
     added_for: BTreeMap<String, AddedForSpec>,
     #[serde(default)]
     no_deps: bool,
+    /// Base packages that come back when their replacer goes.
+    #[serde(default)]
+    returning: Vec<ReturningSpec>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct ReturningSpec {
+    replacer: String,
+    package: String,
+    version: String,
+    base: String,
+    enabled: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -553,7 +566,25 @@ fn run(dir: &Path) -> Vec<String> {
                 Extension { id, thorns: thorns.clone(), label, commit: p.release.commit.clone() }
             })
             .collect();
-        match plan_remove(&present, &added_for, &targets, &rules, rm.no_deps, &extensions, &[]) {
+        let returning: Vec<(PkgId, Present)> = (rm.returning.iter())
+            .map(|r| {
+                let id = PkgId::parse(&r.package).unwrap();
+                let release = facts.releases[&id]
+                    .iter()
+                    .find(|x| x.at.version().is_some_and(|v| v.to_string() == r.version))
+                    .unwrap_or_else(|| panic!("no {id}@{} among the case's packages", r.version))
+                    .clone();
+                let present = Present {
+                    release,
+                    enabled: r.enabled.iter().cloned().collect(),
+                    origin: Origin::Base { repo: r.base.clone() },
+                    libraries: Vec::new(),
+                    stand_in: false,
+                };
+                (PkgId::parse(&r.replacer).unwrap(), present)
+            })
+            .collect();
+        match plan_remove(&present, &added_for, &targets, &rules, rm.no_deps, &extensions, &returning) {
             Ok(plan) => {
                 check_refusal(&case.expect, None, None, &mut errors);
                 compare("removed", &case.expect.removed, plan.removed.iter().map(ToString::to_string).collect(), &mut errors);

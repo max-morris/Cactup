@@ -131,7 +131,8 @@ impl FakeLock {
         loop {
             match self.0.try_lock() {
                 Ok(guard) => return Ok(guard),
-                Err(std::sync::TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
+                // A thread that panicked holding it: that panic is the story.
+                Err(std::sync::TryLockError::Poisoned(_)) => panic!("the fake Cactarium's state is poisoned by an earlier panic"),
                 Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
@@ -1706,8 +1707,9 @@ fn prefetch_waits(n: usize, change: impl FnOnce(&mut Fake)) -> (usize, usize, us
 /// rest on after it, ready on the next ask) in two rounds, asked again soon;
 /// one whose every package is only fetched on after the answer in two, the
 /// first making no progress; rounds the server's busy fetch slots hold up
-/// retried, three times at most, then left to single reads; the wait budget
-/// ending the retries early.
+/// retried, three times at most, then left to single reads; the batch
+/// phase's deadline ending the retries early, and the single reads' wait
+/// budget never doing so.
 #[test]
 fn batch_reads_go_in_rounds() {
     super::super::resolution::TEST_ROUND_WAIT.with(|w| w.set(Some(std::time::Duration::from_millis(20))));
@@ -1730,9 +1732,13 @@ fn batch_reads_go_in_rounds() {
     assert_eq!(stalled(2), (3, 3, 80));
     // Held up for good: the first round and three more, then single reads.
     assert_eq!(stalled(100), (4, 4, 0));
-    // The wait budget spent during the first stall's wait.
+    // The phase's deadline reached by the first stall's wait: none is made.
+    super::super::resolution::TEST_BATCH_DEADLINE.with(|d| d.set(Some(std::time::Duration::from_millis(30))));
+    assert_eq!(stalled(100), (1, 1, 0));
+    super::super::resolution::TEST_BATCH_DEADLINE.with(|d| d.set(None));
+    // The single reads' wait budget is theirs: the batch waits past it.
     super::super::resolution::TEST_WAIT_BUDGET.with(|w| w.set(Some(std::time::Duration::from_millis(30))));
-    assert_eq!(stalled(100), (2, 2, 0));
+    assert_eq!(stalled(2), (3, 3, 80));
     super::super::resolution::TEST_WAIT_BUDGET.with(|w| w.set(None));
     // A read the server goes on with for three asks: asked again shortly,
     // never taken for a stall, however long it takes.
@@ -1779,6 +1785,54 @@ fn the_batch_phase_is_bounded() {
     assert_eq!((requests, read), (1, 0));
     super::super::resolution::TEST_BATCH_DEADLINE.with(|d| d.set(None));
     super::super::resolution::TEST_ROUND_WAIT.with(|c| c.set(None));
+}
+
+/// The read limit met by a batch request is waited out within the batch
+/// phase's own time: a Retry-After past its deadline is not waited for at
+/// all (the request is not sent again, and what it asked is left to single
+/// reads), and one within it is waited for whatever is left of the single
+/// reads' budget.
+#[test]
+fn the_batch_waits_for_the_read_limit_on_its_own_time() {
+    use super::super::resolution::{TEST_BATCH_DEADLINE, TEST_WAIT_BUDGET};
+    let full = |f: &mut Fake| {
+        (f.in_window, f.window_start, f.window, f.retry_after) =
+            (12, Some(std::time::Instant::now()), std::time::Duration::from_secs(1), true);
+    };
+    TEST_BATCH_DEADLINE.with(|d| d.set(Some(std::time::Duration::from_millis(500))));
+    let started = std::time::Instant::now();
+    let (q, r, read, pauses, _) = prefetch_waits(5, full);
+    assert_eq!((q, r, read, pauses.len()), (1, 1, 0, 0));
+    assert!(started.elapsed() < std::time::Duration::from_millis(500), "{:?}", started.elapsed());
+    TEST_BATCH_DEADLINE.with(|d| d.set(None));
+    TEST_WAIT_BUDGET.with(|w| w.set(Some(std::time::Duration::from_millis(30))));
+    let (q, r, read, pauses, _) = prefetch_waits(5, full);
+    assert_eq!((q, r, read, pauses), (2, 1, 5, vec![std::time::Duration::from_secs(1)]));
+    TEST_WAIT_BUDGET.with(|w| w.set(None));
+}
+
+/// An item a batch answered unusably is not asked in a batch again in the
+/// command, by a later prefetch either: what it needs is a single read.
+#[test]
+fn an_unusable_item_is_never_batched_again() {
+    let one = format!("{:040x}", 1);
+    let mut fake = Fake::new();
+    let mut items = Vec::new();
+    for i in 0..5 {
+        let (id, c) = (format!("et/p{i:03}"), format!("{:040x}", i + 1));
+        fake.snapshots.push((id.clone(), c.clone(), version(&c, &c, "https://x/p.git", "P", &["P"], "[]")));
+        items.push((crate::deps::PkgId::parse(&id).unwrap(), c));
+    }
+    fake.wrong_commit_at.push(one);
+    let (base, _, _fake) = fake.serve_shared();
+    let client = crate::cactarium::Client::at(&base);
+    let mut reg = super::super::resolution::Registry::new(&client, []);
+    reg.prefetch(&items).unwrap();
+    reg.prefetch(&items).unwrap();
+    reg.prefetch(&items[..1]).unwrap();
+    assert_eq!(reg.batch_requests, 1);
+    assert!(!reg.batch_read(&items[0].0, &items[0].1));
+    reg.finish();
 }
 
 /// Answers cactup cannot use never fail a command: an unusable item (a
@@ -1951,6 +2005,21 @@ fn a_cactarium_without_batch_reads_reads_singly() {
     assert!(err.contains("does not look like a Cactarium"), "{err}");
 }
 
+/// A fake whose state a panic poisoned fails the next lock, as
+/// `Mutex::lock().unwrap()` does.
+#[test]
+#[should_panic(expected = "poisoned")]
+fn a_poisoned_fake_fails_the_next_lock() {
+    let fake = std::sync::Arc::new(FakeLock(Mutex::new(Fake::new()), std::time::Duration::from_millis(50)));
+    let held = fake.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = held.lock().unwrap();
+        panic!("a panic while the fake is locked");
+    })
+    .join();
+    let _ = fake.lock().unwrap().batch_requests;
+}
+
 /// A statement that locks the fake twice fails, never hangs.
 #[test]
 #[should_panic(expected = "locked twice in one statement")]
@@ -2058,7 +2127,8 @@ fn remove_finds_a_base_package_that_depends_on_what_goes() {
 /// A base whose et/carpet (1.0.0 at c1; 2.0.0 at c2, its branch's tip) is
 /// pinned at c1 or follows its branch, beside et/x (at a commit no version
 /// froze, read in the batch) and et/f (frozen at 1.0.0), both depending on
-/// et/carpet >=1.0.0. `head`: whether the Cactarium can read et/carpet's tip.
+/// et/carpet >=1.0.0. `head`: whether the Cactarium can read et/carpet's tip
+/// (else a commit no version froze, which it has never seen, follows 2.0.0).
 /// `tag`: the tag 2.0.0 was frozen from (in the upstream too), which `add`
 /// writes as the replacement's `!REPO_BRANCH`.
 fn replaced_base(pinned: bool, head: bool, tag: Option<&str>) -> (Setup, Shared) {
@@ -2097,9 +2167,9 @@ fn replaced_base(pinned: bool, head: bool, tag: Option<&str>) -> (Setup, Shared)
             two = two.replace("\"tag\":null", &format!("\"tag\":\"{tag}\""));
         }
         f.packages.iter_mut().find(|(p, _)| p == "et/carpet").unwrap().1.insert(0, two);
-        if head {
-            f.snapshots.push(("et/carpet".into(), "head".into(), version("head", &c2, &curl, "Carpet", &["Carpet"], "[]")));
-        }
+    }
+    if !head {
+        crate::fetch::tests::commit_files(&up, &[("Carpet/interface.ccl", "IMPLEMENTS: carpet\n"), ("README", "3\n")]);
     }
     (setup, fake)
 }
@@ -2162,7 +2232,41 @@ fn removing_a_replacement_counts_the_base_that_comes_back() {
     let target = [crate::deps::PkgId::parse("et/carpet").unwrap()];
     let err = format!("{:#}", super::plan_remove_with_deps(&s.ctx, &start, &base, &target).unwrap_err());
     assert!(err.contains("Other packages depend on et/carpet"), "{err}");
-    assert!(err.contains("cannot be read") && err.contains("base repo carpet: et/carpet at its tip"), "{err}");
+    assert!(err.contains("cannot be read") && err.contains("base repo carpet: et/carpet at "), "{err}");
+}
+
+/// What comes back with a removal holds a dependent only when it meets the
+/// dependency: max/d needs et/carpet ^2.0 (the replacement's release), or
+/// a thorn only the replacement enabled. The base's 1.0.0 that comes back
+/// meets neither: max/d stays a dependent, and the remove refuses.
+#[test]
+fn what_comes_back_holds_only_what_it_meets() {
+    for (range, needs) in [("^2.0.0", "Carpet"), (">=1.0.0", "CarpetX")] {
+        let (s, fake) = replaced_base(true, true, None);
+        let up = s.inst.root.parent().unwrap().join("up");
+        crate::fetch::git::testrepo::init(&up.join("d"));
+        let d = crate::fetch::tests::commit_files(&up.join("d"), &[("D/interface.ccl", "IMPLEMENTS: d\n")]).to_string();
+        let durl = up.join("d").display().to_string();
+        let curl = up.join("carpet").display().to_string();
+        {
+            let mut f = fake.lock().unwrap();
+            let claims = format!("[{}]", depends("et/carpet", range, &[needs]));
+            f.packages.push(("max/d".into(), vec![version("1.0.0", &d, &durl, "D", &["D"], &claims)]));
+            // 2.0.0 has CarpetX too, which the base does not check out.
+            let carpet = &mut f.packages.iter_mut().find(|(p, _)| p == "et/carpet").unwrap().1;
+            let c2 = carpet[0].split("\"commit\":\"").nth(1).unwrap()[..40].to_owned();
+            carpet[0] = version("2.0.0", &c2, &curl, "Carpet", &["Carpet", "CarpetX"], "[]");
+        }
+        let up_c = up.join("carpet");
+        crate::fetch::tests::commit_files(&up_c, &[("Carpet/interface.ccl", "IMPLEMENTS: carpet\n"), ("CarpetX/interface.ccl", "IMPLEMENTS: carpetx\n")]);
+        let flags = AddFlags { upgrade: true, yes: true, ..AddFlags::default() };
+        let _ = s.add(&["max/d"], flags);
+        if !s.meta().added.iter().any(|a| a.package == "et/carpet" && !a.replaces.is_empty()) {
+            panic!("{range} {needs}: et/carpet was not upgraded in the base's place: {:?}", s.meta().added);
+        }
+        let err = format!("{:#}", s.remove(&["et/carpet"], remove_yes()).unwrap_err());
+        assert!(err.contains("Other packages depend on et/carpet") && err.contains("max/d@1.0.0"), "{range} {needs}: {err}");
+    }
 }
 
 /// Taking away the thorns cactup gave a base package (an extension) gives

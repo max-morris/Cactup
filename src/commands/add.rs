@@ -1567,7 +1567,7 @@ fn plan_remove_with_deps(
             .map(|p| p.release.id.clone())
             .collect();
         let unread = super::resolution::read_stand_ins(&mut reg, &mut set, &extended)?;
-        let returning = super::resolution::returning_base(&mut reg, base, &start.meta.added, targets)?;
+        let returning = super::resolution::returning_base(&mut reg, base, &start.meta.added)?;
         Ok((set, unread, returning))
     });
     reg.finish();
@@ -1612,8 +1612,11 @@ fn plan_remove_with_deps(
     // Claim overrides kept in the installation join with `cactup claims` (P4).
     let plan = deps::plan_remove(&set.present, &added_for, targets, &Rules::default(), false, &extensions, &returning)
         .map_err(|r| {
-            // What comes back that could not be read might have held them.
-            let lines: Vec<String> = unread_returning.iter().map(|u| format!("\n  {u}")).collect();
+            // What comes back with the targets that could not be read might have held them.
+            let lines: Vec<String> = (unread_returning.iter())
+                .filter(|(replacer, _)| targets.contains(replacer))
+                .map(|(_, u)| format!("\n  {u}"))
+                .collect();
             match (&r, lines.is_empty()) {
                 (deps::Refusal::HasDependents { .. }, false) => anyhow!(
                     "{r}\nWhat comes back with the removal, which might meet them, cannot be read:{}",

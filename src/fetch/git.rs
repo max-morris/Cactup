@@ -1506,6 +1506,32 @@ pub fn ask_remote_default_branch(url: &str) -> Res<String> {
     }
 }
 
+/// [`remote_tip`] asked on a thread of its own, from a scratch repository it
+/// makes, while this one polls the interrupt flag (as
+/// [`ask_remote_default_branch`] does).
+pub fn ask_remote_tip(url: &str, git_ref: Option<&str>) -> Res<ObjectId> {
+    let (send, recv) = std::sync::mpsc::channel();
+    let (url, git_ref) = (url.to_owned(), git_ref.map(str::to_owned));
+    std::thread::spawn(move || {
+        let answer = (|| {
+            let scratch = tempfile::tempdir().context("Failed to create a scratch directory")?;
+            gix::init_bare(scratch.path()).context("Failed to create a scratch repository")?;
+            remote_tip(scratch.path(), &url, git_ref.as_deref())
+        })();
+        let _ = send.send(answer);
+    });
+    loop {
+        if gix::interrupt::is_triggered() {
+            bail!("Interrupted");
+        }
+        match recv.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(answer) => return answer,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => bail!("Asking for the branch's tip failed"),
+        }
+    }
+}
+
 /// The file `path` of `commit` in the repository at `url`, written to
 /// `dest` (atomically): the commit is fetched by its id at depth 1 into a
 /// scratch repository (a server must grant the want; GitHub and the
