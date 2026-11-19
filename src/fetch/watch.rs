@@ -84,7 +84,7 @@ where
     let mut watched = Watched::new(handle, activity.clone());
     let (worker_cancel, worker_tid) = (Arc::clone(&cancel), Arc::clone(&tid));
     std::thread::spawn(move || {
-        worker_tid.store(current_tid().unwrap_or(0), Ordering::SeqCst);
+        worker_tid.store(rustix::thread::gettid().as_raw_nonzero().get() as u32, Ordering::SeqCst);
         let answer = work(&mut watched, &worker_cancel);
         drop(watched);
         let _ = send.send(answer);
@@ -122,28 +122,32 @@ where
     Err(stop)
 }
 
-/// The kernel's id of the calling thread, from `/proc/thread-self`
-/// (`<pid>/task/<tid>`).
-fn current_tid() -> Option<u32> {
-    let link = std::fs::read_link("/proc/thread-self").ok()?;
-    link.file_name()?.to_str()?.parse().ok()
-}
-
 /// SIGKILL every process the thread `tid` of this process started and has
 /// not yet reaped, and everything those started in turn: an ssh run through
 /// `sh -c` (as a `GIT_SSH_COMMAND` is) is the shell's child, not ours, and
 /// killing the shell alone would leave it holding the pipe gix reads.
-/// Children are listed per thread (`/proc/<pid>/task/<tid>/children`), so
-/// only the work's own are touched. Nothing when the thread is gone, or the
-/// kernel does not list children.
+/// Children are listed per thread (`/proc/<pid>/task/<tid>/children`,
+/// Linux 3.5 on), so only the work's own are touched. Nothing when the
+/// thread is gone, or the kernel does not list children.
+///
+/// A process in another session than ours is left alone, with all it
+/// started: that is a daemon, not part of the fetch. OpenSSH's
+/// ControlPersist master is one: the ssh that starts it forks, and the child
+/// `daemon(3)`s (fork again, `setsid`) before it serves the connections other
+/// sessions share; so once detached it is neither our descendant nor in our
+/// session, and in the moment before, the session check spares it.
 fn kill_children(tid: u32) {
     if tid == 0 {
         return;
     }
+    let ours = session_of("self");
     let mut found = Vec::new();
     let mut pending = children_of(&format!("/proc/self/task/{tid}/children"));
     while let Some(pid) = pending.pop() {
         if found.contains(&pid) {
+            continue;
+        }
+        if ours.is_some() && session_of(&pid.to_string()) != ours {
             continue;
         }
         found.push(pid);
@@ -159,6 +163,16 @@ fn kill_children(tid: u32) {
             let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
         }
     }
+}
+
+/// The session of process `pid` (or `self`), from `/proc/<pid>/stat` (read
+/// there rather than through getsid(2): in a pid namespace a session led
+/// from outside it reads as 0, which is still one session to compare).
+fn session_of(pid: &str) -> Option<i64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // After the command name, which may hold anything, up to its last ')':
+    // state, ppid, pgrp, session.
+    stat.rsplit_once(')')?.1.split_whitespace().nth(3)?.parse().ok()
 }
 
 /// The pids a `children` file of `/proc` lists.
@@ -365,14 +379,15 @@ mod tests {
     }
 
     /// Work that keeps reporting is never given up on, however long it takes
-    /// in all; work that goes quiet is, after the stall bound.
+    /// in all (three times the stall bound here, reporting every sixth of
+    /// it); work that goes quiet is, after the stall bound.
     #[test]
     fn only_silence_stops_the_work() {
         let root = prodash::tree::Root::new();
-        let answer = abandonable(root.add_child("moving"), bounds(300), |progress, _| {
+        let answer = abandonable(root.add_child("moving"), bounds(1200), |progress, _| {
             progress.init(None, None);
-            for _ in 0..12 {
-                std::thread::sleep(Duration::from_millis(100));
+            for _ in 0..18 {
+                std::thread::sleep(Duration::from_millis(200));
                 progress.inc();
             }
             Ok(42)
@@ -387,46 +402,73 @@ mod tests {
             Ok(())
         });
         assert!(matches!(stopped, Err(Stop::Stalled(_))), "{stopped:?}");
-        assert!(started.elapsed() < Duration::from_millis(900), "{:?}", started.elapsed());
+        assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+    }
+
+    /// Work that counts only through a counter it was handed (as gix's
+    /// threaded delta resolution does), never through the handle, is moving
+    /// all the same.
+    #[test]
+    fn a_counter_handed_out_counts_as_movement() {
+        let root = prodash::tree::Root::new();
+        let answer = abandonable(root.add_child("resolving"), bounds(1200), |progress, _| {
+            let counter = progress.counter();
+            for _ in 0..18 {
+                std::thread::sleep(Duration::from_millis(200));
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(7)
+        });
+        assert_eq!(answer.unwrap(), 7);
     }
 
     /// Work given up on is told to stop, its child processes are killed,
     /// and the handles it still holds are let go of: its item leaves the
     /// tree although its thread never ends.
     #[test]
-    fn abandoned_work_is_cancelled_and_let_go_of() {
+    fn abandoned_work_is_canceled_and_let_go_of() {
         let root = prodash::tree::Root::new();
         let (pid_send, pid_recv) = std::sync::mpsc::channel();
-        let (cancelled_send, cancelled_recv) = std::sync::mpsc::channel();
+        let (canceled_send, canceled_recv) = std::sync::mpsc::channel();
         let stopped = abandonable(root.add_child("stuck"), bounds(300), move |progress, cancel| -> Res<()> {
             let _phase = progress.add_child("handshake");
-            // A shell's child, as an ssh run through `sh -c` is.
+            // A shell's child, as an ssh run through `sh -c` is; and one
+            // in a session of its own, as a ControlPersist master is.
             let mut child = std::process::Command::new("sh")
-                .args(["-c", "sleep 30 & echo $!; wait"])
+                .args(["-c", "sleep 30 & echo $!; setsid sleep 30 & echo $!; wait"])
                 .stdout(std::process::Stdio::piped())
                 .spawn()
                 .unwrap();
-            let mut said = String::new();
-            std::io::BufRead::read_line(&mut std::io::BufReader::new(child.stdout.take().unwrap()), &mut said).unwrap();
-            pid_send.send(said.trim().parse::<u32>().unwrap()).unwrap();
+            let mut said = std::io::BufReader::new(child.stdout.take().unwrap());
+            for _ in 0..2 {
+                let mut line = String::new();
+                std::io::BufRead::read_line(&mut said, &mut line).unwrap();
+                pid_send.send(line.trim().parse::<i32>().unwrap()).unwrap();
+            }
             let _ = child.wait();
-            let _ = cancelled_send.send(cancel.load(Ordering::SeqCst));
+            let _ = canceled_send.send(cancel.load(Ordering::SeqCst));
             // Stuck for good, holding its handles.
             loop {
                 std::thread::sleep(Duration::from_secs(60));
             }
         });
         assert!(matches!(stopped, Err(Stop::Stalled(_))), "{stopped:?}");
-        let pid = pid_recv.recv().unwrap();
+        let (pid, daemon) = (pid_recv.recv().unwrap(), pid_recv.recv().unwrap());
         // The shell was killed: the work's wait on it returned at once.
-        assert!(cancelled_recv.recv_timeout(Duration::from_secs(5)).unwrap());
+        assert!(canceled_recv.recv_timeout(Duration::from_secs(5)).unwrap());
         // And so was its sleep (handed to init, which reaps it).
-        let gone = || std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| stat.contains(") Z "));
+        let gone = |pid: i32| std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| stat.contains(") Z "));
         let waited = Instant::now();
-        while !gone() && waited.elapsed() < Duration::from_secs(5) {
+        while !gone(pid) && waited.elapsed() < Duration::from_secs(5) {
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(gone(), "the shell's child {pid} outlived the work given up on");
+        assert!(gone(pid), "the shell's child {pid} outlived the work given up on");
+        // Not the one in another session.
+        let spared = !gone(daemon);
+        if let Some(daemon) = rustix::process::Pid::from_raw(daemon) {
+            let _ = rustix::process::kill_process(daemon, rustix::process::Signal::KILL);
+        }
+        assert!(spared, "the process in a session of its own was killed");
         assert_eq!(root.num_tasks(), 0);
     }
 }

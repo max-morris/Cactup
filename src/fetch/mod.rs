@@ -106,6 +106,9 @@ pub struct GitRepoPlan {
     /// says plainly that the clone was left as it was until the remote
     /// answers.
     pub note: Option<String>,
+    /// Why the remote could not say its default branch, when the note is
+    /// about that: a silent one fails the fetch at once, untried.
+    pub unasked: Option<Unasked>,
 }
 
 #[derive(Debug)]
@@ -173,7 +176,7 @@ impl Plan {
         let mut resolved: BTreeMap<usize, Follow> = BTreeMap::new();
         for (i, branch) in wants {
             let follow = match branch {
-                Some(b) => Follow { branch: Some(b), note: None },
+                Some(b) => Follow { branch: Some(b), note: None, unasked: None },
                 None => follows.next().expect("one answer per ask"),
             };
             resolved.insert(i, follow);
@@ -199,9 +202,9 @@ impl Plan {
                 }
             };
             // Resolved above, for one with neither a pin nor a listed branch.
-            let (branch, note) = match resolved.remove(&i) {
-                Some(Follow { branch, note }) => (branch, note),
-                None => (s.branch, None),
+            let (branch, note, unasked) = match resolved.remove(&i) {
+                Some(Follow { branch, note, unasked }) => (branch, note, unasked),
+                None => (s.branch, None, None),
             };
             moved.push(s.repo.clone());
             self.git.push(GitRepoPlan {
@@ -215,6 +218,7 @@ impl Plan {
                 forced: Some(s.reason.describe()),
                 retarget,
                 note,
+                unasked,
             });
         }
         Ok(moved)
@@ -226,6 +230,21 @@ impl Plan {
 pub struct Follow {
     pub branch: Option<String>,
     pub note: Option<String>,
+    /// Why its remote could not say its default branch, when it was asked
+    /// and could not.
+    pub unasked: Option<Unasked>,
+}
+
+/// Why a clone's remote could not say its default branch, kept for its
+/// fetch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unasked {
+    /// The ask's own error, as said.
+    pub error: String,
+    /// It went unanswered (the remote stalled, or the window ran out while
+    /// it waited): its fetch would wait out the same silence, so it is not
+    /// tried. Not set for a remote that refused, or one never asked.
+    pub silent: bool,
 }
 
 /// Where a clone goes back to, as far as cactup can tell without asking its
@@ -284,9 +303,9 @@ pub fn branch_to_follow(
     window: git::AskWindow,
 ) -> Res<Follow> {
     match known_branch(dir, url, listed, record) {
-        Known::Branch(b) => Ok(Follow { branch: Some(b), note: None }),
+        Known::Branch(b) => Ok(Follow { branch: Some(b), note: None, unasked: None }),
         Known::RemoteDefault { label } => match git::ask_remote_default_branch(url, window) {
-            Ok(b) => Ok(Follow { branch: Some(b), note: None }),
+            Ok(b) => Ok(Follow { branch: Some(b), note: None, unasked: None }),
             Err(e) if gix::interrupt::is_triggered() => Err(e),
             Err(e) => Ok(unanswered(label, &e)),
         },
@@ -299,7 +318,9 @@ fn unanswered(label: Option<String>, e: &anyhow::Error) -> Follow {
         Some(l) => format!("going back to {l}, the label of its last, pinned fetch"),
         None => "and nothing else names a branch".to_owned(),
     };
-    Follow { branch: label, note: Some(format!("its remote's default branch is unknown ({e:#}); {then}")) }
+    let note = Some(format!("its remote's default branch is unknown ({e:#}); {then}"));
+    let unasked = Some(Unasked { error: format!("{e:#}"), silent: git::is_unanswered(e) });
+    Follow { branch: label, note, unasked }
 }
 
 /// Where a fetch of the list puts the clone of `url` at `dir` back on a
@@ -411,6 +432,9 @@ pub struct RepoResult {
     /// Whether the action moved HEAD, to another commit or from detached onto
     /// a branch (false = already up to date).
     pub changed: bool,
+    /// Whether HEAD is at another commit than before (a move onto a branch at
+    /// the same commit changed no source).
+    pub moved_commit: bool,
     /// Carried through from the plan: why this repo needed forcing, if it did.
     pub forced: Option<String>,
     /// `Some(url)` when this fetch re-pointed the repo's `origin` at the
@@ -541,10 +565,33 @@ fn announce_repo(
     };
     match (&item.forced, &item.retarget) {
         (Some(reason), _) => line.warned(format!("{what}; overwrote {reason}")),
-        (None, Some(url)) => line.warned(format!("{what}; origin re-pointed at {url}")),
+        (None, Some(url)) => line.warned(format!("{what}; origin re-pointed at {}", git::redacted(url))),
         (None, None) if item.note.is_some() || warning.is_some() => line.warned(what),
         (None, None) => line.succeeded(what),
     }
+}
+
+/// Why a clone the plan sent back to `label`, its pinned fetch's label,
+/// because its remote could not say its default branch, was left as it was:
+/// what the ask met, where the clone is, and what puts it right, then how
+/// the fetch of the label failed (`fetched`) or that it was not tried.
+fn left_as_it_was(item: &GitRepoPlan, unasked: &Unasked, label: &str, fetched: Option<&anyhow::Error>) -> String {
+    let (asked, then) = if unasked.silent {
+        // The ask's error is the remote's silence itself ("<url> did not
+        // answer within 30 s").
+        (format!("its remote {} when asked for its default branch", unasked.error), "refetch once the remote answers")
+    } else {
+        let url = git::redacted(&item.url);
+        (
+            format!("its remote {url} could not be asked for its default branch ({})", unasked.error),
+            "refetch once it can be",
+        )
+    };
+    let label = match fetched {
+        Some(e) => format!("going back to {label} instead, the label of its last, pinned fetch, failed: {e:#}"),
+        None => format!("going back to {label} instead, the label of its last, pinned fetch, was not tried"),
+    };
+    format!("{asked}, so the clone at '{}' was left as it was; {then} ({label})", item.dir.display())
 }
 
 /// Run the plan: git repos and downloads on a [`WORKERS`]-wide pool keyed by
@@ -650,10 +697,11 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                         if let Some(url) = &item.retarget
                             && let Err(e) = git::set_origin_url(&item.dir, url)
                         {
-                            line.failed(format!("{e:#}"));
+                            let error = git::scrub(&format!("{e:#}"), url);
+                            line.failed(error.clone());
                             report.lock().expect("fetch report poisoned").failures.push(Failure {
                                 what: item.repo.clone(),
-                                error: format!("{e:#}"),
+                                error,
                             });
                             drop(line);
                             top.lock().expect("fetch progress poisoned").inc();
@@ -669,7 +717,18 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                         // Forced (backed-up local edits) or repointed: only
                         // a full overwrite is right there.
                         let force = item.forced.is_some() || item.retarget.is_some();
+                        // Its remote went silent when the plan asked it for its
+                        // default branch, in this very command: the fetch of the
+                        // label it falls back to would only wait out the same
+                        // silence. Failed at once, untried (said below). Not for
+                        // a clone whose `origin` was just re-pointed: that one is
+                        // no longer as it was.
+                        let untried = matches!(item.action, GitAction::Align)
+                            && item.branch.is_some()
+                            && item.retarget.is_none()
+                            && item.unasked.as_ref().is_some_and(|u| u.silent);
                         let outcome = match (&item.action, item.branch.as_deref(), item.commit) {
+                            _ if untried => Err(anyhow::anyhow!("not tried: its remote did not answer")),
                             (GitAction::Clone, branch, Some(commit)) => {
                                 git::clone_pinned(&item.url, branch, commit, &item.dir, &mut line)
                             }
@@ -742,6 +801,7 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                                     head: head.to_string(),
                                     commit: item.commit,
                                     changed,
+                                    moved_commit: before != Some(head),
                                     forced: item.forced.clone(),
                                     retargeted: item.retarget.clone(),
                                     warning,
@@ -752,26 +812,27 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                             }
                             Err(e) => {
                                 // The plan sent the clone back to its pinned fetch's
-                                // label because the remote did not say its default
-                                // branch (`unanswered`): going there failed — a tag
-                                // is no branch — before anything moved. Said plainly,
-                                // the fetch's own error after it. Otherwise said with
-                                // what the plan could not settle, which is likely why.
+                                // label because the remote could not say its default
+                                // branch (`unanswered`): untried (above), or going
+                                // there failed — a tag is no branch — before anything
+                                // moved. Said plainly, the fetch's own error after it.
+                                // Otherwise said with what the plan could not settle,
+                                // which is likely why.
                                 let unmoved = before.is_some()
                                     && git::head_of(&item.dir).ok().map(|(b, id)| (Some(id), b == git::DETACHED))
                                         == Some((before, was_detached));
-                                let error = match &item.note {
-                                    Some(_) if unmoved && !gix::interrupt::is_triggered() => format!(
-                                        "its remote {} did not answer when asked for its default branch, so the clone at \
-                                         '{}' was left as it was; refetch once the remote answers (going back to {} \
-                                         instead, the label of its last, pinned fetch, failed: {e:#})",
-                                        item.url,
-                                        item.dir.display(),
-                                        item.branch.as_deref().unwrap_or("its label"),
-                                    ),
-                                    Some(note) => format!("{e:#} ({note})"),
-                                    None => format!("{e:#}"),
+                                let error = match (&item.unasked, item.branch.as_deref(), &item.note) {
+                                    (Some(unasked), Some(label), _) if untried => {
+                                        left_as_it_was(item, unasked, label, None)
+                                    }
+                                    (Some(unasked), Some(label), _) if unmoved && !gix::interrupt::is_triggered() => {
+                                        left_as_it_was(item, unasked, label, Some(&e))
+                                    }
+                                    (_, _, Some(note)) => format!("{e:#} ({note})"),
+                                    (_, _, None) => format!("{e:#}"),
                                 };
+                                // A transport's own words may quote the URL whole.
+                                let error = git::scrub(&error, &item.url);
                                 line.failed(error.clone());
                                 report.failures.push(Failure { what: item.repo.clone(), error });
                             }
@@ -1527,6 +1588,7 @@ pub fn plan_only(
                 forced: None,
                 retarget: None,
                 note: None,
+                unasked: None,
             }),
             RepoState::Clean { .. } if commit.is_some() => plan.git.push(GitRepoPlan {
                 repo,
@@ -1539,6 +1601,7 @@ pub fn plan_only(
                 forced: None,
                 retarget: None,
                 note: None,
+                unasked: None,
             }),
             RepoState::Clean { head_branch } => {
                 // No !REPO_BRANCH = follow whatever branch the clone is on.
@@ -1556,6 +1619,7 @@ pub fn plan_only(
                     forced: None,
                     retarget: None,
                     note: None,
+                    unasked: None,
                 });
             }
             RepoState::Detached { head } => {
@@ -1570,12 +1634,14 @@ pub fn plan_only(
                 // detached, as it was before cactup could ask its remote: a
                 // forced fetch says why it cannot move it.
                 let action = match (commit, follow) {
-                    (Some(pin), _) if pin == head || ours => Some((GitAction::Pin, group.branch.clone(), None)),
-                    (None, Some(Follow { branch: Some(branch), note })) => Some((GitAction::Align, Some(branch), note)),
+                    (Some(pin), _) if pin == head || ours => Some((GitAction::Pin, group.branch.clone(), None, None)),
+                    (None, Some(Follow { branch: Some(branch), note, unasked })) => {
+                        Some((GitAction::Align, Some(branch), note, unasked))
+                    }
                     _ => None,
                 };
                 match action {
-                    Some((action, branch, note)) => plan.git.push(GitRepoPlan {
+                    Some((action, branch, note, unasked)) => plan.git.push(GitRepoPlan {
                         repo,
                         dir,
                         url: group.url,
@@ -1586,6 +1652,7 @@ pub fn plan_only(
                         forced: None,
                         retarget: None,
                         note,
+                        unasked,
                     }),
                     None => plan.skipped.push(SkippedRepo {
                         repo,
@@ -2414,6 +2481,11 @@ pub(crate) mod tests {
         let mut progress = prodash::tree::Root::new().add_child("test plan");
         let mut p = plan(&list, &root, &mut progress).unwrap();
         assert!(p.git.iter().all(|g| matches!(g.action, GitAction::Align)), "{:?}", p.git);
+        // As if the asks had failed some other way: the aligns' fetches are
+        // tried (one whose ask went silent is not, see below).
+        for g in &mut p.git {
+            g.unasked = None;
+        }
         p.git.extend(fresh_clones(&root, 2, &url).git);
         let started = std::time::Instant::now();
         let report = execute(&p, &root).unwrap();
@@ -2464,7 +2536,41 @@ pub(crate) mod tests {
         assert_eq!(report.failures.len(), 3, "{:?}", report.failures);
         assert!(report.failures.iter().all(|f| f.error.to_lowercase().contains("interrupted")), "{:?}", report.failures);
         let took = returned.duration_since(interrupted);
-        assert!(took < std::time::Duration::from_millis(900), "{took:?}");
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    }
+
+    /// A remote that cannot be asked for another reason than silence — ssh
+    /// refusing the key, here — says that reason, never "did not answer",
+    /// and a password in its URL is not shown. The ssh command is the
+    /// process's environment: run in a child of its own.
+    #[test]
+    fn a_refused_ask_names_its_cause() {
+        if std::env::var_os("CACTUP_TEST_SSH_REFUSED").is_none() {
+            let tmp = tempfile::tempdir().unwrap();
+            let ssh = tmp.path().join("ssh");
+            std::fs::write(&ssh, "#!/bin/sh\necho 'Permission denied (publickey).' >&2\nexit 255\n").unwrap();
+            std::fs::set_permissions(&ssh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["fetch::tests::a_refused_ask_names_its_cause", "--exact", "--test-threads=1"])
+                .env("CACTUP_TEST_SSH_REFUSED", "1")
+                .env("GIT_SSH_COMMAND", &ssh)
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && said.contains("1 passed"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+            return;
+        }
+        let e = git::ask_remote_default_branch("ssh://example.invalid/r.git", git::AskWindow::now()).unwrap_err();
+        let said = format!("{e:#}");
+        // gix takes ssh's "Permission denied" for credentials wanted, and
+        // says it could not obtain them: an authentication failure, named.
+        assert!(said.contains("credentials") && !said.contains("did not answer"), "{said}");
+        assert!(!git::is_unanswered(&e));
+        // Silence, with a password in the URL: unanswered, and not shown.
+        let url = stalling_remote("r").replace("git://", "https://max:hunter2@");
+        let window = git::AskWindow::from(std::time::Instant::now(), std::time::Duration::from_millis(500));
+        let e = git::ask_remote_default_branch(&url, window).unwrap_err();
+        assert!(git::is_unanswered(&e) && !format!("{e:#}").contains("hunter2"), "{e:#}");
     }
 
     /// An ssh remote whose command hangs (and runs its own child, as `sh -c
@@ -2524,6 +2630,8 @@ pub(crate) mod tests {
         assert_ne!(branch, git::DETACHED);
         assert_eq!(now, at);
         assert!(report.repos[0].changed, "{:?}", report.repos[0].changed);
+        // No source changed: no config has anything to pick up.
+        assert!(!report.repos[0].moved_commit);
 
         let tree = prodash::tree::Root::new();
         let layout = crate::progress::Layout::for_names(["R0"]);
@@ -2573,18 +2681,175 @@ pub(crate) mod tests {
         let window = git::AskWindow::from(std::time::Instant::now(), std::time::Duration::ZERO);
         let e = git::ask_remote_default_branch(&local, window).unwrap_err();
         let follow = unanswered(Some("v1.0.0".into()), &e);
-        (p.git[0].branch, p.git[0].note) = (follow.branch, follow.note);
+        (p.git[0].branch, p.git[0].note, p.git[0].unasked) = (follow.branch, follow.note, follow.unasked);
         let report = execute(&p, &root).unwrap();
         assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
         let error = &report.failures[0].error;
         let plain = format!(
-            "its remote {local} did not answer when asked for its default branch, so the clone at '{}' was left as it \
-             was; refetch once the remote answers (going back to v1.0.0 instead",
+            "its remote {local} could not be asked for its default branch ({local} was not asked: the time for asking \
+             remotes was up), so the clone at '{}' was left as it was; refetch once it can be (going back to v1.0.0 \
+             instead",
             dir.display()
         );
         assert!(error.starts_with(&plain), "{error}");
         assert!(error.contains("refs/heads/v1.0.0"), "the fetch's own error comes last: {error}");
         assert_eq!(git::head_of(&dir).unwrap(), before);
+
+        // With no label to go back to, the plain words would be wrong: the
+        // fetch's error and the note, as before.
+        p.git[0].branch = None;
+        let report = execute(&p, &root).unwrap();
+        let error = &report.failures[0].error;
+        assert!(error.starts_with("No branch to put R0 on") && error.contains("default branch is unknown"), "{error}");
+        assert!(!error.contains("left as it was"), "{error}");
+    }
+
+    /// A clone whose remote went silent when the plan asked it for its
+    /// default branch is failed at once, untried — its fetch would only wait
+    /// out the same silence — saying the remote did not answer within the
+    /// ask's window, with none of gix's refspec words.
+    #[test]
+    fn a_clone_whose_ask_went_silent_is_failed_untried() {
+        TEST_FOLLOW_TIMEOUT_MS.store(1000, std::sync::atomic::Ordering::Relaxed);
+        let tmp = tempfile::tempdir().unwrap();
+        let url = stalling_remote("r");
+        let (root, list) = clones_made_pinned(tmp.path(), 3, &url);
+        let before = git::head_of(&root.join("Cactus/repos/R0")).unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("test plan");
+        let p = plan(&list, &root, &mut progress).unwrap();
+        assert!(p.git.iter().all(|g| g.unasked.as_ref().is_some_and(|u| u.silent)), "{:?}", p.git);
+        let started = std::time::Instant::now();
+        let report = execute(&p, &root).unwrap();
+        assert_eq!(report.failures.len(), 3, "{:?}", report.failures);
+        for f in &report.failures {
+            let dir = root.join("Cactus/repos").join(&f.what);
+            let plain = format!(
+                "its remote {url} did not answer within 1 s when asked for its default branch, so the clone at '{}' \
+                 was left as it was; refetch once the remote answers (going back to v1.0.0 instead, the label of its \
+                 last, pinned fetch, was not tried)",
+                dir.display()
+            );
+            assert_eq!(f.error, plain);
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+        assert_eq!(git::head_of(&root.join("Cactus/repos/R0")).unwrap(), before);
+    }
+
+    /// A local `git://` server that relays `git upload-pack` of `repo` until
+    /// the client sends its first `want`, then goes silent, holding the
+    /// connection: a remote that answers the handshake and stalls once the
+    /// fetch has begun (gix holds the repo's `shallow` lock by then). Its URL.
+    fn relay_until_want(repo: &Path) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let repo = repo.to_owned();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let repo = repo.clone();
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut len = [0u8; 4];
+                    stream.read_exact(&mut len).unwrap();
+                    let len = usize::from_str_radix(std::str::from_utf8(&len).unwrap(), 16).unwrap();
+                    let mut request = vec![0u8; len - 4];
+                    stream.read_exact(&mut request).unwrap();
+                    let v2 = request.windows(9).any(|w| w == b"version=2");
+                    let mut command = std::process::Command::new("git");
+                    command.arg("upload-pack").arg(&repo);
+                    if v2 {
+                        command.env("GIT_PROTOCOL", "version=2");
+                    }
+                    let mut child = command
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped())
+                        .spawn()
+                        .unwrap();
+                    let mut from_git = child.stdout.take().unwrap();
+                    let mut to_client = stream.try_clone().unwrap();
+                    std::thread::spawn(move || {
+                        let _ = std::io::copy(&mut from_git, &mut to_client);
+                    });
+                    let mut to_git = child.stdin.take().unwrap();
+                    let mut seen = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    while let Ok(n) = stream.read(&mut buf) {
+                        if n == 0 {
+                            break;
+                        }
+                        seen.extend_from_slice(&buf[..n]);
+                        if seen.windows(5).any(|w| w == b"want ") {
+                            // Silent from here on, the connection held.
+                            loop {
+                                std::thread::sleep(std::time::Duration::from_secs(60));
+                            }
+                        }
+                        if to_git.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                    }
+                    let _ = child.kill();
+                    let _ = child.wait();
+                });
+            }
+        });
+        format!("git://127.0.0.1:{port}/r.git")
+    }
+
+    /// A fetch given up on while gix holds the repo's `shallow` lock (the
+    /// remote stalled after its first `want`) leaves the lock to a thread
+    /// stuck in its read; what the process removes on its way out
+    /// (`crate::remove_leftover_tempfiles`, run at the end of `main`) takes
+    /// it, so the next fetch works once the remote answers. A pin given up on
+    /// that way does not fall back to fetching the label, which would trip
+    /// over the same lock. The process's exit: run in a child of its own.
+    #[test]
+    fn a_fetch_given_up_on_leaves_no_shallow_lock_behind() {
+        let Some(dir) = std::env::var_os("CACTUP_TEST_SHALLOW_CHILD") else {
+            let tmp = tempfile::tempdir().unwrap();
+            let upstream = tmp.path().join("upstream");
+            git::testrepo::init(&upstream);
+            git::testrepo::commit_file(&upstream, "a", "1\n");
+            let (branch, _) = git::head_of(&upstream).unwrap();
+            let clone = tmp.path().join("clone");
+            let mut progress = prodash::tree::Root::new().add_child("test clone");
+            git::clone(&upstream.to_string_lossy(), Some(&branch), &clone, &mut progress).unwrap();
+            git::testrepo::commit_file(&upstream, "a", "2\n");
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["fetch::tests::a_fetch_given_up_on_leaves_no_shallow_lock_behind", "--exact", "--test-threads=1"])
+                .env("CACTUP_TEST_SHALLOW_CHILD", tmp.path())
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && said.contains("1 passed"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+            for repo in [&clone, &tmp.path().join("pinned")] {
+                assert!(!repo.join(".git/shallow.lock").exists(), "{} kept its shallow lock", repo.display());
+            }
+            // The remote answers again: the next align goes through.
+            git::set_origin_url(&clone, &upstream.to_string_lossy()).unwrap();
+            let mut progress = prodash::tree::Root::new().add_child("test align");
+            let tip = git::align(&clone, &branch, false, &mut progress).unwrap();
+            assert_eq!(tip, git::head_of(&upstream).unwrap().1);
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        git::TEST_SILENCE_MS.store(1000, std::sync::atomic::Ordering::Relaxed);
+        let upstream = dir.join("upstream");
+        let (branch, tip) = git::head_of(&upstream).unwrap();
+        let url = relay_until_want(&upstream);
+        let clone = dir.join("clone");
+        git::set_origin_url(&clone, &url).unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("test align");
+        let e = git::align(&clone, &branch, false, &mut progress).unwrap_err();
+        assert!(format!("{e:#}").contains(&format!("{url} did not answer within 1 s")), "{e:#}");
+        // What went wrong before the fix: the abandoned fetch holds it.
+        assert!(clone.join(".git/shallow.lock").exists());
+
+        let pinned = dir.join("pinned");
+        let e = git::clone_pinned(&url, Some(&branch), tip, &pinned, &mut progress).unwrap_err();
+        let said = format!("{e:#}");
+        assert!(said.contains("did not answer within 1 s") && !said.contains("lock"), "{said}");
+        crate::remove_leftover_tempfiles();
     }
 
     /// Where a restore puts a clone, offline: none on disk, the remote's

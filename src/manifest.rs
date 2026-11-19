@@ -239,18 +239,24 @@ pub fn ensure_manifest_repo(cactup_root: &Path, manifest_url: &str) -> Res<Repos
         // Retried from the top on a transient failure: gix deletes the
         // (empty) directory it cloned into when the clone does not finish.
         // Watched (Ctrl-C, a remote gone quiet): one given up on, whose gix
-        // may never return, is deleted here instead.
+        // may never return, is deleted here instead — only when it is this
+        // process's own: the directory was empty when this attempt began and
+        // its clone got going there (a first run racing this one may have
+        // started its clone in it first, and gix refuses a non-empty one).
         let repo = crate::fetch::retry::with_backoff(&mut headline, |headline| {
+            let fresh = manifest_dir.read_dir().map_or(true, |mut entries| entries.next().is_none());
             fs::create_dir_all(&manifest_dir)
                .with_context(|| "Failed to create manifest directory")?;
 
-            let (url, dir) = (manifest_url.to_owned(), manifest_dir.clone());
+            let ours = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (url, dir, started) = (manifest_url.to_owned(), manifest_dir.clone(), ours.clone());
             let fetched = crate::fetch::git::watched(manifest_url, headline, move |headline, cancel| {
                 let mut prepare =
                     gix::prepare_clone(url.as_str(), &dir)?
                         .configure_remote(|r| {
                             Ok(r.with_fetch_tags(Tags::All))
                         });
+                started.store(true, std::sync::atomic::Ordering::SeqCst);
 
                 // gix renames whatever item it's given as the fetch moves through
                 // phases and hangs its own bars off it; the Line keeps all of that
@@ -260,11 +266,13 @@ pub fn ensure_manifest_repo(cactup_root: &Path, manifest_url: &str) -> Res<Repos
                     .with_context(|| "Failed to fetch manifest")?;
                 Ok(repo)
             });
-            if fetched.is_err() {
+            if fetched.is_err() && fresh && ours.load(std::sync::atomic::Ordering::SeqCst) {
                 let _ = fs::remove_dir_all(&manifest_dir);
             }
             fetched
-        })?;
+        })
+        // A transport's own words may quote the URL, credentials and all.
+        .map_err(|e| anyhow!(crate::fetch::git::scrub(&format!("{e:#}"), manifest_url)))?;
 
         headline.succeeded("fetched");
         progress_renderer.shutdown_and_wait();
@@ -315,6 +323,10 @@ pub fn ensure_manifest_repo(cactup_root: &Path, manifest_url: &str) -> Res<Repos
                     .receive(&mut *headline, cancel)?;
                 Ok(())
             })
+        })
+        .map_err(|e| {
+            let said = crate::fetch::git::scrub(&format!("{e:#}"), &url);
+            anyhow!(crate::fetch::git::scrub(&said, manifest_url))
         })?;
 
         headline.succeeded("up to date");

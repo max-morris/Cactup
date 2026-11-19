@@ -339,7 +339,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     if !repointed.is_empty() {
         println!("{}", format!("{} repo(s) had their origin re-pointed:", repointed.len()).bold());
         for (repo, url) in &repointed {
-            println!("  {repo}: origin now points at {}", url.bold());
+            println!("  {repo}: origin now points at {}", fetch::git::redacted(url).bold());
         }
     }
     if ctx.globals.verbose {
@@ -499,7 +499,9 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // (§7.4) and each thorn's recorded provider, so `report_configs`'s claim
     // that a plain `cactup build` does the right thing holds even when the
     // refetched thornlist re-points a thorn *name* at a different provider.
-    if changed > 0 && !configs.is_empty() {
+    // Only a source that changed: a clone put on a branch at the commit it
+    // was at counts as updated, but no config has anything to pick up.
+    if report.repos.iter().any(|r| r.moved_commit) && !configs.is_empty() {
         report_configs(&inst, &configs, matches!(source, Source::Release { .. }));
     }
 
@@ -1804,6 +1806,7 @@ mod tests {
             forced: None,
             retarget: None,
             note: None,
+            unasked: None,
         }
     }
 

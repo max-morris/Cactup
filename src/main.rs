@@ -77,6 +77,22 @@ fn compute_node_path(command: &Commands) -> bool {
 }
 
 fn main() -> Res<()> {
+    let result = run();
+    remove_leftover_tempfiles();
+    result
+}
+
+/// On the way out, Ok or Err, interrupted or not: remove every gix lock and
+/// temp file this process still has registered. A fetch given up on (Ctrl-C,
+/// a remote gone quiet: `fetch::watch`) is abandoned on a thread still stuck
+/// in its read, holding what it took — a repo's `shallow.lock` above all,
+/// which would make every later fetch of that repo fail — and that thread
+/// never drops it. (The second Ctrl-C's abort cleans them up the same way.)
+pub(crate) fn remove_leftover_tempfiles() {
+    gix::tempfile::registry::cleanup_tempfiles();
+}
+
+fn run() -> Res<()> {
     // Before anything else: as the build cache's compiler wrapper (or its
     // probe) this process is not a cactup command at all. It runs once per
     // compile with `make` waiting on it, and must stay clear of everything

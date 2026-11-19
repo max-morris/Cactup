@@ -58,9 +58,11 @@ crossterm = "0.29"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29"] }
 # kill(2) and waitpid(2) for the compiler wrapper (src/objcache/wrapper.rs),
 # which must pass a signal on to the compiler it runs; std can only SIGKILL.
-# Already in the tree (tempfile, crossterm) and pure Rust on Linux: it makes
-# the system calls itself, without libc, so the binary stays static.
-rustix = { version = "1.1", features = ["fs", "param", "process"] }
+# gettid(2) for killing what a fetch given up on started
+# (src/fetch/watch.rs). Already in the tree (tempfile, crossterm) and pure
+# Rust on Linux: it makes the system calls itself, without libc, so the
+# binary stays static.
+rustix = { version = "1.1", features = ["fs", "param", "process", "thread"] }
 # Compresses the build cache's unit records (src/objcache/store.rs). Already
 # in the tree (gix's zlib), pure Rust: nothing for the static binary to load.
 zlib-rs = "0.6"

@@ -76,7 +76,7 @@ impl DirtyReason {
                 format!("checked out on branch {head} instead of {expected}")
             }
             DirtyReason::RemoteUrlChanged { on_disk, wanted, modified } => {
-                let mut s = format!("remote URL is {on_disk}, thornlist wants {wanted}");
+                let mut s = format!("remote URL is {}, thornlist wants {}", redacted(on_disk), redacted(wanted));
                 if !modified.is_empty() {
                     s.push_str(&format!(" ({} local modification(s))", modified.len()));
                 }
@@ -369,6 +369,13 @@ fn clean_path(path: &str) -> String {
 /// what bounds `git://` and ssh remotes, which have no timeout of their own.
 /// Long enough for a server that thinks before it speaks: `git upload-pack`
 /// reports its counting within a couple of seconds.
+///
+/// Over ssh, a prompt waiting for input (a key's passphrase, a password, a
+/// second factor, an unknown host key) is silence too: one left unanswered
+/// for longer than this is cut off and the repo fails. Accepted: a fetch
+/// runs many repos at once under a progress display, where a prompt cannot
+/// be answered well anyway, and a minute is ample for one that can; a host
+/// that needs one is set up beforehand (an agent, a known host key).
 pub const FETCH_SILENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// How long a fetch given up on gets to unwind (and drop gix's lock and temp
@@ -397,6 +404,58 @@ fn silence_timeout(url: &str) -> std::time::Duration {
 #[cfg(test)]
 pub(crate) static TEST_SILENCE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// A remote that went quiet: a fetch given up on after
+/// [`FETCH_SILENCE_TIMEOUT`] with nothing moving, or an ask whose window ran
+/// out while it waited. Typed, so callers can tell it from a remote that
+/// answered with a refusal.
+#[derive(Debug)]
+pub struct Unanswered {
+    /// The remote, as it may be shown ([`redacted`]).
+    pub url: String,
+    /// How long it was waited on, in whole seconds.
+    pub secs: u64,
+}
+
+impl std::fmt::Display for Unanswered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} did not answer within {} s", self.url, self.secs)
+    }
+}
+
+impl std::error::Error for Unanswered {}
+
+/// Whether `e` is, or was caused by, an [`Unanswered`].
+pub fn is_unanswered(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| cause.is::<Unanswered>())
+}
+
+/// `url` as it may be shown: a password in it replaced (gix's own redacted
+/// form); any other URL exactly as given.
+pub fn redacted(url: &str) -> String {
+    match gix::url::parse(url.as_bytes().as_bstr()) {
+        Ok(parsed) if parsed.password().is_some() => parsed.to_string(),
+        _ => url.to_owned(),
+    }
+}
+
+/// `text` with the credentials `url` carries hidden wherever it shows them —
+/// an error from deeper down (a transport's, the HTTP client's) may quote
+/// the URL whole: every `:<password>@` of it, as given and percent-decoded,
+/// becomes `:redacted@`, as in [`redacted`].
+pub fn scrub(text: &str, url: &str) -> String {
+    let Ok(parsed) = gix::url::parse(url.as_bytes().as_bstr()) else { return text.to_owned() };
+    let Some(password) = parsed.password() else { return text.to_owned() };
+    let mut text = text.to_owned();
+    let raw = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let given = raw.split_once('@').and_then(|(userinfo, _)| userinfo.split_once(':')).map(|(_, p)| p);
+    for secret in given.into_iter().chain([password]) {
+        if !secret.is_empty() {
+            text = text.replace(&format!(":{secret}@"), ":redacted@");
+        }
+    }
+    text
+}
+
 /// `work`, the network half of a fetch from `url` (connecting through
 /// receiving the pack), on a thread of its own and reporting on a handle of
 /// `progress`'s, watched from this one (`super::watch`): Ctrl-C fails it
@@ -421,9 +480,11 @@ where
         Ok(value) => Ok(value),
         Err(Stop::Failed(e)) => Err(e),
         Err(Stop::Interrupted) => bail!("Interrupted"),
-        Err(Stop::Stalled(after)) => bail!("{url} did not answer within {} s", after.as_secs().max(1)),
-        Err(Stop::Overran(after)) => bail!("The fetch from {url} did not finish within {} s", after.as_secs()),
-        Err(Stop::Vanished) => bail!("The fetch from {url} stopped unexpectedly"),
+        Err(Stop::Stalled(after)) => Err(Unanswered { url: redacted(url), secs: after.as_secs().max(1) }.into()),
+        Err(Stop::Overran(after)) => {
+            bail!("The fetch from {} did not finish within {} s", redacted(url), after.as_secs())
+        }
+        Err(Stop::Vanished) => bail!("The fetch from {} stopped unexpectedly", redacted(url)),
     }
 }
 
@@ -447,8 +508,9 @@ pub fn clone(url: &str, branch: Option<&str>, dest: &Path, progress: &mut impl c
         let (owned_url, owned_dest, owned_branch) = (url.to_owned(), dest.to_owned(), branch.map(str::to_owned));
         let fetched = watched(url, progress, move |progress, cancel| {
             let (url, branch) = (owned_url.as_str(), owned_branch.as_deref());
+            let shown = redacted(url);
             let mut prepare = gix::prepare_clone(url, &owned_dest)
-                .with_context(|| format!("Failed to prepare clone of {url}"))?
+                .with_context(|| format!("Failed to prepare clone of {shown}"))?
                 .with_shallow(Shallow::DepthAtRemote(1.try_into().expect("nonzero")))
                 .with_ref_name(branch)
                 .with_context(|| format!("Invalid branch name {}", branch.unwrap_or("<default>")))?;
@@ -463,7 +525,7 @@ pub fn clone(url: &str, branch: Option<&str>, dest: &Path, progress: &mut impl c
             }
             let (checkout, _outcome) = prepare
                 .fetch_then_checkout(&mut *progress, cancel)
-                .with_context(|| format!("Failed to fetch {url} (branch {})", branch.unwrap_or("<default>")))?;
+                .with_context(|| format!("Failed to fetch {shown} (branch {})", branch.unwrap_or("<default>")))?;
             Ok(checkout)
         });
         let mut checkout = match fetched {
@@ -477,7 +539,7 @@ pub fn clone(url: &str, branch: Option<&str>, dest: &Path, progress: &mut impl c
         };
         let (_repo, _outcome) = checkout
             .main_worktree(&mut *progress, &gix::interrupt::IS_INTERRUPTED)
-            .with_context(|| format!("Failed to check out {url} (branch {branch_desc})"))?;
+            .with_context(|| format!("Failed to check out {} (branch {branch_desc})", redacted(url)))?;
         // gix's checkout returns `Ok` when interrupted, with only part of the
         // tree written: that clone must not be reported as done.
         if gix::interrupt::is_triggered() {
@@ -639,6 +701,7 @@ fn fetch_refspec(
     shallow: Shallow,
     progress: &mut impl crate::progress::Handoff,
 ) -> Res<()> {
+    // Only ever shown (`watched` redacts it), never connected to.
     let url = repo
         .find_remote("origin")
         .with_context(|| "No origin remote")?
@@ -679,6 +742,13 @@ fn fetch_commit(
     if gix::interrupt::is_triggered() {
         by_id?;
         bail!("Interrupted while fetching commit {commit}");
+    }
+    // Given up on as gone quiet: no fallback. The remote is not answering,
+    // and the abandoned fetch may still hold the repo's `shallow` lock.
+    if let Err(e) = &by_id
+        && is_unanswered(e)
+    {
+        return by_id;
     }
     if by_id.is_ok() && has_commit(repo, commit) {
         return Ok(());
@@ -785,7 +855,7 @@ pub fn clone_pinned(
         )));
     }
     let _ = std::fs::remove_dir_all(dest);
-    Err(e.context(format!("Failed to clone {url} at {commit}")))
+    Err(e.context(format!("Failed to clone {} at {commit}", redacted(url))))
 }
 
 /// Give a fresh repo its `origin`: `url`, fetching every branch, as a clone
@@ -1546,30 +1616,31 @@ pub fn is_published(repo_dir: &Path, commit: ObjectId) -> Res<bool> {
 /// it tags. `scratch` is any repository on disk: gix needs one to speak to a
 /// remote from, and nothing is written to it.
 fn remote_tip(scratch: &Path, url: &str, git_ref: Option<&str>) -> Res<ObjectId> {
+    let shown = redacted(url);
     const LOCAL: &str = "refs/cactup/tip";
     let repo = gix::open(scratch).with_context(|| format!("Failed to open '{}'", scratch.display()))?;
     let name = git_ref.unwrap_or("HEAD");
     let spec = format!("{name}:{LOCAL}");
     let remote = repo
         .remote_at(url)
-        .with_context(|| format!("Invalid remote URL {url}"))?
+        .with_context(|| format!("Invalid remote URL {shown}"))?
         .with_refspecs(Some(spec.as_str()), Direction::Fetch)
         .with_context(|| format!("Invalid branch or tag name {name}"))?;
     let (map, _) = remote
         .connect(Direction::Fetch)
-        .with_context(|| format!("Failed to connect to {url}"))?
+        .with_context(|| format!("Failed to connect to {shown}"))?
         .ref_map(gix::progress::Discard, Default::default())
-        .with_context(|| format!("Failed to list {url}'s branches and tags"))?;
+        .with_context(|| format!("Failed to list {shown}'s branches and tags"))?;
     let mapping = map
         .mappings
         .iter()
         .find(|m| m.local.as_ref().is_some_and(|l| l == LOCAL))
-        .ok_or_else(|| anyhow!("{url} has no branch or tag {name}"))?;
+        .ok_or_else(|| anyhow!("{shown} has no branch or tag {name}"))?;
     match &mapping.remote {
         gix::remote::fetch::refmap::Source::ObjectId(id) => Ok(*id),
         gix::remote::fetch::refmap::Source::Ref(r) => {
             let (_, target, peeled) = r.unpack();
-            peeled.or(target).map(ToOwned::to_owned).ok_or_else(|| anyhow!("{url}'s {name} points at no commit"))
+            peeled.or(target).map(ToOwned::to_owned).ok_or_else(|| anyhow!("{shown}'s {name} points at no commit"))
         }
     }
 }
@@ -1578,19 +1649,20 @@ fn remote_tip(scratch: &Path, url: &str, git_ref: Option<&str>) -> Res<ObjectId>
 /// the commit at its tip, from one listing (`git ls-remote --symref <url>
 /// HEAD`), without fetching anything. `scratch` is as for [`remote_tip`].
 fn remote_head(scratch: &Path, url: &str) -> Res<(String, ObjectId)> {
+    let shown = redacted(url);
     const LOCAL: &str = "refs/cactup/head";
     let repo = gix::open(scratch).with_context(|| format!("Failed to open '{}'", scratch.display()))?;
     let spec = format!("HEAD:{LOCAL}");
     let remote = repo
         .remote_at(url)
-        .with_context(|| format!("Invalid remote URL {url}"))?
+        .with_context(|| format!("Invalid remote URL {shown}"))?
         .with_refspecs(Some(spec.as_str()), Direction::Fetch)
         .context("Invalid refspec")?;
     let (map, _) = remote
         .connect(Direction::Fetch)
-        .with_context(|| format!("Failed to connect to {url}"))?
+        .with_context(|| format!("Failed to connect to {shown}"))?
         .ref_map(gix::progress::Discard, Default::default())
-        .with_context(|| format!("Failed to list {url}'s branches and tags"))?;
+        .with_context(|| format!("Failed to list {shown}'s branches and tags"))?;
     let head = map
         .remote_refs
         .iter()
@@ -1600,7 +1672,7 @@ fn remote_head(scratch: &Path, url: &str) -> Res<(String, ObjectId)> {
             }
             _ => None,
         })
-        .ok_or_else(|| anyhow!("{url} does not say which branch is its default"))?;
+        .ok_or_else(|| anyhow!("{shown} does not say which branch is its default"))?;
     let (name, id) = head;
     Ok((name.strip_prefix("refs/heads/").unwrap_or(&name).to_owned(), id))
 }
@@ -1712,7 +1784,7 @@ fn ask_remote<T: Send + 'static>(
     use super::watch::{abandonable, Bounds, Stop};
     let left = window.until.saturating_duration_since(std::time::Instant::now());
     if left.is_zero() {
-        bail!("{url} was not asked: the time for asking remotes was up");
+        bail!("{} was not asked: the time for asking remotes was up", redacted(url));
     }
     #[cfg(test)]
     ASKED.lock().expect("test record poisoned").push(url.to_owned());
@@ -1730,14 +1802,17 @@ fn ask_remote<T: Send + 'static>(
     });
     match answer {
         Ok(answer) => Ok(answer),
-        Err(Stop::Failed(e)) => Err(e),
+        // Its words with the URL's credentials hidden: an ask is never
+        // retried, so nothing needs the typed chain.
+        Err(Stop::Failed(e)) => Err(anyhow!(scrub(&format!("{e:#}"), url))),
         Err(Stop::Interrupted) => bail!("Interrupted"),
         // The window, not what was left of it: an ask begun a moment
         // into it would round its wait down ("within 29 s").
         Err(Stop::Stalled(_) | Stop::Overran(_)) => {
-            bail!("{url} did not answer within {} s", window.length.as_secs_f64().round().max(1.0))
+            let secs = (window.length.as_secs_f64().round() as u64).max(1);
+            Err(Unanswered { url: redacted(url), secs }.into())
         }
-        Err(Stop::Vanished) => bail!("Asking {url} failed"),
+        Err(Stop::Vanished) => bail!("Asking {} failed", redacted(url)),
     }
 }
 
@@ -1805,6 +1880,7 @@ pub fn file_at_commit(
     dest: &Path,
     progress: &mut impl crate::progress::Handoff,
 ) -> Res<()> {
+    let shown = redacted(url);
     let id = ObjectId::from_hex(commit.as_bytes()).with_context(|| format!("\"{commit}\" is not a commit id"))?;
     let scratch = tempfile::tempdir().context("Failed to create a scratch directory")?;
     let repo = gix::init_bare(scratch.path()).context("Failed to create a scratch repository")?;
@@ -1812,33 +1888,37 @@ pub fn file_at_commit(
     let (owned_url, owned_commit) = (url.to_owned(), commit.to_owned());
     let repo = watched(url, progress, move |progress, cancel| {
         let (url, commit) = (owned_url.as_str(), owned_commit.as_str());
+        let shown = redacted(url);
         repo.remote_at(url)
-            .with_context(|| format!("Invalid remote URL {url}"))?
+            .with_context(|| format!("Invalid remote URL {shown}"))?
             .with_refspecs(Some(spec.as_str()), Direction::Fetch)
             .context("Invalid refspec")?
             .connect(Direction::Fetch)
-            .with_context(|| format!("Failed to connect to {url}"))?
+            .with_context(|| format!("Failed to connect to {shown}"))?
             .prepare_fetch(&mut *progress, Default::default())
-            .with_context(|| format!("Failed to prepare a fetch from {url}"))?
+            .with_context(|| format!("Failed to prepare a fetch from {shown}"))?
             .with_shallow(depth_one())
             .receive(&mut *progress, cancel)
-            .with_context(|| format!("Failed to fetch commit {commit} from {url}"))?;
+            .with_context(|| format!("Failed to fetch commit {commit} from {shown}"))?;
         Ok(repo)
-    })?;
+    })
+    // Its words with the URL's credentials hidden (not retried: nothing
+    // needs the typed chain).
+    .map_err(|e| anyhow!(scrub(&format!("{e:#}"), url)))?;
     if gix::interrupt::is_triggered() {
         bail!("Interrupted");
     }
     let tree = repo
         .find_commit(id)
-        .with_context(|| format!("{url} did not send commit {commit}"))?
+        .with_context(|| format!("{shown} did not send commit {commit}"))?
         .tree()
         .with_context(|| format!("Commit {commit} has no tree"))?;
     let entry = tree
         .lookup_entry_by_path(path)
         .with_context(|| format!("Failed to look up {path} in commit {commit}"))?
-        .ok_or_else(|| anyhow!("Commit {commit} of {url} has no {path}"))?;
+        .ok_or_else(|| anyhow!("Commit {commit} of {shown} has no {path}"))?;
     if !entry.mode().is_blob() {
-        bail!("{path} in commit {commit} of {url} is not a regular file");
+        bail!("{path} in commit {commit} of {shown} is not a regular file");
     }
     let blob = entry.object().with_context(|| format!("Failed to read {path} from commit {commit}"))?;
     let dir = dest.parent().unwrap_or(Path::new("."));
@@ -1960,6 +2040,23 @@ mod tests {
         let command = format!("ssh -o BatchMode=yes -o ConnectTimeout={}", REMOTE_ASK_TIMEOUT.as_secs());
         assert_eq!(options.command.as_deref(), Some(std::ffi::OsStr::new(&command)), "{options:?}");
         assert_eq!(options.kind, Some(gix::protocol::transport::client::blocking_io::ssh::ProgramKind::Ssh));
+    }
+
+    /// A password in a URL is hidden wherever cactup shows it, as given and
+    /// as another layer may quote it; a URL without one is shown as is.
+    #[test]
+    fn credentials_in_a_url_are_hidden() {
+        let url = "https://max:s%40cret@example.org/r.git";
+        assert!(!redacted(url).contains("cret"), "{}", redacted(url));
+        let said = "error sending request for url (https://max:s%40cret@example.org/r.git/info/refs), \
+                    or https://max:s@cret@example.org/r.git";
+        let scrubbed = scrub(said, url);
+        assert!(!scrubbed.contains("cret"), "{scrubbed}");
+        assert!(scrubbed.contains("https://max:redacted@example.org/r.git/info/refs"), "{scrubbed}");
+        for plain in ["/tmp/up", "git://127.0.0.1:9/r.git", "git@github.com:max/r.git", "https://max@example.org/r"] {
+            assert_eq!(redacted(plain), plain);
+            assert_eq!(scrub(&format!("x {plain} y"), plain), format!("x {plain} y"));
+        }
     }
 
     #[test]

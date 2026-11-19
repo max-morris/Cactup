@@ -530,7 +530,8 @@ fn clones_changed(e: anyhow::Error) -> anyhow::Error {
 /// refuses a changed record.
 fn same_fetch(checked: &crate::fetch::Plan, now: &crate::fetch::Plan) -> Res<()> {
     // Everything the fetch does; not a note's words (a remote that failed to answer in other
-    // words the second time changed no clone).
+    // words the second time changed no clone), nor whether its ask went silent (the second
+    // plan may find the window already up, and either way the clone is left as it is).
     let shape = |p: &crate::fetch::Plan| {
         let git: Vec<String> = (p.git.iter())
             .map(|g| {
@@ -1819,6 +1820,7 @@ mod tests {
                 forced: None,
                 retarget: None,
                 note: note.map(str::to_owned),
+                unasked: None,
             }],
             skipped: Vec::new(),
             downloads: Vec::new(),
@@ -1847,6 +1849,7 @@ mod tests {
             forced: None,
             retarget: None,
             note: None,
+            unasked: None,
         };
         let pin = gix::ObjectId::empty_tree(gix::hash::Kind::Sha1);
         let plan = crate::fetch::Plan {
