@@ -108,6 +108,8 @@ fn print_all(ctx: &Ctx) -> Res<()> {
         let knob = spec.name;
         let marker = override_marker(knob);
         match (db.knob(knob), db.knob_or_default(knob)) {
+            // Stored blank reads as unset, as `knob NAME` shows it.
+            (Some(""), _) => println!("  {knob} {}{marker}", unset_note(knob).dimmed()),
             (Some(stored), _) => println!("  {knob} = {}{marker}", (spec.render)(stored)),
             (None, Some(derived)) => {
                 println!("  {knob} = {} {}", (spec.render)(&derived), "(derived)".dimmed())

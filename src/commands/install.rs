@@ -287,7 +287,9 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         }
     }
 
-    // Prompt for knobs if they haven't been set yet.
+    // Prompt for knobs if they haven't been set yet. A blank answer is
+    // stored blank (empty reads as unset everywhere), so it is not asked
+    // again on the next install.
     if !silent {
         let snapshot = ctx.db.read()?;
 
@@ -299,10 +301,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         ] {
             if snapshot.knob(knob).is_none() {
                 let default = snapshot.knob_or_default(knob).unwrap_or_default();
-                let answer = prompt_with_default(question, &default)?;
-                if !answer.is_empty() {
-                    answers.push((knob, answer));
-                }
+                answers.push((knob, prompt_with_default(question, &default)?));
             }
         }
         ctx.db.update(|db| {
