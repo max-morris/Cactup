@@ -53,7 +53,7 @@ fn delete(ctx: &Ctx, name: &str) -> Res<()> {
 pub fn dispatch(ctx: &Ctx, name: Option<String>, value: Option<String>, custom: bool) -> Res<()> {
     let Some(name) = name else {
         if custom {
-            bail!("-c/--custom creates a knob: name the knob and give it a value");
+            bail!("-c/--custom needs a knob name and a value");
         }
         return print_all(ctx);
     };
@@ -68,7 +68,7 @@ pub fn dispatch(ctx: &Ctx, name: Option<String>, value: Option<String>, custom: 
     match value {
         None => {
             if custom {
-                bail!("-c/--custom creates a knob: give \"{name}\" a value to set");
+                bail!("-c/--custom needs a value for \"{name}\"");
             }
             let db = ctx.db.read()?;
             if !standard && db.knob(&name).is_none() {
@@ -137,7 +137,7 @@ fn unset_note(name: &str) -> String {
 /// The error for a non-standard name nothing has created yet.
 fn unknown_custom(name: &str) -> String {
     format!(
-        "No knob named \"{name}\" (see `cactup knob`); create it with `cactup knob -c {name} VALUE`"
+        "No knob named \"{name}\"; create it with `cactup knob -c {name} VALUE`"
     )
 }
 

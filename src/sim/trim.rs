@@ -101,7 +101,7 @@ pub fn needed(list: &Thornlist, cactus_root: &Path, par: &str) -> Res<BTreeSet<S
     let facts = thorn_facts(list, cactus_root)?;
     let active = active_thorns(par);
     if active.is_empty() {
-        bail!("The parfile activates no thorns (no ActiveThorns statement), so there is nothing to trim to");
+        bail!("The parfile has no ActiveThorns statement; nothing to trim to");
     }
     let by_name: BTreeMap<&str, &str> = facts.iter().map(|(checkout, (name, _))| (name.as_str(), checkout.as_str())).collect();
     let missing: Vec<&String> = active.iter().filter(|t| !by_name.contains_key(t.as_str())).collect();

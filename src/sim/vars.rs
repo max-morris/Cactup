@@ -200,7 +200,7 @@ impl Topology {
             && n == a
         {
             return Some(format!(
-                "{verb} {n} nodes, all of this job allocation's, for {}; pass -n to choose",
+                "{verb} {n} nodes (the whole job allocation) for {}; pass -n to choose",
                 count(tasks, "task")
             ));
         }
@@ -280,7 +280,7 @@ pub fn resolve_topology(
         })?;
     if let (Some(k), None, Some(f)) = (skipped_knob, &flags.queue, fit) {
         eprintln!(
-            "{} not using your `queue` knob (\"{k}\"): config \"{}\" may not run there; using \"{queue}\" instead",
+            "{} config \"{}\" may not run on queue \"{k}\" of your `queue` knob; using \"{queue}\"",
             "note:".yellow(),
             f.label,
         );
@@ -649,12 +649,10 @@ fn check_gpus_per_node(
                 format!("--gpus-per-task {max} or lower fits this layout")
             } else if per_task > 1 && max / tpn >= 1 {
                 format!("--gpus-per-task {} or lower fits this layout", max / tpn)
-            } else if per_task > 1 {
-                // Lowering GPUs per task cannot save this rank count: even 1
-                // per rank overshoots, so the rank count is what has to move.
-                format!("lower --tpn/--tasks to put at most {} ranks on a node", max / per_task)
             } else {
-                format!("each rank already takes one GPU, so lower --tpn/--tasks to put at most {max} on a node")
+                // Lowering GPUs per task cannot save this rank count (at 1 per
+                // rank there is nothing to lower): the rank count has to move.
+                format!("lower --tpn/--tasks to put at most {} ranks on a node", max / per_task.max(1))
             };
             // An explicit `--nodes` the ranks would fit on more of: the same
             // advice as for one the CPUs cannot hold. Not where no rank count
@@ -1306,7 +1304,7 @@ mod tests {
 
         // At 1 GPU per rank there is nothing left to lower, so the advice must
         // point at the layout instead of at --gpus-per-task.
-        assert!(e.contains("already takes one GPU") && e.contains("--tpn"), "{e}");
+        assert!(e.contains("at most 4 ranks") && e.contains("--tpn"), "{e}");
 
         // An explicit `--gpus-per-task` the node can still honor is NOT an
         // error any more: 3 each × the CPU rule's 2 ranks would need 6, but the
@@ -2035,7 +2033,7 @@ mod tests {
         );
         assert_eq!(
             note("checkpt", None, 1, Placement::Allocation { nodes: Some(4) }).as_deref(),
-            Some("Using 4 nodes, all of this job allocation's, for 256 tasks; pass -n to choose")
+            Some("Using 4 nodes (the whole job allocation) for 256 tasks; pass -n to choose")
         );
         let t = note("checkpt", Some(256), 1, Placement::Allocation { nodes: None }).unwrap();
         assert!(t.starts_with("Using 4 nodes: at most 64 tasks per node"), "{t}");

@@ -248,8 +248,7 @@ impl Client {
         }
         let why = if e.is_timeout() { "it did not answer in time".to_owned() } else { cause.to_string() };
         anyhow!(
-            "The Cactarium at {} isn't reachable ({why}). Check the network, or point cactup at another \
-             Cactarium with the {URL_KNOB} knob or CACTARIUM_URL",
+            "The Cactarium at {} isn't reachable ({why})\nTo use another, set the {URL_KNOB} knob or CACTARIUM_URL.",
             self.base
         )
     }
@@ -269,8 +268,7 @@ impl Client {
             let generation: u32 = generation.to_str().ok().and_then(|g| g.parse().ok()).unwrap_or(0);
             if generation > API_GENERATION {
                 bail!(
-                    "The Cactarium at {} speaks API generation {generation}, newer than this cactup's \
-                     {API_GENERATION}; run `cactup update`",
+                    "The Cactarium at {} needs a newer cactup (API generation {generation}); run `cactup update`",
                     self.base
                 );
             }
@@ -306,7 +304,7 @@ pub enum EntryKind {
 pub fn warn_if_yanked(slug: &str, version: &VersionInfo) {
     if version.yanked {
         let why = version.yank_reason.as_deref().filter(|r| !r.is_empty()).map(|r| format!(": {r}")).unwrap_or_default();
-        println!("{}", format!("{slug} is yanked{why}. Using it because you asked for exactly that version.").yellow());
+        println!("{}", format!("{slug} is yanked{why}. Using it as requested.").yellow());
     }
 }
 
@@ -367,11 +365,7 @@ fn stack_release_from(client: &Client, req: &str, allow_untrusted: bool) -> Res<
     if !unchecked.is_empty() {
         println!(
             "{}",
-            format!(
-                "Downloaded without checking their recorded hash, which names no single file: {}",
-                unchecked.join(", ")
-            )
-            .yellow()
+            format!("Downloaded without a hash check: {}", unchecked.join(", ")).yellow()
         );
     }
     let text = crate::thornlist::pin_text(&stack.thornlist.text, &pins).with_context(pin_failed)?;
@@ -411,24 +405,18 @@ pub(crate) fn confirm_untrusted(slug: &str, kind: &str, what: Unreviewed, allow:
 /// [`confirm_untrusted`], told whether there is a terminal to ask on.
 pub(crate) fn confirm_untrusted_on(slug: &str, kind: &str, what: Unreviewed, allow: bool, interactive: bool) -> Res<()> {
     let why = match what {
-        Unreviewed::Tip => format!(
-            "{slug} is a branch tip of a {kind} the Cactarium does not trust. Branch tips of untrusted {kind}s \
-             are never reviewed"
-        ),
-        Unreviewed::Commit => format!(
-            "{slug} is a commit of a {kind} the Cactarium does not trust, and no published version names it, \
-             so nobody has reviewed it"
-        ),
+        Unreviewed::Tip => format!("{slug} is an unreviewed branch tip of an untrusted {kind}"),
+        Unreviewed::Commit => format!("{slug} is an unreviewed commit of an untrusted {kind}"),
     };
-    eprintln!("{}", format!("WARNING: {why}: installing it may fetch and build arbitrary code.").red().bold());
+    eprintln!("{}", format!("WARNING: {why}. Installing it may fetch and build arbitrary code.").red().bold());
     if allow {
-        eprintln!("{}", "Going on anyway, as --risky-allow-untrusted-artifacts says.".yellow());
+        eprintln!("{}", "Continuing anyway (--risky-allow-untrusted-artifacts).".yellow());
         return Ok(());
     }
     if !interactive {
         bail!(
-            "Refusing the untrusted {} {slug} without a terminal to confirm it on; use a release \
-             (owner/name@X.Y.Z or a range), or pass --risky-allow-untrusted-artifacts",
+            "Refusing the untrusted {} {slug} without a terminal to confirm\n\
+             Use a release (owner/name@X.Y.Z or a range), or pass --risky-allow-untrusted-artifacts.",
             what.noun()
         );
     }
@@ -474,8 +462,8 @@ fn stack_json(response: reqwest::blocking::Response) -> Res<FrozenStack> {
         && found > u64::from(STACK_FORMAT)
     {
         bail!(
-            "The Cactarium's stack release from {url} is format {found}, but this cactup, {}, reads up to format \
-             {STACK_FORMAT}; upgrade cactup (`cactup update`)",
+            "The stack release from {url} is format {found}; this cactup ({}) reads up to {STACK_FORMAT}\n\
+             Run `cactup update` to upgrade cactup.",
             crate::build_info::LONG_VERSION
         );
     }
@@ -538,7 +526,7 @@ fn read_credentials(path: &Path) -> Res<Credentials> {
         // The file could not be read at all: the error says why and holds no content.
         Err(e) if e.root_cause().is::<std::io::Error>() => Err(e),
         Err(_) => Err(anyhow!(
-            "Failed to parse '{}': it is not a valid credentials file (its contents are not shown: they hold tokens)",
+            "Failed to parse credentials file '{}' (contents not shown)",
             path.display()
         )),
     }

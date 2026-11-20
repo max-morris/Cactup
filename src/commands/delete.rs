@@ -24,16 +24,8 @@ pub fn dispatch(ctx: &Ctx, alias: String, force: bool) -> Res<()> {
     // Not even with -f: their files are links into this tree.
     let dependents = super::copy::dependents(&db, &inst.root);
     drop(db);
-    if let Some(first) = dependents.first() {
-        let (are, copies, read, them) = match dependents.len() {
-            1 => ("is a", "copy", "reads", "it"),
-            _ => ("are", "copies", "read", "them"),
-        };
-        bail!(
-            "{} {are} symbolic {copies} of {alias} and {read} its files; make {them} independent first with \
-             `cactup inst reify {first}`, or delete {them}",
-            dependents.join(", ")
-        );
+    if !dependents.is_empty() {
+        bail!("{alias} has symbolic copies: {}; reify or delete them first", dependents.join(", "));
     }
 
     let home_exists = inst.root.is_dir();
@@ -48,8 +40,7 @@ pub fn dispatch(ctx: &Ctx, alias: String, force: bool) -> Res<()> {
         let in_flight = builds_in_flight(cactus_root);
         if !in_flight.is_empty() && !force {
             bail!(
-                "{}; stop it with `cactup --installation {alias} build stop <config>` first, \
-                 or pass -f to delete anyway",
+                "{}\nStop it with `cactup --installation {alias} build stop <config>`, or pass -f.",
                 in_flight.join("; ")
             );
         }
@@ -62,13 +53,13 @@ pub fn dispatch(ctx: &Ctx, alias: String, force: bool) -> Res<()> {
         let kept = match (sims, tests) {
             (0, 0) => "Simulation and test output is kept.".to_owned(),
             _ => format!(
-                "Its {sims} simulation(s) and {tests} test run(s) keep their output, but cactup \
-                 will no longer list them."
+                "The output of its {sims} simulation(s) and {tests} test run(s) is kept but no \
+                 longer listed."
             ),
         };
         let answer = prompt_with_default(
             &format!(
-                "Really delete installation {} and its source tree in '{}'? {kept} \
+                "Really delete installation {} and its source tree in '{}'?\n{kept}\n\
                  Type \"yes\" to confirm",
                 alias.bold(),
                 inst.root.display()
@@ -118,10 +109,8 @@ pub fn dispatch(ctx: &Ctx, alias: String, force: bool) -> Res<()> {
         );
     }
     if was_active {
-        println!(
-            "It was the active installation; pick a new one with `{}`.",
-            "cactup use <alias>".bold()
-        );
+        println!("It was the active installation.");
+        println!("Pick a new one with `{}`.", "cactup use <alias>".bold());
     }
     Ok(())
 }
@@ -177,8 +166,8 @@ fn delete_until(inst: &Installation, stop: &AtomicBool, removed: &dyn Fn()) -> R
     for target in targets(inst)? {
         remove_tree_until(&target, stop, removed).map_err(|e| match stop.load(Ordering::Relaxed) {
             true => anyhow!(
-                "Interrupted; installation {} is partly deleted and still registered: run \
-                 `cactup inst delete {}` again to finish",
+                "Interrupted; installation {} is partly deleted.\n\
+                 Run `cactup inst delete {}` again to finish.",
                 inst.alias,
                 inst.alias
             ),

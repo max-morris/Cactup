@@ -130,9 +130,8 @@ fn stop_sim(sim: &Simulation, sched: &Scheduler, name: &str, force: bool) -> Res
                 format!("job {} is still in the queue", r.meta.job_id)
             };
             println!(
-                "{what} after {GRACEFUL_WAIT_SECS}s; Cactus stops at its next termination check. \
-                 Leaving {} active; run `cactup sim stop -f {name}` to kill it now.",
-                restart::dir_name(active)
+                "{what} after {GRACEFUL_WAIT_SECS}s; Cactus stops at its next termination check.\n\
+                 Run `cactup sim stop -f {name}` to kill it now."
             );
             sim.log(
                 "stop",
@@ -147,15 +146,14 @@ fn stop_sim(sim: &Simulation, sched: &Scheduler, name: &str, force: bool) -> Res
             // job, and only its lock says whether it runs.
             if crate::lock::LinkLock::is_held_live(&r.running_lock_path())? {
                 println!(
-                    "{} runs in the foreground (pid {}); interrupt it with Ctrl-C in its terminal. \
-                     Nothing recorded.",
+                    "{} runs in the foreground (pid {}).\nInterrupt it with Ctrl-C in its terminal.",
                     restart::dir_name(active),
                     r.meta.job_id
                 );
                 return Ok(());
             }
             println!(
-                "{} ran in the foreground and no run holds its lock; treating it as ended",
+                "{} (foreground) is no longer running; treating it as ended",
                 restart::dir_name(active)
             );
         } else if let Some(job) = r.meta.scheduler_job(sched) {
@@ -166,15 +164,13 @@ fn stop_sim(sim: &Simulation, sched: &Scheduler, name: &str, force: bool) -> Res
                 // Another host's pid (§10): its lock says whether it runs.
                 Stopped::Elsewhere(host) if crate::lock::LinkLock::is_held_live(&r.running_lock_path())? => {
                     println!(
-                        "Job {} runs on host {host}; stop it there with `cactup sim stop -f {name}`. \
-                         Nothing recorded.",
+                        "Job {} runs on host {host}.\nStop it there with `cactup sim stop -f {name}`.",
                         r.meta.job_id
                     );
                     return Ok(());
                 }
                 Stopped::Elsewhere(host) => println!(
-                    "Job {} was submitted on host {host} and no run holds the restart's lock; \
-                     treating it as ended",
+                    "Job {} on host {host} is no longer running; treating it as ended",
                     r.meta.job_id
                 ),
             }
@@ -240,8 +236,8 @@ fn stop_ended(sim: &Simulation, sched: &Scheduler, name: &str) -> Res<()> {
             }
             EndedStop::NotKnown(said) => {
                 println!(
-                    "The scheduler does not know job {job_id} of ended restart {dir} (stop command \
-                     said: {said}); treating it as ended"
+                    "The scheduler does not know job {job_id} of ended restart {dir} ({said}); \
+                     treating it as ended"
                 );
                 record_job_stopped(sim, r.id)?;
                 Ok(false)
@@ -254,8 +250,7 @@ fn stop_ended(sim: &Simulation, sched: &Scheduler, name: &str) -> Res<()> {
             job_id.bold()
         ), StopCase::Listed)?,
         Some(AfterEnd::Unanswered(failed)) => stop_it(&format!(
-            "Could not query job {} of ended restart {dir}; asked the scheduler to stop it in case \
-             it was queued again",
+            "Could not query job {} of ended restart {dir}; asked the scheduler to stop it in case it was requeued",
             job_id.bold()
         ), StopCase::Unanswered(failed))?,
         Some(AfterEnd::Over(JobStatus::Unknown)) => {
@@ -573,11 +568,10 @@ pub(crate) fn ended_newest(sim: &Simulation, sched: &Scheduler) -> Res<Option<(R
 pub(crate) fn unanswered_refusal(sim: &Simulation, r: &Restart, failed: &str, what: &str) -> anyhow::Error {
     let name = &sim.name;
     anyhow::anyhow!(
-        "Restart {} of simulation \"{name}\" ended, but the scheduler could not be asked whether its job \
-         {} was queued again: {failed}\nRun `cactup sim stop {name}` to stop the job, or pass -f to stop it \
-         and {what}",
-        restart::dir_name(r.id),
-        r.meta.job_id
+        "Could not query job {} of ended restart {} of simulation \"{name}\": {failed}\n\
+         Run `cactup sim stop {name}`, or pass -f to stop the job and {what}.",
+        r.meta.job_id,
+        restart::dir_name(r.id)
     )
 }
 
@@ -602,8 +596,7 @@ pub(crate) fn stop_unanswered(sim: &Simulation, sched: &Scheduler, r: &Restart, 
     match stopped {
         EndedStop::Sent => {
             println!(
-                "Could not query job {job_id} of ended restart {dir}; asked the scheduler to stop it \
-                 in case it was queued again"
+                "Could not query job {job_id} of ended restart {dir}; asked the scheduler to stop it in case it was requeued"
             );
             sim.log("stop", &format!("asked the scheduler to stop job {job_id} ({dir}), after its end"));
         }
@@ -648,8 +641,7 @@ fn chained_after(sim: &Simulation, sched: &Scheduler, id: u32) -> Res<Vec<String
                 Ok(status) => matches!(status, JobStatus::Queued | JobStatus::Holding),
                 Err(e) if e.downcast_ref::<crate::scheduler::FailedQuery>().is_some() => {
                     lines.push(format!(
-                        "Restart {dir} (job {}) was submitted chained behind job {after}; the scheduler \
-                         could not be asked about it",
+                        "Restart {dir} (job {}) is chained behind job {after}; could not query it",
                         r.meta.job_id
                     ));
                     continue;
@@ -712,8 +704,8 @@ fn live_jobs(sim: &Simulation, sched: &Scheduler) -> Res<Vec<LiveJob>> {
         let Some(job) = r.meta.scheduler_job(sched) else {
             if r.meta.foreground && held()? {
                 bail!(
-                    "Restart {} of simulation \"{}\" runs in the foreground (pid {}); interrupt it \
-                     (Ctrl-C), then delete the simulation (a stale lock expires within {} minutes)",
+                    "Restart {} of simulation \"{}\" runs in the foreground (pid {}).\n\
+                     Interrupt it with Ctrl-C, then delete. A stale lock expires within {} minutes.",
                     restart::dir_name(id),
                     sim.name,
                     r.meta.job_id,
@@ -728,8 +720,8 @@ fn live_jobs(sim: &Simulation, sched: &Scheduler) -> Res<Vec<LiveJob>> {
         if let Some(host) = sched.recorded_elsewhere(job) {
             if held()? {
                 bail!(
-                    "Restart {} of simulation \"{}\" runs on host {host} (job {}); stop it there \
-                     with `cactup sim stop -f {}`, then delete the simulation",
+                    "Restart {} of simulation \"{}\" runs on host {host} (job {}).\n\
+                     Stop it there with `cactup sim stop -f {}`, then delete.",
                     restart::dir_name(id),
                     sim.name,
                     r.meta.job_id,
@@ -773,18 +765,18 @@ fn live_jobs(sim: &Simulation, sched: &Scheduler) -> Res<Vec<LiveJob>> {
 fn live_jobs_refusal(name: &str, live: &[LiveJob], stops: Option<u32>) -> String {
     let stoppable = live.iter().find(|l| Some(l.id) == stops);
     let advice = match stoppable {
-        Some(_) if live.len() == 1 => format!("`cactup sim stop {name}` first, or use -f to stop it and delete"),
+        Some(_) if live.len() == 1 => format!("Run `cactup sim stop {name}` first, or pass -f to stop it and delete."),
         Some(l) => format!(
-            "`cactup sim stop {name}` stops {}'s job; use -f to stop them all and delete",
+            "Run `cactup sim stop {name}` to stop the job of {}, or pass -f to stop them all and delete.",
             restart::dir_name(l.id)
         ),
-        None => "use -f to stop them and delete".to_owned(),
+        None => "Pass -f to stop them and delete.".to_owned(),
     };
     let jobs = live
         .iter()
         .map(|l| match l.ended {
             true => format!(
-                "{} = job {}, still listed by the scheduler after the restart ended ({})",
+                "{} = job {}, still listed after its restart ended ({})",
                 restart::dir_name(l.id),
                 l.job.id,
                 crate::scheduler::listed_state_words(l.status)
@@ -794,7 +786,7 @@ fn live_jobs_refusal(name: &str, live: &[LiveJob], stops: Option<u32>) -> String
         .collect::<Vec<_>>()
         .join("; ");
     let what = if live.len() == 1 { "a live job" } else { "live jobs" };
-    format!("simulation \"{name}\" has {what} ({jobs}); {advice}")
+    format!("Simulation \"{name}\" has {what}: {jobs}\n{advice}")
 }
 
 /// One simulation's derived display state (§8.6, §10) with the live scheduler
@@ -1596,7 +1588,7 @@ mod tests {
         let r = Restart::load(&sim.dir, 0).unwrap();
         let held = crate::lock::LinkLock::acquire(&r.running_lock_path()).unwrap();
         let err = live_jobs(&sim, &sched).unwrap_err().to_string();
-        assert!(err.contains("runs on host some-other-host") && err.contains("stop it there"), "{err}");
+        assert!(err.contains("runs on host some-other-host") && err.contains("Stop it there"), "{err}");
         assert!(run_is_live(&sched, &r).unwrap(), "the graceful stop takes the lock for it");
         drop(held);
         assert!(live_jobs(&sim, &sched).unwrap().is_empty());
@@ -1680,8 +1672,8 @@ mod tests {
         let live = live_jobs(&sim, &sched).unwrap();
         assert_eq!(live.iter().map(|l| (l.id, l.ended)).collect::<Vec<_>>(), [(0, true)]);
         let refusal = live_jobs_refusal("requeued", &live, Some(0));
-        assert!(refusal.contains("job 1003, still listed by the scheduler after the restart ended (queued again)"), "{refusal}");
-        assert!(refusal.ends_with("`cactup sim stop requeued` first, or use -f to stop it and delete"), "{refusal}");
+        assert!(refusal.contains("job 1003, still listed after its restart ended (queued again)"), "{refusal}");
+        assert!(refusal.ends_with("`cactup sim stop requeued` first, or pass -f to stop it and delete."), "{refusal}");
         assert_eq!(shown(false, false, true, Some(Some(JobStatus::Queued))), DisplayState::Requeued);
         // `sim list` asks about it and says the same.
         let name = "requeued".to_owned();
@@ -1738,7 +1730,7 @@ mod tests {
         assert!(r.meta.foreground && r.meta.scheduler_job(&batch).is_none());
         let held = crate::lock::LinkLock::acquire(&r.running_lock_path()).unwrap();
         let err = live_jobs(&sim, &batch).unwrap_err().to_string();
-        assert!(err.contains("runs in the foreground") && err.contains("interrupt it (Ctrl-C)"), "{err}");
+        assert!(err.contains("runs in the foreground") && err.contains("Interrupt it with Ctrl-C"), "{err}");
         assert!(run_is_live(&batch, &r).unwrap(), "its lock says it runs");
         assert_eq!(sim_state_now(&sim, &batch).0, DisplayState::Active);
         drop(held);
@@ -1779,7 +1771,7 @@ mod tests {
             let entry = fake_sim(tmp.path(), "u", "1003", false, None, true);
             let sim = Simulation::open("u", &entry.dir).unwrap();
             let refused = crate::sim::start::refuse_beside_listed_for_tests(&sim, &sched, false).unwrap_err().to_string();
-            assert!(refused.contains("could not be asked whether its job 1003 was queued again"), "{refused}");
+            assert!(refused.contains("Could not query job 1003 of ended restart"), "{refused}");
             assert!(refused.contains("error: no such job 1003") && refused.contains("unknown-job-pattern"), "{refused}");
             assert!(refused.contains("`cactup sim stop u`") && refused.contains("-f"), "{refused}");
             assert!(!stopped.exists());
@@ -1938,8 +1930,8 @@ mod tests {
             let refusal = live_jobs_refusal("chain", &live, stops);
             assert!(refusal.contains("output-0001 = job 1001"), "{zero}: {refusal}");
             match zero {
-                "TO" => assert!(refusal.contains("`cactup sim stop chain` stops output-0001's job"), "{refusal}"),
-                _ => assert!(refusal.ends_with("`cactup sim stop chain` first, or use -f to stop it and delete"), "{refusal}"),
+                "TO" => assert!(refusal.contains("`cactup sim stop chain` to stop the job of output-0001"), "{refusal}"),
+                _ => assert!(refusal.ends_with("`cactup sim stop chain` first, or pass -f to stop it and delete."), "{refusal}"),
             }
 
             // Forced: restart 1's job, not restart 0's.
@@ -2118,7 +2110,7 @@ mod tests {
         let failing = sched_for("echo 'Socket timed out' >&2; exit 1");
         let lines = chained_after(&sim, &Scheduler::new(&failing), 0).unwrap();
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("could not be asked") && !lines[0].contains("runs after"), "{lines:?}");
+        assert!(lines[0].contains("could not query") && !lines[0].contains("runs after"), "{lines:?}");
 
         // Where job ids are pids: a pid whose process is another one now (a
         // start time that differs) is not named, and no stop command for

@@ -365,7 +365,7 @@ conformance:
 cactup inst show myrelease
 # release:      ET_2026_05
 # now on:       ET_2026_11 (refetched)
-# conformance:  INCOMPLETE — 1 repo(s) FAILED to fetch and 1 repo(s) were skipped; 4 thorn(s) on disk do not match the thornlist above.
+# conformance:  INCOMPLETE: 1 repo(s) FAILED to fetch, 1 skipped; 4 thorn(s) differ from the thornlist.
 #                 Failed:
 #                   carpetx — connection reset by peer
 #                     CarpetX/Algo, CarpetX/BoxUtils
@@ -373,11 +373,12 @@ cactup inst show myrelease
 #                   mclachlan — local commits
 #                     McLachlan/ML_BSSN, McLachlan/ML_ADMConstraints
 #                 Retry the failed repo(s) with `cactup inst refetch`.
-#                 Fetch over the skipped ones with `cactup inst refetch -f` (modified files are backed up first); `cactup inst delta` shows what differs.
+#                 Fetch over the skipped ones with `cactup inst refetch -f` (backs up modified files).
+#                 See what differs with `cactup inst delta`.
 ```
 
-When nothing failed the header softens to `PARTIAL — N repo(s) were
-skipped, …` and only the yellow skipped group appears. At most six thorns
+When nothing failed the header softens to `PARTIAL: N repo(s)
+skipped; …` and only the yellow skipped group appears. At most six thorns
 are named per repo and eight repos in total, each capped with a `+N more`
 tail; `cactup inst delta` has the unabridged picture.
 

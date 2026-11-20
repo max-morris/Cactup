@@ -139,8 +139,8 @@ pub fn validate_knob_name(name: &str) -> Res<()> {
         && bytes.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-');
     if !ok {
         bail!(
-            "\"{name}\" is not a valid knob name: lowercase letters a-z, digits after the first \
-             character, and dashes anywhere but first or last"
+            "\"{name}\" is not a valid knob name; use lowercase letters, digits and dashes, \
+             starting with a letter and not ending with a dash"
         );
     }
     // `cactup knob <subcommand>` shares the positional slot with knob names,

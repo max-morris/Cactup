@@ -94,17 +94,16 @@ pub(crate) fn conformance_lines(entry: &CactusInstallation) -> Vec<(Tone, String
         if failed_count > 0 { ("INCOMPLETE", Tone::Alarm) } else { ("PARTIAL", Tone::Warn) };
     let header = match (failed_count > 0, skipped_count > 0) {
         (true, true) => format!(
-            "  conformance:  {word}: {failed_count} repo(s) FAILED to fetch and \
-             {skipped_count} repo(s) were skipped; {thorn_count} thorn(s) on disk do not match \
-             the thornlist above."
+            "  conformance:  {word}: {failed_count} repo(s) FAILED to fetch, {skipped_count} \
+             skipped; {thorn_count} thorn(s) differ from the thornlist."
         ),
         (true, false) => format!(
             "  conformance:  {word}: {failed_count} repo(s) FAILED to fetch; {thorn_count} \
-             thorn(s) on disk do not match the thornlist above."
+             thorn(s) differ from the thornlist."
         ),
         (false, true) => format!(
-            "  conformance:  {word}: {skipped_count} repo(s) were skipped, so {thorn_count} \
-             thorn(s) on disk do not match the thornlist above."
+            "  conformance:  {word}: {skipped_count} repo(s) skipped; {thorn_count} thorn(s) \
+             differ from the thornlist."
         ),
         (false, false) => unreachable!(
             "a non-empty unfetched_repos always has at least one Failed or Skipped entry"
@@ -143,10 +142,10 @@ pub(crate) fn conformance_lines(entry: &CactusInstallation) -> Vec<(Tone, String
     if !skipped.is_empty() {
         lines.push((
             Tone::Plain,
-            "                Fetch over the skipped ones with `cactup inst refetch -f`; \
-             modified files are backed up first. `cactup inst delta` shows what differs."
-                .to_owned(),
+            "                Fetch over the skipped ones with `cactup inst refetch -f` (backs up \
+             modified files).".to_owned(),
         ));
+        lines.push((Tone::Plain, "                See what differs with `cactup inst delta`.".to_owned()));
     }
     lines
 }
@@ -229,18 +228,14 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
         _ => {}
     }
     match (&entry.copied_from, meta.as_ref().and_then(|m| m.linked_to.as_ref())) {
-        (Some(source), Some(_)) => println!(
-            "  copied from:  {source}, symbolically: the files not yet made its own are links to {source}'s \
-             (`cactup inst reify {}`)",
-            entry.alias
-        ),
-        (None, Some(home)) => println!("  linked to:    {} (symbolically)", home.display()),
+        (Some(source), Some(_)) => println!("  copied from:  {source} (symbolic)"),
+        (None, Some(home)) => println!("  linked to:    {}", home.display()),
         (Some(source), None) => println!("  copied from:  {source}"),
         (None, None) => {}
     }
     let dependents = super::copy::dependents(&database, &inst.root);
     if !dependents.is_empty() {
-        println!("  symbolic copies: {} (they read this installation's files)", dependents.join(", "));
+        println!("  symbolic copies: {}", dependents.join(", "));
     }
     // §8.10: where to take problems with the stack the tree is on.
     if let Some(contact) = &entry.stack_contact {
@@ -466,8 +461,8 @@ mod tests {
         }
         let lines = conformance_lines(&entry(unfetched));
         // Header line, the "skipped (...)" group header, 8 repo lines,
-        // "+2 more repo(s)", and the trailing remedy line.
-        assert_eq!(lines.len(), 1 + 1 + 8 + 1 + 1);
+        // "+2 more repo(s)", and the two trailing remedy lines.
+        assert_eq!(lines.len(), 1 + 1 + 8 + 1 + 2);
         assert!(lines[10].1.contains("+2 more repo(s)"), "{}", lines[10].1);
     }
 
@@ -528,7 +523,7 @@ mod tests {
         assert_eq!(lines[0].0, Tone::Alarm);
         assert!(lines[0].1.contains("INCOMPLETE"), "{}", lines[0].1);
         assert!(lines[0].1.contains("FAILED"), "{}", lines[0].1);
-        assert!(lines[0].1.contains("were skipped"), "{}", lines[0].1);
+        assert!(lines[0].1.contains("2 skipped"), "{}", lines[0].1);
 
         let failed_pos = lines.iter().position(|(_, l)| l.contains("Failed:")).unwrap();
         let skipped_pos = lines.iter().position(|(_, l)| l.contains("Skipped:")).unwrap();
