@@ -2154,7 +2154,7 @@ mod tests {
             "d: git@private.share.test:o/d.git is an ssh URL, which needs an account on the host, and https://private.share.test/o/d.git doesn't answer",
             "it answered 401 Unauthorized",
             "e: git@moved.share.test:o/e.git is an ssh URL, and its https equivalent https://moved.share.test/o/e.git redirects to https://moved.share.test/new/e.git: the repo has moved",
-            "input data: https://***@example.org/f.h5?*** carries a user name or password",
+            "input data: https://***@example.org/f.h5?*** carries credentials",
             "or pass --local to export for use here only",
         ] {
             assert!(err.contains(said), "{said:?} not in: {err}");
@@ -2166,7 +2166,7 @@ mod tests {
         // The one that answers, beside an https URL: written as https.
         let (packed, out, list) = pack_urls(
             tmp.path(),
-            &[("git@public.share.test:o/f.git", "F/One"), ("https://github.com/o/g.git", "G/One")],
+            &[("git@public.share.test:o/f.git", "F/One"), ("https://public.share.test/o/g.git", "G/One")],
             true,
             Default::default(),
         );
@@ -2174,7 +2174,7 @@ mod tests {
         let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
         let url = |repo: &str| file.repos.iter().find(|r| r.name == repo).unwrap().url.clone();
         assert_eq!(url("f"), "https://public.share.test/o/f.git");
-        assert_eq!(url("g"), "https://github.com/o/g.git");
+        assert_eq!(url("g"), "https://public.share.test/o/g.git", "an https remote that answers is kept as written");
         assert_eq!(file.thornlist.text, list.replace("git@public.share.test:o/f.git", "https://public.share.test/o/f.git"));
     }
 
@@ -2186,13 +2186,13 @@ mod tests {
         use crate::fetch::anonymous::testserver::{serve, Mode};
         use cactup_ecosystem_common::sim::SimFile;
         let tmp = tempfile::tempdir().unwrap();
-        let sections = [("https://github.com/a/x.git", "A/One"), ("https://TOKEN111@github.com/b/x.git", "B/One")];
+        serve("twice.share.test", Mode::Public);
+        let sections = [("https://twice.share.test/a/x.git", "A/One"), ("https://TOKEN111@github.com/b/x.git", "B/One")];
         let (packed, out, _) = pack_urls(tmp.path(), &sections, true, Default::default());
         let err = format!("{:#}", packed.unwrap_err());
         assert!(err.contains("x: https://***@github.com/b/x.git carries credentials"), "{err}");
         assert!(!err.contains("TOKEN111") && !out.exists(), "{err}");
 
-        serve("twice.share.test", Mode::Public);
         let sections = [("git@twice.share.test:a/x.git", "A/One"), ("git@twice.share.test:b/x.git", "B/One")];
         let (packed, out, list) = pack_urls(tmp.path(), &sections, true, Default::default());
         packed.unwrap();
@@ -2231,12 +2231,14 @@ mod tests {
     /// logins of `!ANON_USER`/`!ANON_PASS` are not refused.
     #[test]
     fn credentials_anywhere_in_the_thornlist_are_refused() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
         let tmp = tempfile::tempdir().unwrap();
+        serve("clean.share.test", Mode::Public);
         let list = format!(
             "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!DEFINE OLD = https://me:TOKEN2@example.org/x\n\
              # old: !URL = https://TOKEN3@github.com/o/a.git\n\
              !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://TOKEN4@github.com/o/b.git\n\
-             !URL = https://github.com/o/b.git\n!AUTH_URL = https://me:TOKEN5@github.com/o/b.git\n\
+             !URL = https://clean.share.test/o/b.git\n!AUTH_URL = https://me:TOKEN5@github.com/o/b.git\n\
              !REPO_COMMIT = {c}\n!CHECKOUT = B/One\n\
              !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = \"https://TOKEN6@github.com/o/c.git\"\n\
              !REPO_COMMIT = {c}\n!CHECKOUT = C/One\n\
@@ -2247,10 +2249,10 @@ mod tests {
         let (packed, out, _) = pack_list(tmp.path(), &list, Default::default());
         let err = format!("{:#}", packed.unwrap_err());
         for said in [
-            "thornlist line 3: https://***@example.org/x carries a user name or password",
+            "thornlist line 3: https://***@example.org/x carries credentials",
             "thornlist line 4: https://***@github.com/o/a.git carries",
             "thornlist line 7: https://***@github.com/o/b.git carries",
-            "b (its !AUTH_URL): https://***@github.com/o/b.git carries a user name or password",
+            "b (its !AUTH_URL): https://***@github.com/o/b.git carries credentials",
             // The parser names the repo from the URL, quote and all.
             "c.git\": https://***@github.com/o/c.git is written in quotes",
         ] {
@@ -2286,6 +2288,7 @@ mod tests {
         use crate::fetch::anonymous::testserver::{serve, Mode};
         let tmp = tempfile::tempdir().unwrap();
         serve("private.offline.test", Mode::Private);
+        serve("tips.offline.test", Mode::Public);
         let sections = [
             ("https://TOKEN123@tips.offline.test/o/a.git", "A/One"),
             ("https://tips.offline.test/o/b.git", "B/One"),

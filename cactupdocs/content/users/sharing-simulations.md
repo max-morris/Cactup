@@ -41,22 +41,29 @@ Export refuses what nobody else could reproduce:
   pass `--allow-unpushed`.
 - **Repository URLs nobody else can fetch, or that carry credentials.** A
   local path or `file://` URL, a URL with a user name, password or token in
-  it (`https://TOKEN@host/…`), or a query string (`?private_token=…`), is
-  refused, as the Cactarium refuses it. Remove the credentials, or push the
-  repository somewhere others can reach and point the remote there.
+  it (`https://TOKEN@host/…`), a query string (`?private_token=…`), or a
+  `git://` URL (it can't be checked, and has no encryption) is refused, as
+  the Cactarium refuses it. Remove the credentials, or push the repository
+  somewhere others can reach and use its https URL.
+- **Every git remote is checked.** Export asks each one over the network,
+  as a stranger would, with no credentials of any kind: one small request
+  per repository, all at once, within 30 seconds. A remote that asks for
+  credentials, isn't there, or does not answer is refused; one that
+  redirects to another path has moved, and export names where to. A remote
+  whose host resolves to a private address (a machine on your own network)
+  is refused too: nobody outside could reach it.
 - **ssh URLs** (`git@github.com:me/thorns.git`) need an account on the
-  host. Export asks the matching https URL (`https://github.com/me/thorns.git`)
-  over the network, with no credentials of any kind: if it answers, the
-  `.sim` names the https URL instead, in the thornlist too, and export says
-  so. If it asks for credentials or does not answer, the URL is refused; if
-  it redirects, the repository has moved, and export names where to.
+  host, so export asks the matching https URL
+  (`https://github.com/me/thorns.git`) instead: if it answers, the `.sim`
+  names the https URL, in the thornlist too, and export says so.
 
 A user name, password or token anywhere in the thornlist is refused too,
 in a comment or a line nothing uses, with its line number, and so is a URL
 written in quotes (cactup would take the quotes as part of it). Every URL
-refused is listed in one error. An input's download URL
-(`--input-url`) is refused for a user name or password too, though a query
-string is fine there (`?download=1` is how many download links work).
+refused is listed in one error. A download's URL, and an input's
+(`--input-url`), may carry a query (`?download=1` is how many download links
+work), but not one that looks like a token or a signature, nor a user name
+or password; an ssh or local one is refused as well.
 
 A `.sim` meant only for this machine can keep every URL as it is:
 

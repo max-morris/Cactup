@@ -1278,11 +1278,12 @@ pub(crate) struct SimDescribeArgs {
     /// Write the .sim for use on this machine only: keep repo and input URLs as they are
     ///
     /// Without it, every URL must be one anybody can fetch, with no
-    /// credentials in it: a git repo's URL may not be a local path, carry a
-    /// user name, password, token or query string, or be an ssh URL. An ssh
-    /// URL is written as its https URL instead when that can be fetched
-    /// without credentials (it is asked over the network); otherwise it is
-    /// refused. With --local, nothing is checked or asked.
+    /// credentials in it: a git repo's URL may not be a local path, a git://
+    /// URL, or carry a user name, password, token or query string, and every
+    /// git repo is asked over the network, without credentials, whether it
+    /// answers (one request each). An ssh URL is written as its https URL
+    /// instead when that answers; otherwise it is refused. With --local,
+    /// nothing is checked or asked.
     #[clap(long)]
     pub local: bool,
 }
