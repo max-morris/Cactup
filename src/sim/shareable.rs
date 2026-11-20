@@ -59,7 +59,8 @@ pub struct Checked {
 /// One git remote of the thornlist, however many components name it.
 #[derive(Debug)]
 struct Ask {
-    /// The repos whose components name it, in order.
+    /// The repos whose components name it, in order, as a refusal names
+    /// them ([`repo_label`]).
     repos: Vec<String>,
     /// The remote as written.
     url: String,
@@ -83,13 +84,14 @@ pub fn classify(list: &thornlist::Thornlist, text: &str, input_urls: &[(String, 
         if c.ty == ComponentType::Ignore {
             continue;
         }
-        let fields = [(c.url.as_deref(), c.repo.clone()), (c.auth_url.as_deref(), format!("{} (its !AUTH_URL)", c.repo))];
+        let name = repo_label(list, text, &c.repo, c.url.as_deref());
+        let fields = [(c.url.as_deref(), name.clone()), (c.auth_url.as_deref(), format!("{name} (its !AUTH_URL)"))];
         for (i, (url, label)) in fields.into_iter().enumerate() {
             let Some(url) = url.filter(|u| !u.trim().is_empty()) else { continue };
             let auth = i == 1;
             if !auth && let Some(ask) = asks.iter_mut().find(|a| a.url == url) {
-                if !ask.repos.contains(&c.repo) {
-                    ask.repos.push(c.repo.clone());
+                if !ask.repos.contains(&name) {
+                    ask.repos.push(name.clone());
                 }
                 continue;
             }
@@ -117,7 +119,7 @@ pub fn classify(list: &thornlist::Thornlist, text: &str, input_urls: &[(String, 
             } else {
                 match probe::start(url) {
                     Start::Probe { candidate } => {
-                        asks.push(Ask { repos: vec![c.repo.clone()], url: url.to_owned(), candidate });
+                        asks.push(Ask { repos: vec![name.clone()], url: url.to_owned(), candidate });
                         None
                     }
                     Start::Refuse(why) => Some(why),
@@ -136,6 +138,31 @@ pub fn classify(list: &thornlist::Thornlist, text: &str, input_urls: &[(String, 
         }
     }
     Checked { refused, asks }
+}
+
+/// How a refusal names the repo `repo` (as the thornlist derives the name)
+/// of a component whose URL is `url`: the name without surrounding quotes
+/// (a quoted URL's name keeps its closing one) or a trailing `.git`; and
+/// when another section gives the same name to another URL, the thornlist
+/// line of this one's `!URL`, so the section can be told apart.
+fn repo_label(list: &thornlist::Thornlist, text: &str, repo: &str, url: Option<&str>) -> String {
+    let bare = repo.trim_matches(['"', '\'']);
+    let name = bare.strip_suffix(".git").unwrap_or(bare);
+    let urls: BTreeSet<&str> = list.components().iter().filter(|c| c.repo == repo).filter_map(|c| c.url.as_deref()).collect();
+    let line = url.filter(|_| urls.len() > 1).and_then(|url| {
+        text.lines()
+            .position(|l| {
+                l.trim_start()
+                    .strip_prefix("!URL")
+                    .and_then(|rest| rest.trim_start().strip_prefix('='))
+                    .is_some_and(|value| value.trim() == url.trim())
+            })
+            .map(|i| i + 1)
+    });
+    match line {
+        Some(n) => format!("{name} (thornlist line {n})"),
+        None => name.to_owned(),
+    }
 }
 
 /// Every `scheme://` URL in `text` that carries credentials as a download's
@@ -341,7 +368,7 @@ mod tests {
             "https://example.org/f.h5?private_token=TOKEN",
         ] {
             let why = download_refusal(url).unwrap();
-            assert!(why.contains("carries credentials") && !why.contains("s3cret") && !why.contains("TOKEN"), "{why}");
+            assert!(why.contains(" carries ") && !why.contains("s3cret") && !why.contains("TOKEN"), "{why}");
         }
         assert!(download_refusal("svn+ssh://svn.example.org/r").unwrap().contains("ssh"));
         assert!(download_refusal("file:///srv/svn/r").unwrap().contains("local path"));
@@ -362,9 +389,13 @@ mod tests {
                     !URL = https://zenodo.org/f.tar.gz?download=1\n!URL = https://TOKEN4@github.com/o/d.git\n";
         let found = search_text(text, &BTreeSet::from(["https://TOKEN4@github.com/o/d.git".to_owned()]));
         assert_eq!(found.len(), 3, "{found:#?}");
-        assert!(found[0].starts_with("thornlist line 2: https://***@github.com/o/a.git carries credentials"), "{found:?}");
+        assert_eq!(
+            found[0],
+            "thornlist line 2: https://***@github.com/o/a.git carries a user name or token, which must never be published; \
+             remove it from the URL"
+        );
         assert!(found[1].starts_with("thornlist line 3: https://***@example.org/x"), "{found:?}");
-        assert!(found[2].starts_with("thornlist line 4: https://gitlab.com/o/b.git?*** carries"), "{found:?}");
+        assert!(found[2].starts_with("thornlist line 4: https://gitlab.com/o/b.git?*** carries `private_token` in its query"), "{found:?}");
         assert!(!found.concat().contains("TOKEN"), "{found:?}");
     }
 
@@ -387,7 +418,7 @@ mod tests {
         let checked = classify(&list, text, &inputs);
         assert_eq!(checked.refused.len(), 2, "{:#?}", checked.refused);
         assert!(checked.refused[0].starts_with("a: git://github.com/o/a.git uses git://"), "{:?}", checked.refused);
-        assert!(checked.refused[1].starts_with("input bad: https://gitlab.com/api/v4/f.h5?*** carries credentials"), "{:?}", checked.refused);
+        assert!(checked.refused[1].starts_with("input bad: https://gitlab.com/api/v4/f.h5?*** carries `private_token` in its query"), "{:?}", checked.refused);
         let asked: Vec<(&str, &str)> = checked.asks.iter().map(|a| (a.url.as_str(), a.candidate.as_str())).collect();
         assert_eq!(
             asked,

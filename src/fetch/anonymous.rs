@@ -28,7 +28,7 @@ use super::watch::{abandonable, Bounds, Stop};
 use crate::Res;
 use anyhow::bail;
 use cactup_ecosystem_common::probe::{self, Outcome, Step};
-use cactup_ecosystem_common::url::unanswered_refusal;
+use cactup_ecosystem_common::url::{private_address_refusal, unanswered_refusal, unreachable_refusal};
 use std::time::{Duration, Instant};
 
 /// The longest a probe waits to connect (within what is left of its window).
@@ -53,7 +53,13 @@ pub enum Verdict {
 pub fn check(url: &str, candidate: &str, window: AskWindow) -> Res<Verdict> {
     let mut asked = candidate.to_owned();
     for round in 0..2 {
-        let (outcome, seen) = ask(&asked, window)?;
+        // Nothing answered, or nothing was asked: not the repo's doing, so
+        // not the "doesn't answer" wording, which blames the repo.
+        let (outcome, seen) = match ask(&asked, window)? {
+            Ok(response) => response,
+            Err(Unchecked::Private(host)) => return Ok(Verdict::Refuse(private_address_refusal(url, &host))),
+            Err(Unchecked::Unreachable(detail)) => return Ok(Verdict::Refuse(unreachable_refusal(url, &detail))),
+        };
         let refused = |message: String| Verdict::Refuse(format!("{message} (asked without credentials, it {seen})"));
         match probe::next_step(url, candidate, &asked, &outcome) {
             Step::Publish(published) => return Ok(Verdict::Publish(published)),
@@ -74,13 +80,58 @@ pub fn check_remote(url: &str, window: AskWindow) -> Res<Verdict> {
     }
 }
 
-/// One probe of `asked`, within what is left of `window`: what it found,
-/// and what it saw, as a clause ("answered 401 Unauthorized", "did not
-/// answer within 30 s", …).
-fn ask(asked: &str, window: AskWindow) -> Res<(Outcome, String)> {
+/// Why a remote could not be checked at all: no response came, or it was
+/// not asked. Said by the crate's `private_address_refusal` and
+/// `unreachable_refusal`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Unchecked {
+    /// Its host, as written, resolves to an address that is not public.
+    Private(String),
+    /// No HTTP response, and why, in a few words with no URL in them
+    /// ("connection refused", "no answer within 30 s").
+    Unreachable(String),
+}
+
+/// What went wrong with a request that got no response, in a few words
+/// built from the error's kind, never its text: reqwest's quotes the URL.
+fn failure(e: &reqwest::Error) -> String {
+    use std::io::ErrorKind;
+    if e.is_timeout() {
+        return "connection timed out".to_owned();
+    }
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(err) = source {
+        if let Some(io) = err.downcast_ref::<std::io::Error>() {
+            match io.kind() {
+                ErrorKind::ConnectionRefused => return "connection refused".to_owned(),
+                ErrorKind::TimedOut => return "connection timed out".to_owned(),
+                ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted => return "connection reset".to_owned(),
+                ErrorKind::NetworkUnreachable | ErrorKind::HostUnreachable => return "no route to the host".to_owned(),
+                _ => {}
+            }
+        }
+        let said = err.to_string().to_ascii_lowercase();
+        if said.contains("dns error") || said.contains("failed to lookup") || said.contains("name or service not known") {
+            return "dns lookup failed".to_owned();
+        }
+        if said.contains("certificate") || said.contains("tls") || said.contains("handshake") {
+            return "TLS handshake failed".to_owned();
+        }
+        source = err.source();
+    }
+    if e.is_connect() { "connection failed" } else { "request failed" }.to_owned()
+}
+
+/// What a probe got back: what it found, and what it saw, as a clause
+/// ("answered 401 Unauthorized", "redirected to …").
+type Response = (Outcome, String);
+
+/// One probe of `asked`, within what is left of `window`: its response, or
+/// why it got none.
+fn ask(asked: &str, window: AskWindow) -> Res<Result<Response, Unchecked>> {
     let left = window.until.saturating_duration_since(Instant::now());
     if left.is_zero() {
-        return Ok((Outcome::Other, "was not asked: the time for asking was up".to_owned()));
+        return Ok(Err(Unchecked::Unreachable("the time for asking remotes was up".to_owned())));
     }
     #[cfg(test)]
     PROBED.lock().expect("test record poisoned").push(asked.to_owned());
@@ -91,13 +142,15 @@ fn ask(asked: &str, window: AskWindow) -> Res<(Outcome, String)> {
     let bounds = Bounds { stall: left, total: Some(left), wind_down: Duration::ZERO };
     match abandonable(gix::progress::Discard, bounds, move |_, _| request(&owned, left + Duration::from_secs(1))) {
         Ok(found) => Ok(found),
-        Err(Stop::Failed(e)) => Ok((Outcome::Other, format!("could not be asked: {e:#}"))),
+        // Only building the client fails this way; its words are no
+        // network's.
+        Err(Stop::Failed(_)) => Ok(Err(Unchecked::Unreachable("the probe failed".to_owned()))),
         Err(Stop::Interrupted) => bail!("Interrupted"),
         Err(Stop::Stalled(_) | Stop::Overran(_)) => {
             let secs = (window.length.as_secs_f64().round() as u64).max(1);
-            Ok((Outcome::Other, format!("did not answer within {secs} s")))
+            Ok(Err(Unchecked::Unreachable(format!("no answer within {secs} s"))))
         }
-        Err(Stop::Vanished) => Ok((Outcome::Other, "could not be asked".to_owned())),
+        Err(Stop::Vanished) => Ok(Err(Unchecked::Unreachable("the probe failed".to_owned()))),
     }
 }
 
@@ -105,18 +158,18 @@ fn ask(asked: &str, window: AskWindow) -> Res<(Outcome, String)> {
 /// bounded by the window and given up on at a Ctrl-C): the host resolved
 /// and checked, then a bare GET of the advertisement, pinned to those
 /// addresses, turned into an [`Outcome`] by the crate's rules.
-fn request(asked: &str, timeout: Duration) -> Res<(Outcome, String)> {
+fn request(asked: &str, timeout: Duration) -> Res<Result<Response, Unchecked>> {
     use reqwest::header;
     let target = probe::probe_url(asked);
     let parsed = match reqwest::Url::parse(&target) {
         Ok(parsed) => parsed,
-        Err(e) => return Ok((Outcome::Other, format!("could not be asked: {e}"))),
+        Err(_) => return Ok(Err(Unchecked::Unreachable("its URL does not parse".to_owned()))),
     };
     let mut client = client(timeout);
     match public_addresses(&parsed) {
         Ok(Some((host, addrs))) => client = client.resolve_to_addrs(&host, &addrs),
         Ok(None) => {}
-        Err(seen) => return Ok((Outcome::Other, seen)),
+        Err(unchecked) => return Ok(Err(unchecked)),
     }
     // A test's host is served by a local stand-in; the check above was of
     // the host asked, through the test resolver.
@@ -127,12 +180,12 @@ fn request(asked: &str, timeout: Duration) -> Res<(Outcome, String)> {
     };
     let response = match client.build()?.get(parsed).send() {
         Ok(response) => response,
-        Err(e) => return Ok((Outcome::Other, format!("could not be reached: {:#}", anyhow::Error::from(e)))),
+        Err(e) => return Ok(Err(Unchecked::Unreachable(failure(&e)))),
     };
     let status = response.status();
     let kind = response.headers().get(header::CONTENT_TYPE).and_then(|t| t.to_str().ok()).map(str::to_owned);
     if probe::is_answer(status.as_u16(), kind.as_deref()) {
-        return Ok((Outcome::Answer, "answered".to_owned()));
+        return Ok(Ok((Outcome::Answer, "answered".to_owned())));
     }
     if status.is_redirection() {
         let location = response.headers().get(header::LOCATION).and_then(|l| l.to_str().ok());
@@ -142,14 +195,14 @@ fn request(asked: &str, timeout: Duration) -> Res<(Outcome, String)> {
             Some(to) => format!("redirected to {}", cactup_ecosystem_common::url::Redacted(to)),
             None => format!("answered {status} with no location"),
         };
-        return Ok((Outcome::Redirect(to), seen));
+        return Ok(Ok((Outcome::Redirect(to), seen)));
     }
     let seen = match (status == reqwest::StatusCode::OK, kind) {
         (false, _) => format!("answered {status}"),
         (true, None) => "answered, but not as a git server (no content type)".to_owned(),
         (true, Some(kind)) => format!("answered, but not as a git server ({kind})"),
     };
-    Ok((Outcome::Other, seen))
+    Ok(Ok((Outcome::Other, seen)))
 }
 
 /// The probe's client: no redirect followed, no referer, a git user agent
@@ -172,8 +225,7 @@ fn client(timeout: Duration) -> reqwest::blocking::ClientBuilder {
 /// `url`'s host resolved, once, with every address checked public: the
 /// domain and its addresses to pin the connection to; `None` for an IP
 /// address (checked, and needing no pin) and for a host that does not
-/// resolve here; else, when an address is not public, what was seen, as a
-/// clause.
+/// resolve here; else, when an address is not public, that address.
 ///
 /// A host that does not resolve here (no answer, no such name) is not
 /// refused for that alone: a login node that reaches the world only
@@ -183,9 +235,9 @@ fn client(timeout: Duration) -> reqwest::blocking::ClientBuilder {
 /// connect, which is then the refusal, with its own words. Leniency is
 /// safe on this side: the Cactarium vets the addresses of anything
 /// published there itself.
-fn public_addresses(url: &reqwest::Url) -> Result<Option<(String, Vec<std::net::SocketAddr>)>, String> {
+fn public_addresses(url: &reqwest::Url) -> Result<Option<(String, Vec<std::net::SocketAddr>)>, Unchecked> {
     let port = url.port_or_known_default().unwrap_or(443);
-    let Some(host) = url.host_str() else { return Err("could not be asked: it has no host".to_owned()) };
+    let Some(host) = url.host_str() else { return Err(Unchecked::Unreachable("it has no host".to_owned())) };
     let (domain, addrs): (Option<String>, Vec<std::net::SocketAddr>) =
         match host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>() {
             Ok(ip) => (None, vec![(ip, port).into()]),
@@ -194,8 +246,8 @@ fn public_addresses(url: &reqwest::Url) -> Result<Option<(String, Vec<std::net::
                 _ => return Ok(None),
             },
         };
-    if let Some(private) = addrs.iter().find(|a| !probe::is_public_address(a.ip())) {
-        return Err(format!("resolves to a private address ({}); not reachable for others", private.ip()));
+    if addrs.iter().any(|a| !probe::is_public_address(a.ip())) {
+        return Err(Unchecked::Private(host.to_owned()));
     }
     Ok(domain.map(|d| (d, addrs)))
 }
@@ -375,7 +427,11 @@ mod tests {
         let short = AskWindow::from(Instant::now(), Duration::from_millis(600));
         let started = Instant::now();
         let silent = check_remote("https://silent.probe.test/org/r.git", short).unwrap();
-        assert!(refused(&silent).ends_with("it did not answer within 1 s)"), "{silent:?}");
+        assert_eq!(
+            refused(&silent),
+            "https://silent.probe.test/org/r.git can't be checked: its host couldn't be reached (no answer within 1 s); try \
+             again later"
+        );
         assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
         let before = PROBED.lock().unwrap().len();
         assert!(refused(&check_now("git://github.com/o/r.git")).contains("git://"));
@@ -403,18 +459,33 @@ mod tests {
         assert_eq!(check_now("https://unresolved.probe.test/o/r"), Verdict::Publish("https://unresolved.probe.test/o/r".to_owned()));
         assert!(asked.try_recv().is_ok(), "asked");
         let nowhere = check_now("https://nowhere.invalid/o/r.git");
-        let said = refused(&nowhere);
-        assert!(said.contains("doesn't answer git without credentials") && said.contains("it could not be reached"), "{said}");
+        assert_eq!(
+            refused(&nowhere),
+            "https://nowhere.invalid/o/r.git can't be checked: its host couldn't be reached (dns lookup failed); try again later"
+        );
     }
 
     /// A remote at, or resolving to, a private address is refused unasked,
     /// saying so.
     #[test]
     fn a_private_address_is_refused() {
-        for url in ["https://127.0.0.1/org/r.git", "http://localhost:9/org/r.git", "https://[::1]/r"] {
-            let verdict = check_now(url);
-            let said = refused(&verdict);
-            assert!(said.contains("resolves to a private address") && said.contains("not reachable for others"), "{url}: {said}");
-        }
+        assert_eq!(
+            refused(&check_now("https://127.0.0.1/org/r.git")),
+            "https://127.0.0.1/org/r.git can't be checked: 127.0.0.1 is not a public address, so nobody outside your \
+             network can fetch it; publish a URL on a public host"
+        );
+        assert_eq!(
+            refused(&check_now("git@[::1]:o/r.git")),
+            "git@[::1]:o/r.git can't be checked: [::1] is not a public address, so nobody outside your network can fetch \
+             it; publish a URL on a public host"
+        );
+        assert!(refused(&check_now("http://localhost:9/org/r.git")).contains("localhost is not a public address"));
+        // A connection refused is said by its kind, with no URL in the detail.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        ROUTES.lock().unwrap().insert("closed.probe.test".to_owned(), format!("http://127.0.0.1:{closed}"));
+        assert_eq!(
+            refused(&check_now("https://closed.probe.test/o/r")),
+            "https://closed.probe.test/o/r can't be checked: its host couldn't be reached (connection refused); try again later"
+        );
     }
 }

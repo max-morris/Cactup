@@ -4559,7 +4559,7 @@ the config's own record only while that still describes the same `build-id`.
     helpers even with prompts off): no auth, cookies, netrc or referer, a
     `git/cactup-<version>` user agent, no redirect followed. The host is
     resolved once and every address must pass `probe::is_public_address`
-    (else "resolves to a private address; not reachable for others"); the
+    (else `url::private_address_refusal`); the
     connection is pinned to those addresses (`resolve_to_addrs`), so DNS
     cannot swap one in between (an environment proxy connects on its own,
     and then the pin cannot hold). A host that does not resolve here at all
@@ -4573,7 +4573,13 @@ the config's own record only while that still describes the same `build-id`.
     redirect to the same repo (GitLab's `.git` form; the candidate is still
     what is published), or refuse (`moved_refusal` for a move on the same
     host, else `unanswered_refusal`, in https or ssh wording), cactup
-    appending what the probe saw ("answered 401 Unauthorized"). One request
+    appending what the probe saw ("answered 401 Unauthorized"). A probe
+    that got no HTTP response at all (a failed connection, a silence) is
+    `url::unreachable_refusal`, its detail built from the error's kind
+    ("connection refused", "dns lookup failed"), never reqwest's words,
+    which quote the URL: nothing was asked, so the repo is not blamed. A
+    refusal names the repo without quotes or `.git`, and with its `!URL`'s
+    line when another section gives another URL the same name. One request
     per remote, on the network fan-out (`ask_all`, 32 wide) within one 30 s
     window, a progress line each, through the watcher (§2.4: Ctrl-C fails
     at once, "Interrupted"). A remote published as another URL (an ssh

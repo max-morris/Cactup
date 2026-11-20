@@ -2148,13 +2148,13 @@ mod tests {
         let (packed, out, _) = pack_urls(tmp.path(), &sections, true, describe);
         let err = format!("{:#}", packed.unwrap_err());
         for said in [
-            "a: https://***@github.com/o/a.git carries credentials",
+            "a: https://***@github.com/o/a.git carries a user name or token, which must never be published",
             "b: file:///srv/b.git is a local path",
             "c: ssh://git@home.share.test/~max/c.git is an ssh URL, which needs an account on the host, and has no https equivalent",
             "d: git@private.share.test:o/d.git is an ssh URL, which needs an account on the host, and https://private.share.test/o/d.git doesn't answer",
             "it answered 401 Unauthorized",
             "e: git@moved.share.test:o/e.git is an ssh URL, and its https equivalent https://moved.share.test/o/e.git redirects to https://moved.share.test/new/e.git: the repo has moved",
-            "input data: https://***@example.org/f.h5?*** carries credentials",
+            "input data: https://***@example.org/f.h5?*** carries a user name and password, which must never be published",
             "or pass --local to export for use here only",
         ] {
             assert!(err.contains(said), "{said:?} not in: {err}");
@@ -2190,8 +2190,14 @@ mod tests {
         let sections = [("https://twice.share.test/a/x.git", "A/One"), ("https://TOKEN111@github.com/b/x.git", "B/One")];
         let (packed, out, _) = pack_urls(tmp.path(), &sections, true, Default::default());
         let err = format!("{:#}", packed.unwrap_err());
-        assert!(err.contains("x: https://***@github.com/b/x.git carries credentials"), "{err}");
-        assert!(!err.contains("TOKEN111") && !out.exists(), "{err}");
+        // Two sections name repo x: the one refused is told by its line.
+        assert_eq!(
+            err,
+            "These URLs cannot go into a .sim for others: nobody else could fetch them, or they would publish \
+             credentials:\n  x (thornlist line 11): https://***@github.com/b/x.git carries a user name or token, which \
+             must never be published; remove it from the URL\nFix them, or pass --local to export for use here only"
+        );
+        assert!(!out.exists());
 
         let sections = [("git@twice.share.test:a/x.git", "A/One"), ("git@twice.share.test:b/x.git", "B/One")];
         let (packed, out, list) = pack_urls(tmp.path(), &sections, true, Default::default());
@@ -2249,12 +2255,13 @@ mod tests {
         let (packed, out, _) = pack_list(tmp.path(), &list, Default::default());
         let err = format!("{:#}", packed.unwrap_err());
         for said in [
-            "thornlist line 3: https://***@example.org/x carries credentials",
+            "thornlist line 3: https://***@example.org/x carries a user name and password",
             "thornlist line 4: https://***@github.com/o/a.git carries",
             "thornlist line 7: https://***@github.com/o/b.git carries",
-            "b (its !AUTH_URL): https://***@github.com/o/b.git carries credentials",
-            // The parser names the repo from the URL, quote and all.
-            "c.git\": https://***@github.com/o/c.git is written in quotes",
+            "b (its !AUTH_URL): https://***@github.com/o/b.git carries a user name and password",
+            // Named without the quote the parser leaves on the name.
+            "\n  c: https://***@github.com/o/c.git is written in quotes, which the thornlist parser keeps as part of \
+             the URL, so it could not be fetched; remove the quotes\n",
         ] {
             assert!(err.contains(said), "{said:?} not in: {err}");
         }
@@ -2296,7 +2303,7 @@ mod tests {
         ];
         let (packed, out, _) = pack_urls(tmp.path(), &sections, false, Default::default());
         let err = format!("{:#}", packed.unwrap_err());
-        assert!(err.contains("a: https://***@tips.offline.test/o/a.git carries credentials"), "{err}");
+        assert!(err.contains("a: https://***@tips.offline.test/o/a.git carries a user name or token"), "{err}");
         assert!(err.contains("c: git@private.offline.test:o/c.git is an ssh URL") && err.contains("401"), "{err}");
         assert!(!err.contains("TOKEN123") && !out.exists(), "{err}");
         let asked = crate::fetch::git::ASKED.lock().unwrap().clone();
