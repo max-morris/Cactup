@@ -4542,39 +4542,58 @@ the config's own record only while that still describes the same `build-id`.
   or below a shallow boundary, reads as unpublished and errs toward asking.
 - **Shareable URLs** (`sim::shareable`; export and pack alike). A `.sim`
   leaves the machine, so every repo URL in it must be one anybody can fetch
-  and carry no credentials: the shared crate's `url::shareability` decides,
-  the same function the Cactarium checks with, so the two refuse exactly
-  the same URLs. A git repo's URL that is `Credentials` (userinfo,
-  or a query string), `Local`, `Unsupported`, or `Ssh` with no https
-  equivalent is refused with the crate's `refusal()` sentence. An `Ssh` URL
-  with an https equivalent is probed (`fetch::anonymous`): a bare GET of
-  `<https>/info/refs?service=git-upload-pack` with reqwest, not gix (gix
-  consults credential helpers even with prompts off), carrying no
-  credentials of any kind (no auth, cookies, netrc or referer) and following
-  no redirect; only a 200 with `Content-Type:
-  application/x-git-upload-pack-advertisement` is an answer. The probe is
-  kept identical to the Cactarium's, so a borderline host is judged the
-  same on both sides. An answer writes the https URL in place of the ssh one, in
-  the `[[repo]]` pin and in the thornlist's `!URL` line (an import fetches
-  what the thornlist names; a `$1`/`$2` template is rewritten as one, and
-  the result is parsed back and must name exactly the expected URLs, so a
-  URL built from a `!DEFINE` fails, asking for the https URL to be written),
-  and says so on one line. A 3xx is `moved_refusal` naming its `Location`
-  without the suffix; anything else (401/403/404, a silence, an error) is
-  `refusal()` with what happened. The probes run on the network fan-out
-  (`ask_all`, 32 wide) within one 30 s window, a progress line each, through
-  the watcher (§2.4: Ctrl-C fails at once, "Interrupted"). A non-git
-  component's URL (a download, svn) is not probed and may carry a query; it
-  is refused for credentials or a local path only. An input's URL
-  (`--input-url`, or one typed at the prompt) is refused for userinfo only:
-  download links carry queries (`?download=1`). The judgment that needs no
-  network (`shareable::classify`) runs first, before `sim pack` asks any
-  remote for its tip: a URL refused there fails at once, after only the
-  https asks, so one error still names every URL refused. Every refusal is
-  collected into that one error, before any question is asked, ending "or
-  pass --local to export for use here only"; messages show URLs redacted
-  (`url::Redacted`).
-  `--local` writes every URL as it is and probes nothing.
+  and nothing in it may carry credentials: the shared crate's
+  `url::shareability` decides, the same function the Cactarium checks with,
+  so the two refuse exactly the same URLs.
+  - *Every component's URL* is judged, once per URL string, not once per
+    repo name (two sections may share one). A git repo's URL that is
+    `Credentials` (userinfo, or a query string), `Local`, `Unsupported`, or
+    `Ssh` with no https equivalent is refused with the crate's `refusal()`
+    sentence. A quoted URL is refused for its quotes: the parser keeps them,
+    and gix will not fetch such a URL. A non-git component's URL (a
+    download, svn) is not probed and may carry a query; it is refused for a
+    user name or password, or a local path; a cvs root (no URL) only for a
+    password (`:pserver:anonymous@…` is anonymous access). A `!AUTH_URL`
+    (what svn and cvs fetch from) is held to the same, for any type.
+  - *The whole thornlist text* that goes into the `.sim`, comments, unused
+    `!DEFINE`s and overridden lines included, is then searched for any
+    `scheme://` URL with a user name or password, or a token query key (a
+    local list until the crate has one), each refusal naming its line.
+    `!ANON_USER`/`!ANON_PASS` hold bare anonymous logins, never a URL, and
+    are never refused.
+  - *An `Ssh` URL with an https equivalent* is probed (`fetch::anonymous`):
+    a bare GET of `<https>/info/refs?service=git-upload-pack` with reqwest,
+    not gix (gix consults credential helpers even with prompts off),
+    carrying no credentials of any kind (no auth, cookies, netrc or referer)
+    and following no redirect; only a 200 with `Content-Type:
+    application/x-git-upload-pack-advertisement` is an answer. The probe is
+    kept identical to the Cactarium's, so a borderline host is judged the
+    same on both sides; its decisions (may this address be asked, is this
+    an answer, where does a redirect point, is that the same repo) are one
+    function each, to be replaced by the crate's. An answer rewrites the
+    ssh URL to the https one in the thornlist's `!URL` lines (an import
+    fetches what the thornlist names, and the pins are built from it; a
+    `$1`/`$2` template is rewritten as one), and says so on one line. The
+    result is parsed back and must name exactly the expected URLs, so an
+    ssh URL that no `!URL` line spells out (built from a `!DEFINE`) is
+    refused, asking for the https URL to be written. A 3xx is
+    `moved_refusal` naming its `Location` without the suffix; anything else
+    (401/403/404, a silence, an error) is `refusal()` with what happened.
+    The probes run on the network fan-out (`ask_all`, 32 wide) within one
+    30 s window, a progress line each, through the watcher (§2.4: Ctrl-C
+    fails at once, "Interrupted").
+  - *An input's URL* (`--input-url`, or one typed at the prompt) is refused
+    for a user name or password only: download links carry queries
+    (`?download=1`).
+  - The whole check, the https asks and the rewrite included, runs before
+    anything else asks the network: `sim pack` then asks its tips of
+    the rewritten https URLs (never of an ssh URL, with the user's keys). A
+    URL refused fails with no tip asked; every refusal is collected into one
+    error, before any question is asked, ending "or pass --local to export
+    for use here only". Messages show URLs redacted (`url::Redacted`, also
+    behind `fetch::git::redacted`; `scrub` hides a URL's userinfo, password
+    and query in a lower layer's words). `--local` writes every URL as it
+    is and probes nothing.
 - **Inputs.** Every required `@KNOB(name)@` in a `.par` that is not a
   standard knob (§5) becomes an `[[input]]`: something the simulation needs
   from outside the source tree. `vars` lists the `@VAR@`s used. Both come

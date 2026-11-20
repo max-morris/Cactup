@@ -51,7 +51,7 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
     let parfile = parfile_at(&sim.cactup_dir().join("par").join(&sim.meta.parfile))?;
     let (source_text, list) =
         if args.trim { trimmed(source_text, &list, &sim.meta.sourcedir, &parfile)? } else { (source_text, list) };
-    let shareable = check_offline(&args.describe, &list)?;
+    let (source_text, list) = shareable(&args.describe, source_text, list)?;
 
     // The pins, and the checks that decide whether anyone else could fetch them.
     let fetched = FetchState::read(&inst.root)?;
@@ -97,7 +97,6 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
             run: run_hints(&sim),
             provenance,
             knobs: sim.meta.knobs.clone(),
-            shareable,
         },
     )
 }
@@ -147,20 +146,23 @@ struct Parts {
     /// The simulation's own knob values (over the global ones): an input's
     /// value here, to compare a download with.
     knobs: indexmap::IndexMap<String, String>,
-    /// The URLs judged offline ([`check_offline`]; `None`: `--local`).
-    shareable: Option<super::shareable::Checked>,
 }
 
-/// The offline half of the §8.9 check that nothing nobody else could fetch,
-/// and no credentials, leaves the machine (unless `--local`): `list`'s repo
-/// URLs and the input URLs given as flags. Made before anything asks the
-/// network, so a URL refused here fails at once, with no remote asked for
-/// its tip; the error still names every URL refused, the ssh remotes whose
-/// https URLs do not answer included. What it found goes on to
-/// [`finish`], which asks the https URLs and rewrites them.
-fn check_offline(describe: &SimDescribeArgs, list: &thornlist::Thornlist) -> Res<Option<super::shareable::Checked>> {
+/// The §8.9 check that nothing nobody else could fetch, and no credentials,
+/// leaves the machine (unless `--local`): the thornlist `text` (parsed as
+/// `list`) that goes into the `.sim`, and the input URLs given as flags.
+/// Made before anything else asks the network: a URL refused fails here,
+/// with no remote asked for its tip, in one error naming every URL refused
+/// (the ssh remotes whose https URLs do not answer included). The text and
+/// list come back with the ssh URLs that answer as https rewritten, so the
+/// pins, and a pack's tips, are of the https URLs.
+fn shareable(
+    describe: &SimDescribeArgs,
+    text: String,
+    list: thornlist::Thornlist,
+) -> Res<(String, thornlist::Thornlist)> {
     if describe.local {
-        return Ok(None);
+        return Ok((text, list));
     }
     let input_urls: Vec<(String, String)> = describe
         .input_urls
@@ -168,12 +170,14 @@ fn check_offline(describe: &SimDescribeArgs, list: &thornlist::Thornlist) -> Res
         .filter_map(|pair| pair.split_once('='))
         .map(|(knob, url)| (knob.to_owned(), url.to_owned()))
         .collect();
-    let checked = super::shareable::classify(list, &input_urls);
-    if checked.refuses() {
-        super::shareable::refuse(checked)?;
-        unreachable!("a refusal always fails");
+    let checked = super::shareable::classify(&list, &text, &input_urls);
+    match super::shareable::settle(checked, &text)? {
+        None => Ok((text, list)),
+        Some(rewritten) => {
+            let list = thornlist::parse(&rewritten).context("The rewritten thornlist does not parse")?;
+            Ok((rewritten, list))
+        }
     }
-    Ok(Some(checked))
 }
 
 fn refuse_overwrite(file: &Path, describe: &SimDescribeArgs) -> Res<()> {
@@ -213,13 +217,7 @@ fn refuse_unfetchable(repos: &[RepoPin], published: &[bool], allow_dirty: bool, 
 /// Settle the descriptive fields — flags, else defaults, offered for editing
 /// on a terminal — then write the file and say what it holds.
 fn finish(ctx: &Ctx, describe: &SimDescribeArgs, file: &Path, parts: Parts) -> Res<()> {
-    let Parts { default_name, fallback_summary, root, mut thornlist, parfile, mut repos, run, provenance, knobs, shareable } =
-        parts;
-    // §8.9: the ssh remotes' https URLs asked and written, before any
-    // question is asked: a refusal should not come after the answers.
-    if let Some(checked) = shareable {
-        super::shareable::settle(checked, &mut repos, &mut thornlist.text)?;
-    }
+    let Parts { default_name, fallback_summary, root, thornlist, parfile, repos, run, provenance, knobs } = parts;
     warn_about_paths(&parfile);
     let (lead_summary, lead_description) = leading_comment(&parfile.text);
     let interactive = !describe.yes && std::io::stdin().is_terminal();
@@ -369,20 +367,21 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
     if args.trim && ctx.globals.installation.is_none() {
         bail!("--trim reads the thorns' .ccl files, so it needs an installation that has them: pass -I");
     }
-    let (repos, published, text, list, shareable) = if ctx.globals.installation.is_some() {
+    let (repos, published, text, list) = if ctx.globals.installation.is_some() {
         let inst = Installation::resolve(ctx)?;
         let (text, list) =
             if args.trim { trimmed(text, &list, &inst.cactus_root()?, &parfile)? } else { (text, list) };
-        let shareable = check_offline(&args.describe, &list)?;
+        let (text, list) = shareable(&args.describe, text, list)?;
         let repos_dir = inst.cactus_root()?.join("repos");
         let states = installed_states(&repos_dir, &list)?;
         let hashes = installed_download_hashes(&inst.root, &list)?;
         let repos = repo_pins(&list, |repo| states.get(repo).cloned(), |repo| hashes.get(repo).cloned());
         let published = check_repos(&repos_dir, &repos, FetchState::read(&inst.root)?.as_ref())?;
-        (repos, published, text, list, shareable)
+        (repos, published, text, list)
     } else {
-        // Before the tips are asked: a refused URL fails without the network.
-        let shareable = check_offline(&args.describe, &list)?;
+        // Before the tips are asked: a refused URL fails without asking
+        // one, and the tips are asked of the rewritten https URLs.
+        let (text, list) = shareable(&args.describe, text, list)?;
         let tips = remote_tips(&list)?;
         // No installation, so no downloaded file to hash: only checksums the list gives.
         let repos = repo_pins(&list, |repo| tips.get(repo).map(ToString::to_string), |_| None);
@@ -394,7 +393,7 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
         );
         // Each commit is a remote tip by construction.
         let published = vec![true; repos.len()];
-        (repos, published, text, list, shareable)
+        (repos, published, text, list)
     };
     refuse_unfetchable(&repos, &published, args.allow_dirty, args.allow_unpushed, "in the installation")?;
 
@@ -413,7 +412,6 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
             run: None,
             provenance: exporter(),
             knobs: Default::default(),
-            shareable,
         },
     )
 }

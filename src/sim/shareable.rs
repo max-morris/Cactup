@@ -1,32 +1,42 @@
 //! What may go into a `.sim` that leaves this machine (spec §8.9): every
-//! repo URL one anybody can fetch, and no URL that carries credentials.
-//! `sim export` and `sim pack` check every repo and input URL before they
-//! write one, unless `--local` says the file is for use here only. The
-//! check comes in two halves: [`classify`], offline, before anything else
-//! asks the network (a pack's remote tips), and [`settle`], which asks the
-//! ssh remotes' https URLs and rewrites them. A URL refused offline fails
-//! at once ([`refuse`]), the https asks made too, so one error still names
-//! every URL refused.
+//! repo URL one anybody can fetch, and no credentials anywhere in it.
+//! `sim export` and `sim pack` check the thornlist and every input URL
+//! before they write one, unless `--local` says the file is for use here
+//! only. The check comes in two halves: [`classify`], offline, and
+//! [`settle`], which asks the ssh remotes' https URLs and rewrites those
+//! that answer. Both run before anything else asks the network (a pack's
+//! remote tips, which are then asked of the rewritten URLs); a URL refused
+//! offline still waits for the https asks, so one error names every URL
+//! refused.
 //!
 //! The rules are the shared crate's (`cactup_ecosystem_common::url`), so the
-//! Cactarium refuses exactly what export does. A git repo's URL must be
-//! [`Shareability::Shareable`]: no credentials or query string, no local
-//! path, no ssh. An ssh remote is written as its https equivalent instead
+//! Cactarium refuses exactly what export does. Every component's URL is
+//! judged, not one per repo name: a git repo's must be
+//! [`Shareability::Shareable`] (no credentials or query string, no local
+//! path, no ssh). An ssh remote is written as its https equivalent instead
 //! when that answers with no credentials at all
-//! ([`crate::fetch::anonymous`]), in the pins and in the thornlist alike,
-//! since an import fetches what the thornlist names. A download's URL, or
-//! another kind of repo's, is not asked about (it is not git) and may carry
-//! a query (`?download=1` is how download links work); it is refused for
-//! credentials and local paths only. So is an input's URL, for credentials.
+//! ([`crate::fetch::anonymous`]), in the thornlist (an import fetches what
+//! the thornlist names) and so in the pins built from it. A download's URL,
+//! or another kind of repo's, is not asked about (it is not git) and may
+//! carry a query (`?download=1` is how download links work); it is refused
+//! for a user name or password and for a local path. A `!AUTH_URL` (what
+//! svn and cvs fetch from) is held to the same. A quoted URL is refused:
+//! the parser keeps the quotes, so cactup would fetch them as part of it.
+//! Then the whole text that goes into the `.sim`, comments, unused
+//! `!DEFINE`s and overridden lines included, is searched for any
+//! `scheme://` URL with a user name or password, or a token in its query.
+//! `!ANON_USER`/`!ANON_PASS` are left alone: they hold the public logins
+//! of anonymous svn and cvs access, never a URL; so is the anonymous user
+//! of a cvs root (`:pserver:anonymous@…`), which is refused only for a
+//! password. An input's URL is refused for a user name or password.
 
 use crate::fetch::anonymous::{self, Answer};
 use crate::fetch::git::{AskWindow, REMOTE_ASK_TIMEOUT};
 use crate::thornlist::{self, ComponentType};
 use crate::Res;
 use anyhow::{bail, Context};
-use cactup_ecosystem_common::sim::RepoPin;
 use cactup_ecosystem_common::url::{moved_refusal, shareability, Redacted, Shareability};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// What every refusal ends with.
 const LOCAL_HINT: &str = "or pass --local to export for use here only";
@@ -34,92 +44,159 @@ const LOCAL_HINT: &str = "or pass --local to export for use here only";
 /// The offline half of the check: what [`classify`] found.
 #[derive(Debug)]
 pub struct Checked {
-    /// A line per URL refused, "<repo>: <why>" or "input <knob>: <why>".
+    /// A line per URL refused: "<repo>: <why>", "input <knob>: <why>",
+    /// "thornlist line <n>: <why>".
     refused: Vec<String>,
-    /// The ssh remotes to ask the https equivalents of: (repo, ssh URL,
-    /// https URL).
-    asks: Vec<(String, String, String)>,
+    /// The ssh remotes whose https equivalents to ask.
+    asks: Vec<Ask>,
 }
 
-impl Checked {
-    /// Whether a URL was refused already, offline.
-    pub fn refuses(&self) -> bool {
-        !self.refused.is_empty()
-    }
+/// One ssh URL of the thornlist, however many components name it.
+#[derive(Debug)]
+struct Ask {
+    /// The repos whose components name it, in order.
+    repos: Vec<String>,
+    ssh: String,
+    https: String,
 }
 
-/// Each repo URL of `list` (a repo once, by its first component) and each
-/// input's URL in `input_urls` (KNOB, URL) judged without the network: the
-/// refusals, and the ssh remotes whose https equivalents [`settle`] or
-/// [`refuse`] must ask.
-pub fn classify(list: &thornlist::Thornlist, input_urls: &[(String, String)]) -> Checked {
+/// The thornlist `text` (parsed as `list`) and each input's URL in
+/// `input_urls` (KNOB, URL) judged without the network: the refusals, and
+/// the ssh remotes whose https equivalents [`settle`] must ask. Every
+/// component's URL and `!AUTH_URL` is judged once per URL string; then the
+/// whole text is searched for credentials (see the module docs).
+pub fn classify(list: &thornlist::Thornlist, text: &str, input_urls: &[(String, String)]) -> Checked {
     let mut refused = Vec::new();
-    let mut asks = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
+    let mut asks: Vec<Ask> = Vec::new();
+    // The URLs judged, and of those the ones refused (the text search
+    // leaves those to the line already said).
+    let mut judged = BTreeSet::new();
+    let mut refused_urls = BTreeSet::new();
     for c in list.components() {
-        let url = c.url.as_deref().unwrap_or("");
-        if !seen.insert(c.repo.as_str()) || c.ty == ComponentType::Ignore || url.trim().is_empty() {
+        if c.ty == ComponentType::Ignore {
             continue;
         }
-        if c.ty != ComponentType::Git {
-            if let Some(why) = download_refusal(url, true) {
-                refused.push(format!("{}: {why}", c.repo));
+        let fields = [(c.url.as_deref(), c.repo.clone()), (c.auth_url.as_deref(), format!("{} (its !AUTH_URL)", c.repo))];
+        for (i, (url, label)) in fields.into_iter().enumerate() {
+            let Some(url) = url.filter(|u| !u.trim().is_empty()) else { continue };
+            let auth = i == 1;
+            if !auth && let Some(ask) = asks.iter_mut().find(|a| a.ssh == url) {
+                if !ask.repos.contains(&c.repo) {
+                    ask.repos.push(c.repo.clone());
+                }
+                continue;
             }
-            continue;
-        }
-        match shareability(url) {
-            Shareability::Shareable => {}
-            Shareability::Ssh { https: Some(https) } => asks.push((c.repo.clone(), url.to_owned(), https)),
-            other => refused.push(format!("{}: {}", c.repo, other.refusal(url).expect("not shareable"))),
+            if !judged.insert((auth, url.to_owned())) {
+                continue;
+            }
+            let why = if let Some(inner) = unquoted(url) {
+                refused_urls.insert(inner.to_owned());
+                Some(format!(
+                    "{} is written in quotes, which the thornlist parser keeps as part of the URL, so it could not \
+                     be fetched; remove the quotes",
+                    Redacted(inner)
+                ))
+            } else if c.ty == ComponentType::Cvs {
+                cvs_refusal(url)
+            } else if auth || c.ty != ComponentType::Git {
+                // Not asked about: credentials, and for what is fetched
+                // (not a git repo's !AUTH_URL) a local path.
+                download_refusal(url, !auth || c.ty != ComponentType::Git)
+            } else {
+                match shareability(url) {
+                    Shareability::Shareable => None,
+                    Shareability::Ssh { https: Some(https) } => {
+                        asks.push(Ask { repos: vec![c.repo.clone()], ssh: url.to_owned(), https });
+                        None
+                    }
+                    other => other.refusal(url),
+                }
+            };
+            if let Some(why) = why {
+                refused_urls.insert(url.to_owned());
+                refused.push(format!("{label}: {why}"));
+            }
         }
     }
+    refused.extend(search_text(text, &refused_urls));
     for (knob, url) in input_urls {
-        if let Some(why) = download_refusal(url, false) {
+        if let Some(why) = credentials_refusal(url) {
             refused.push(format!("input {knob}: {why}"));
         }
     }
     Checked { refused, asks }
 }
 
-/// Fail with every refusal of `checked`, after asking its https URLs so
-/// the one error names those refused too; nothing when `checked` refuses
-/// nothing and every https URL answers. For a caller that will not write
-/// the file anyway: nothing is rewritten.
-pub fn refuse(checked: Checked) -> Res<()> {
-    probed(checked).map(drop)
-}
-
-/// Make `repos` and the thornlist `text` they came from (what `checked`
-/// was classified from) fit to leave this machine: every ssh remote whose
-/// https equivalent answers anonymously is rewritten to it (one line said
-/// for each), and anything that cannot be published fails the call, every
-/// offending URL named in one error. The asks run on the network fan-out
-/// within one [`REMOTE_ASK_TIMEOUT`], a line each; Ctrl-C fails the call
-/// ("Interrupted").
-pub fn settle(checked: Checked, repos: &mut [RepoPin], text: &mut String) -> Res<()> {
-    let rewrites = probed(checked)?;
-    if rewrites.is_empty() {
-        return Ok(());
+/// Every `scheme://` URL in `text` with a user name or password, or a token
+/// in its query, as "thornlist line <n>: <why>", but for those in
+/// `already` (refused by name). `!ANON_USER`/`!ANON_PASS` hold a bare login,
+/// no URL, so nothing there is refused.
+fn search_text(text: &str, already: &BTreeSet<String>) -> Vec<String> {
+    static URL: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r#"[A-Za-z][A-Za-z0-9+.\-]*://[^\s"'<>`]+"#).expect("valid regex"));
+    let mut out = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        for m in URL.find_iter(line) {
+            let url = m.as_str().trim_end_matches([')', ']', '}', ',', '.', ';', ':']);
+            if already.contains(url) {
+                continue;
+            }
+            let why = credentials_refusal(url).or_else(|| {
+                token_query_key(url).map(|key| {
+                    format!(
+                        "{} carries a token in its query ({key}=…), which must never be published; remove it",
+                        Redacted(url)
+                    )
+                })
+            });
+            if let Some(why) = why {
+                out.push(format!("thornlist line {}: {why}", n + 1));
+            }
+        }
     }
-    let list = thornlist::parse(text).context("The thornlist does not parse")?;
-    rewrite(&list, &rewrites, repos, text)
+    out
 }
 
-/// The https asks of `checked` made: the error naming every URL refused,
-/// offline or by its answer, else the ssh URLs to rewrite, by repo (ssh
-/// URL, https URL).
-fn probed(checked: Checked) -> Res<BTreeMap<String, (String, String)>> {
+/// The query key of `url` that names a token, password or signature, if it
+/// has one. (The shared crate is to decide this; until then, this list.)
+fn token_query_key(url: &str) -> Option<String> {
+    let query = url.get(without_query(url).len()..)?.strip_prefix('?')?;
+    let query = query.split('#').next().unwrap_or(query);
+    query.split(['&', ';']).map(|pair| pair.split('=').next().unwrap_or(pair)).find_map(|key| {
+        let k = key.to_ascii_lowercase().replace('-', "_");
+        let named = ["token", "secret", "password", "passwd", "signature", "credential", "api_key", "apikey"]
+            .iter()
+            .any(|word| k.contains(word))
+            || ["key", "sig", "auth", "pass", "pwd", "jwt", "session"].contains(&k.as_str());
+        named.then(|| key.to_owned())
+    })
+}
+
+/// `url` without one layer of surrounding quotes, when it has them.
+fn unquoted(url: &str) -> Option<&str> {
+    let url = url.trim();
+    ['"', '\''].into_iter().find_map(|q| url.strip_prefix(q)?.strip_suffix(q))
+}
+
+/// Ask the https URL of each ssh remote of `checked`, and fail with every
+/// refusal (offline, or by its answer) in one error; else `text` (what
+/// `checked` was classified from) with every ssh `!URL` rewritten to its
+/// https equivalent (one line said for each), or `None` when there were
+/// none. The rewritten text is parsed back and must name exactly the URLs
+/// expected. The asks run on the network fan-out within one
+/// [`REMOTE_ASK_TIMEOUT`], a line each; Ctrl-C fails the call
+/// ("Interrupted").
+pub fn settle(checked: Checked, text: &str) -> Res<Option<String>> {
     let Checked { mut refused, asks } = checked;
     let answers = probe_all(&asks)?;
-    let mut rewrites = BTreeMap::new();
-    for ((name, ssh, https), answer) in asks.into_iter().zip(answers) {
+    let mut answered = Vec::new();
+    for (ask, answer) in asks.into_iter().zip(answers) {
+        let name = ask.repos.join(", ");
         match answer {
-            Answer::Answered => {
-                rewrites.insert(name, (ssh, https));
-            }
-            Answer::Moved(to) => refused.push(format!("{name}: {}", moved_refusal(&ssh, &https, to.as_deref()))),
+            Answer::Answered => answered.push(ask),
+            Answer::Moved(to) => refused.push(format!("{name}: {}", moved_refusal(&ask.ssh, &ask.https, to.as_deref()))),
             Answer::Refused(how) => {
-                let why = Shareability::Ssh { https: Some(https.clone()) }.refusal(&ssh).expect("not shareable");
+                let why = Shareability::Ssh { https: Some(ask.https.clone()) }.refusal(&ask.ssh).expect("not shareable");
                 refused.push(format!("{name}: {why} (asked without credentials, it {how})"));
             }
         }
@@ -131,66 +208,87 @@ fn probed(checked: Checked) -> Res<BTreeMap<String, (String, String)>> {
             refused.join("\n  ")
         );
     }
-    Ok(rewrites)
+    if answered.is_empty() {
+        return Ok(None);
+    }
+    let rewritten = rewrite(text, &answered)?;
+    for ask in &answered {
+        println!(
+            "{}: written as {}, which anyone can fetch, in place of the ssh URL {}",
+            ask.repos.join(", "),
+            ask.https,
+            Redacted(&ask.ssh)
+        );
+    }
+    Ok(Some(rewritten))
 }
 
-/// `rewrites` (by repo: ssh URL, https URL) made in `repos` and in `text`
-/// (parsed as `list`), checked by parsing the result back.
-fn rewrite(
-    list: &thornlist::Thornlist,
-    rewrites: &BTreeMap<String, (String, String)>,
-    repos: &mut [RepoPin],
-    text: &mut String,
-) -> Res<()> {
-    let rewritten = rewrite_urls(text, &rewrites.values().cloned().collect());
+/// `text` with the `!URL` of each of `answered` rewritten to its https URL,
+/// checked by parsing the result back: every component must name exactly
+/// the URL it did, or its https equivalent when that was rewritten.
+fn rewrite(text: &str, answered: &[Ask]) -> Res<String> {
+    let map: BTreeMap<String, String> = answered.iter().map(|a| (a.ssh.clone(), a.https.clone())).collect();
+    let list = thornlist::parse(text).context("The thornlist does not parse")?;
+    let rewritten = rewrite_urls(text, &map);
     let check = thornlist::parse(&rewritten).context("The thornlist with its ssh URLs rewritten does not parse")?;
     let mut stuck = Vec::new();
-    for c in check.components() {
-        let Some(old) = list.components().iter().find(|o| o.checkout == c.checkout && o.repo == c.repo) else {
-            stuck.push(c.checkout.clone());
-            continue;
-        };
-        let want = rewrites.get(&old.repo).map(|(_, https)| Some(https.clone())).unwrap_or_else(|| old.url.clone());
-        if c.url != want {
-            stuck.push(c.checkout.clone());
+    for (i, old) in list.components().iter().enumerate() {
+        let want = old.url.as_ref().map(|u| map.get(u).unwrap_or(u));
+        let got = check.components().get(i).filter(|c| c.checkout == old.checkout && c.repo == old.repo);
+        if got.map(|c| c.url.as_ref()) != Some(want) {
+            let url = old.url.as_deref().unwrap_or("");
+            let https = map.get(url).map_or(String::new(), |h| format!(" (to {h})"));
+            stuck.push(format!("{}: {}{https}", old.checkout, Redacted(url)));
         }
     }
     if !stuck.is_empty() || check.components().len() != list.components().len() {
-        let names: Vec<String> =
-            rewrites.iter().map(|(name, (ssh, https))| format!("{name}: {} as {https}", Redacted(ssh))).collect();
         bail!(
-            "The thornlist's ssh URLs answer as https, but its !URL lines could not all be rewritten to them (a URL \
-             built from a !DEFINE, perhaps; {}):\n  {}\nWrite the https URLs in the thornlist, {LOCAL_HINT}",
-            if stuck.is_empty() { "the list changed shape".to_owned() } else { format!("for {}", stuck.join(", ")) },
-            names.join("\n  ")
+            "The thornlist's ssh URLs answer as https, but rewriting its !URL lines did not rewrite these, as no \
+             !URL line spells them out:\n  {}\nWrite the https URLs in the thornlist, {LOCAL_HINT}",
+            if stuck.is_empty() { "(the list changed shape)".to_owned() } else { stuck.join("\n  ") }
         );
     }
-    *text = rewritten;
-    for pin in repos.iter_mut() {
-        if let Some((ssh, https)) = rewrites.get(&pin.name) {
-            println!("{}: written as {https}, which anyone can fetch, in place of the ssh URL {}", pin.name, Redacted(ssh));
-            pin.url = https.clone();
-        }
-    }
-    Ok(())
+    Ok(rewritten)
 }
 
-/// Why `url`, an input's (when not `repo`) or a repo's that is not git,
-/// cannot be published, if it cannot: credentials in it (a user name or
-/// password), or, for a repo, a local path. A query string is no reason:
+/// Why `url`, a download's or another kind of repo's than git, cannot be
+/// published, if it cannot: a user name or password in it, or, when it is
+/// `fetched` from as given, a local path. A query string is no reason:
 /// download links carry them.
-pub fn download_refusal(url: &str, repo: bool) -> Option<String> {
-    match shareability(without_query(url)) {
-        s @ Shareability::Credentials => s.refusal(url),
-        s @ Shareability::Local if repo => s.refusal(url),
+fn download_refusal(url: &str, fetched: bool) -> Option<String> {
+    credentials_refusal(url).or_else(|| match shareability(without_query(url)) {
+        s @ Shareability::Local if fetched => s.refusal(url),
         _ => None,
-    }
+    })
 }
 
-/// [`download_refusal`] for an input's URL given at a prompt: the error, or
-/// nothing.
+/// Why `url` cannot be published for what its authority carries, if it
+/// cannot: a user name (but an ssh one) or a password, as the shared crate
+/// tells credentials from a URL with its query left out. Said for what was
+/// found, not for the query it may also have.
+fn credentials_refusal(url: &str) -> Option<String> {
+    matches!(shareability(without_query(url)), Shareability::Credentials).then(|| {
+        format!("{} carries a user name or password, which must never be published; remove it from the URL", Redacted(url))
+    })
+}
+
+/// Why the cvs root `root` (`:method:[user[:password]@]host:path`, no URL)
+/// cannot be published, if it cannot: a password in it. A user name alone
+/// is how anonymous access is written (`:pserver:anonymous@…`).
+fn cvs_refusal(root: &str) -> Option<String> {
+    let rest = root.trim().strip_prefix(':').and_then(|r| r.split_once(':')).map_or(root.trim(), |(_, r)| r);
+    let (userinfo, host) = rest.rsplit_once('@')?;
+    let (user, password) = userinfo.split_once(':')?;
+    let method = &root.trim()[..root.trim().len() - rest.len()];
+    (!password.is_empty()).then(|| {
+        format!("{method}{user}:***@{host} carries a password, which must never be published; remove it")
+    })
+}
+
+/// [`credentials_refusal`] for an input's URL given at a prompt: the error,
+/// or nothing.
 pub fn check_input_url(knob: &str, url: &str) -> Res<()> {
-    match download_refusal(url, false) {
+    match credentials_refusal(url) {
         Some(why) => bail!("Input {knob}: {why}, {LOCAL_HINT}"),
         None => Ok(()),
     }
@@ -209,10 +307,9 @@ fn without_query(url: &str) -> &str {
     }
 }
 
-/// Probe each https URL of `asks` (name, ssh URL, https URL) for an
-/// anonymous answer, on the network fan-out within one window, with a
+/// Probe the https URL of each of `asks` for an anonymous answer, on the network fan-out within one window, with a
 /// progress line for each.
-fn probe_all(asks: &[(String, String, String)]) -> Res<Vec<Answer>> {
+fn probe_all(asks: &[Ask]) -> Res<Vec<Answer>> {
     if asks.is_empty() {
         return Ok(Vec::new());
     }
@@ -221,9 +318,9 @@ fn probe_all(asks: &[(String, String, String)]) -> Res<Vec<Answer>> {
     item.init(Some(asks.len()), Some(prodash::unit::label("repos")));
     let item = std::sync::Mutex::new(item);
     let window = AskWindow::from(std::time::Instant::now(), REMOTE_ASK_TIMEOUT);
-    let answers = crate::fetch::git::ask_all(asks, |(name, _, https)| {
-        let current = item.lock().expect("probe progress poisoned").add_child(name.clone());
-        let answer = anonymous::probe(https, window);
+    let answers = crate::fetch::git::ask_all(asks, |ask| {
+        let current = item.lock().expect("probe progress poisoned").add_child(ask.repos.join(", "));
+        let answer = anonymous::probe(&ask.https, window);
         drop(current);
         item.lock().expect("probe progress poisoned").inc();
         answer
@@ -273,18 +370,45 @@ fn rewrite_urls(text: &str, rewrites: &BTreeMap<String, String>) -> String {
 mod tests {
     use super::*;
 
-    /// Credentials are refused in a download's URL, and a local path in a
-    /// repo's; a query string is not, nor is an ordinary URL.
+    /// A user name or password is refused in a download's URL, and a local
+    /// path in what is fetched; a query string is not, nor is an ordinary
+    /// URL, and the refusal does not name what it does not refuse.
     #[test]
     fn a_download_is_refused_for_credentials_not_for_a_query() {
-        assert!(download_refusal("https://zenodo.org/records/1/files/id.tar.gz?download=1", false).is_none());
-        assert!(download_refusal("https://example.org/f.h5", false).is_none());
+        assert!(download_refusal("https://zenodo.org/records/1/files/id.tar.gz?download=1", true).is_none());
+        assert!(download_refusal("https://example.org/f.h5", true).is_none());
         for url in ["https://max:s3cret@example.org/f.h5?download=1", "https://TOKEN@example.org/f.h5"] {
-            let why = download_refusal(url, false).unwrap();
-            assert!(why.contains("credentials") && !why.contains("s3cret") && !why.contains("TOKEN"), "{why}");
+            let why = credentials_refusal(url).unwrap();
+            assert!(why.contains("user name or password") && !why.contains("query"), "{why}");
+            assert!(!why.contains("s3cret") && !why.contains("TOKEN"), "{why}");
         }
-        assert!(download_refusal("/data/f.h5", false).is_none(), "an input's local path fails on download");
+        assert!(credentials_refusal("/data/f.h5").is_none(), "an input's local path fails on download");
         assert!(download_refusal("file:///srv/svn/r", true).unwrap().contains("local path"));
+        assert!(cvs_refusal(":pserver:anonymous@cvs.example.org:/cvsroot").is_none());
+        let why = cvs_refusal(":pserver:me:s3cret@cvs.example.org:/cvsroot").unwrap();
+        assert!(why.starts_with(":pserver:me:***@cvs.example.org:/cvsroot carries a password"), "{why}");
+    }
+
+    /// The whole text is searched, comments and unused lines included, for
+    /// a user name, password or query token in any URL, each named by its
+    /// line; ssh user names, anonymous logins, download queries and URLs
+    /// already refused by name are not.
+    #[test]
+    fn credentials_anywhere_in_the_text_are_found() {
+        let text = "!CRL_VERSION = 1.0\n# old: !URL = https://TOKEN1@github.com/o/a.git\n\
+                    !DEFINE UNUSED = https://me:TOKEN2@example.org/x\n!URL = https://gitlab.com/o/b.git?private_token=TOKEN3\n\
+                    !URL = ssh://git@github.com/o/c.git\n!ANON_USER = anonymous\n!ANON_PASS = anon\n\
+                    !URL = https://zenodo.org/f.tar.gz?download=1\n!URL = https://TOKEN4@github.com/o/d.git\n";
+        let found = search_text(text, &BTreeSet::from(["https://TOKEN4@github.com/o/d.git".to_owned()]));
+        assert_eq!(found.len(), 3, "{found:#?}");
+        assert!(found[0].starts_with("thornlist line 2: https://***@github.com/o/a.git carries a user name"), "{found:?}");
+        assert!(found[1].starts_with("thornlist line 3: https://***@example.org/x"), "{found:?}");
+        assert!(found[2].starts_with("thornlist line 4: ") && found[2].contains("(private_token=…)"), "{found:?}");
+        assert!(!found.concat().contains("TOKEN"), "{found:?}");
+        assert_eq!(token_query_key("https://h/f?download=1&X-Amz-Signature=s").as_deref(), Some("X-Amz-Signature"));
+        assert_eq!(token_query_key("https://h/f?download=1"), None);
+        assert_eq!(unquoted("\"https://h/x\""), Some("https://h/x"));
+        assert_eq!(unquoted("https://h/x"), None);
     }
 
     /// An ssh `!URL` is rewritten as written or as a template; nothing else

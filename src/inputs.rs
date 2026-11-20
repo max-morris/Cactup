@@ -118,7 +118,7 @@ pub fn fetch(dir: &Path, input: &Input, policy: &SizePolicy, repo: Option<&RepoS
             line.phase("checking");
             let actual = crate::update::sha256_hex_counting(archive.path(), line)?;
             if !actual.eq_ignore_ascii_case(expected) {
-                bail!("The download of {url} has SHA-256 {actual}, but the .sim records {expected}; nothing was unpacked");
+                bail!("The download of {} has SHA-256 {actual}, but the .sim records {expected}; nothing was unpacked", crate::fetch::git::redacted(url));
             }
             Ok(archive.into_temp_path())
         })
@@ -132,7 +132,7 @@ pub fn fetch(dir: &Path, input: &Input, policy: &SizePolicy, repo: Option<&RepoS
     renderer.shutdown_and_wait();
     let (value, _) = fetched?;
     if input.sha256.is_none() {
-        println!("{}", format!("The .sim records no hash for {url}, so the download could not be checked").yellow());
+        println!("{}", format!("The .sim records no hash for {}, so the download could not be checked", crate::fetch::git::redacted(url)).yellow());
     }
     Ok(value)
 }
@@ -230,7 +230,7 @@ fn fetch_file(
     if let Some(expected) = sha256
         && !expected.eq_ignore_ascii_case(&actual)
     {
-        bail!("The download of {url} has SHA-256 {actual}, but the .sim records {expected}");
+        bail!("The download of {} has SHA-256 {actual}, but the .sim records {expected}", crate::fetch::git::redacted(url));
     }
     let hash_dir = dir.join(&actual);
     std::fs::create_dir_all(&hash_dir).with_context(|| format!("Failed to create '{}'", hash_dir.display()))?;
@@ -354,7 +354,10 @@ fn download(
 ) -> Res<tempfile::NamedTempFile> {
     let mut temp = tempfile::NamedTempFile::new_in(dir).context("Failed to create a download file")?;
     line.phase("downloading");
-    crate::fetch::download::download_to_limited(crate::fetch::download::client(), url, temp.as_file_mut(), line, limit)?;
+    // Its words with the URL's credentials hidden (a --local export may
+    // keep them in the URL).
+    crate::fetch::download::download_to_limited(crate::fetch::download::client(), url, temp.as_file_mut(), line, limit)
+        .map_err(|e| anyhow!(crate::fetch::git::scrub(&format!("{e:#}"), url)))?;
     Ok(temp)
 }
 
@@ -376,7 +379,7 @@ fn confirm_size(url: &str, policy: &SizePolicy) -> Res<Option<u64>> {
         .and_then(|r| r.headers().get(reqwest::header::CONTENT_LENGTH)?.to_str().ok()?.parse::<u64>().ok());
     if policy.yes {
         if let Some(size) = size.filter(|s| *s > policy.confirm_above) {
-            println!("Downloading {url} ({}).", crate::progress::bytes(size as usize));
+            println!("Downloading {} ({}).", crate::fetch::git::redacted(url), crate::progress::bytes(size as usize));
         }
         return Ok(Some(MAX_DOWNLOAD));
     }
@@ -386,6 +389,7 @@ fn confirm_size(url: &str, policy: &SizePolicy) -> Res<Option<u64>> {
         return Ok(limit);
     }
     let shown = crate::progress::bytes(size as usize);
+    let url = crate::fetch::git::redacted(url);
     if !policy.interactive {
         bail!("{url} is {shown}; pass -y to download it without asking");
     }
@@ -886,7 +890,7 @@ pub fn author(dir: &Path, input: &mut Input, how: &Authoring, policy: &SizePolic
     let members = regular_members(&tree)?;
     let member = match how.member {
         Some(m) => {
-            within(&tree, Path::new(m)).with_context(|| format!("The archive at {url} has no usable {m}"))?;
+            within(&tree, Path::new(m)).with_context(|| format!("The archive at {} has no usable {m}", crate::fetch::git::redacted(url)))?;
             Some(m.to_owned())
         }
         None => how

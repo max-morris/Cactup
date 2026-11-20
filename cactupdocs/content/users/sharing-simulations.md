@@ -51,7 +51,10 @@ Export refuses what nobody else could reproduce:
   so. If it asks for credentials or does not answer, the URL is refused; if
   it redirects, the repository has moved, and export names where to.
 
-Every URL refused is listed in one error. An input's download URL
+A user name, password or token anywhere in the thornlist is refused too,
+in a comment or a line nothing uses, with its line number, and so is a URL
+written in quotes (cactup would take the quotes as part of it). Every URL
+refused is listed in one error. An input's download URL
 (`--input-url`) is refused for a user name or password too, though a query
 string is fine there (`?download=1` is how many download links work).
 

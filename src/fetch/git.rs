@@ -429,31 +429,71 @@ pub fn is_unanswered(e: &anyhow::Error) -> bool {
     e.chain().any(|cause| cause.is::<Unanswered>())
 }
 
-/// `url` as it may be shown: a password in it replaced (gix's own redacted
-/// form); any other URL exactly as given.
+/// `url` as it may be shown: the shared crate's redacted form
+/// (`url::Redacted`), with a user name (but an ssh one), a password and a
+/// query hidden; anything else as given.
 pub fn redacted(url: &str) -> String {
-    match gix::url::parse(url.as_bytes().as_bstr()) {
-        Ok(parsed) if parsed.password().is_some() => parsed.to_string(),
-        _ => url.to_owned(),
-    }
+    cactup_ecosystem_common::url::Redacted(url).to_string()
 }
 
 /// `text` with the credentials `url` carries hidden wherever it shows them —
 /// an error from deeper down (a transport's, the HTTP client's) may quote
-/// the URL whole: every `:<password>@` of it, as given and percent-decoded,
-/// becomes `:redacted@`, as in [`redacted`].
+/// the URL whole, or parts of it: the URL itself becomes [`redacted`]'s
+/// form, and then every secret of it, as given and percent-decoded — the
+/// userinfo before an `@` (but an ssh user name: only its password), and
+/// the query — is replaced by `***` wherever it still shows.
 pub fn scrub(text: &str, url: &str) -> String {
-    let Ok(parsed) = gix::url::parse(url.as_bytes().as_bstr()) else { return text.to_owned() };
-    let Some(password) = parsed.password() else { return text.to_owned() };
-    let mut text = text.to_owned();
-    let raw = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let given = raw.split_once('@').and_then(|(userinfo, _)| userinfo.split_once(':')).map(|(_, p)| p);
-    for secret in given.into_iter().chain([password]) {
-        if !secret.is_empty() {
-            text = text.replace(&format!(":{secret}@"), ":redacted@");
+    let url = url.trim();
+    let mut text = text.replace(url, &redacted(url));
+    let (scheme, rest) = url.split_once("://").map_or((None, url), |(s, r)| (Some(s), r));
+    let ssh = scheme.is_none_or(|s| ["ssh", "git+ssh", "ssh+git"].iter().any(|k| s.eq_ignore_ascii_case(k)));
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let mut secrets: Vec<(String, &str)> = Vec::new();
+    if let Some((userinfo, _)) = authority.rsplit_once('@') {
+        // The whole userinfo first, then the password alone (as another
+        // layer may quote it beside a user name of its own spelling).
+        if !ssh {
+            secrets.push((format!("{userinfo}@"), "***@"));
+        }
+        if let Some((_, password)) = userinfo.split_once(':') {
+            secrets.push((format!(":{password}@"), ":***@"));
+        }
+    }
+    if let Some((_, query)) = rest.split_once('?') {
+        let query = query.split('#').next().unwrap_or(query);
+        secrets.push((format!("?{query}"), "?***"));
+    }
+    for (secret, hidden) in secrets {
+        let decoded = percent_decode(&secret);
+        for form in [secret, decoded] {
+            if form.len() > 2 {
+                text = text.replace(&form, hidden);
+            }
         }
     }
     text
+}
+
+/// `s` with its `%XX` escapes decoded (an invalid one, or bytes that are not
+/// UTF-8, left as they were).
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        if bytes[i] == b'%'
+            && let (Some(&h), Some(&l)) = (bytes.get(i + 1), bytes.get(i + 2))
+            && let (Some(h), Some(l)) = (hex(h), hex(l))
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_owned())
 }
 
 /// `work`, the network half of a fetch from `url` (connecting through
@@ -2042,18 +2082,27 @@ mod tests {
         assert_eq!(options.kind, Some(gix::protocol::transport::client::blocking_io::ssh::ProgramKind::Ssh));
     }
 
-    /// A password in a URL is hidden wherever cactup shows it, as given and
-    /// as another layer may quote it; a URL without one is shown as is.
+    /// Credentials in a URL are hidden wherever cactup shows it, as given
+    /// and as another layer may quote it: a password, a token given as the
+    /// user name, a query; an ssh user name, and a URL without any, are
+    /// shown as they are.
     #[test]
     fn credentials_in_a_url_are_hidden() {
         let url = "https://max:s%40cret@example.org/r.git";
-        assert!(!redacted(url).contains("cret"), "{}", redacted(url));
+        assert_eq!(redacted(url), "https://***@example.org/r.git");
         let said = "error sending request for url (https://max:s%40cret@example.org/r.git/info/refs), \
                     or https://max:s@cret@example.org/r.git";
         let scrubbed = scrub(said, url);
         assert!(!scrubbed.contains("cret"), "{scrubbed}");
-        assert!(scrubbed.contains("https://max:redacted@example.org/r.git/info/refs"), "{scrubbed}");
-        for plain in ["/tmp/up", "git://127.0.0.1:9/r.git", "git@github.com:max/r.git", "https://max@example.org/r"] {
+        assert!(scrubbed.contains("https://***@example.org/r.git/info/refs"), "{scrubbed}");
+        let token = "https://ghp_TOKEN@github.com/o/r.git";
+        assert_eq!(redacted(token), "https://***@github.com/o/r.git");
+        let scrubbed = scrub("Failed: https://ghp_TOKEN@github.com/o/r.git/info/refs said no; user ghp_TOKEN@github.com", token);
+        assert!(!scrubbed.contains("ghp_TOKEN"), "{scrubbed}");
+        let query = "https://gitlab.com/o/r.git?private_token=QTOKEN";
+        assert!(!redacted(query).contains("QTOKEN"));
+        assert!(!scrub("GET /o/r.git/info/refs?private_token=QTOKEN failed", query).contains("QTOKEN"));
+        for plain in ["/tmp/up", "git://127.0.0.1:9/r.git", "git@github.com:max/r.git", "ssh://git@github.com/max/r"] {
             assert_eq!(redacted(plain), plain);
             assert_eq!(scrub(&format!("x {plain} y"), plain), format!("x {plain} y"));
         }

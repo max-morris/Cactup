@@ -84,42 +84,91 @@ pub fn probe(https: &str, window: AskWindow) -> Res<Answer> {
 
 /// The request itself, on the probe's thread: a bare GET of the
 /// advertisement, as the Cactarium's (see the module docs: keep the two
-/// identical).
+/// identical). Each decision is a function of its own, [`may_ask`],
+/// [`is_answer`], [`redirect_target`] and [`same_repo`], to be replaced by
+/// the shared crate's when it has them.
 fn ask(https: &str, timeout: Duration) -> Res<Answer> {
     use reqwest::header;
     let target = format!("{}{ADVERTISEMENT}", https.trim_end_matches('/'));
     #[cfg(test)]
     let target = routed(&target);
-    let client = reqwest::blocking::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .referer(false)
-        .user_agent(concat!("git/cactup-", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(CONNECT_TIMEOUT.min(timeout))
-        .timeout(timeout)
-        .build()?;
-    let response = match client.get(&target).send() {
+    if !may_ask(&target) {
+        return Ok(Answer::Refused("was not asked: its address is not a public one".to_owned()));
+    }
+    let response = match client(timeout)?.get(&target).send() {
         Ok(response) => response,
         Err(e) => return Ok(Answer::Refused(format!("could not be reached: {:#}", anyhow::Error::from(e)))),
     };
     let status = response.status();
     if status.is_redirection() {
-        let to = response
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|l| l.to_str().ok())
-            .and_then(|l| response.url().join(l).ok())
-            .map(|u| u.as_str().strip_suffix(ADVERTISEMENT).unwrap_or(u.as_str()).to_owned());
-        return Ok(Answer::Moved(to));
-    }
-    if status != reqwest::StatusCode::OK {
-        return Ok(Answer::Refused(format!("answered {status}")));
+        let location = response.headers().get(header::LOCATION).and_then(|l| l.to_str().ok());
+        let to = redirect_target(response.url(), location);
+        return Ok(match to {
+            Some(to) if same_repo(https, &to) => {
+                Answer::Refused(format!("redirected to {to}, the same repo, which is not asked again"))
+            }
+            to => Answer::Moved(to),
+        });
     }
     let kind = response.headers().get(header::CONTENT_TYPE).and_then(|t| t.to_str().ok()).unwrap_or("").to_owned();
-    if !kind.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case(CONTENT_TYPE) {
-        let kind = if kind.is_empty() { "no content type".to_owned() } else { kind };
-        return Ok(Answer::Refused(format!("answered, but not as a git server ({kind})")));
+    if is_answer(status, &kind) {
+        return Ok(Answer::Answered);
     }
-    Ok(Answer::Answered)
+    Ok(Answer::Refused(if status != reqwest::StatusCode::OK {
+        format!("answered {status}")
+    } else if kind.is_empty() {
+        "answered, but not as a git server (no content type)".to_owned()
+    } else {
+        format!("answered, but not as a git server ({kind})")
+    }))
+}
+
+/// The probe's client: no redirect followed, no referer, a git-like user
+/// agent, nothing kept between probes (a client of its own each), and a
+/// connect timeout within `timeout`, the request's. Tests ignore the
+/// environment's proxies, so they ask their local servers wherever they
+/// run.
+fn client(timeout: Duration) -> Res<reqwest::blocking::Client> {
+    let builder = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .referer(false)
+        .user_agent(concat!("git/cactup-", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(CONNECT_TIMEOUT.min(timeout))
+        .timeout(timeout);
+    #[cfg(test)]
+    let builder = builder.no_proxy();
+    Ok(builder.build()?)
+}
+
+/// Whether the probe may ask `target` at all. Every address, for now:
+/// refusing private and loopback addresses is to be the shared crate's
+/// rule (the Cactarium's too), and goes here.
+fn may_ask(_target: &str) -> bool {
+    true
+}
+
+/// Whether a response with `status` and `content_type` is the ref
+/// advertisement: a 200 with git's content type (parameters after a `;`
+/// allowed), and nothing else.
+fn is_answer(status: reqwest::StatusCode, content_type: &str) -> bool {
+    status == reqwest::StatusCode::OK
+        && content_type.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case(CONTENT_TYPE)
+}
+
+/// Where a redirect from `asked` points, as a repo URL: its `location`
+/// resolved against `asked`, without the smart-HTTP suffix; `None` without
+/// a usable `Location`.
+fn redirect_target(asked: &reqwest::Url, location: Option<&str>) -> Option<String> {
+    let to = asked.join(location?).ok()?;
+    Some(to.as_str().strip_suffix(ADVERTISEMENT).unwrap_or(to.as_str()).to_owned())
+}
+
+/// Whether a redirect from the repo `https` to `to` stays on that repo.
+/// Never, for now: every redirect is a move. (GitLab's redirect to the
+/// `.git` spelling is to count as the same repo, asked again once, by the
+/// shared crate's rule, which goes here.)
+fn same_repo(_https: &str, _to: &str) -> bool {
+    false
 }
 
 /// Every https URL probed in this process, in order (tests only).

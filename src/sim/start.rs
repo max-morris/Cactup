@@ -2079,16 +2079,27 @@ mod tests {
         pinned: bool,
         describe: crate::args::SimDescribeArgs,
     ) -> (crate::Res<()>, PathBuf, String) {
-        let mut ctx = fake_ctx(&tmp.join("db"));
-        ctx.globals.installation = None;
         let mut list = "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n".to_owned();
         for (url, checkout) in sections {
-            list.push_str(&format!(
-                "!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = {url}\n!REPO_BRANCH = main\n\
-                 {}!CHECKOUT = {checkout}\n",
-                if pinned { format!("!REPO_COMMIT = {}\n", "a".repeat(40)) } else { String::new() }
-            ));
+            list.push_str(&section(url, checkout, pinned));
         }
+        pack_list(tmp, &list, describe)
+    }
+
+    /// A pinned (when `pinned`) git section of `url` checking out `checkout`.
+    fn section(url: &str, checkout: &str, pinned: bool) -> String {
+        format!(
+            "!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = {url}\n!REPO_BRANCH = main\n{}!CHECKOUT = {checkout}\n",
+            if pinned { format!("!REPO_COMMIT = {}\n", "a".repeat(40)) } else { String::new() }
+        )
+    }
+
+    /// The thornlist `list` and a parfile with one input, packed with no
+    /// installation and `describe` over the defaults; and the list back.
+    fn pack_list(tmp: &Path, list: &str, describe: crate::args::SimDescribeArgs) -> (crate::Res<()>, PathBuf, String) {
+        let mut ctx = fake_ctx(&tmp.join("db"));
+        ctx.globals.installation = None;
+        let list = list.to_owned();
         let th = tmp.join("list.th");
         fs::write(&th, &list).unwrap();
         let par = tmp.join("run.par");
@@ -2143,7 +2154,7 @@ mod tests {
             "d: git@private.share.test:o/d.git is an ssh URL, which needs an account on the host, and https://private.share.test/o/d.git doesn't answer",
             "it answered 401 Unauthorized",
             "e: git@moved.share.test:o/e.git is an ssh URL, and its https equivalent https://moved.share.test/o/e.git redirects to https://moved.share.test/new/e.git: the repo has moved",
-            "input data: https://***@example.org/f.h5?*** carries credentials",
+            "input data: https://***@example.org/f.h5?*** carries a user name or password",
             "or pass --local to export for use here only",
         ] {
             assert!(err.contains(said), "{said:?} not in: {err}");
@@ -2165,6 +2176,105 @@ mod tests {
         assert_eq!(url("f"), "https://public.share.test/o/f.git");
         assert_eq!(url("g"), "https://github.com/o/g.git");
         assert_eq!(file.thornlist.text, list.replace("git@public.share.test:o/f.git", "https://public.share.test/o/f.git"));
+    }
+
+    /// Every component's URL is judged, not one per repo name: a token in
+    /// the second component of a repo is refused, and two ssh URLs that
+    /// share a repo name are each written as https.
+    #[test]
+    fn every_url_of_a_repo_is_judged_and_rewritten() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use cactup_ecosystem_common::sim::SimFile;
+        let tmp = tempfile::tempdir().unwrap();
+        let sections = [("https://github.com/a/x.git", "A/One"), ("https://TOKEN111@github.com/b/x.git", "B/One")];
+        let (packed, out, _) = pack_urls(tmp.path(), &sections, true, Default::default());
+        let err = format!("{:#}", packed.unwrap_err());
+        assert!(err.contains("x: https://***@github.com/b/x.git carries credentials"), "{err}");
+        assert!(!err.contains("TOKEN111") && !out.exists(), "{err}");
+
+        serve("twice.share.test", Mode::Public);
+        let sections = [("git@twice.share.test:a/x.git", "A/One"), ("git@twice.share.test:b/x.git", "B/One")];
+        let (packed, out, list) = pack_urls(tmp.path(), &sections, true, Default::default());
+        packed.unwrap();
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        let want = list
+            .replace("git@twice.share.test:a/x.git", "https://twice.share.test/a/x.git")
+            .replace("git@twice.share.test:b/x.git", "https://twice.share.test/b/x.git");
+        assert_eq!(file.thornlist.text, want);
+        assert_eq!(file.repos[0].url, "https://twice.share.test/a/x.git");
+    }
+
+    /// An ssh URL that answers as https but that no `!URL` line spells out
+    /// (built from a `!DEFINE`) cannot be rewritten: the parse-back check
+    /// refuses it, naming the checkout, rather than write a list that still
+    /// fetches over ssh.
+    #[test]
+    fn an_ssh_url_built_from_a_define_is_refused_not_left_as_ssh() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        let tmp = tempfile::tempdir().unwrap();
+        serve("defined.share.test", Mode::Public);
+        let list = format!(
+            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!DEFINE GH = git@defined.share.test:o\n{}",
+            section("$GH/y.git", "Y/One", true)
+        );
+        let (packed, out, _) = pack_list(tmp.path(), &list, Default::default());
+        let err = format!("{:#}", packed.unwrap_err());
+        assert!(err.contains("no !URL line spells them out"), "{err}");
+        assert!(err.contains("Y/One: git@defined.share.test:o/y.git (to https://defined.share.test/o/y.git)"), "{err}");
+        assert!(!out.exists());
+    }
+
+    /// Credentials anywhere in the thornlist that goes into the .sim are
+    /// refused, each named: a `!AUTH_URL`, a comment, an unused `!DEFINE`,
+    /// an overridden `!URL`; a quoted URL is refused for its quotes (cactup
+    /// would fetch them as part of it), its token not shown; the anonymous
+    /// logins of `!ANON_USER`/`!ANON_PASS` are not refused.
+    #[test]
+    fn credentials_anywhere_in_the_thornlist_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let list = format!(
+            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!DEFINE OLD = https://me:TOKEN2@example.org/x\n\
+             # old: !URL = https://TOKEN3@github.com/o/a.git\n\
+             !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://TOKEN4@github.com/o/b.git\n\
+             !URL = https://github.com/o/b.git\n!AUTH_URL = https://me:TOKEN5@github.com/o/b.git\n\
+             !REPO_COMMIT = {c}\n!CHECKOUT = B/One\n\
+             !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = \"https://TOKEN6@github.com/o/c.git\"\n\
+             !REPO_COMMIT = {c}\n!CHECKOUT = C/One\n\
+             !TARGET = $ROOT\n!TYPE = svn\n!URL = https://svn.example.org/d/trunk\n!ANON_USER = anonymous\n\
+             !ANON_PASS = anonymous\n!CHECKOUT = D/One\n",
+            c = "a".repeat(40)
+        );
+        let (packed, out, _) = pack_list(tmp.path(), &list, Default::default());
+        let err = format!("{:#}", packed.unwrap_err());
+        for said in [
+            "thornlist line 3: https://***@example.org/x carries a user name or password",
+            "thornlist line 4: https://***@github.com/o/a.git carries",
+            "thornlist line 7: https://***@github.com/o/b.git carries",
+            "b (its !AUTH_URL): https://***@github.com/o/b.git carries a user name or password",
+            // The parser names the repo from the URL, quote and all.
+            "c.git\": https://***@github.com/o/c.git is written in quotes",
+        ] {
+            assert!(err.contains(said), "{said:?} not in: {err}");
+        }
+        assert!(!err.contains("TOKEN") && !err.contains("anonymous") && !err.contains("\n  d:"), "{err}");
+        assert!(!out.exists());
+    }
+
+    /// `sim pack` without an installation asks the tips of the rewritten
+    /// https URL, never of the ssh one (which would use the user's keys).
+    #[test]
+    fn pack_asks_tips_of_the_https_url_an_ssh_remote_is_written_as() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        let tmp = tempfile::tempdir().unwrap();
+        serve("tipped.share.test", Mode::Public);
+        let (packed, out, _) = pack_urls(tmp.path(), &[("git@tipped.share.test:o/r.git", "R/One")], false, Default::default());
+        // The tip is asked of the real host, which does not exist.
+        let err = format!("{:#}", packed.unwrap_err());
+        assert!(err.contains("Could not ask every remote for its tip") && err.contains("https://tipped.share.test/o/r.git"), "{err}");
+        assert!(!out.exists());
+        let asked = crate::fetch::git::ASKED.lock().unwrap().clone();
+        assert!(asked.iter().any(|u| u == "https://tipped.share.test/o/r.git"), "{asked:?}");
+        assert!(!asked.iter().any(|u| u.contains("git@tipped.share.test")), "{asked:?}");
     }
 
     /// A URL refused offline fails before any remote is asked for its tip:
