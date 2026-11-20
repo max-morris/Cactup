@@ -277,7 +277,7 @@ fn materialize(path: &Path) -> Res<bool> {
         Err(e) => return Err(e).with_context(|| format!("Failed to stat '{}'", path.display())),
     };
     if !meta.is_file() {
-        bail!("'{}' links to something that is not a file; cactup only links files", path.display());
+        bail!("'{}' links to something that is not a file", path.display());
     }
     let dir = path.parent().expect("a link in a tree has a parent");
     let temp = tempfile::Builder::new()

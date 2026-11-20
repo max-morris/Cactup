@@ -151,9 +151,8 @@ fn generation_notice(root: &Path, generation: u32) -> Option<String> {
     let stamp = read_stamp(root, generation)?;
     (stamp.tip_generation > generation).then(|| {
         format!(
-            "the machine database has moved to generation {}; this cactup keeps using the last \
-             generation-{generation} revision. Run `cactup update`, and retry later if it reports \
-             up to date",
+            "The machine database has moved to generation {}; this cactup stays on generation \
+             {generation}.\nRun `cactup update`; retry later if it reports up to date.",
             stamp.tip_generation
         )
     })
@@ -304,10 +303,9 @@ fn sync_locked(root: &Path, url: &str, generation: u32, line: &mut Line) -> Res<
             let Some(dir) = current else {
                 bail!(
                     "Could not fetch the machine database from {url}: {e:#}\n\
-                     No local copy exists yet. Run `cactup update` on a host with network access \
-                     (the copy in '{}' serves every host sharing this home directory), or point \
-                     --mdb-path at a machine database on disk.",
-                    root.display()
+                     No local copy exists yet.\n\
+                     Run `cactup update` on a host with network access and the same home directory, \
+                     or point --mdb-path at a machine database on disk."
                 );
             };
             keep_stamp(root, generation, &dir, None);
@@ -324,8 +322,8 @@ fn sync_locked(root: &Path, url: &str, generation: u32, line: &mut Line) -> Res<
     let Some(commit) = found else {
         let Some(dir) = current else {
             bail!(
-                "{url} has never published MDB generation {generation} (its newest is generation \
-                 {tip_generation}). {}",
+                "{url} has never published MDB generation {generation}; its newest is \
+                 {tip_generation}.\n{}",
                 if tip_generation > generation { "Run `cactup update`." } else { "Retry later." }
             );
         };
@@ -1182,7 +1180,7 @@ mod tests {
         write_stamp(root.path(), 1, &stamp(3));
         let notice = generation_notice(root.path(), 1).unwrap();
         assert!(notice.contains("moved to generation 3"), "{notice}");
-        assert!(notice.contains("last generation-1 revision"), "{notice}");
+        assert!(notice.contains("stays on generation 1"), "{notice}");
         assert!(notice.contains("cactup update"), "{notice}");
     }
 

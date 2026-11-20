@@ -92,26 +92,25 @@ pub fn check_into(into: &str) -> Res<()> {
     };
     if into.is_empty() {
         bail!(
-            "Where a library goes (into) is empty; it must be a folder inside the dependent's repo, like \"src/fuka\""
+            "Library path (into) is empty; it must be a folder in the dependent's repo, like \"src/fuka\""
         );
     }
     if into.starts_with('/') || Path::new(into).is_absolute() {
         bail!(
-            "Where a library goes (into) is \"{}\", an absolute path; it must be relative to the dependent's repo",
+            "Library path (into) \"{}\" is absolute; it must be relative to the dependent's repo",
             into.escape_debug()
         );
     }
     if let Some(bad) = into.split('/').find(|part| !plain(part)) {
         bail!(
-            "Where a library goes (into) is \"{}\", whose part \"{}\" is not a plain folder name; it must be a \
-             relative path of plain names, like \"src/fuka\"",
+            "Library path (into) \"{}\" has \"{}\", which is not a plain folder name",
             into.escape_debug(),
             bad.escape_debug()
         );
     }
     if into.split('/').any(|part| part.eq_ignore_ascii_case(".git")) {
         bail!(
-            "Where a library goes (into) is \"{}\", inside the repo's .git; cactup will not write there",
+            "Library path (into) \"{}\" is inside the repo's .git",
             into.escape_debug()
         );
     }
@@ -152,7 +151,7 @@ pub fn order(placements: Vec<Placement>) -> Res<Vec<Placement>> {
     for p in &placements {
         if let Some(other) = at.insert((fold(&p.dependent), fold(&p.into)), p) {
             bail!(
-                "Two libraries go to {}: {} and {}; one path holds one checkout",
+                "Two libraries go to {}: {} and {}",
                 p.label(),
                 other.url,
                 p.url
@@ -180,7 +179,7 @@ pub fn order(placements: Vec<Placement>) -> Res<Vec<Placement>> {
                 .filter(|&i| !done[i])
                 .map(|i| format!("{} inside {}", placements[i].repo, placements[i].dependent))
                 .collect();
-            bail!("Libraries placed inside each other in a cycle: {}", stuck.join(", "));
+            bail!("Library cycle: {}", stuck.join(", "));
         };
         done[i] = true;
         *placed_repos.entry(fold(&placements[i].repo)).or_default() += 1;
@@ -203,7 +202,7 @@ fn check_clone(dir: &Path, what: &str, url: &str, commit: Option<&str>) -> Res<g
     };
     if meta.file_type().is_symlink() || !meta.is_dir() {
         bail!(
-            "'{}' is not {what}'s checkout but a {}",
+            "'{}' is a {}, not the checkout of {what}",
             dir.display(),
             if meta.file_type().is_symlink() { "symlink" } else { "file" }
         );
@@ -223,7 +222,7 @@ fn check_clone(dir: &Path, what: &str, url: &str, commit: Option<&str>) -> Res<g
     match origin {
         Some(o) if super::git::normalize_url(&o) == super::git::normalize_url(url) => {}
         Some(o) => bail!("'{}' is a checkout of {o}, not of {what}'s repository {url}", dir.display()),
-        None => bail!("'{}' has no origin, so it cannot be told to be {what}'s checkout", dir.display()),
+        None => bail!("'{}' has no origin, so cactup cannot confirm it is {what}", dir.display()),
     }
     if let Some(want) = commit {
         let head = repo.head_id().map(|id| id.detach().to_string()).unwrap_or_default();
@@ -249,7 +248,7 @@ fn tracked_at(repo: &gix::Repository, dependent: &str, into: &str) -> Res<Option
     let index_path = repo.index_path();
     let index = repo.index().map_err(|e| {
         anyhow!(e).context(format!(
-            "{dependent} has no readable index at '{}', so what it tracks at {into} cannot be told",
+            "{dependent} has no readable index at '{}'",
             index_path.display()
         ))
     })?;
@@ -340,14 +339,14 @@ fn walk(dependent: OwnedFd, shown: &Path, parts: &[&str]) -> Res<Way> {
                 let to = rustix::fs::readlinkat(here, *part, Vec::new())
                     .map(|t| t.to_string_lossy().into_owned());
                 bail!(
-                    "'{}' is a symlink (to '{}'); cactup places a library only through plain directories",
+                    "'{}' is a symlink (to '{}'), not a plain directory",
                     path.display(),
                     to.unwrap_or_default()
                 );
             }
             Some(kind) => {
                 bail!(
-                    "'{}' is a {}, not a directory, so nothing can go inside it",
+                    "'{}' is a {}, not a directory",
                     path.display(),
                     kind_name(kind)
                 )
@@ -435,8 +434,7 @@ impl Exclude {
         match kind_at(dependent, ".git", &git_path)? {
             Some(FileType::Directory) => {}
             Some(kind) => bail!(
-                "'{}' is a {}, not the repository's own directory; cactup writes the library's exclude only into a \
-                 plain .git directory",
+                "'{}' is a {}, not the repository's own directory",
                 git_path.display(),
                 kind_name(kind)
             ),
@@ -651,7 +649,7 @@ fn place_between(
     }
     if unplaced.contains(&p.dependent) {
         bail!(
-            "Not placed: {}, which it goes inside, is a library that was not placed itself",
+            "Not placed: {}, which it goes inside, was not placed",
             p.dependent
         );
     }
@@ -664,15 +662,12 @@ fn place_between(
         &p.dependent_url,
         p.dependent_commit.as_deref(),
     )
-    .context(
-        "Not placed: cactup puts a library only inside its dependent's own checkout, never creating it",
-    )?;
+    .context("Not placed")?;
     let library_dir = repos.join(&p.repo);
     check_clone(&library_dir, &p.repo, &p.url, None).context("Not placed")?;
     if let Some(path) = tracked_at(&dependent, &p.dependent, &p.into).context("Not placed")? {
         bail!(
-            "Not placed: {} tracks '{path}', so '{}' is the dependent's own; cactup will not put a library over it \
-             or inside it",
+            "Not placed: {} tracks '{path}', which is in the way of '{}'",
             p.dependent,
             dependent_dir.join(&p.into).display()
         );
@@ -701,20 +696,17 @@ fn place_between(
                 let to = rustix::fs::readlinkat(parent, *name, Vec::new())
                     .map(|t| t.to_string_lossy().into_owned());
                 bail!(
-                    "Not placed: '{}' is already a link, to '{}', which cactup did not make for {}; move it aside",
+                    "Not placed: '{}' is a link to '{}' that cactup did not make; move it aside",
                     target.display(),
-                    to.unwrap_or_default(),
-                    p.repo
+                    to.unwrap_or_default()
                 );
             }
             Some(FileType::Directory) => bail!(
-                "Not placed: '{}' is already a directory; cactup never overwrites one (a library is a link to its \
-                 own clone, '{}'); move it aside",
-                target.display(),
-                want.display()
+                "Not placed: '{}' is already a directory; move it aside",
+                target.display()
             ),
             Some(kind) => bail!(
-                "Not placed: '{}' is already a {}; cactup never overwrites one; move it aside",
+                "Not placed: '{}' is already a {}; move it aside",
                 target.display(),
                 kind_name(kind)
             ),
@@ -839,7 +831,7 @@ pub fn unplace(
     };
     let exclude = Exclude::check(&dependent_fd, &dependent_dir);
     match walk(dependent_fd, &dependent_dir, on_the_way) {
-        Err(e) => notes.push(format!("No link of {repo} to take away at '{}': {e:#}", target.display())),
+        Err(e) => notes.push(format!("No link of {repo} to remove at '{}': {e:#}", target.display())),
         Ok(way) if way.existing < on_the_way.len() => {}
         Ok(way) => {
             let parent = way.dirs.last().expect("the dependent at least");
@@ -852,8 +844,7 @@ pub fn unplace(
                     done.link_removed = true;
                 }
                 Some(kind) => notes.push(format!(
-                    "'{}', where {repo} was linked in, is a {} cactup did not make (the dependent's own, now); \
-                     left as it is",
+                    "'{}' is a {} cactup did not make; left as it is",
                     target.display(),
                     kind_name(kind)
                 )),
@@ -871,11 +862,7 @@ pub fn unplace(
         }
         Err(e) => e,
     };
-    notes.push(format!(
-        "{repo}'s exclude line for /{into} in {dependent} was left ({left:#}){}; prune still counts whatever is put \
-         at that path as the user's",
-        if done.link_removed { ", though its link was taken away" } else { "" }
-    ));
+    notes.push(format!("Left the exclude line for /{into} in {dependent} ({left:#})"));
     Ok(done)
 }
 
@@ -954,7 +941,7 @@ impl Unplacing {
                 let text = link_text(d.into.split('/').count(), &d.repo);
                 // `ln -s` into a directory there would make the link inside it.
                 let aside = if std::fs::symlink_metadata(&link).is_ok() {
-                    format!("move '{}' aside first (something is there now), then ", link.display())
+                    format!("move '{}' aside first, then ", link.display())
                 } else {
                     String::new()
                 };
@@ -1024,7 +1011,7 @@ impl<'a> PutBack<'a> {
         for (root, dependent, into, repo) in std::mem::take(&mut self.made) {
             if let Err(e) = unplace(self.install_root, &root, &dependent, &into, &repo, &mut problems) {
                 problems.push(format!(
-                    "{dependent}/{into}, which this run placed, could not be taken away: {e:#}"
+                    "Could not remove {dependent}/{into}, placed by this run: {e:#}"
                 ));
             }
         }
@@ -1515,7 +1502,7 @@ mod tests {
         let aside = s.tmp.path().join("aside");
         std::fs::rename(&kadath, &aside).unwrap();
         let e = err(&p);
-        assert!(e.contains("not checked out") && e.contains("never creating it"), "{e}");
+        assert!(e.contains("not checked out") && e.contains("Not placed"), "{e}");
         assert!(!kadath.exists());
         std::fs::rename(&aside, &kadath).unwrap();
 
@@ -2327,9 +2314,7 @@ mod tests {
         let unplacing = unplacing.unwrap();
         assert_eq!(unplacing.links(), ["KadathThorn/src/fuka"]);
         assert!(
-            unplacing.notes.iter().any(|n| n.contains("was left")
-                && n.contains("its link was taken away")
-                && n.contains("prune")),
+            unplacing.notes.iter().any(|n| n.contains("Left the exclude line for /src/fuka")),
             "{:?}",
             unplacing.notes
         );

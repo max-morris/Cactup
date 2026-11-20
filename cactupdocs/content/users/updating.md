@@ -156,9 +156,8 @@ your build keeps using the last revision of its own generation and says so,
 loudly, on every command:
 
 ```
-the machine database has moved to generation 3; this cactup (generation 2)
-keeps using the last generation-2 revision. Run `cactup update` (if that
-reports up to date, a release is still propagating; retry later)
+The machine database has moved to generation 3; this cactup stays on generation 2.
+Run `cactup update`; retry later if it reports up to date.
 ```
 
 Nothing breaks while you see this; your machines simply stop receiving

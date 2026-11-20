@@ -613,8 +613,7 @@ fn fetch_commit(
     let Some(git_ref) = git_ref else {
         let why = by_id.err().map(|e| format!("{e:#}")).unwrap_or_else(|| "the server sent something else".into());
         bail!(
-            "Failed to fetch commit {commit} by its id ({why}), and no !REPO_BRANCH names a branch or tag to \
-             fetch it through"
+            "Failed to fetch commit {commit} by its id ({why}); no !REPO_BRANCH to fetch it through"
         );
     };
     super::retry::with_backoff(progress, |progress| {

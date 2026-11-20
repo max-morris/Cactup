@@ -56,8 +56,7 @@ fn obtain_sim(
         (Some(par), true) => {
             if !(args.overwrite || args.force) {
                 bail!(
-                    "Simulation \"{}\" already exists but a parfile was given; \
-                     use --overwrite (or -f) to replace it",
+                    "Simulation \"{}\" already exists; pass --overwrite or -f to replace it",
                     args.sim
                 );
             }
@@ -330,15 +329,15 @@ fn submit_impl(
         if r.meta.foreground && r.meta.scheduler_job(&sched).is_none() {
             match LinkLock::is_held_live(&r.running_lock_path())? {
                 true => bail!(
-                    "Restart {} of simulation \"{}\" runs in the foreground (pid {}) and cannot be \
-                     chained behind; wait for it to end or interrupt it (Ctrl-C), then submit",
+                    "Restart {} of simulation \"{}\" runs in the foreground (pid {}).\n\
+                     Wait for it to end or interrupt it with Ctrl-C, then submit.",
                     restart::dir_name(active),
                     sim.name,
                     r.meta.job_id
                 ),
                 false => bail!(
-                    "Restart {} of simulation \"{}\" ran in the foreground and is still active, but \
-                     no run holds its lock; run `cactup sim clean {}`, then submit",
+                    "Restart {} of simulation \"{}\" is still active, but its foreground run is gone.\n\
+                     Run `cactup sim clean {}`, then submit.",
                     restart::dir_name(active),
                     sim.name,
                     sim.name
@@ -347,8 +346,7 @@ fn submit_impl(
         }
         if r.meta.job_id == NO_JOB_ID {
             bail!(
-                "Restart {} is active but has no job and is not reapable yet; \
-                 try again shortly or `cactup sim stop {}`",
+                "Restart {} is active but has no job; try again shortly or run `cactup sim stop {}`",
                 restart::dir_name(active),
                 sim.name
             );
@@ -356,7 +354,7 @@ fn submit_impl(
         let chain = match r.meta.terminated {
             false => {
                 println!(
-                    "Restart {} is still live (job {}); chaining the new submission behind it",
+                    "Restart {} is still live (job {}); chaining behind it",
                     restart::dir_name(active),
                     r.meta.job_id
                 );
@@ -384,7 +382,7 @@ fn submit_impl(
                     Some(AfterEnd::Listed(status)) => {
                         println!(
                             "Restart {dir} has ended but the scheduler still lists its job {job_id} ({}); \
-                             chaining the new submission behind it",
+                             chaining behind it",
                             crate::scheduler::listed_state_words(status)
                         );
                         true
@@ -397,8 +395,7 @@ fn submit_impl(
                     ),
                     _ if LinkLock::is_held_live(&r.running_lock_path())? => {
                         println!(
-                            "Restart {dir} is still shutting down; chaining the new submission behind its \
-                             job {job_id}"
+                            "Restart {dir} is still shutting down; chaining behind its job {job_id}"
                         );
                         true
                     }
@@ -437,7 +434,7 @@ fn submit_impl(
             Some(AfterEnd::Listed(status)) => {
                 println!(
                     "Restart {dir} has ended but the scheduler still lists its job {job_id} ({}); \
-                     chaining the new submission behind it",
+                     chaining behind it",
                     crate::scheduler::listed_state_words(status)
                 );
                 prev_job = Some(ended.meta.job_id.clone());
@@ -724,7 +721,7 @@ fn run_interactive(
     if let Some(active) = active {
         bail!(
             "Simulation \"{}\" already has an active restart ({}); wait for it, or \
-             `cactup sim stop {}` first",
+             run `cactup sim stop {}` first",
             sim.name,
             restart::dir_name(active),
             sim.name
@@ -1118,8 +1115,7 @@ pub(crate) fn spawn_and_wait(
     crate::par::join_with_deadline(
         copiers,
         std::time::Duration::from_secs(2),
-        "note: a background process of the run-script still holds the output pipe; \
-         its further output is not captured",
+        "note: no longer capturing output of a background process of the run-script",
     );
     Ok(status)
 }

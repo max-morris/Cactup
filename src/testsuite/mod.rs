@@ -226,7 +226,7 @@ impl TestRun {
         })?;
         if !entry.dir.is_dir() {
             bail!(
-                "Test run \"{name}\" is registered at '{}', which is missing; \
+                "Directory '{}' of test run \"{name}\" is missing; \
                  run `cactup test delete {name}` to remove it",
                 entry.dir.display()
             );

@@ -70,12 +70,8 @@ pub fn resolve_with(
     match resolve_inner(db, mdb, machine_flag, hostname_override, verbose)? {
         Resolution::Known(machine) => Ok(machine),
         Resolution::Unrecognized(hostname) => {
-            println!(
-                "Unrecognized host {}; using the built-in {} machine. Run `{}` to create one for this host.",
-                hostname.bold(),
-                "generic".bold(),
-                "cactup machine create".bold()
-            );
+            println!("Unrecognized host {}; using the built-in {} machine.", hostname.bold(), "generic".bold());
+            println!("Run `{}` to create one for this host.", "cactup machine create".bold());
             load_checked(mdb, "generic")
         }
     }
@@ -282,8 +278,8 @@ fn load_checked(mdb: &Mdb, name: &str) -> Res<Machine> {
             eprintln!(
                 "{}",
                 format!(
-                    "Warning: the system-MDB machine \"{}\" has changed since {name} was created from it; \
-                     re-create {name} to pick up the change.",
+                    "Warning: system-MDB machine \"{}\" has changed since {name} was created from it.\n\
+                     Re-create {name} to pick up the change.",
                     origin.from
                 )
                 .yellow()
@@ -341,7 +337,7 @@ fn list(ctx: &Ctx, mdb: &Mdb) -> Res<()> {
         eprintln!(
             "{}",
             format!(
-                "Note: ignoring '{}': a machine name may not start with '.'; rename the directory to use it.",
+                "Note: ignoring '{}': a machine name may not start with '.'.\nRename the directory to use it.",
                 dir.display()
             )
             .yellow()
@@ -778,8 +774,8 @@ fn delete_machine(db: &Db, mdb: &Mdb, name: &str) -> Res<()> {
     match mdb.machine_dir(name) {
         None => bail!("No machine named \"{name}\" in the MDB"),
         Some((_, Layer::System)) => bail!(
-            "\"{name}\" is a system-MDB machine and cannot be deleted; \
-             override it instead with `cactup machine create {name} --from-existing {name}`"
+            "\"{name}\" is a system-MDB machine and cannot be deleted.\n\
+             Override it with `cactup machine create {name} --from-existing {name}`."
         ),
         Some((dir, Layer::User)) => {
             fs::remove_dir_all(&dir)

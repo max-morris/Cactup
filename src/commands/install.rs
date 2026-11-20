@@ -163,7 +163,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         && sim.sim.root != root
     {
         bail!(
-            "'{}' says its source tree is {}, but its thornlist's !DEFINE ROOT is {root}",
+            "'{}' names source tree {}, but its thornlist defines ROOT = {root}",
             path.display(),
             sim.sim.root
         );
@@ -183,7 +183,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
 
     let alias = match alias {
         Some(alias) if database.installations.contains_key(&alias) => {
-            println!("{}", format!("An installation with the alias {} already exists.", alias.bold()).bright_red());
+            println!("{}", format!("Installation {} already exists.", alias.bold()).bright_red());
             return Ok(());
         },
         Some(alias) if !valid_alias(&alias) => {
@@ -192,18 +192,18 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         }
         Some(alias) => alias,
         None if silent && !valid_alias(&alias_default) => {
-            println!("{}", format!("The default alias {} is not valid: use only letters, digits, '-', '_', and '.'. Pass {} to choose one.", alias_default.bold(), "--alias".bold()).bright_red());
+            println!("{}", format!("The default alias {} is not valid.\nPass {} with only letters, digits, '-', '_' and '.'.", alias_default.bold(), "--alias".bold()).bright_red());
             return Ok(());
         }
         None if silent && database.installations.contains_key(&alias_default) => {
-            println!("{}", format!("An installation with the default alias {} already exists. Pass {} to choose another.", alias_default.bold(), "--alias".bold()).bright_red());
+            println!("{}", format!("Installation {} already exists.\nPass {} to choose another alias.", alias_default.bold(), "--alias".bold()).bright_red());
             return Ok(());
         }
         None if silent => alias_default.clone(),
         None => loop {
             let alias_sel = prompt_with_default("What should the installation's alias be?", &alias_default)?;
             if database.installations.contains_key(&alias_sel) {
-                println!("{}", format!("An installation with the alias {} already exists. Please choose another.", alias_sel.bold()).bright_red());
+                println!("{}", format!("Installation {} already exists; choose another alias.", alias_sel.bold()).bright_red());
             } else if !valid_alias(&alias_sel) {
                 println!("{}", format!("{} is not a valid alias: use only letters, digits, '-', '_', and '.'.", alias_sel.bold()).bright_red());
             } else {
@@ -358,8 +358,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         // Running the same install again picks up where this one stopped; a
         // repo cut short mid-checkout is then named, for deleting first.
         bail!(
-            "Interrupted; the installation at '{}' is incomplete and was not registered \
-             (run the same install again to finish it)",
+            "Interrupted; '{}' is incomplete and not registered\nRerun the same install to finish it.",
             install_dir.display()
         );
     }
@@ -441,8 +440,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     let became_active = ctx.db.update(|database| {
         if database.installations.contains_key(&alias) {
             bail!(
-                "An installation named {alias} appeared while this install ran; \
-                 the new installation at '{}' was NOT registered",
+                "Installation {alias} was created meanwhile; '{}' was not registered",
                 install_dir.display()
             );
         }
@@ -493,7 +491,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     }
 
     if !became_active {
-        println!("Another installation is active; run `{}` to switch to this one.", format!("cactup use {}", alias).bold());
+        println!("Switch to it with `{}`.", format!("cactup use {}", alias).bold());
     }
 
     Ok(())
@@ -550,7 +548,7 @@ fn stack_install_source(ctx: &Ctx, req: &str) -> Res<InstallSource<'static>> {
     if unpinned {
         println!(
             "{}",
-            format!("{slug} is not a release: its repos follow their branches, so the installation is not reproducible")
+            format!("{slug} is not a release; its repos follow their branches")
                 .yellow()
         );
     }
@@ -575,24 +573,20 @@ fn sim_install_source(path: &Path) -> Res<InstallSource<'static>> {
     };
     let unpinned = names(&|r| r.commit.is_none() && r.sha256.is_none());
     if !unpinned.is_empty() {
-        println!("{}", format!("Not pinned, so they follow their branch: {}", unpinned.join(", ")).yellow());
+        println!("{}", format!("Unpinned (following their branch): {}", unpinned.join(", ")).yellow());
     }
     let dirty = names(&|r| r.dirty);
     if !dirty.is_empty() {
         println!(
             "{}",
-            format!("Had uncommitted changes when exported, which the file does not carry: {}", dirty.join(", "))
+            format!("Uncommitted changes at export, not in the file: {}", dirty.join(", "))
                 .yellow()
         );
     }
     if !unchecked.is_empty() {
         println!(
             "{}",
-            format!(
-                "Downloaded without checking their recorded hash, which names no single file: {}",
-                unchecked.join(", ")
-            )
-            .yellow()
+            format!("Downloaded without a hash check: {}", unchecked.join(", ")).yellow()
         );
     }
     let resolved = fs::canonicalize(&expanded).unwrap_or(expanded);

@@ -1079,8 +1079,7 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
                     git_groups.keys().find(|k| **k != c.repo && k.eq_ignore_ascii_case(&c.repo))
                 {
                     bail!(
-                        "Thornlist names repos {other} and {}, which differ only in case: on a case-insensitive \
-                         filesystem they are one directory",
+                        "Thornlist names repos {other} and {}, which differ only in case",
                         c.repo
                     );
                 }
@@ -1145,8 +1144,7 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
         library::check_into(&into).with_context(|| format!("The thornlist places {} inside {dependent}", c.repo))?;
         let Some(host) = git_groups.get(&dependent) else {
             bail!(
-                "The thornlist places {} inside repos/{dependent}, which it does not check out; a library goes only \
-                 inside a clone the same list fetches",
+                "The thornlist places {} inside repos/{dependent}, which it does not check out",
                 c.repo
             );
         };
