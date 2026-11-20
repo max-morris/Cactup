@@ -24,16 +24,8 @@ pub fn dispatch(ctx: &Ctx, alias: String, force: bool) -> Res<()> {
     // Not even with -f: their files are links into this tree.
     let dependents = super::copy::dependents(&db, &inst.root);
     drop(db);
-    if let Some(first) = dependents.first() {
-        let (are, copies, read, them) = match dependents.len() {
-            1 => ("is a", "copy", "reads", "it"),
-            _ => ("are", "copies", "read", "them"),
-        };
-        bail!(
-            "{} {are} symbolic {copies} of {alias} and {read} its files; make {them} independent first with \
-             `cactup inst reify {first}`, or delete {them}",
-            dependents.join(", ")
-        );
+    if !dependents.is_empty() {
+        bail!("{alias} has symbolic copies: {}; reify or delete them first", dependents.join(", "));
     }
 
     let home_exists = inst.root.is_dir();

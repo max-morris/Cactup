@@ -28,7 +28,7 @@ pub fn dispatch(ctx: &Ctx, alias: &str, paths: &[PathBuf]) -> Res<()> {
     drop(db);
     let inst = Installation::new(alias, &entry.path);
     let Some(source) = inst.meta()?.linked_to else {
-        println!("{alias} is not a symbolic copy: its files are its own already.");
+        println!("{alias} is not a symbolic copy.");
         return Ok(());
     };
     let source_name = entry.copied_from.clone().unwrap_or_else(|| source.display().to_string());
@@ -54,17 +54,16 @@ pub fn dispatch(ctx: &Ctx, alias: &str, paths: &[PathBuf]) -> Res<()> {
         locked.set_meta(&meta)?;
         println!(
             "{}",
-            format!("{alias} no longer depends on {source_name}: made {} file(s) its own.", done.copied).bright_green()
+            format!("Reified {alias}: {} file(s) copied from {source_name}.", done.copied).bright_green()
         );
     } else {
         println!(
             "{}",
-            format!("Made {} file(s) {alias}'s own; it still reads {source_name}'s other files.", done.copied)
-                .bright_green()
+            format!("Reified {} file(s) in {alias}.", done.copied).bright_green()
         );
     }
     if done.dangling > 0 {
-        println!("Removed {} link(s) to files {source_name} no longer has.", done.dangling);
+        println!("Removed {} dangling link(s).", done.dangling);
     }
     Ok(())
 }
@@ -134,7 +133,7 @@ fn reify_with_progress(cow: &Cow, units: &[PathBuf], alias: &str) -> Res<Reified
         renderer.shutdown_and_wait();
     }
     result.map_err(|e| match gix::interrupt::is_triggered() {
-        true => anyhow!("Interrupted; the files done so far stay done: run the same command again to finish"),
+        true => anyhow!("Interrupted; rerun to finish"),
         false => e,
     })
 }

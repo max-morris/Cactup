@@ -229,18 +229,14 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
         _ => {}
     }
     match (&entry.copied_from, meta.as_ref().and_then(|m| m.linked_to.as_ref())) {
-        (Some(source), Some(_)) => println!(
-            "  copied from:  {source}, symbolically: the files not yet made its own are links to {source}'s \
-             (`cactup inst reify {}`)",
-            entry.alias
-        ),
-        (None, Some(home)) => println!("  linked to:    {} (symbolically)", home.display()),
+        (Some(source), Some(_)) => println!("  copied from:  {source} (symbolic)"),
+        (None, Some(home)) => println!("  linked to:    {}", home.display()),
         (Some(source), None) => println!("  copied from:  {source}"),
         (None, None) => {}
     }
     let dependents = super::copy::dependents(&database, &inst.root);
     if !dependents.is_empty() {
-        println!("  symbolic copies: {} (they read this installation's files)", dependents.join(", "));
+        println!("  symbolic copies: {}", dependents.join(", "));
     }
     // §8.10: where to take problems with the stack the tree is on.
     if let Some(contact) = &entry.stack_contact {
