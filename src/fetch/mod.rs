@@ -340,6 +340,13 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
         Git(&'p GitRepoPlan),
         Download(&'p Component),
     }
+    // A symbolic copy's files are links into its source until written
+    // (`crate::cow`). Its repos need nothing here: their `.git` is their
+    // own, and a checkout unlinks a link before it writes the file (gix opens
+    // with O_NOFOLLOW and unlinks on the collision), so a changed file
+    // becomes the copy's own and an unchanged one stays a link. A download
+    // replaces its file by rename; a system tool (svn) writes in place.
+    let cow = crate::cow::Cow::at(install_root)?;
 
     let (progress, renderer) = crate::manifest::setup_prodash_with(
         Some(crate::manifest::progress_level_filter(PROGRESS_MAX_LEVEL)),
@@ -525,7 +532,7 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                             layout.clone(),
                         );
                         line.phase("downloading");
-                        let outcome = download::download_component(install_root, c, &mut line);
+                        let outcome = download::download_component(install_root, c, &mut line, &cow);
                         let mut report = report.lock().expect("fetch report poisoned");
                         match outcome {
                             // Kept as it was: nothing happened, so the line leaves nothing.
@@ -605,7 +612,9 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                 .push(Failure { what: c.checkout.clone(), error: "Interrupted".into() });
             continue;
         }
-        if let Err(e) = external::fetch_external(install_root, c) {
+        // A system tool writes in its checkout in place.
+        let reified = cow.reify(&install_root.join(&c.target), &gix::interrupt::IS_INTERRUPTED, &|| ());
+        if let Err(e) = reified.and_then(|_| external::fetch_external(install_root, c)) {
             report.failures.push(Failure { what: c.checkout.clone(), error: format!("{e:#}") });
         }
     }

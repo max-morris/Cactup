@@ -808,10 +808,39 @@ pub fn local_edits(repo_dir: &Path, paths: &[String]) -> Vec<String> {
             };
             let Some(id) = id else { return true };
             let on_disk = Some((id, kind));
-            on_disk != entry_at(&head_tree, rel) && on_disk != entry_at(&before_tree, rel)
+            // A link a symbolic copy put there stands for the file it resolves
+            // to (see `stands_in_for`).
+            let followed = meta.file_type().is_symlink().then(|| followed_file(&path, hash_kind)).flatten();
+            let unchanged = |view: Option<(ObjectId, EntryKind)>| {
+                view.is_some() && (view == entry_at(&head_tree, rel) || view == entry_at(&before_tree, rel))
+            };
+            !unchanged(on_disk) && !unchanged(followed)
         })
         .cloned()
         .collect()
+}
+
+/// The blob id and kind of the regular file `path` resolves to, following
+/// links; `None` for anything else.
+fn followed_file(path: &Path, hash_kind: gix::hash::Kind) -> Option<(ObjectId, gix::objs::tree::EntryKind)> {
+    use gix::objs::tree::EntryKind;
+    let meta = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
+    let kind = match std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 {
+        0 => EntryKind::Blob,
+        _ => EntryKind::BlobExecutable,
+    };
+    let mut file = std::fs::File::open(path).ok()?;
+    let interrupt = &gix::interrupt::IS_INTERRUPTED;
+    let id = gix::objs::compute_stream_hash(
+        hash_kind,
+        gix::objs::Kind::Blob,
+        &mut file,
+        meta.len(),
+        &mut gix::progress::Discard,
+        interrupt,
+    )
+    .ok()?;
+    Some((id, kind))
 }
 
 /// How an [`align`] cut short by Ctrl-C mid-checkout begins its error, for
@@ -1243,6 +1272,8 @@ fn status_paths_until(
     }
     let mut iter =
         platform.into_iter(Vec::<BString>::new()).with_context(|| "Failed to run status")?;
+    // Read only once some entry needs it (see `stands_in_for`).
+    let mut index = None;
     for item in iter.by_ref() {
         let item = match item {
             Ok(item) => item,
@@ -1256,6 +1287,19 @@ fn status_paths_until(
             }
             gix::status::Item::IndexWorktree(item) => {
                 use gix::status::index_worktree::Item::*;
+                use gix::status::plumbing::index_as_worktree::{Change as Worktree, EntryStatus};
+                // A link where a file is tracked reads as a type change, or,
+                // for an executable, as its executable bit lost.
+                if let Modification {
+                    entry,
+                    rela_path,
+                    status: EntryStatus::Change(Worktree::Type { .. } | Worktree::Modification { .. }),
+                    ..
+                } = &item
+                    && stands_in_for(repo, &mut index, rela_path.as_bstr(), entry)
+                {
+                    continue;
+                }
                 let path = match &item {
                     Modification { rela_path, .. } => rela_path.to_string(),
                     DirectoryContents { entry, .. } => entry.rela_path.to_string(),
@@ -1295,6 +1339,51 @@ fn status_paths_until(
     modified.sort();
     modified.dedup();
     Ok((modified, untracked))
+}
+
+/// Whether the worktree entry at `rela_path`, which status calls a type
+/// change of `entry`, is a symlink standing in for that tracked file: one a
+/// symbolic copy put there (`crate::cow`), resolving to a regular file with
+/// the entry's content and executable bit. Such a link is the file,
+/// unchanged: what a build reads through it is exactly what is committed.
+/// `index` is the repo's index, read here the first time it is needed.
+fn stands_in_for(
+    repo: &gix::Repository,
+    index: &mut Option<Option<gix::index::File>>,
+    rela_path: &gix::bstr::BStr,
+    entry: &gix::index::Entry,
+) -> bool {
+    use gix::index::entry::Mode;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if entry.mode != Mode::FILE && entry.mode != Mode::FILE_EXECUTABLE {
+        return false;
+    }
+    let Some(workdir) = repo.workdir() else { return false };
+    let Ok(rela_path) = gix::path::try_from_bstr(rela_path) else { return false };
+    let path = workdir.join(rela_path);
+    if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return false;
+    }
+    let Ok(meta) = std::fs::metadata(&path) else { return false };
+    if !meta.is_file() || (meta.permissions().mode() & 0o111 != 0) != (entry.mode == Mode::FILE_EXECUTABLE) {
+        return false;
+    }
+    // The stat the index recorded is the file's own while the repo's index
+    // is a copy of the source's: no need to hash.
+    let index = index.get_or_insert_with(|| repo.open_index().ok());
+    let same_stat = meta.len() as u32 == entry.stat.size
+        && meta.mtime() as u32 == entry.stat.mtime.secs
+        && meta.mtime_nsec() as u32 == entry.stat.mtime.nsecs;
+    if same_stat && index.as_ref().is_some_and(|index| !is_racy_in(entry, index)) {
+        crate::timing::count("status: links matched by stat", 1);
+        return true;
+    }
+    crate::timing::count("status: links hashed", 1);
+    let Ok(mut file) = std::fs::File::open(&path) else { return false };
+    let interrupt = &gix::interrupt::IS_INTERRUPTED;
+    let blob = gix::objs::Kind::Blob;
+    gix::objs::compute_stream_hash(repo.object_hash(), blob, &mut file, meta.len(), &mut gix::progress::Discard, interrupt)
+        .is_ok_and(|id| id == entry.id)
 }
 
 /// What a build actually compiles out of this repo, as a compact string:
@@ -1754,6 +1843,93 @@ mod source_state_tests {
         // A new commit moves the commit half.
         testrepo::commit(&dir, "more");
         assert_ne!(source_state(&dir).unwrap(), clean);
+    }
+
+    /// A symbolic copy's repo is links to the source's files, with a `.git`
+    /// of its own that borrows the source's objects: it reads as the source
+    /// does, a link counting as the file it resolves to, and an edit made in
+    /// the copy (a link become a file) is still an edit. Reified, it reads
+    /// the same with objects of its own.
+    #[test]
+    fn a_symbolic_copy_reads_as_its_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let (a, b) = (root.join("a"), root.join("b"));
+        testrepo::init(&a);
+        testrepo::commit_file(&a, "thorn.cc", "int a;\n");
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        crate::treecopy::Copier::new(&root, &root, &stop, &|| ())
+            .copy(&a, &b, crate::treecopy::Mode::Link)
+            .unwrap();
+        assert!(std::fs::symlink_metadata(b.join("thorn.cc")).unwrap().file_type().is_symlink());
+        assert!(std::fs::symlink_metadata(b.join(".git/HEAD")).unwrap().is_file());
+        assert!(b.join(".git/objects/info/alternates").is_file());
+
+        let clean = source_state(&a).unwrap();
+        assert_eq!(source_state(&b).unwrap(), clean);
+        assert!(source_diff(&b).unwrap().untracked.is_empty());
+        let probe = probe(&b, "", "");
+        assert!(!matches!(probe.state, RepoState::Dirty(DirtyReason::WorktreeModified(_))), "{:?}", probe.state);
+
+        // The copy's own edit, made the way copy-on-write makes it.
+        crate::cow::Cow::linked_to(Some(a.clone())).reify_quietly(&b.join("thorn.cc")).unwrap();
+        assert_eq!(source_state(&b).unwrap(), clean, "a reified file with the same content is unchanged");
+        std::fs::write(b.join("thorn.cc"), "int b;\n").unwrap();
+        assert_eq!(source_diff(&b).unwrap().modified, ["thorn.cc"]);
+        assert_eq!(std::fs::read_to_string(a.join("thorn.cc")).unwrap(), "int a;\n");
+        assert_eq!(local_edits(&b, &["thorn.cc".to_owned()]), ["thorn.cc"]);
+
+        // A link whose file differs from the commit is an edit as well.
+        std::fs::remove_file(b.join("thorn.cc")).unwrap();
+        std::fs::write(root.join("other.cc"), "int c;\n").unwrap();
+        std::os::unix::fs::symlink(root.join("other.cc"), b.join("thorn.cc")).unwrap();
+        assert_eq!(source_diff(&b).unwrap().modified, ["thorn.cc"]);
+        std::fs::write(root.join("other.cc"), "int a;\n").unwrap();
+        assert!(source_diff(&b).unwrap().modified.is_empty(), "the same content through another link");
+        assert!(local_edits(&b, &["thorn.cc".to_owned()]).is_empty());
+
+        // Reified whole: the objects are its own, and nothing else changed.
+        let reified = crate::cow::Cow::linked_to(Some(a.clone())).reify_quietly(&b).unwrap();
+        assert!(reified.copied > 0);
+        assert!(!b.join(".git/objects/info/alternates").exists());
+        assert_eq!(source_state(&b).unwrap(), clean);
+        std::fs::remove_dir_all(&a).unwrap();
+        assert_eq!(source_state(&b).unwrap(), clean, "the copy no longer needs its source");
+    }
+
+    /// What a refetch does to a symbolic copy's repo needs no copy-on-write
+    /// of its own: the checkout replaces each file it changes with a file of
+    /// the copy's own and leaves the others links, its new objects land in
+    /// the copy's store, and the source is untouched.
+    #[test]
+    fn a_checkout_in_a_symbolic_copy_writes_only_its_own_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let (a, b) = (root.join("a"), root.join("b"));
+        testrepo::init(&a);
+        testrepo::commit_file(&a, "thorn.cc", "int a;\n");
+        let two = testrepo::commit_tree(&a, &[("keep.cc", "same\n", false), ("thorn.cc", "int b;\n", false)]);
+        let three = testrepo::commit_tree(&a, &[("keep.cc", "same\n", false), ("thorn.cc", "int c;\n", false)]);
+        let mut progress = prodash::tree::Root::new().add_child("test checkout");
+        pin(&a, None, two, false, &mut progress).unwrap();
+        // As a fetch leaves it: what the index says is known to be on disk.
+        assert!(matches!(settle_index(&a).unwrap(), Settled::Rewritten | Settled::Clean));
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        crate::treecopy::Copier::new(&root, &root, &stop, &|| ())
+            .copy(&a, &b, crate::treecopy::Mode::Link)
+            .unwrap();
+        let is_link = |p: &Path| std::fs::symlink_metadata(p).unwrap().file_type().is_symlink();
+
+        pin(&b, None, three, false, &mut progress).unwrap();
+        assert_eq!(head_of(&b).unwrap().1, three);
+        assert!(!is_link(&b.join("thorn.cc")));
+        assert_eq!(std::fs::read_to_string(b.join("thorn.cc")).unwrap(), "int c;\n");
+        assert!(is_link(&b.join("keep.cc")), "an unchanged file stays a link");
+        assert!(source_diff(&b).unwrap().modified.is_empty());
+
+        assert_eq!(head_of(&a).unwrap().1, two);
+        assert_eq!(std::fs::read_to_string(a.join("thorn.cc")).unwrap(), "int b;\n");
+        assert!(source_diff(&a).unwrap().modified.is_empty());
     }
 }
 

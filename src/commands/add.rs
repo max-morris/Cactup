@@ -842,6 +842,7 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<
 
     let inst = Installation::resolve(ctx)?;
     let locked = inst.locked()?;
+    let _source_locks = super::copy::lock_sources(ctx, &inst)?;
     let mut meta = locked.meta()?;
     let pristine = std::fs::read_to_string(inst.source_thornlist_to_read())
         .context("This installation has no pristine thornlist to add to")?;
@@ -962,6 +963,7 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], replace: bool, force: bool) -> Res<
     }
     crate::fetch::FetchState::record(&inst.root, &report.records())?;
 
+    crate::cow::Cow::at(&inst.root)?.before_replace(&live_path)?;
     std::fs::write(&live_path, &composed).with_context(|| format!("Failed to write '{}'", live_path.display()))?;
     // The list is written: what it drops stays dropped, whatever follows.
     let unplacing = undo.commit();
@@ -1020,6 +1022,7 @@ pub fn remove(ctx: &Ctx, package: &str, force: bool) -> Res<()> {
     let entry = format!("{}/{}", slug.owner, slug.name);
     let inst = Installation::resolve(ctx)?;
     let locked = inst.locked()?;
+    let _source_locks = super::copy::lock_sources(ctx, &inst)?;
     let mut meta = locked.meta()?;
     let Some(i) = meta.added.iter().position(|a| a.package == entry) else {
         let added: Vec<&str> = meta.added.iter().map(|a| a.package.as_str()).collect();
@@ -1074,6 +1077,7 @@ pub fn remove(ctx: &Ctx, package: &str, force: bool) -> Res<()> {
         }
         crate::fetch::FetchState::record(&inst.root, &report.records())?;
     }
+    crate::cow::Cow::at(&inst.root)?.before_replace(&live_path)?;
     std::fs::write(&live_path, &composed).with_context(|| format!("Failed to write '{}'", live_path.display()))?;
     // The list is written: what it drops stays dropped, whatever follows.
     let unplacing = undo.commit();
@@ -1822,6 +1826,7 @@ mod tests {
                         current_thornlist: None,
                         stack_contact: None,
                         unfetched_repos: Default::default(),
+                        copied_from: None,
                     },
                 );
                 d.active_installation = Some("t".into());

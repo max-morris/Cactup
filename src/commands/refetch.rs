@@ -72,7 +72,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
 
     // §2.3 item 6: the fetch lock. Dry-run stays read-only but still probes
     // it — classifying 81 worktrees mid-checkout would be garbage.
-    let lock_path = inst.cactup_dir().join(".cactup-fetch.lock");
+    let lock_path = inst.fetch_lock_path();
     fs::create_dir_all(inst.cactup_dir())
         .with_context(|| format!("Failed to create '{}'", inst.cactup_dir().display()))?;
     let _lock = if args.dry_run {
@@ -90,6 +90,16 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     } else {
         Some(LinkLock::acquire(&lock_path)?.with_heartbeat())
     };
+    // A symbolic copy reads its source's files, which must hold still while
+    // they are copied in (`crate::cow`).
+    let cow = crate::cow::Cow::at(&inst.root)?;
+    let _source_locks = match cow.source() {
+        Some(source) if !args.dry_run => super::copy::lock_fetches(&Installation::new("", source))?,
+        _ => Vec::new(),
+    };
+    if !args.dry_run {
+        super::copy::note_dependents(ctx, &inst)?;
+    }
 
     // Thornlist source, in precedence order (§3.2).
     let source = resolve_source(ctx, &inst, &args)?;
@@ -365,6 +375,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     if fetch_ok || had_work {
         if source.is_explicit() {
             snapshot_live(&inst, &live_read)?;
+            cow.before_replace(&live_path)?;
             fs::write(&live_path, &composed)
                 .with_context(|| format!("Failed to write '{}'", live_path.display()))?;
             // The list is written: the placements it drops stay dropped,
@@ -385,6 +396,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             // — hand edits in the live file stay visible as divergence, so
             // the guard above keeps protecting them on the next explicit
             // refetch even after they have been fetched once.
+            cow.before_replace(&pristine_path)?;
             fs::write(&pristine_path, source.bytes())
                 .with_context(|| format!("Failed to write '{}'", pristine_path.display()))?;
             if pristine_read != pristine_path {
@@ -1585,6 +1597,7 @@ mod tests {
             current_thornlist: None,
             stack_contact: None,
             unfetched_repos: Default::default(),
+            copied_from: None,
         };
         let mp = entry(Some("max/carpetx-mp@mixed-precision:1.2.0"), None);
         assert_eq!(stay_on_track("max/carpetx-mp", Some(&mp)), "max/carpetx-mp@mixed-precision");

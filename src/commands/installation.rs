@@ -159,6 +159,10 @@ pub fn dispatch(ctx: &Ctx, cmd: InstallationCommand) -> Res<()> {
         InstallationCommand::Refetch(args) => super::refetch::dispatch(ctx, args),
         InstallationCommand::Delta { alias } => super::delta::installation_delta(ctx, alias),
         InstallationCommand::Delete { alias, force } => super::delete::dispatch(ctx, alias, force),
+        InstallationCommand::Cp { source, new_name, install_prefix, symbolic } => {
+            super::copy::dispatch(ctx, &source, &new_name, install_prefix.as_deref(), symbolic)
+        }
+        InstallationCommand::Reify { alias, paths } => super::reify::dispatch(ctx, &alias, &paths),
     }
 }
 
@@ -223,6 +227,20 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
             println!("  now on:       thornlist {current} (refetched)")
         }
         _ => {}
+    }
+    match (&entry.copied_from, meta.as_ref().and_then(|m| m.linked_to.as_ref())) {
+        (Some(source), Some(_)) => println!(
+            "  copied from:  {source}, symbolically: the files not yet made its own are links to {source}'s \
+             (`cactup inst reify {}`)",
+            entry.alias
+        ),
+        (None, Some(home)) => println!("  linked to:    {} (symbolically)", home.display()),
+        (Some(source), None) => println!("  copied from:  {source}"),
+        (None, None) => {}
+    }
+    let dependents = super::copy::dependents(&database, &inst.root);
+    if !dependents.is_empty() {
+        println!("  symbolic copies: {} (they read this installation's files)", dependents.join(", "));
     }
     // §8.10: where to take problems with the stack the tree is on.
     if let Some(contact) = &entry.stack_contact {
@@ -388,6 +406,7 @@ mod tests {
             current_thornlist: None,
             stack_contact: None,
             unfetched_repos,
+            copied_from: None,
         }
     }
 

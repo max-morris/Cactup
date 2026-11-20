@@ -555,7 +555,7 @@ written older).
 | File | Descriptor | Key | Current | `frozen_read` |
 |---|---|---|---|---|
 | `~/.cactup/database.json` | `database::DATABASE` (JSON; `legacy`: bare `detected-machine`) | `schema` | 1 | no |
-| `<inst>/.cactup/installation.toml` | `installation::INSTALLATION` (chain `[1 → 2]`, a no-op; down-step `[2 → 1]` unless some `[[added]]` has `libraries`, which an older writer would drop; once written as 2 a file stays 2. Binaries released before the bump read a schema-2 file's `root-dir` as `Cactus` on some paths, so with a custom `!DEFINE ROOT` they may report a missing tree instead of "upgrade") | `schema` | 2 | no |
+| `<inst>/.cactup/installation.toml` | `installation::INSTALLATION` (chain `[1 → 2, 2 → 3]`, no-ops; down-step `[2 → 1]` unless some `[[added]]` has `libraries`, which an older writer would drop; down-step `[3 → 2]` unless the record has `linked-to` (a symbolic copy, §3.1), into which an older binary would write through its links; once written as N a file stays N. Binaries released before the first bump read a schema-2 file's `root-dir` as `Cactus` on some paths, so with a custom `!DEFINE ROOT` they may report a missing tree instead of "upgrade") | `schema` | 3 | no |
 | `simulations.toml` | `installation::SIM_REGISTRY` | `schema` | 1 | no |
 | `tests.toml` | `installation::TEST_REGISTRY` | `schema` | 1 | no |
 | `<inst>/.cactup/fetch-state.toml` | `fetch::FETCH_STATE` | `schema` | 1 | no |
@@ -649,6 +649,30 @@ cactup installation delete <alias> [-f]           (delete an installation: the
                                                    if it points there; refuses
                                                    while a build is in flight
                                                    unless -f)
+cactup installation cp <alias> <new-name>         (copy an installation: the
+       [--install-prefix P] [-s|--symbolic]        Cactus tree without configs/
+                                                   and exe/, imports/, the
+                                                   pristine thornlist, and the
+                                                   installation record and fetch
+                                                   state; new sim-home/test-home
+                                                   for the new alias, no active
+                                                   config, no simulations or test
+                                                   runs; staged in
+                                                   P/.cactup-cp-<new>.partial and
+                                                   registered last; holds the
+                                                   fetch locks of the source and
+                                                   of what it links into; DB
+                                                   entry records `copied-from`.
+                                                   -s: a symbolic copy, below)
+cactup installation reify <alias> [PATH…]         (make a symbolic copy's files
+                                                   its own: every copy link under
+                                                   PATH, or all of them, becomes
+                                                   a copy, a repo's borrowed
+                                                   objects are copied in, a link
+                                                   to a file the source no longer
+                                                   has is removed; all of them:
+                                                   `linked-to` goes. Holds its own
+                                                   and the source's fetch locks)
 cactup inst …                      (short form of `installation`, a duplicate
                                     clap variant routed identically, so the docs
                                     generator renders both)
@@ -730,6 +754,42 @@ Retired so far: `--variant` on `build` (and `build run`/`build submit`), now
 test scripts, as it picks every script (§11.2); `--variants` on `machine
 show`, now `--flavors`. They are kept indefinitely (`args::RETIRED_FLAGS`). This
 paragraph is the one place they are documented: user docs never mention them.
+
+**Symbolic copies (`installation cp -s`).** A symbolic copy makes the same
+real directories as a copy, and in them, for every file of the Cactus tree
+and of `imports/`, an absolute symlink to the same file in the source (a
+*copy link*). Real all the same: `.cactup/`, the pristine thornlist, the
+live thornlist (edited by hand, and an editor writes through a link), every
+repo's `.git` (git accepts no `HEAD` that links elsewhere, and writes refs,
+the index and reflogs in place), and any file named `.git*` (git reads
+`.gitignore`/`.gitattributes` only from a file). A repo's object store
+borrows the source's through `objects/info/alternates`, under a
+`# cactup: …` marker line that tells it from the user's own lines. The
+record names the source home (`installation.toml` `linked-to`, which made it
+version 3: an older binary must refuse the copy rather than write through
+its links).
+
+Copy-on-write: nothing may open a copy link for writing. A checkout (gix's,
+and git's) unlinks a link before writing the file, so a refetch gives every
+file it changes a copy of the installation's own and leaves the rest links;
+new objects land in the copy's store. cactup's whole-file writes (the
+thornlists, `import`'s parfile, a download's temp file) remove a link first
+(`cow::Cow::before_replace`); what writes in place (an svn/cvs/hg checkout)
+has its directory reified first (`cow::Cow::reify`). Status reads
+(`fetch::git::status_paths_until`, `local_edits`) count a link that resolves
+to a regular file with the index entry's content and executable bit as that
+file, unchanged (stat first, while the index is the copied one; else hashed),
+so refetch's dirty guard, `inst delta`, a build's source state and
+`sim export` see a symbolic copy as they see its source. Plain `git status` in
+the copy still reports each link as a type change.
+
+A symbolic copy follows its source: a file it has not made its own changes
+when the source's does. So `installation delete` refuses a source while any
+installation's `linked-to` names it (not even `-f`); refetch and add in a
+source say which symbolic copies see the change; refetch and add in a copy
+hold the source's fetch lock. A plain copy of a symbolic copy copies what its
+links point at and copies in its borrowed objects; a symbolic copy of one
+links to its paths (a chain). `installation reify` ends the dependence.
 
 ### 3.1 Command mapping from simfactory
 

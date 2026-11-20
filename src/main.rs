@@ -3,6 +3,7 @@ mod build;
 mod build_info;
 mod cactarium;
 mod commands;
+mod cow;
 mod database;
 mod fetch;
 mod format;
@@ -23,6 +24,7 @@ mod template;
 mod testsuite;
 mod thornlist;
 mod timing;
+mod treecopy;
 mod update;
 mod walltime;
 // The corpus parser: used by build.rs (via include!) at build time, and by
