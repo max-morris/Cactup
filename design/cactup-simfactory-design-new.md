@@ -4562,7 +4562,12 @@ the config's own record only while that still describes the same `build-id`.
     (else "resolves to a private address; not reachable for others"); the
     connection is pinned to those addresses (`resolve_to_addrs`), so DNS
     cannot swap one in between (an environment proxy connects on its own,
-    and then the pin cannot hold). `probe::is_answer` and
+    and then the pin cannot hold). A host that does not resolve here at all
+    is not refused for that: a proxy-only login node resolves nothing
+    itself. The check and the pin are skipped and the probe decides: it may
+    answer through the proxy, and without one its failed connection is the
+    refusal. The Cactarium vets addresses server-side for what is published
+    there, so this side may be lenient. `probe::is_answer` and
     `probe::redirect_target` turn the response into an `Outcome`, and
     `probe::next_step` decides: publish the candidate, ask once more at a
     redirect to the same repo (GitLab's `.git` form; the candidate is still

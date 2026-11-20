@@ -51,7 +51,9 @@ Export refuses what nobody else could reproduce:
   credentials, isn't there, or does not answer is refused; one that
   redirects to another path has moved, and export names where to. A remote
   whose host resolves to a private address (a machine on your own network)
-  is refused too: nobody outside could reach it.
+  is refused too: nobody outside could reach it. (A host your machine
+  cannot look up itself, as on a login node that goes out through a proxy,
+  is still asked.)
 - **ssh URLs** (`git@github.com:me/thorns.git`) need an account on the
   host, so export asks the matching https URL
   (`https://github.com/me/thorns.git`) instead: if it answers, the `.sim`
