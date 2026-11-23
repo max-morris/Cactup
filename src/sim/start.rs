@@ -2230,35 +2230,33 @@ mod tests {
         assert!(!out.exists());
     }
 
-    /// Credentials anywhere in the thornlist that goes into the .sim are
-    /// refused, each named: a `!AUTH_URL`, a comment, an unused `!DEFINE`,
-    /// an overridden `!URL`; a quoted URL is refused for its quotes (cactup
-    /// would fetch them as part of it), its token not shown; the anonymous
-    /// logins of `!ANON_USER`/`!ANON_PASS` are not refused.
+    /// Credentials in what the thornlist fetches are refused, each named:
+    /// a `!AUTH_URL`, a quoted URL (refused for its quotes, as cactup would
+    /// fetch them as part of it), its token not shown. Those nothing fetches
+    /// (a comment, an unused `!DEFINE`, an overridden `!URL`) are hidden in
+    /// the .sim, which is written. The anonymous logins of
+    /// `!ANON_USER`/`!ANON_PASS` are neither.
     #[test]
-    fn credentials_anywhere_in_the_thornlist_are_refused() {
+    fn credentials_in_the_thornlist_are_refused_where_fetched_and_hidden_elsewhere() {
         use crate::fetch::anonymous::testserver::{serve, Mode};
+        use cactup_ecosystem_common::sim::SimFile;
         let tmp = tempfile::tempdir().unwrap();
         serve("clean.share.test", Mode::Public);
-        let list = format!(
-            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!DEFINE OLD = https://me:TOKEN2@example.org/x\n\
-             # old: !URL = https://TOKEN3@github.com/o/a.git\n\
-             !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://TOKEN4@github.com/o/b.git\n\
-             !URL = https://clean.share.test/o/b.git\n!AUTH_URL = https://me:TOKEN5@github.com/o/b.git\n\
-             !REPO_COMMIT = {c}\n!CHECKOUT = B/One\n\
+        let unused = "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!DEFINE OLD = https://me:TOKEN2@example.org/x\n\
+                      # old: !URL = https://TOKEN3@github.com/o/a.git\n# or git:TOKEN7@github.com:o/a.git\n";
+        let svn = "!TARGET = $ROOT\n!TYPE = svn\n!URL = https://svn.example.org/d/trunk\n!ANON_USER = anonymous\n\
+                   !ANON_PASS = anonymous\n!CHECKOUT = D/One\n";
+        let fetched = format!(
+            "{unused}!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://clean.share.test/o/b.git\n\
+             !AUTH_URL = https://me:TOKEN5@github.com/o/b.git\n!REPO_COMMIT = {c}\n!CHECKOUT = B/One\n\
              !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = \"https://TOKEN6@github.com/o/c.git\"\n\
-             !REPO_COMMIT = {c}\n!CHECKOUT = C/One\n\
-             !TARGET = $ROOT\n!TYPE = svn\n!URL = https://svn.example.org/d/trunk\n!ANON_USER = anonymous\n\
-             !ANON_PASS = anonymous\n!CHECKOUT = D/One\n",
+             !REPO_COMMIT = {c}\n!CHECKOUT = C/One\n{svn}",
             c = "a".repeat(40)
         );
-        let (packed, out, _) = pack_list(tmp.path(), &list, Default::default());
+        let (packed, out, _) = pack_list(tmp.path(), &fetched, Default::default());
         let err = format!("{:#}", packed.unwrap_err());
         for said in [
-            "thornlist line 3: https://***@example.org/x carries a user name and password",
-            "thornlist line 4: https://***@github.com/o/a.git carries",
-            "thornlist line 7: https://***@github.com/o/b.git carries",
-            "b (its !AUTH_URL): https://***@github.com/o/b.git carries a user name and password",
+            "\n  b (its !AUTH_URL): https://***@github.com/o/b.git carries a user name and password",
             // Named without the quote the parser leaves on the name.
             "\n  c: https://***@github.com/o/c.git is written in quotes, which the thornlist parser keeps as part of \
              the URL, so it could not be fetched; remove the quotes\n",
@@ -2266,7 +2264,24 @@ mod tests {
             assert!(err.contains(said), "{said:?} not in: {err}");
         }
         assert!(!err.contains("TOKEN") && !err.contains("anonymous") && !err.contains("\n  d:"), "{err}");
+        assert!(!err.contains("example.org/x") && !err.contains("o/a.git"), "nothing fetches those: {err}");
         assert!(!out.exists());
+
+        let overridden = format!(
+            "{unused}!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://TOKEN4@github.com/o/b.git\n\
+             !URL = https://clean.share.test/o/b.git\n!REPO_COMMIT = {c}\n!CHECKOUT = B/One\n{svn}",
+            c = "a".repeat(40)
+        );
+        let (packed, out, list) = pack_list(tmp.path(), &overridden, Default::default());
+        packed.unwrap();
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        let want = list
+            .replace("me:TOKEN2", "***")
+            .replace("TOKEN3", "***")
+            .replace("git:TOKEN7", "git:***")
+            .replace("TOKEN4", "***");
+        assert_eq!(file.thornlist.text, want);
+        assert!(!fs::read_to_string(&out).unwrap().contains("TOKEN"));
     }
 
     /// `sim pack` without an installation asks the tips of the rewritten

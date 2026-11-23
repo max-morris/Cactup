@@ -27,12 +27,20 @@
 //! `!AUTH_URL` is held to its type's rule where it is fetched (svn, cvs),
 //! and for a git repo, which never fetches it, to carrying no credentials.
 //! A quoted URL is refused: the parser keeps the quotes, and gix will not
-//! fetch such a URL. Then the whole text that goes into the `.sim`,
-//! comments, unused `!DEFINE`s and overridden lines included, is searched
-//! for any `scheme://` URL that carries credentials as a download's would.
+//! fetch such a URL. An input's URL is judged as a download's. All of these
+//! are fetched, so a credential in one is refused.
+//!
+//! Then the whole text that goes into the `.sim` is searched for
+//! credentials ([`search_text`]): a `scheme://` URL that carries them as a
+//! download's would, an scp-like `user:password@host:path`, a cvs root with
+//! a password. One found where nothing fetches it (a comment, an unused
+//! `!DEFINE`, an overridden `!URL`, a `#` comment after a URL) is hidden,
+//! not refused: its secret becomes `***` in the copy that goes into the
+//! `.sim`, a line said for each. Export reads the simulation's frozen
+//! thornlist, which nobody edits, so a refusal there could not be fixed.
+//! The text so hidden is parsed back and must give the same components.
 //! `!ANON_USER`/`!ANON_PASS` hold the public logins of anonymous svn and
-//! cvs access, never a URL, and are never refused. An input's URL is judged
-//! as a download's.
+//! cvs access, never a URL, and are never refused.
 
 use crate::fetch::anonymous::{self, Verdict};
 use crate::fetch::git::{AskWindow, REMOTE_ASK_TIMEOUT};
@@ -40,8 +48,13 @@ use crate::thornlist::{self, ComponentType};
 use crate::Res;
 use anyhow::{bail, Context};
 use cactup_ecosystem_common::probe::{self, Start};
-use cactup_ecosystem_common::url::{download_shareability, shareability, unquote, Redacted, Shareability};
+use cactup_ecosystem_common::url::{
+    download_shareability, is_credential_key, shareability, unquote, Redacted, Shareability,
+};
+use colored::Colorize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
+use std::sync::LazyLock;
 
 /// What every refusal ends with.
 const LOCAL_HINT: &str = "or pass --local to export for use here only";
@@ -49,11 +62,22 @@ const LOCAL_HINT: &str = "or pass --local to export for use here only";
 /// The offline half of the check: what [`classify`] found.
 #[derive(Debug)]
 pub struct Checked {
-    /// A line per URL refused: "<repo>: <why>", "input <knob>: <why>",
-    /// "thornlist line <n>: <why>".
+    /// A line per URL refused: "<repo>: <why>", "input <knob>: <why>".
     refused: Vec<String>,
     /// The git remotes to probe.
     asks: Vec<Ask>,
+    /// The credentials found where nothing fetches them, to hide.
+    hidden: Vec<Spot>,
+}
+
+/// A credential [`search_text`] found in the thornlist's text.
+#[derive(Debug, PartialEq, Eq)]
+struct Spot {
+    /// Its line's index in the text.
+    line: usize,
+    /// The byte ranges in that line (without its line ending) that become
+    /// `***`.
+    secrets: Vec<Range<usize>>,
 }
 
 /// One git remote of the thornlist, however many components name it.
@@ -70,14 +94,14 @@ struct Ask {
 
 /// The thornlist `text` (parsed as `list`) and each input's URL in
 /// `input_urls` (KNOB, URL) judged without the network: the refusals, and
-/// the git remotes [`settle`] must probe. Every
+/// the git remotes [`settle`] must probe, and the credentials to hide. Every
 /// component's URL and `!AUTH_URL` is judged once per URL string; then the
 /// whole text is searched for credentials (see the module docs).
 pub fn classify(list: &thornlist::Thornlist, text: &str, input_urls: &[(String, String)]) -> Checked {
     let mut refused = Vec::new();
     let mut asks: Vec<Ask> = Vec::new();
     // The URLs judged, and of those the ones refused (the text search
-    // leaves those to the line already said).
+    // leaves those to the refusal already said).
     let mut judged = BTreeSet::new();
     let mut refused_urls = BTreeSet::new();
     for c in list.components() {
@@ -110,8 +134,8 @@ pub fn classify(list: &thornlist::Thornlist, text: &str, input_urls: &[(String, 
                 cvs_refusal(url)
             } else if auth && c.ty == ComponentType::Git {
                 // Never fetched: only what it carries counts.
-                match download_shareability(url) {
-                    s @ Shareability::Credentials => s.download_refusal(url),
+                match download_judged(url) {
+                    s @ Shareability::Credentials => scrubbed(s.download_refusal(url), url),
                     _ => None,
                 }
             } else if auth || c.ty != ComponentType::Git {
@@ -131,13 +155,13 @@ pub fn classify(list: &thornlist::Thornlist, text: &str, input_urls: &[(String, 
             }
         }
     }
-    refused.extend(search_text(text, &refused_urls));
+    let hidden = search_text(text, &refused_urls);
     for (knob, url) in input_urls {
         if let Some(why) = download_refusal(url) {
             refused.push(format!("input {knob}: {why}"));
         }
     }
-    Checked { refused, asks }
+    Checked { refused, asks, hidden }
 }
 
 /// How a refusal names the repo `repo` (as the thornlist derives the name)
@@ -174,26 +198,125 @@ pub fn shown_repo(repo: &str) -> &str {
     repo.split(['?', '#']).next().unwrap_or(repo)
 }
 
-/// Every `scheme://` URL in `text` that carries credentials as a download's
-/// would (a user name but an ssh one, a password, a credential-like query
-/// key: `url::download_shareability`), as "thornlist line <n>: <why>", but
-/// for those in `already` (refused by name). `!ANON_USER`/`!ANON_PASS` hold
-/// a bare login, no URL, so nothing there is refused.
-fn search_text(text: &str, already: &BTreeSet<String>) -> Vec<String> {
-    static URL: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| regex::Regex::new(r#"[A-Za-z][A-Za-z0-9+.\-]*://[^\s"'<>`]+"#).expect("valid regex"));
+/// Every credential in `text` but those in `already` (refused by name, as
+/// fetched): a `scheme://` URL that carries one as a download's would (a
+/// user name but an ssh one, a password, a credential-like query key:
+/// [`download_judged`]), an scp-like `user:password@host:path` (or one with a
+/// query: `url::shareability`), a cvs root with a password ([`cvs_secrets`]).
+/// `!ANON_USER`/`!ANON_PASS` hold a bare login, no URL, so nothing there is
+/// found.
+fn search_text(text: &str, already: &BTreeSet<String>) -> Vec<Spot> {
+    // A password may hold a quote or a backtick: the userinfo runs to the
+    // last `@` before the path.
+    static URL: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r#"[A-Za-z][A-Za-z0-9+.\-]*://(?:[^\s/?#]*@)?[^\s"'<>`]*"#).expect("valid regex")
+    });
+    static CVS: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r#"(?:^|[\s"'`=(<])(:[A-Za-z][A-Za-z0-9_+\-]*[;,:][^\s"'`<>]*)"#).expect("valid regex")
+    });
+    static SCP: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r#"(?:^|[\s"'`=(<])([^\s/@]+@[^\s"'`<>/@:\[]+:[^\s"'`<>]*)"#).expect("valid regex")
+    });
+    let trim = |m: regex::Match| {
+        let token = m.as_str().trim_end_matches([')', ']', '}', ',', '.', ';', ':']);
+        m.start()..m.start() + token.len()
+    };
     let mut out = Vec::new();
-    for (n, line) in text.lines().enumerate() {
-        for m in URL.find_iter(line) {
-            let url = m.as_str().trim_end_matches([')', ']', '}', ',', '.', ';', ':']);
-            if already.contains(url) {
+    for (n, line) in text.split_inclusive('\n').enumerate() {
+        let line = line.trim_end_matches(['\n', '\r']);
+        // Each token once: the URL form first, then a cvs root, then the
+        // scp form, none inside another's span.
+        let mut taken: Vec<Range<usize>> = Vec::new();
+        let mut secrets = Vec::new();
+        let candidates = URL
+            .find_iter(line)
+            .map(|m| (0, trim(m)))
+            .chain(CVS.captures_iter(line).filter_map(|c| c.get(1)).map(|m| (1, trim(m))))
+            .chain(SCP.captures_iter(line).filter_map(|c| c.get(1)).map(|m| (2, trim(m))))
+            .collect::<Vec<_>>();
+        for (kind, span) in candidates {
+            if taken.iter().any(|t| t.start < span.end && span.start < t.end) {
                 continue;
             }
-            if let s @ Shareability::Credentials = download_shareability(url)
-                && let Some(why) = s.download_refusal(url)
-            {
-                out.push(format!("thornlist line {}: {why}", n + 1));
+            taken.push(span.clone());
+            let token = &line[span.clone()];
+            if already.contains(token) {
+                continue;
             }
+            let found = match kind {
+                0 if download_judged(token) == Shareability::Credentials => url_secrets(token),
+                1 => cvs_secrets(token),
+                2 if shareability(token) == Shareability::Credentials => url_secrets(token),
+                _ => Vec::new(),
+            };
+            secrets.extend(found.into_iter().map(|r| span.start + r.start..span.start + r.end));
+        }
+        if !secrets.is_empty() {
+            out.push(Spot { line: n, secrets });
+        }
+    }
+    out
+}
+
+/// The byte ranges of the secrets in `url` (a `scheme://` URL or an
+/// scp-like one, judged to carry credentials): the userinfo (but an ssh
+/// URL's user name: only its password), and the query or fragment, whole.
+fn url_secrets(url: &str) -> Vec<Range<usize>> {
+    let (scheme, start) = match url.find("://") {
+        Some(i) => (Some(&url[..i]), i + 3),
+        None => (None, 0),
+    };
+    let ssh = scheme.is_none_or(|s| s.to_ascii_lowercase().contains("ssh"));
+    let authority_end = start + url[start..].find('/').unwrap_or(url.len() - start);
+    let mut secrets = Vec::new();
+    let mut host = start;
+    if let Some(at) = url[start..authority_end].rfind('@').map(|at| start + at) {
+        let userinfo = start..at;
+        match url[userinfo.clone()].find(':') {
+            Some(colon) if ssh => secrets.push(start + colon + 1..at),
+            _ if ssh => {}
+            _ => secrets.push(userinfo),
+        }
+        host = at + 1;
+    }
+    if let Some(q) = url[host..].find(['?', '#']) {
+        secrets.push(host + q + 1..url.len());
+    }
+    secrets.retain(|r| !r.is_empty());
+    secrets
+}
+
+/// `line` with each of `secrets` (byte ranges, in any order, may overlap)
+/// replaced by `***`.
+fn hide(line: &str, secrets: &[Range<usize>]) -> String {
+    let mut sorted = secrets.to_vec();
+    sorted.sort_by_key(|r| r.start);
+    let mut out = String::with_capacity(line.len());
+    let mut at = 0;
+    for r in sorted {
+        if r.end <= at {
+            continue;
+        }
+        out.push_str(&line[at..r.start.max(at)]);
+        out.push_str("***");
+        at = r.end;
+    }
+    out.push_str(&line[at..]);
+    out
+}
+
+/// `text` with every spot of `hidden` hidden; every other byte as it was.
+fn hide_spots(text: &str, hidden: &[Spot]) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (n, line) in text.split_inclusive('\n').enumerate() {
+        let body = line.trim_end_matches(['\n', '\r']);
+        let secrets: Vec<Range<usize>> =
+            hidden.iter().filter(|s| s.line == n).flat_map(|s| s.secrets.iter().cloned()).collect();
+        if secrets.is_empty() {
+            out.push_str(line);
+        } else {
+            out.push_str(&hide(body, &secrets));
+            out.push_str(&line[body.len()..]);
         }
     }
     out
@@ -202,13 +325,14 @@ fn search_text(text: &str, already: &BTreeSet<String>) -> Vec<String> {
 /// Probe every git remote of `checked`, and fail with every refusal
 /// (offline, or by its probe) in one error; else `text` (what `checked` was
 /// classified from) with every remote published as another URL (an ssh
-/// remote as its https equivalent) rewritten to it, one line said for
-/// each, or `None` when there were none. The rewritten text is parsed back
-/// and must name exactly the URLs expected. The probes run on the network
+/// remote as its https equivalent) rewritten to it and every credential of
+/// `checked`'s hidden ones hidden, a line said for each, or `None` when
+/// there were none. The new text is parsed back and must give the same
+/// components, but for the URLs rewritten. The probes run on the network
 /// fan-out within one [`REMOTE_ASK_TIMEOUT`], a line each; Ctrl-C fails the
 /// call ("Interrupted").
 pub fn settle(checked: Checked, text: &str) -> Res<Option<String>> {
-    let Checked { mut refused, asks } = checked;
+    let Checked { mut refused, asks, hidden } = checked;
     let verdicts = probe_all(&asks)?;
     let mut rewrites = BTreeMap::new();
     for (ask, verdict) in asks.iter().zip(verdicts) {
@@ -227,10 +351,13 @@ pub fn settle(checked: Checked, text: &str) -> Res<Option<String>> {
             refused.join("\n  ")
         );
     }
-    if rewrites.is_empty() {
+    if rewrites.is_empty() && hidden.is_empty() {
         return Ok(None);
     }
-    let rewritten = rewrite(text, &rewrites)?;
+    let rewritten = rewrite(text, &hidden, &rewrites)?;
+    for note in hidden_notes(&rewritten, &hidden) {
+        println!("{}", note.yellow());
+    }
     for ask in &asks {
         if let Some(published) = rewrites.get(&ask.url) {
             println!(
@@ -243,22 +370,40 @@ pub fn settle(checked: Checked, text: &str) -> Res<Option<String>> {
     Ok(Some(rewritten))
 }
 
-/// `text` with each `!URL` of `map` (URL as written → URL to publish)
-/// rewritten, checked by parsing the result back: every component must
-/// name exactly the URL it did, or the one it is published as.
-fn rewrite(text: &str, map: &BTreeMap<String, String>) -> Res<String> {
+/// `text` with the credentials of `hidden` hidden and each `!URL` of `map`
+/// (URL as written → URL to publish) rewritten, checked by parsing the
+/// result back: every component must be what it was, but for naming the
+/// URL it is published as. A hidden credential that changed a component
+/// was fetched after all, and fails the check.
+fn rewrite(text: &str, hidden: &[Spot], map: &BTreeMap<String, String>) -> Res<String> {
     let list = thornlist::parse(text).context("The thornlist does not parse")?;
-    let rewritten = rewrite_urls(text, map);
-    let check = thornlist::parse(&rewritten).context("The thornlist with its ssh URLs rewritten does not parse")?;
+    let rewritten = rewrite_urls(&hide_spots(text, hidden), map);
+    let check = thornlist::parse(&rewritten).context("The thornlist with its URLs rewritten does not parse")?;
     let mut stuck = Vec::new();
+    let mut changed = Vec::new();
     for (i, old) in list.components().iter().enumerate() {
         let want = old.url.as_ref().map(|u| map.get(u).unwrap_or(u));
         let got = check.components().get(i).filter(|c| c.checkout == old.checkout && c.repo == old.repo);
-        if got.map(|c| c.url.as_ref()) != Some(want) {
-            let url = old.url.as_deref().unwrap_or("");
-            let https = map.get(url).map_or(String::new(), |h| format!(" (to {h})"));
-            stuck.push(format!("{}: {}{https}", old.checkout, Redacted(url)));
+        let url = old.url.as_deref().unwrap_or("");
+        match got {
+            Some(got) if got.url.as_ref() == want || old.ty == ComponentType::Ignore => {
+                if !same_but_url(old, got) {
+                    changed.push(old.checkout.clone());
+                }
+            }
+            Some(_) if !map.contains_key(url) => changed.push(old.checkout.clone()),
+            _ => {
+                let https = map.get(url).map_or(String::new(), |h| format!(" (to {h})"));
+                stuck.push(format!("{}: {}{https}", old.checkout, Redacted(url)));
+            }
         }
+    }
+    if !changed.is_empty() {
+        bail!(
+            "Hiding the thornlist's unused credentials changed these components:\n  {}\nRemove the credentials, \
+             {LOCAL_HINT}",
+            changed.join("\n  ")
+        );
     }
     if !stuck.is_empty() || check.components().len() != list.components().len() {
         bail!(
@@ -270,24 +415,131 @@ fn rewrite(text: &str, map: &BTreeMap<String, String>) -> Res<String> {
     Ok(rewritten)
 }
 
-/// Why `url`, a download's, an input's or another kind of repo's than git,
-/// cannot be published, if it cannot: the shared crate's rule for
-/// downloads (`url::download_shareability`).
-fn download_refusal(url: &str) -> Option<String> {
-    download_shareability(url).download_refusal(url)
+/// The line said for each of `hidden` in `text`, the text they were hidden
+/// in: the line as it now reads. (Its number would be of the text with its
+/// `!INCLUDE`s spliced in, not of any file the user has.)
+fn hidden_notes(text: &str, hidden: &[Spot]) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    hidden
+        .iter()
+        .map(|spot| format!("Hid a credential in the thornlist: {}", lines.get(spot.line).map_or("", |l| l.trim())))
+        .collect()
 }
 
-/// Why the cvs root `root` (`:method:[user[:password]@]host:path`, no URL)
-/// cannot be published, if it cannot: a password in it. A user name alone
-/// is how anonymous access is written (`:pserver:anonymous@…`).
+/// Whether `got` is `old` (a component, and the same one parsed back) but
+/// for its URL; an `ignore` component's URLs are not fetched, and may
+/// differ too.
+fn same_but_url(old: &thornlist::Component, got: &thornlist::Component) -> bool {
+    let mut got = got.clone();
+    got.url.clone_from(&old.url);
+    if old.ty == ComponentType::Ignore {
+        got.auth_url.clone_from(&old.auth_url);
+    }
+    &got == old
+}
+
+/// Why `url`, a download's, an input's or another kind of repo's than git,
+/// cannot be published, if it cannot: the shared crate's rule for
+/// downloads ([`download_judged`]).
+fn download_refusal(url: &str) -> Option<String> {
+    scrubbed(download_judged(url).download_refusal(url), url)
+}
+
+/// `url::download_shareability`, but with the URL's query and fragment keys
+/// percent-decoded first (`%74oken`), which the crate does not do
+/// yet. Drop this for the crate's own once it does.
+fn download_judged(url: &str) -> Shareability {
+    let judged = download_shareability(url);
+    let u = unquote(url);
+    let authority = u.find("://").map_or(0, |i| i + 3);
+    let tail = &u[authority..];
+    let encoded = tail.find(['?', '#']).is_some_and(|at| {
+        tail[at + 1..]
+            .split(['&', ';', '?', '#'])
+            .map(|pair| pair.split_once('=').map_or(pair, |(k, _)| k))
+            .any(|k| k.contains('%') && is_credential_key(&crate::fetch::git::percent_decode(k)))
+    });
+    match judged {
+        Shareability::Shareable if encoded => Shareability::Credentials,
+        judged => judged,
+    }
+}
+
+/// A refusal of `url` with its fragment hidden: the crate's `Redacted`
+/// hides a query but shows a fragment, which may hold a token too
+/// (`#access_token=…`).
+fn scrubbed(refusal: Option<String>, url: &str) -> Option<String> {
+    let fragment = unquote(url).split_once('#').map(|(_, f)| f).filter(|f| !f.is_empty());
+    match (refusal, fragment) {
+        (Some(why), Some(fragment)) => Some(why.replace(&format!("#{fragment}"), "#***")),
+        (refusal, _) => refusal,
+    }
+}
+
+/// Why the cvs root `root` (no URL) cannot be published, if it cannot: a
+/// password in it ([`cvs_secrets`]), which the refusal shows as `***`. A
+/// user name alone is how anonymous access is written
+/// (`:pserver:anonymous@…`).
 fn cvs_refusal(root: &str) -> Option<String> {
-    let rest = root.trim().strip_prefix(':').and_then(|r| r.split_once(':')).map_or(root.trim(), |(_, r)| r);
-    let (userinfo, host) = rest.rsplit_once('@')?;
-    let (user, password) = userinfo.split_once(':')?;
-    let method = &root.trim()[..root.trim().len() - rest.len()];
-    (!password.is_empty()).then(|| {
-        format!("{method}{user}:***@{host} carries a password, which must never be published; remove it")
-    })
+    let root = root.trim();
+    let secrets = cvs_secrets(root);
+    (!secrets.is_empty()).then(|| format!("{} carries a password", hide(root, &secrets)))
+}
+
+/// The byte ranges of the passwords in the cvs root `root`:
+/// `:method[;option=value…]:[user[:password]@]host[:port]:path`, or
+/// without the method. A password is the main one, an option whose key
+/// holds `pass` (CVSNT's `;password=…`, `;proxypassword=…`), or the one in
+/// a proxy option's userinfo (`;proxy=user:password@host`). A proxy's
+/// value runs to the `:` after its `@`, so a proxy written without
+/// userinfo but followed by a user name (`;proxy=p:anonymous@host`) counts
+/// as one: refused, the safe side.
+fn cvs_secrets(root: &str) -> Vec<Range<usize>> {
+    let mut secrets = Vec::new();
+    let mut at = 0;
+    if let Some(after) = root.strip_prefix(':') {
+        at = 1 + after.find([';', ',', ':']).unwrap_or(after.len());
+        while root[at..].starts_with([';', ',']) {
+            let start = at + 1;
+            let rest = &root[start..];
+            let Some(eq) = rest.find([';', ',', ':', '=']).filter(|&i| rest.as_bytes()[i] == b'=') else {
+                at = start + rest.find([';', ',', ':']).unwrap_or(rest.len());
+                continue;
+            };
+            let key = rest[..eq].to_ascii_lowercase();
+            let value_start = start + eq + 1;
+            let tail = &root[value_start..];
+            let chunk = &tail[..tail.find([';', ',']).unwrap_or(tail.len())];
+            let end = match chunk.find('@') {
+                Some(a) if key == "proxy" => a + 1 + chunk[a + 1..].find(':').unwrap_or(chunk.len() - a - 1),
+                _ => tail.find([';', ',', ':']).unwrap_or(tail.len()),
+            };
+            let value = &tail[..end];
+            if key.contains("pass") && !value.is_empty() {
+                secrets.push(value_start..value_start + end);
+            }
+            if key == "proxy"
+                && let Some((userinfo, _)) = value.split_once('@')
+                && let Some(colon) = userinfo.find(':')
+                && colon + 1 < userinfo.len()
+            {
+                secrets.push(value_start + colon + 1..value_start + userinfo.len());
+            }
+            at = value_start + end;
+        }
+        match root[at..].strip_prefix(':') {
+            Some(_) => at += 1,
+            None => return secrets,
+        }
+    }
+    let main = &root[at..];
+    if let Some(a) = main.rfind('@')
+        && let Some(colon) = main[..a].find(':')
+        && colon + 1 < a
+    {
+        secrets.push(at + colon + 1..at + a);
+    }
+    secrets
 }
 
 /// [`download_refusal`] for an input's URL given at a prompt: the error,
@@ -365,8 +617,7 @@ mod tests {
 
     /// A download's URL is judged by the crate's download rule: a query is
     /// fine unless a key looks like a credential, and a user name or
-    /// password, ssh and a local path are refused; a cvs root only for a
-    /// password.
+    /// password, ssh and a local path are refused.
     #[test]
     fn a_download_is_refused_for_credentials_not_for_a_query() {
         assert!(download_refusal("https://zenodo.org/records/1/files/id.tar.gz?download=1").is_none());
@@ -381,31 +632,117 @@ mod tests {
         }
         assert!(download_refusal("svn+ssh://svn.example.org/r").unwrap().contains("ssh"));
         assert!(download_refusal("file:///srv/svn/r").unwrap().contains("local path"));
-        assert!(cvs_refusal(":pserver:anonymous@cvs.example.org:/cvsroot").is_none());
-        let why = cvs_refusal(":pserver:me:s3cret@cvs.example.org:/cvsroot").unwrap();
-        assert!(why.starts_with(":pserver:me:***@cvs.example.org:/cvsroot carries a password"), "{why}");
+        // A fragment's token is hidden too, and a percent-encoded key found.
+        let why = download_refusal("https://example.org/f.h5#access_token=TOKEN").unwrap();
+        assert!(why.starts_with("https://example.org/f.h5#*** carries"), "{why}");
+        assert!(download_refusal("https://example.org/f.h5?%74oken=TOKEN").unwrap().contains(" carries "));
     }
 
     /// The whole text is searched, comments and unused lines included, for
-    /// any URL that carries credentials, each named by its line; ssh user
-    /// names, anonymous logins, download queries and URLs already refused
-    /// by name are not.
+    /// credentials in every form, each hidden in place: a URL's userinfo
+    /// (an ssh URL's password), a credential-like query (percent-encoded
+    /// too) or fragment, an scp-like password, a cvs root's password, a
+    /// password with quotes or a backtick in it. Ssh user names, anonymous
+    /// logins, download queries and URLs already refused by name are left
+    /// alone, and so is every other byte.
     #[test]
-    fn credentials_anywhere_in_the_text_are_found() {
-        let text = "!CRL_VERSION = 1.0\n# old: !URL = https://TOKEN1@github.com/o/a.git\n\
-                    !DEFINE UNUSED = https://me:TOKEN2@example.org/x\n!URL = https://gitlab.com/o/b.git?private_token=TOKEN3\n\
-                    !URL = ssh://git@github.com/o/c.git\n!ANON_USER = anonymous\n!ANON_PASS = anon\n\
-                    !URL = https://zenodo.org/f.tar.gz?download=1\n!URL = https://TOKEN4@github.com/o/d.git\n";
-        let found = search_text(text, &BTreeSet::from(["https://TOKEN4@github.com/o/d.git".to_owned()]));
-        assert_eq!(found.len(), 3, "{found:#?}");
+    fn credentials_anywhere_in_the_text_are_hidden() {
+        let cases = [
+            ("# old: !URL = https://TOKEN1@github.com/o/a.git", "# old: !URL = https://***@github.com/o/a.git"),
+            ("!DEFINE UNUSED = https://me:TOKEN2@example.org/x", "!DEFINE UNUSED = https://***@example.org/x"),
+            ("!URL = https://gitlab.com/o/b.git?private_token=TOKEN3", "!URL = https://gitlab.com/o/b.git?***"),
+            ("# https://example.org/f?%74oken=TOKEN4.", "# https://example.org/f?***."),
+            ("!URL = https://example.org/g.tgz#access_token=TOKEN5", "!URL = https://example.org/g.tgz#***"),
+            ("# (ssh://git:TOKEN6@github.com/o/c.git)", "# (ssh://git:***@github.com/o/c.git)"),
+            ("# was git:TOKEN7@github.com:o/r.git", "# was git:***@github.com:o/r.git"),
+            ("!DEFINE OLD=git:TOKEN8@github.com:o/r.git", "!DEFINE OLD=git:***@github.com:o/r.git"),
+            ("# :pserver:me:TOKEN9@cvs.example.org:/cvsroot", "# :pserver:me:***@cvs.example.org:/cvsroot"),
+            ("# :pserver;password=TOKENA:me@cvs.example.org:/r", "# :pserver;password=***:me@cvs.example.org:/r"),
+            ("# https://me:to\"k`EN'B@example.org/x", "# https://***@example.org/x"),
+            ("!URL = ssh://git@github.com/o/c.git", "!URL = ssh://git@github.com/o/c.git"),
+            ("!URL = git@github.com:o/d.git", "!URL = git@github.com:o/d.git"),
+            ("!URL = :pserver:anonymous@cvs.example.org:/cvsroot", "!URL = :pserver:anonymous@cvs.example.org:/cvsroot"),
+            ("!ANON_USER = anonymous", "!ANON_USER = anonymous"),
+            ("!ANON_PASS = anon", "!ANON_PASS = anon"),
+            ("!URL = https://zenodo.org/f.tar.gz?download=1", "!URL = https://zenodo.org/f.tar.gz?download=1"),
+            ("# mail max@example.org: see https://example.org/x#readme", "# mail max@example.org: see https://example.org/x#readme"),
+            ("!URL = https://TOKENC@github.com/o/d.git", "!URL = https://TOKENC@github.com/o/d.git"),
+        ];
+        let text: String = cases.iter().map(|(line, _)| format!("{line}\r\n")).collect();
+        let already = BTreeSet::from(["https://TOKENC@github.com/o/d.git".to_owned()]);
+        let found = search_text(&text, &already);
+        let hidden = hide_spots(&text, &found);
+        let want: String = cases.iter().map(|(_, line)| format!("{line}\r\n")).collect();
+        assert_eq!(hidden, want);
+        assert_eq!(found.len(), 11, "{found:?}");
+        assert_eq!(found[0], Spot { line: 0, secrets: std::iter::once(22..28).collect() });
+    }
+
+    /// A credential nothing fetches is hidden, and the list parsed back
+    /// gives the same components; one in a fetched URL is refused (an
+    /// active cvs root's option password included), not hidden.
+    #[test]
+    fn credentials_nothing_fetches_are_hidden_and_fetched_ones_refused() {
+        let text = "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!DEFINE OLD = https://me:TOKEN1@example.org/x\n\
+                    # was git:TOKEN2@github.com:o/a.git\n\
+                    !TARGET = $ROOT\n!TYPE = cvs\n!URL = :pserver:me:TOKEN3@cvs.example.org:/cvsroot\n\
+                    !URL = :pserver:anonymous@cvs.example.org:/cvsroot\n!CHECKOUT = A/One\n\
+                    !TARGET = $ROOT\n!TYPE = svn\n!URL = https://svn.example.org/b/trunk#token=TOKEN4\n!CHECKOUT = B/One\n";
+        let list = thornlist::parse(text).unwrap();
+        let checked = classify(&list, text, &[]);
+        assert!(checked.refused.is_empty(), "{:?}", checked.refused);
+        assert!(checked.asks.is_empty());
+        let hidden = rewrite(text, &checked.hidden, &BTreeMap::new()).unwrap();
+        assert!(!hidden.contains("TOKEN"), "{hidden}");
+        assert_eq!(thornlist::parse(&hidden).unwrap().components(), list.components());
         assert_eq!(
-            found[0],
-            "thornlist line 2: https://***@github.com/o/a.git carries a user name or token, which must never be published; \
-             remove it from the URL"
+            hidden_notes(&hidden, &checked.hidden),
+            [
+                "Hid a credential in the thornlist: !DEFINE OLD = https://***@example.org/x",
+                "Hid a credential in the thornlist: # was git:***@github.com:o/a.git",
+                "Hid a credential in the thornlist: !URL = :pserver:me:***@cvs.example.org:/cvsroot",
+                "Hid a credential in the thornlist: !URL = https://svn.example.org/b/trunk#***",
+            ]
         );
-        assert!(found[1].starts_with("thornlist line 3: https://***@example.org/x"), "{found:?}");
-        assert!(found[2].starts_with("thornlist line 4: https://gitlab.com/o/b.git?*** carries `private_token` in its query"), "{found:?}");
-        assert!(!found.concat().contains("TOKEN"), "{found:?}");
+
+        // Fetched: refused by name, and not hidden.
+        let text = "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\
+                    !TARGET = $ROOT\n!TYPE = cvs\n!URL = :pserver;password=TOKEN5:me@cvs.example.org:/cvsroot\n\
+                    !CHECKOUT = A/One\n";
+        let checked = classify(&thornlist::parse(text).unwrap(), text, &[]);
+        assert_eq!(checked.refused, ["cvsroot: :pserver;password=***:me@cvs.example.org:/cvsroot carries a password"]);
+        assert!(checked.hidden.is_empty(), "{:?}", checked.hidden);
+    }
+
+    /// A hidden credential that a component turns out to use fails the
+    /// parse-back check, rather than change what the list fetches.
+    #[test]
+    fn hiding_a_credential_a_component_uses_fails() {
+        let text = "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\
+                    !TARGET = $ROOT\n!TYPE = svn\n!URL = https://me:TOKEN@svn.example.org/b\n!CHECKOUT = B/One\n";
+        let spot = search_text(text, &BTreeSet::new());
+        assert_eq!(spot.len(), 1);
+        let err = format!("{:#}", rewrite(text, &spot, &BTreeMap::new()).unwrap_err());
+        assert!(err.contains("changed these components:\n  B/One\n"), "{err}");
+    }
+
+    /// A cvs root is refused for a password, written in any of its places,
+    /// and shown with it hidden; a user name alone is anonymous access.
+    #[test]
+    fn a_cvs_root_is_refused_for_a_password_anywhere_in_it() {
+        assert!(cvs_refusal(":pserver:anonymous@cvs.example.org:/cvsroot").is_none());
+        assert!(cvs_refusal(":pserver;port=2401:anonymous@cvs.example.org:/cvsroot").is_none());
+        assert!(cvs_refusal(":pserver;proxy=proxy.example.org;proxyport=8080:me@cvs.example.org:/r").is_none());
+        for (root, shown) in [
+            (":pserver:me:s3cret@cvs.example.org:/cvsroot", ":pserver:me:***@cvs.example.org:/cvsroot"),
+            ("me:s3cret@cvs.example.org:/cvsroot", "me:***@cvs.example.org:/cvsroot"),
+            (":pserver;password=s3cret:me@cvs.example.org:/r", ":pserver;password=***:me@cvs.example.org:/r"),
+            (":pserver,PROXYPASSWORD=s3cret:me@cvs.example.org:/r", ":pserver,PROXYPASSWORD=***:me@cvs.example.org:/r"),
+            (":pserver;proxy=u:s3cret@proxy.example.org:me@cvs.example.org:/r", ":pserver;proxy=u:***@proxy.example.org:me@cvs.example.org:/r"),
+            (":pserver;proxy=u:s3cret@proxy.example.org;port=1:me@h:/r", ":pserver;proxy=u:***@proxy.example.org;port=1:me@h:/r"),
+        ] {
+            assert_eq!(cvs_refusal(root), Some(format!("{shown} carries a password")), "{root}");
+        }
     }
 
     /// A repo named after a URL with a query (the parser keeps it in the

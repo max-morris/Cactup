@@ -476,7 +476,7 @@ pub fn scrub(text: &str, url: &str) -> String {
 
 /// `s` with its `%XX` escapes decoded (an invalid one, or bytes that are not
 /// UTF-8, left as they were).
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
