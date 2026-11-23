@@ -1,8 +1,9 @@
-schema = 2
+schema = 3
 active-config = "sim"
 sim-home = "/scratch/sims/et"
 test-home = "/scratch/tests/et"
 root-dir = "Cactus"
+linked-to = "/scratch/cacti/et"
 
 [[added]]
 package = "owner/pkg"

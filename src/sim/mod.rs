@@ -163,7 +163,7 @@ impl Simulation {
         if !entry.dir.is_dir() {
             // §8.1
             bail!(
-                "Simulation \"{name}\" is registered at '{}', which is missing; \
+                "Directory '{}' of simulation \"{name}\" is missing; \
                  run `cactup sim delete {name}` to unregister it",
                 entry.dir.display()
             );
@@ -346,7 +346,7 @@ pub fn create(
     // freezing a half-written binary into a simulation is real corruption,
     // not just confusing advice, so only an explicit `-f` may proceed.
     if !force && let Some(phrase) = build_cmd::in_flight_build(&config_dir, &config, Some(machine)) {
-        bail!("{phrase}; wait for it to finish, or pass -f to proceed anyway (it may freeze a half-written executable)");
+        bail!("{phrase}; wait for it to finish, or pass -f to proceed anyway");
     }
 
     // 2. Parfile name validation (collision guard, §8.2).

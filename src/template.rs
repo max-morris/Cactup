@@ -131,12 +131,10 @@ fn stray_at(text: &str, pos: usize, syntax: Syntax) -> anyhow::Error {
     let directive_shaped =
         matches!(syntax, Syntax::Shell | Syntax::ShellLine) && text[line_start..].trim_start().starts_with('#');
     anyhow!(
-        "Stray '@' on line {}: not an '@@' escape nor a well-formed @NAME@ token \
-         (write a literal '@' as '@@'{})",
+        "Stray '@' on line {}; write a literal '@' as '@@'{}",
         line_of(text, pos),
         if directive_shaped {
-            "; a '#' glued to a word opens a scheduler directive, not a comment: \
-             a comment is '# ' with a space"
+            "\nA '#' glued to a word is a scheduler directive; write a comment as '# '."
         } else {
             ""
         }
@@ -738,8 +736,7 @@ fn parse_default(cur: &mut Cursor<'_>, at: usize, form: &str, arg: &str) -> Res<
                     ),
                     Some(c) => bail!(
                         "Unquoted default value in @{form}({arg}, …)@ on line {at} contains \
-                         '{c}'; only letters and digits may go unquoted, so quote it: \
-                         @{form}({arg}, \"…\")@"
+                         '{c}'; quote it: @{form}({arg}, \"…\")@"
                     ),
                 }
             }
@@ -811,13 +808,12 @@ impl Pass<'_> {
         let line = self.line_at(pos);
         match self.syntax {
             Syntax::Plain => bail!(
-                "@{form}(…)@ on line {line}: this value has no lines to drop (an argument, a \
-                 path); use the plain or -OPTIONAL form"
+                "@{form}(…)@ on line {line}: this value has no lines to drop; use the plain or \
+                 -OPTIONAL form"
             ),
             Syntax::ShellLine => bail!(
-                "@{form}(…)@ on line {line}: this is a single command, with no lines to drop (a \
-                 [scheduler] command, [build].make, a universe wrapper); use the plain or \
-                 -OPTIONAL form"
+                "@{form}(…)@ on line {line}: this is a single command, with no lines to drop; use \
+                 the plain or -OPTIONAL form"
             ),
             _ => {}
         }
@@ -826,16 +822,16 @@ impl Pass<'_> {
             Syntax::Hash => "a line continued with a backslash",
             _ => "a backslash-newline, an unclosed quote, or a trailing |, && or ||",
         };
-        let leave = "so dropping it would leave half of it behind; put the token on a line of its own";
+        let leave = "put the token on a line of its own";
         let here = self.join(line);
         if here.opens_block {
-            bail!("@{form}(…)@ on line {line}: the line opens a heredoc whose body follows, {leave}");
+            bail!("@{form}(…)@ on line {line}: the line opens a heredoc; {leave}");
         }
         if here.joins_next {
-            bail!("@{form}(…)@ on line {line}: the line runs on into the next ({what}), {leave}");
+            bail!("@{form}(…)@ on line {line}: the line runs on into the next ({what}); {leave}");
         }
         if self.join(line - 1).joins_next {
-            bail!("@{form}(…)@ on line {line}: the line continues line {} ({what}), {leave}", line - 1);
+            bail!("@{form}(…)@ on line {line}: the line continues line {} ({what}); {leave}", line - 1);
         }
         Ok(())
     }

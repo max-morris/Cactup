@@ -163,7 +163,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         && sim.sim.root != root
     {
         bail!(
-            "'{}' says its source tree is {}, but its thornlist's !DEFINE ROOT is {root}",
+            "'{}' names source tree {}, but its thornlist defines ROOT = {root}",
             path.display(),
             sim.sim.root
         );
@@ -183,7 +183,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
 
     let alias = match alias {
         Some(alias) if database.installations.contains_key(&alias) => {
-            println!("{}", format!("An installation with the alias {} already exists.", alias.bold()).bright_red());
+            println!("{}", format!("Installation {} already exists.", alias.bold()).bright_red());
             return Ok(());
         },
         Some(alias) if !valid_alias(&alias) => {
@@ -192,18 +192,18 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         }
         Some(alias) => alias,
         None if silent && !valid_alias(&alias_default) => {
-            println!("{}", format!("The default alias {} is not valid: use only letters, digits, '-', '_', and '.'. Pass {} to choose one.", alias_default.bold(), "--alias".bold()).bright_red());
+            println!("{}", format!("The default alias {} is not valid.\nPass {} with only letters, digits, '-', '_' and '.'.", alias_default.bold(), "--alias".bold()).bright_red());
             return Ok(());
         }
         None if silent && database.installations.contains_key(&alias_default) => {
-            println!("{}", format!("An installation with the default alias {} already exists. Pass {} to choose another.", alias_default.bold(), "--alias".bold()).bright_red());
+            println!("{}", format!("Installation {} already exists.\nPass {} to choose another alias.", alias_default.bold(), "--alias".bold()).bright_red());
             return Ok(());
         }
         None if silent => alias_default.clone(),
         None => loop {
             let alias_sel = prompt_with_default("What should the installation's alias be?", &alias_default)?;
             if database.installations.contains_key(&alias_sel) {
-                println!("{}", format!("An installation with the alias {} already exists. Please choose another.", alias_sel.bold()).bright_red());
+                println!("{}", format!("Installation {} already exists; choose another alias.", alias_sel.bold()).bright_red());
             } else if !valid_alias(&alias_sel) {
                 println!("{}", format!("{} is not a valid alias: use only letters, digits, '-', '_', and '.'.", alias_sel.bold()).bright_red());
             } else {
@@ -222,13 +222,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     // machine's [paths].install-home (§4.2) — @USER@/@ENV()@ resolved for
     // this host — falling back to ~/.cactup/cacti when neither says.
     // Installs land under <install-home>/<alias>.
-    let install_home_base = machine
-        .meta
-        .path_for(&database, "install-home")
-        .ok()
-        .flatten()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| crate::mdb::meta::fallback_home("install-home").expect("install-home has a fallback"));
+    let install_home_base = install_home(&machine, &database);
     let install_prefix_default = |alias: &str| p2s(install_home_base.join(alias));
 
     let install_prefix = match install_prefix {
@@ -287,7 +281,9 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         }
     }
 
-    // Prompt for knobs if they haven't been set yet.
+    // Prompt for knobs if they haven't been set yet. A blank answer is
+    // stored blank (empty reads as unset everywhere), so it is not asked
+    // again on the next install.
     if !silent {
         let snapshot = ctx.db.read()?;
 
@@ -299,10 +295,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         ] {
             if snapshot.knob(knob).is_none() {
                 let default = snapshot.knob_or_default(knob).unwrap_or_default();
-                let answer = prompt_with_default(question, &default)?;
-                if !answer.is_empty() {
-                    answers.push((knob, answer));
-                }
+                answers.push((knob, prompt_with_default(question, &default)?));
             }
         }
         ctx.db.update(|db| {
@@ -365,8 +358,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         // Running the same install again picks up where this one stopped; a
         // repo cut short mid-checkout is then named, for deleting first.
         bail!(
-            "Interrupted; the installation at '{}' is incomplete and was not registered \
-             (run the same install again to finish it)",
+            "Interrupted; '{}' is incomplete and not registered\nRerun the same install to finish it.",
             install_dir.display()
         );
     }
@@ -448,8 +440,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     let became_active = ctx.db.update(|database| {
         if database.installations.contains_key(&alias) {
             bail!(
-                "An installation named {alias} appeared while this install ran; \
-                 the new installation at '{}' was NOT registered",
+                "Installation {alias} was created meanwhile; '{}' was not registered",
                 install_dir.display()
             );
         }
@@ -464,6 +455,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
             current_release: None,
             current_thornlist: None,
             unfetched_repos: Default::default(),
+            copied_from: None,
         });
         if database.active_installation.is_none() {
             database.active_installation = Some(alias.clone());
@@ -499,7 +491,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     }
 
     if !became_active {
-        println!("Another installation is active; run `{}` to switch to this one.", format!("cactup use {}", alias).bold());
+        println!("Switch to it with `{}`.", format!("cactup use {}", alias).bold());
     }
 
     Ok(())
@@ -525,8 +517,21 @@ fn default_symlink_name(root: &str, alias: &str) -> String {
     Path::new(root).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| alias.to_owned())
 }
 
+/// Where installations land by default, each in a directory named for its
+/// alias: the install-home knob, else the machine's `[paths].install-home`
+/// (§4.2), else `~/.cactup/cacti`.
+pub(crate) fn install_home(machine: &crate::mdb::Machine, database: &crate::database::Database) -> PathBuf {
+    machine
+        .meta
+        .path_for(database, "install-home")
+        .ok()
+        .flatten()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::mdb::meta::fallback_home("install-home").expect("install-home has a fallback"))
+}
+
 /// An alias must be usable verbatim as a path component.
-fn valid_alias(alias: &str) -> bool {
+pub(crate) fn valid_alias(alias: &str) -> bool {
     !alias.is_empty()
         && alias != "."
         && alias != ".."
@@ -543,7 +548,7 @@ fn stack_install_source(ctx: &Ctx, req: &str) -> Res<InstallSource<'static>> {
     if unpinned {
         println!(
             "{}",
-            format!("{slug} is not a release: its repos follow their branches, so the installation is not reproducible")
+            format!("{slug} is not a release; its repos follow their branches")
                 .yellow()
         );
     }
@@ -568,24 +573,20 @@ fn sim_install_source(path: &Path) -> Res<InstallSource<'static>> {
     };
     let unpinned = names(&|r| r.commit.is_none() && r.sha256.is_none());
     if !unpinned.is_empty() {
-        println!("{}", format!("Not pinned, so they follow their branch: {}", unpinned.join(", ")).yellow());
+        println!("{}", format!("Unpinned (following their branch): {}", unpinned.join(", ")).yellow());
     }
     let dirty = names(&|r| r.dirty);
     if !dirty.is_empty() {
         println!(
             "{}",
-            format!("Had uncommitted changes when exported, which the file does not carry: {}", dirty.join(", "))
+            format!("Uncommitted changes at export, not in the file: {}", dirty.join(", "))
                 .yellow()
         );
     }
     if !unchecked.is_empty() {
         println!(
             "{}",
-            format!(
-                "Downloaded without checking their recorded hash, which names no single file: {}",
-                unchecked.join(", ")
-            )
-            .yellow()
+            format!("Downloaded without a hash check: {}", unchecked.join(", ")).yellow()
         );
     }
     let resolved = fs::canonicalize(&expanded).unwrap_or(expanded);

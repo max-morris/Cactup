@@ -183,8 +183,8 @@ pub fn sniff(source: &str) -> Res<OptionlistFormat> {
                 "cactup" | "cactup.runs-on" => seen_cactup_header = true,
                 "options" => seen_options_header = true,
                 other => bail!(
-                    "Unknown table header [{other}] at line {lineno}; only [cactup], \
-                     [cactup.runs-on] and [options] are recognized in an optionlist"
+                    "Unknown table header [{other}] at line {lineno}; expected [cactup], \
+                     [cactup.runs-on] or [options]"
                 ),
             }
             i += 1;
@@ -254,8 +254,8 @@ pub fn sniff(source: &str) -> Res<OptionlistFormat> {
 
     if let (Some((tln, ttext)), Some((cln, ctext))) = (&toml_line, &cfg_line) {
         bail!(
-            "Optionlist mixes TOML and native-Cactus value spellings: line {tln} (\"{ttext}\") \
-             looks like TOML, line {cln} (\"{ctext}\") looks like native Cactus"
+            "Optionlist mixes TOML and native-Cactus values: line {tln} (\"{ttext}\") is TOML, \
+             line {cln} (\"{ctext}\") is native Cactus"
         );
     }
 
@@ -273,8 +273,8 @@ pub fn sniff(source: &str) -> Res<OptionlistFormat> {
     if cfg_line.is_some() {
         if seen_options_header {
             bail!(
-                "An [options] table header appears over unquoted native-Cactus values; \
-                 TOML and native .cfg forms may not be mixed in one file"
+                "An [options] header sits over unquoted native-Cactus values; use one form or the \
+                 other"
             );
         }
         return Ok(OptionlistFormat::Cfg);

@@ -316,8 +316,7 @@ pub fn after_build(cc_dir: &Path) {
         let published: u64 = events.iter().filter(|e| e.published == Some(true)).filter_map(|e| e.object_bytes).sum();
         match upkeep::add_to_size(&conf.store, published) {
             Ok(None) => println!(
-                "{} build-cache-size is set, but the size of the build cache in '{}' is unknown; \
-                 run `cactup cache stats` to measure it",
+                "{} the size of the build cache in '{}' is unknown; run `cactup cache stats` to measure it",
                 "note:".bold(),
                 conf.store.display(),
             ),

@@ -388,24 +388,23 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
         // read to build "to establish a baseline" sends them in a circle.
         match (&live, &meta.sources) {
             (Err(why), None) if stamps_compared => println!(
-                "{} cactup cannot track this config's repos: {why}. Only thorn files are \
-                 compared; after changing the flesh, run `cactup build {name} --reconfig`; \
-                 after a refetch, run `cactup build {name} -f`.",
+                "{} cannot track the repos of this config: {why}.\nOnly thorn files are compared.\n\
+                 Run `cactup build {name} --reconfig` after changing the flesh.\n\
+                 Run `cactup build {name} -f` after a refetch.",
                 "note:".yellow().bold()
             ),
             (Err(why), None) => println!(
-                "{} cactup cannot track this config's sources: {why}. After changing them, \
-                 run `cactup build {name} --reconfig`.",
+                "{} cannot track the sources of this config: {why}.\nRun `cactup build {name} \
+                 --reconfig` after changing them.",
                 "note:".yellow().bold()
             ),
             (Err(why), Some(_)) => println!(
-                "{} cactup can no longer read this config's sources: {why}.",
+                "{} cannot read the sources of this config: {why}.",
                 "note:".yellow().bold()
             ),
             (Ok(_), _) => println!(
-                "{} no source baseline recorded for this config yet; the next `cactup build \
-                 {name}` records one. If the sources changed since the last build, run \
-                 `cactup build {name} --reconfig`.",
+                "{} no source baseline yet; the next `cactup build {name}` records one.\nIf the \
+                 sources changed since the last build, run `cactup build {name} --reconfig`.",
                 "note:".yellow().bold()
             ),
         }
@@ -487,7 +486,7 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
         ),
         // Built before stamps: nothing can say whether thorn files changed.
         SourceDelta::Unchanged if stamps_unrecorded => println!(
-            "  {} thorn files have no baseline yet; the next `cactup build {name}` records one. \
+            "  {} thorn files have no baseline yet; the next `cactup build {name}` records one.\n  \
              If files git does not track changed since the last build, run `cactup build {name} --reconfig`.",
             "note:".yellow().bold()
         ),
@@ -549,8 +548,8 @@ pub fn warn_if_sources_diverged(inst: &Installation, meta: &ConfigMeta, silent: 
         what.push(format!("{} no longer inspectable", change.vanished.len()));
     }
     println!(
-        "{} the source tree changed since config {} was built ({}); this run uses the \
-         existing executable. See `cactup config delta {}`; `-s` silences this.",
+        "{} sources changed since config {} was built ({}); using the existing executable.\n\
+         See `cactup config delta {}`; -s silences this.",
         "note:".yellow().bold(),
         meta.name.bold(),
         what.join(", "),

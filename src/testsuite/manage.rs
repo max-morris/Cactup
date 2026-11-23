@@ -234,16 +234,12 @@ fn running_without_job(run: &TestRun, sched: &Scheduler) -> Res<bool> {
 fn without_job(run: &TestRun, name: &str) -> String {
     if run.meta.timestamps.submitted.is_some() {
         format!(
-            "test run \"{name}\" was stopped or has ended, but its running.lock is still held; a \
-             stale lock expires within {} minutes",
+            "test run \"{name}\" has ended, but its running.lock is still held; a stale lock \
+             expires within {} minutes",
             crate::lock::LOCK_STALE_SECS / 60
         )
     } else {
-        format!(
-            "test run \"{name}\" ran in the foreground and its running.lock is held; interrupt it \
-             with Ctrl-C where it runs (a stale lock expires within {} minutes)",
-            crate::lock::LOCK_STALE_SECS / 60
-        )
+        format!("test run \"{name}\" runs in the foreground; interrupt it with Ctrl-C where it runs")
     }
 }
 
@@ -258,12 +254,11 @@ fn running_elsewhere(run: &TestRun, sched: &Scheduler, name: &str) -> String {
     // where job ids are pids, `ps` is what answers.
     let failed = match sched.tells_failed_queries() || !sched.may_requeue() {
         true => "",
-        false => " or could not be asked",
+        false => " or could not be queried",
     };
     format!(
-        "test run \"{name}\" has its running.lock held, but the scheduler does not list its job \
-         {}{failed}; it may be running on another host. Stop it where it runs, or try again later \
-         (a stale lock expires within {} minutes)",
+        "test run \"{name}\" holds its running.lock, but the scheduler does not list its job {}{failed}\n\
+         Stop it where it runs, or try again later; a stale lock expires within {} minutes.",
         run.meta.job_id,
         crate::lock::LOCK_STALE_SECS / 60
     )
@@ -307,11 +302,9 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
             if let EndedStop::NotKnown(said) = sched.stop_judged(job.job(), StopCase::Unread)? {
                 if run.lock_live()? {
                     println!(
-                        "{}, and the scheduler does not know it ({said}), but the run's running.lock is \
-                         held; nothing recorded. Run `cactup test stop {name}` again once the lock is \
-                         released (a stale lock expires within {} minutes).",
-                        sentence(unread(job_id)),
-                        crate::lock::LOCK_STALE_SECS / 60
+                        "{}, and the scheduler does not know it ({said}), but its running.lock is held\n\
+                         Run `cactup test stop {name}` again once the lock is released.",
+                        sentence(unread(job_id))
                     );
                     return Ok(());
                 }
@@ -350,8 +343,7 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
             };
             match sched.stop_judged(job.job(), case)? {
                 EndedStop::Sent if unanswered => println!(
-                    "Could not query test job {}; asked the scheduler to stop it in case it was \
-                     queued again",
+                    "Could not query test job {}; asked the scheduler to stop it in case it was requeued",
                     job_id.bold()
                 ),
                 EndedStop::Sent => println!(
@@ -394,12 +386,11 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
             run.meta.timestamps.finished.get_or_insert_with(chrono::Utc::now);
         }
         Job::OnHost if run.lock_live()? => {
-            println!("{}. Nothing recorded.", sentence(on_host(job.job(), name)));
+            println!("{}", sentence(on_host(job.job(), name)));
             return Ok(());
         }
         Job::OnHost => println!(
-            "Test job {job_id} was submitted on host {} and its run's lock is not held; treating it \
-             as ended",
+            "Test job {job_id} on host {} is no longer running; treating it as ended",
             job.host.as_deref().unwrap_or_default()
         ),
         Job::Ended | Job::Absent if run.lock_live()? => {
@@ -549,19 +540,19 @@ fn clear_to_delete(run: &TestRun, sched: &Scheduler, name: &str, force: bool) ->
             bail!("{}; then delete the test run", SharedGroup(job_id.to_owned()))
         }
         Job::Listed(status) if !force => bail!(
-            "Test run \"{name}\" ended, but the scheduler still lists its job {job_id} {}; or use -f to \
+            "Test run \"{name}\" ended, but the scheduler still lists its job {job_id} {}; or pass -f to \
              stop it and delete",
             crate::scheduler::listed_after_end(status, &format!("cactup test stop {name}"))
         ),
         Job::Live if !force => bail!(
-            "Test run \"{name}\" has a live job ({job_id}); `cactup test stop {name}` first, or use \
-             -f to stop and delete"
+            "Test run \"{name}\" has a live job ({job_id})\n\
+             Run `cactup test stop {name}` first, or pass -f to stop it and delete."
         ),
         Job::Live => {
             send_stop(sched, job)?;
         }
         Job::Unread if !force => bail!(
-            "{}: `cactup test stop {name}` first, or use -f to stop it and delete",
+            "{}\nRun `cactup test stop {name}` first, or pass -f to stop it and delete.",
             unread(job_id)
         ),
         state @ (Job::Unread | Job::Listed(_)) => {
@@ -578,11 +569,9 @@ fn clear_to_delete(run: &TestRun, sched: &Scheduler, name: &str, force: bool) ->
                 // Not stopped: over, unless something still holds the lock.
                 if run.lock_live()? {
                     bail!(
-                        "{}, but the scheduler does not know it ({said}), and the run's running.lock \
-                         is held; delete it once the lock is released (a stale lock expires within {} \
-                         minutes)",
-                        what,
-                        crate::lock::LOCK_STALE_SECS / 60
+                        "{}, but the scheduler does not know it ({said}), and its running.lock is held\n\
+                         Delete it once the lock is released.",
+                        what
                     );
                 }
                 println!(
@@ -828,7 +817,7 @@ mod tests {
         let sched = Scheduler::new(&meta);
         stop_run(&mut live, &sched, "t").unwrap();
         for force in [false, true] {
-            assert!(clear_to_delete(&live, &sched, "t", force).unwrap_err().to_string().contains("ran in the foreground"));
+            assert!(clear_to_delete(&live, &sched, "t", force).unwrap_err().to_string().contains("runs in the foreground"));
         }
         assert!(!stopped.exists(), "an interactive run's pid went to the scheduler");
         assert!(TestRun::open(&live.dir).unwrap().meta.timestamps.finished.is_none());
@@ -970,7 +959,7 @@ mod tests {
         // nothing with the lock held, and takes the run as ended without it.
         let refusing = machine_with("echo 'qdel: Unknown Job Id JOB-7.qb2' >&2; exit 153");
         let refusing = Scheduler::new(&refusing);
-        assert!(clear_to_delete(&ended, &refusing, "t", false).unwrap_err().to_string().contains("use -f"));
+        assert!(clear_to_delete(&ended, &refusing, "t", false).unwrap_err().to_string().contains("pass -f"));
         clear_to_delete(&ended, &refusing, "t", true).unwrap();
         let held_ended = crate::lock::LinkLock::acquire(&ended.running_lock_path()).unwrap();
         assert!(clear_to_delete(&ended, &refusing, "t", true).unwrap_err().to_string().contains("running.lock is held"));

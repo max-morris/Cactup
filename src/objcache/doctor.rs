@@ -731,18 +731,17 @@ fn stands_down(dir: &Path, cactus_root: &Path) -> Option<(String, String)> {
 /// where one was found: the thorn's file, or what generates it.
 fn thorn_fix(raw: &Raw, file: Option<&Path>, config_dir: &Path, values: &BTreeMap<String, String>) -> Option<String> {
     let flag = shown_for(&raw.reason, raw.variable.as_ref().and_then(|variable| values.get(variable)));
-    let leave = flag.map(|flag| format!(" (leave {flag} out, if its compiles do not need it)")).unwrap_or_default();
+    let leave = flag.map(|flag| format!(", or leave {flag} out if its compiles do not need it")).unwrap_or_default();
     let generated = file.is_some_and(|file| file.starts_with(config_dir.join("bindings")));
     let capability = file.is_some_and(|file| file.starts_with(config_dir.join("bindings/Configuration/Capabilities")));
     let r#where = match (file, capability, generated) {
-        (None, _, _) => "the thorn's make files set it (make.code.defn, make.code.deps, or what they include), possibly from a variable the option list can set too".to_owned(),
-        (Some(_), true, _) => "it comes with a capability: change it in the thorn that provides the capability (for an ExternalLibraries thorn, its configuration or the option list's variables for that library)".to_owned(),
-        (Some(_), false, true) => "the file named is generated from the thorn's configuration.ccl: change it there".to_owned(),
-        (Some(_), false, false) => "the file named sets it: change it in the thorn, not the option list".to_owned(),
+        (None, _, _) => "change it in the thorn's make files (make.code.defn, make.code.deps, or what they include) or in an option-list variable they read".to_owned(),
+        (Some(_), true, _) => "change it in the thorn that provides the capability (for an ExternalLibraries thorn, in its configuration or the option-list variables for that library)".to_owned(),
+        (Some(_), false, true) => "change it in the thorn's configuration.ccl, which generates the file named".to_owned(),
+        (Some(_), false, false) => "change it in the file named, not in the option list".to_owned(),
     };
     match raw.severity {
-        Severity::KeepsOut => Some(format!("the cache stays out of these compiles only; {where}{leave}")),
-        Severity::Costs => Some(format!("{where}{leave}")),
+        Severity::KeepsOut | Severity::Costs => Some(format!("{where}{leave}")),
         Severity::Unchecked | Severity::Note => None,
     }
 }
@@ -1300,7 +1299,7 @@ pub fn fragile_entries(env: &str, build: Option<&Path>) -> Result<Fragile, Strin
                 fragile.stopped.push(state);
                 values
             }
-            (None, None) => return Err(format!("with the path variables other than PATH {state}, the setup did not finish and where it stopped is unknown (it sets its own exit trap or uses exec)")),
+            (None, None) => return Err(format!("with the path variables other than PATH {state}, the setup did not finish (it sets its own exit trap or uses exec)")),
         };
         for line in values.lines() {
             let Some((variable, value)) = line.split_once('=').filter(|(variable, _)| PATH_VARIABLES.contains(variable)) else { continue };
@@ -1617,7 +1616,7 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
             if !fragile.stopped.is_empty() {
                 findings.push(Finding {
                     severity: Severity::Unchecked,
-                    what: format!("with the path variables other than PATH {}, the setup stopped early (an exit, a failed command under set -e, or an unset variable under set -u); what it sets after that is not checked", fragile.stopped.join(" or ")),
+                    what: format!("with the path variables other than PATH {}, the setup stops early (an exit, or a failure under set -e or set -u); the rest of it is not checked", fragile.stopped.join(" or ")),
                     from: setup.clone(),
                     fix: None,
                 });
@@ -1711,7 +1710,7 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, writte
         };
         let from = match from_shell {
             _ if variable == "TMPDIR" && raw.reason.contains("is not set") => "this host's /tmp".to_owned(),
-            true => format!("your shell ({variable} is already so before the build's environment setup runs)"),
+            true => format!("your shell ({variable} is set so before the environment setup runs)"),
             false => setup.to_owned(),
         };
         let fix = match () {
@@ -1720,7 +1719,7 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, writte
             _ if variable == "TMPDIR" => "set TMPDIR to an existing, writable directory, or create the one it names".to_owned(),
             _ if raw.reason.contains("is set") || variable == "LD_AUDIT" => format!("unset {variable} for the build"),
             _ if variable == "LD_PRELOAD" => "name each library LD_PRELOAD loads by its absolute path".to_owned(),
-            _ => format!("give {variable} absolute directories only: export {variable}=\"/dir${{{variable}:+:${variable}}}\" adds one without an empty entry"),
+            _ => format!("give {variable} absolute directories only, e.g. export {variable}=\"/dir${{{variable}:+:${variable}}}\""),
         };
         return (from, Some(fix));
     }
@@ -1769,10 +1768,10 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, writte
         let fix = match hint(&raw.reason) {
             // An unknown flag with a word after it that is no flag: both.
             Some(_) if raw.reason.contains("is not a flag the cache knows") && shown != flag => {
-                Some(format!("if {flag} is not needed, leave {shown} out; if it is, the cache does not know it yet"))
+                Some(format!("leave {shown} out if the build does not need {flag}"))
             }
             Some(hint) => Some(hint.to_owned()),
-            None => Some(format!("leave {shown} out, if the build does not need it")),
+            None => Some(format!("leave {shown} out if the build does not need it")),
         };
         return (from, fix);
     }
@@ -1796,17 +1795,17 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, writte
 /// What would let compiles kept out for `why` in, where cactup knows.
 pub fn hint(why: &str) -> Option<&'static str> {
     let hints: [(&str, &str); 12] = [
-        ("is not a plain command naming a program", "name the compiler alone in the option list (CC = gcc); put settings such as LANG=C in the machine's environment setup, and flags in the flags variables"),
+        ("is not a plain command naming a program", "name the compiler alone in the option list (CC = gcc); put settings like LANG=C in the machine's environment setup and flags in the flags variables"),
         ("is another compiler wrapper", "name the compiler itself in the option list (CC = gcc, not ccache gcc)"),
         ("--objdir-as-tempdir", "give nvcc --objdir-as-tempdir in the option list's CUDA flags"),
         ("records when each source was last changed", "remove -G and -lineinfo from the option list's CUDA flags"),
         ("native targets the GPU", "name the GPU architecture in the option list instead of native (e.g. -arch=sm_80)"),
-        ("is not a flag the cache knows", "if the flag is not needed, leave it out; if it is, the cache does not know it yet"),
-        ("is read as one)", "the word named is read as a second source: leave it and its flag out if the build does not need them"),
+        ("is not a flag the cache knows", "leave the flag out if the build does not need it"),
+        ("is read as one)", "leave the word named and its flag out if the build does not need them"),
         ("changes the compiler's flags behind its command line", "unset that variable for the build, in your shell or the machine's environment setup"),
-        ("Disk quota exceeded", "a disk quota is exhausted: free space (`cactup cache gc` for the cache), or set build-cache-size for an early warning"),
-        ("No space left on device", "a file system is full: free space (`cactup cache gc` for the cache), or set build-cache-size for an early warning"),
-        ("not published: Failed to create", "the build could not write to the build cache: check its permissions and free space (see `cactup cache stats`)"),
+        ("Disk quota exceeded", "free space (`cactup cache gc` for the cache), or set build-cache-size for an early warning"),
+        ("No space left on device", "free space (`cactup cache gc` for the cache), or set build-cache-size for an early warning"),
+        ("not published: Failed to create", "check the permissions and free space of the build cache (see `cactup cache stats`)"),
         ("it targets the processor it runs on", "name the processor in the option list instead of -march=native, or build on hosts with uniform processors"),
     ];
     hints.iter().find(|(pattern, _)| why.contains(pattern)).map(|(_, hint)| *hint)

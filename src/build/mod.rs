@@ -459,8 +459,8 @@ pub fn resolve_thornlist(
         let snapshot = config_file(cactus_root, name, THORNLIST_SNAPSHOT);
         let text = fs::read_to_string(&snapshot).with_context(|| {
             format!(
-                "Config \"{name}\"'s thornlist '{stored_path}' is no longer readable and there is \
-                 no snapshot at '{}'; pass --thornlist to choose one",
+                "Thornlist '{stored_path}' of config \"{name}\" is unreadable and has no snapshot at \
+                 '{}'; pass --thornlist to choose one",
                 snapshot.display()
             )
         })?;
@@ -541,7 +541,7 @@ pub fn retarget_recorded_thornlist(
         }
         meta.thornlist = live_display.clone();
         meta.store(cactus_root)
-            .with_context(|| format!("Failed to retarget config \"{name}\"'s thornlist"))?;
+            .with_context(|| format!("Failed to retarget the thornlist of config \"{name}\""))?;
         retargeted += 1;
     }
     Ok(retargeted)
@@ -664,8 +664,7 @@ fn warn_disabled_overrides(
     println!(
         "{}",
         format!(
-            "warning: the thornlist enables {} thorn(s) that the mdb disables; they will NOT \
-             be built:",
+            "warning: the mdb disables {} thorn(s) the thornlist enables; they will not be built:",
             overrides.len(),
         )
         .yellow()
@@ -1375,60 +1374,66 @@ fn up_to_date_message(
     stamps: StampReading,
 ) -> String {
     const AGAIN: &str = "pass --reconfig to rebuild incrementally, or -f to rebuild from scratch";
-    let untracked_note_for = |untracked: &[String]| {
-        if untracked.is_empty() {
-            String::new()
-        } else {
-            format!(" Not links into repos/, so edits to them go unnoticed: {}.", summarize(untracked))
-        }
+    let same = "same optionlist, same universe, same thornlist";
+    let untracked_line = |untracked: &[String]| {
+        (!untracked.is_empty())
+            .then(|| format!("Edits go unnoticed in {} (not links into repos/).", summarize(untracked)))
     };
-    let untracked_note = untracked_note_for(untracked);
     // The upgrade case: a config last built before stamps existed may have
     // had thorns regenerated since, and nothing could have noticed.
-    const NO_STAMPS: &str = "Its thorns' files had no baseline; one is recorded now.";
+    const NO_STAMPS: &str = "Recorded a first baseline of its thorn files.";
+    let lines = |parts: Vec<Option<String>>| parts.into_iter().flatten().collect::<Vec<_>>().join("\n");
     if let Some(why) = no_sources {
-        let unseen = "Edits to the Cactus flesh and refetches that move it go unnoticed";
+        let unseen = "Edits to the Cactus flesh and refetches that move it go unnoticed.";
         // That sentence names the flesh already; the note names the rest.
         let others: Vec<String> =
             untracked.iter().filter(|t| *t != crate::thornlist::UNTRACKED_FLESH).cloned().collect();
-        let untracked_note = untracked_note_for(&others);
         return match stamps {
-            StampReading::Compared => format!(
-                "Config {name} is up to date (same optionlist, same universe, same thornlist, same \
-                 thorn files), but cactup cannot track its repos: {why}.{untracked_note} {unseen}; \
-                 {AGAIN}."
-            ),
-            StampReading::FirstBaseline => format!(
-                "Config {name} is up to date (same optionlist, same universe, same thornlist), but \
-                 cactup cannot track its repos: {why}. {NO_STAMPS}{untracked_note} {unseen}. If \
-                 thorns or the flesh changed since the last build, {AGAIN}."
-            ),
-            StampReading::Absent => format!(
-                "Config {name} is up to date (same optionlist, same universe, same thornlist), but \
-                 cactup cannot track its sources: {why}. Source edits and refetches go unnoticed; \
-                 {AGAIN}."
-            ),
+            StampReading::Compared => lines(vec![
+                Some(format!("Config {name} is up to date ({same}, same thorn files).")),
+                Some(format!("Cannot track its repos: {why}.")),
+                untracked_line(&others),
+                Some(unseen.to_owned()),
+                Some(format!("To rebuild, {AGAIN}.")),
+            ]),
+            StampReading::FirstBaseline => lines(vec![
+                Some(format!("Config {name} is up to date ({same}).")),
+                Some(format!("Cannot track its repos: {why}.")),
+                Some(NO_STAMPS.to_owned()),
+                untracked_line(&others),
+                Some(unseen.to_owned()),
+                Some(format!("If thorns or the flesh changed since the last build, {AGAIN}.")),
+            ]),
+            StampReading::Absent => lines(vec![
+                Some(format!("Config {name} is up to date ({same}).")),
+                Some(format!("Cannot track its sources: {why}.")),
+                Some("Source edits and refetches go unnoticed.".to_owned()),
+                Some(format!("To rebuild, {AGAIN}.")),
+            ]),
         };
     }
     if !had_baseline {
-        return format!(
-            "Config {name} is up to date (same optionlist, same universe, same thornlist). It had \
-             no source baseline; one is recorded now.{untracked_note} If sources changed since the \
-             last build, {AGAIN}."
-        );
+        return lines(vec![
+            Some(format!("Config {name} is up to date ({same}).")),
+            Some("Recorded a first source baseline.".to_owned()),
+            untracked_line(untracked),
+            Some(format!("If sources changed since the last build, {AGAIN}.")),
+        ]);
     }
     if stamps == StampReading::FirstBaseline {
-        return format!(
-            "Config {name} is up to date (same optionlist, same universe, same thornlist, same \
-             sources for what cactup tracks). {NO_STAMPS}{untracked_note} If files git does not \
-             track were regenerated since the last build, {AGAIN}."
-        );
+        return lines(vec![
+            Some(format!("Config {name} is up to date ({same}, same tracked sources).")),
+            Some(NO_STAMPS.to_owned()),
+            untracked_line(untracked),
+            Some(format!("If files git does not track were regenerated since the last build, {AGAIN}.")),
+        ]);
     }
-    let tracked = if untracked.is_empty() { "same sources" } else { "same sources for what cactup tracks" };
-    format!(
-        "Config {name} is up to date (same optionlist, same universe, same thornlist, \
-         {tracked}).{untracked_note} To rebuild anyway, {AGAIN}."
-    )
+    let tracked = if untracked.is_empty() { "same sources" } else { "same tracked sources" };
+    lines(vec![
+        Some(format!("Config {name} is up to date ({same}, {tracked}).")),
+        untracked_line(untracked),
+        Some(format!("To rebuild anyway, {AGAIN}.")),
+    ])
 }
 
 /// Resolve the BUILD universe name per §4.8 precedence (steps 1, 3, 4):
@@ -1542,7 +1547,7 @@ pub fn resolve_optionlist(
                 // default.
                 bail!(
                     "Config \"{name}\" was built with flavor \"{recorded}\", which machine \"{}\" \
-                     no longer has; pass --flavor (one of: {}) or --optionlist",
+                     no longer has\nPass --flavor (one of: {}) or --optionlist.",
                     machine.name,
                     if listed.is_empty() { "none".to_owned() } else { listed.join(", ") },
                 );
@@ -1564,8 +1569,8 @@ pub fn resolve_optionlist(
                 let snapshot = config_file(cactus_root, name, OPTIONLIST_SNAPSHOT);
                 let source = fs::read_to_string(&snapshot).with_context(|| {
                     format!(
-                        "Config \"{name}\"'s optionlist '{recorded}' is no longer readable and \
-                         there is no snapshot at '{}'; pass --optionlist or --flavor",
+                        "Optionlist '{recorded}' of config \"{name}\" is unreadable and has no \
+                         snapshot at '{}'; pass --optionlist or --flavor",
                         snapshot.display()
                     )
                 })?;
@@ -1574,8 +1579,8 @@ pub fn resolve_optionlist(
                 // such, pointing at the flag that names a current file instead.
                 let optionlist = Optionlist::parse_any(&source).with_context(|| {
                     format!(
-                        "Config \"{name}\"'s optionlist '{recorded}' is no longer readable and this \
-                         cactup cannot read its snapshot '{}'; pass --optionlist or --flavor",
+                        "Optionlist '{recorded}' of config \"{name}\" is unreadable and its snapshot \
+                         '{}' does not parse; pass --optionlist or --flavor",
                         snapshot.display()
                     )
                 })?;
@@ -1825,8 +1830,7 @@ fn prepare_with_cache(
     let ResolvedOptionlist { source: optionlist_source, optionlist, .. } = &resolved;
     if resolved.from_snapshot {
         println!(
-            "{} optionlist '{optionlist_source}' is no longer readable; building from the config's \
-             snapshot.",
+            "{} optionlist '{optionlist_source}' is unreadable; building from the config's snapshot.",
             "warning:".yellow().bold(),
         );
     }
@@ -1860,7 +1864,7 @@ fn prepare_with_cache(
         resolve_thornlist(&cactus_root, name, stored_meta.as_ref(), opts.thornlist.as_deref())?;
     if thornlist.from_snapshot {
         println!(
-            "{} thornlist '{}' is no longer readable; building from the config's snapshot.",
+            "{} thornlist '{}' is unreadable; building from the config's snapshot.",
             "warning:".yellow().bold(),
             thornlist.recorded,
         );
@@ -2116,21 +2120,21 @@ fn prepare_with_cache(
         && stamping
     {
         println!(
-            "{} cactup cannot track config {name}'s repos: {why}. Edits to the Cactus flesh and \
-             refetches will not trigger a rebuild; pass --reconfig after changing the flesh, or -f \
+            "{} cannot track the repos of config {name}: {why}.\nEdits to the Cactus flesh and \
+             refetches will not trigger a rebuild.\nPass --reconfig after changing the flesh, or -f \
              after a refetch.",
             "note:".yellow().bold()
         );
     } else if let Some(why) = &no_sources {
         println!(
-            "{} cactup cannot track config {name}'s sources: {why}. Later edits and refetches \
-             will not trigger a rebuild; pass --reconfig after changing them.",
+            "{} cannot track the sources of config {name}: {why}.\nEdits and refetches will not \
+             trigger a rebuild.\nPass --reconfig after changing them.",
             "note:".yellow().bold()
         );
     }
     if !untracked.is_empty() && fresh_sources.is_some() {
         println!(
-            "{} these sources of config {name} are not links into repos/ and are not tracked: {}.",
+            "{} untracked sources of config {name} (not links into repos/): {}.",
             "note:".yellow().bold(),
             summarize(&untracked)
         );
@@ -2609,8 +2613,7 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
         && prev_built > staged
     {
         println!(
-            "Note: config {name} was rebuilt by another `cactup build` while this one was \
-             queued; building anyway."
+            "Note: config {name} was rebuilt while this build was queued; building anyway."
         );
     }
     let (sources_now, _) =
@@ -2706,8 +2709,7 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
             && (spec.wrapper.is_some() || spec.wrapper_argv.is_some())
         {
             println!(
-                "Building inside universe \"{}\"; if its wrapper queues a job, output starts \
-                 once the job is allocated.",
+                "Building inside universe \"{}\"; output may wait until its wrapper's job starts.",
                 spec.name,
             );
         }
@@ -5038,7 +5040,7 @@ mod tests {
 
         let fresh = up_to_date_message("bcx", None, false, &mine, StampReading::Absent);
         assert!(!fresh.contains("same sources"), "{fresh}");
-        assert!(fresh.contains("no source baseline") && fresh.contains("Local/Mine"), "{fresh}");
+        assert!(fresh.contains("first source baseline") && fresh.contains("Local/Mine"), "{fresh}");
 
         let why = crate::fetch::NoSources::NoGitRepos;
         let blind = up_to_date_message("bcx", Some(&why), true, &[], StampReading::Absent);
@@ -5064,7 +5066,7 @@ mod tests {
         for no_sources in [None, Some(&why)] {
             let first = up_to_date_message("bcx", no_sources, true, &[], StampReading::FirstBaseline);
             assert!(!first.contains("same sources)") && !first.contains("same thorn files"), "{first}");
-            assert!(first.contains("had no baseline") && first.contains("--reconfig"), "{first}");
+            assert!(first.contains("first baseline") && first.contains("--reconfig"), "{first}");
         }
     }
 

@@ -1214,13 +1214,13 @@ impl Meta {
                 (None, None) => {}
                 (None, Some(t)) => {
                     if !t.contains("@COMMAND@") {
-                        bail!("Universe \"{name}\"'s wrapper template does not contain @COMMAND@") // §4.8
+                        bail!("The wrapper template of universe \"{name}\" lacks @COMMAND@") // §4.8
                     }
                     if let Some(pos) = command_token_in_quotes(t) {
                         bail!(
-                            "Universe \"{name}\"'s wrapper template puts @COMMAND@ inside a \
-                             quoted string (byte {pos}); @COMMAND@ is already shell-quoted, so \
-                             place it outside the quotes, e.g. `bash -lc '… && '@COMMAND@`" // §4.8
+                            "The wrapper template of universe \"{name}\" puts @COMMAND@ inside a \
+                             quoted string (byte {pos}), but it is already shell-quoted.\n\
+                             Place it outside the quotes, e.g. `bash -lc '… && '@COMMAND@`." // §4.8
                         )
                     }
                 }

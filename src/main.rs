@@ -3,6 +3,7 @@ mod build;
 mod build_info;
 mod cactarium;
 mod commands;
+mod cow;
 mod database;
 mod deps;
 mod fetch;
@@ -24,6 +25,7 @@ mod template;
 mod testsuite;
 mod thornlist;
 mod timing;
+mod treecopy;
 mod update;
 mod walltime;
 // The corpus parser: used by build.rs (via include!) at build time, and by
@@ -223,7 +225,6 @@ fn run() -> Res<()> {
         Commands::Stack(crate::args::StackCommand::Publish { definition, target, version, thornlist }) => {
             commands::import::publish_stack(&ctx, &definition, &target, &version, thornlist.as_deref())
         }
-        Commands::Uninstall { alias, force } => commands::uninstall::dispatch(&ctx, alias, force),
         Commands::Installation(cmd) | Commands::Inst(cmd) => commands::installation::dispatch(&ctx, cmd),
         Commands::Config(cmd) => commands::config::dispatch(&ctx, cmd),
         Commands::Build { start, command } => commands::build::dispatch(&ctx, *start, command),

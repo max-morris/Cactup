@@ -52,13 +52,20 @@ use std::path::{Path, PathBuf};
 /// even if they are removed (versions are sticky); an older binary refuses
 /// it rather than corrupts it. A file that never had libraries stays v1 (the
 /// down-step), so an older binary keeps reading those installations.
+///
+/// Version 3 added `linked-to`, which makes the installation a symbolic copy
+/// whose unchanged files are links into another installation. An older
+/// binary ignoring it would write through those links into the other
+/// installation's tree (a refetch, an add), so a symbolic copy's record is
+/// written as v3 and an older binary refuses it; every other record keeps
+/// the version it had (the down-step).
 // Spec §2.5 matrix; the v1 shape is fixtures/formats/installation/v1.toml.
 pub static INSTALLATION: Format<Toml> = Format {
     name: "installation record",
     key: "schema",
-    current: 2,
-    upgrades: &[installation_up_1],
-    downgrades: &[installation_down_2],
+    current: 3,
+    upgrades: &[installation_up_1, installation_up_2],
+    downgrades: &[installation_down_2, installation_down_3],
     down_floor: 1,
     frozen_read: false,
     legacy: None,
@@ -68,6 +75,19 @@ pub static INSTALLATION: Format<Toml> = Format {
 /// v1 → v2: nothing to change (v1 has no libraries).
 fn installation_up_1(_doc: &mut Toml) -> Res<()> {
     Ok(())
+}
+
+/// v2 → v3: nothing to change (v2 has no `linked-to`).
+fn installation_up_2(_doc: &mut Toml) -> Res<()> {
+    Ok(())
+}
+
+/// v3 → v2: unchanged, unless the installation is a symbolic copy.
+fn installation_down_3(doc: &mut Toml) -> Result<(), format::CannotExpress> {
+    match doc.get("linked-to") {
+        Some(_) => Err(format::CannotExpress),
+        None => Ok(()),
+    }
 }
 
 /// v2 → v1: unchanged, unless some added package has libraries, which v1
@@ -149,6 +169,15 @@ pub struct InstallationMeta {
     /// of each `[[added]]` element, so an older binary's rewrite keeps it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub added_for: BTreeMap<String, AddedFor>,
+    /// For a symbolic copy (`installation cp --symbolic`, §3.1): the
+    /// installation home its unchanged files are links into. Each file of the
+    /// copy's tree is an absolute link to the same file there until cactup
+    /// writes to it (`crate::cow`), or `installation reify` makes it the
+    /// copy's own; reify of the whole copy removes this key. The source must
+    /// outlive the copy, so `installation delete` refuses it while this names
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_to: Option<PathBuf>,
 }
 
 /// One `added-for` entry. Believed only beside the package's `[[added]]`
@@ -277,8 +306,8 @@ impl InstallationMeta {
     pub fn active_config(&self) -> Res<&str> {
         self.active_config.as_deref().ok_or_else(|| {
             anyhow!(
-                "This installation has no active config; \
-                 build one with `cactup build <name>` or select one with `cactup config use <name>`"
+                "This installation has no active config.\n\
+                 Build one with `cactup build <name>` or select one with `cactup config use <name>`."
             )
         })
     }
@@ -568,7 +597,7 @@ impl Installation {
                 eprintln!(
                     "{}",
                     format!(
-                        "Renamed this installation's thornlists: pristine copy '{}', live copy '{}'.",
+                        "Renamed the thornlists to '{}' (pristine) and '{}' (live).",
                         self.source_thornlist().display(),
                         live.display()
                     )
@@ -578,7 +607,7 @@ impl Installation {
             Ok(false) => {}
             Err(e) => eprintln!(
                 "{}",
-                format!("Warning: could not rename this installation's thornlists: {e:#}").yellow()
+                format!("Warning: could not rename the thornlists: {e:#}").yellow()
             ),
         }
     }
@@ -624,6 +653,13 @@ impl Installation {
 
     pub fn cactup_dir(&self) -> PathBuf {
         self.root.join(".cactup")
+    }
+
+    /// The fetch lock (§2.3 item 6): held by whatever rewrites the source
+    /// tree's repos (`installation refetch`), and by `installation cp` while
+    /// it reads them.
+    pub fn fetch_lock_path(&self) -> PathBuf {
+        self.cactup_dir().join(".cactup-fetch.lock")
     }
 
     fn meta_path(&self) -> PathBuf {
@@ -956,7 +992,7 @@ mod tests {
     fn schema_guard_refuses_newer_files() {
         let (_dir, inst) = inst();
         std::fs::create_dir_all(inst.cactup_dir()).unwrap();
-        std::fs::write(inst.meta_path(), "schema = 3\n").unwrap();
+        std::fs::write(inst.meta_path(), format!("schema = {}\n", INSTALLATION.current + 1)).unwrap();
         let err = format!("{:#}", inst.meta().unwrap_err());
         assert!(err.contains("upgrade"), "{err}");
     }
@@ -1005,6 +1041,7 @@ mod tests {
                 },
             )]
             .into(),
+            linked_to: Some("/scratch/cacti/et".into()),
         }
     }
 
@@ -1100,16 +1137,19 @@ mod tests {
         };
         let mut plain = exhaustive_meta();
         plain.added[0].libraries.clear();
+        plain.linked_to = None;
 
         format::write(&path, &plain, &INSTALLATION).unwrap();
         assert_eq!(schema(), 1);
         let back: InstallationMeta = format::read(&path, &INSTALLATION).unwrap().unwrap();
         assert_eq!(back.added, plain.added);
 
-        format::write(&path, &exhaustive_meta(), &INSTALLATION).unwrap();
+        let mut libraries = exhaustive_meta();
+        libraries.linked_to = None;
+        format::write(&path, &libraries, &INSTALLATION).unwrap();
         assert_eq!(schema(), 2);
         let back: InstallationMeta = format::read(&path, &INSTALLATION).unwrap().unwrap();
-        assert_eq!(back.added, exhaustive_meta().added);
+        assert_eq!(back.added, libraries.added);
 
         format::write(&path, &plain, &INSTALLATION).unwrap();
         assert_eq!(schema(), 2);
@@ -1143,6 +1183,7 @@ mod tests {
         plain.added[0].libraries.clear();
         // Additive, and not in the v1 fixture (see the test of `added-for`).
         plain.added_for.clear();
+        plain.linked_to = None;
 
         format::write(&path, &plain, &INSTALLATION).unwrap();
         let old: InstallationMeta = format::read(&path, &V1).unwrap().unwrap();
@@ -1154,7 +1195,9 @@ mod tests {
         let v1 = crate::format::testing::fixture_dir("installation").join("v1.toml");
         assert_eq!(parse(&path), parse(&v1));
 
-        format::write(&path, &exhaustive_meta(), &INSTALLATION).unwrap();
+        let mut libraries = exhaustive_meta();
+        libraries.linked_to = None;
+        format::write(&path, &libraries, &INSTALLATION).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let err = format::read::<InstallationMeta, _>(&path, &V1).unwrap_err();
         assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
@@ -1172,8 +1215,8 @@ mod tests {
     /// and their `choices` arrays alike, and the version stays what it was.
     #[test]
     fn an_older_binary_s_rewrite_keeps_added_for() {
-        // `InstallationMeta` and `INSTALLATION` as they shipped before
-        // `added-for`.
+        // `InstallationMeta` and `INSTALLATION` as they shipped at version
+        // 2, before `added-for`.
         #[derive(Debug, Default, Serialize, Deserialize)]
         #[serde(rename_all = "kebab-case")]
         struct Before {
@@ -1203,6 +1246,7 @@ mod tests {
         let path = dir.path().join("installation.toml");
         let mut plain = exhaustive_meta();
         plain.added[0].libraries.clear();
+        plain.linked_to = None;
         format::write(&path, &plain, &INSTALLATION).unwrap();
         let schema = || {
             let doc: Toml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -1272,6 +1316,44 @@ mod tests {
         assert_eq!(back.added_for.keys().collect::<Vec<_>>(), ["owner/pkg"]);
         let present: Vec<bool> = back.added_for_present().map(|(_, f)| f.is_some()).collect();
         assert_eq!(present, [true]);
+    }
+
+    /// A version-2 binary must refuse a symbolic copy, which it would write
+    /// through into its source, and only that.
+    #[test]
+    fn an_older_binary_refuses_only_symbolic_copies() {
+        // `INSTALLATION` as it shipped at version 2.
+        static V2: Format<Toml> = Format {
+            name: "installation record",
+            key: "schema",
+            current: 2,
+            upgrades: &[installation_up_1],
+            downgrades: &[installation_down_2],
+            down_floor: 1,
+            frozen_read: false,
+            legacy: None,
+            replace_whole: &[],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let schema = |path: &Path| std::fs::read_to_string(path).unwrap().lines().next().unwrap().to_owned();
+
+        let path = dir.path().join("libraries.toml");
+        let mut libraries = exhaustive_meta();
+        libraries.linked_to = None;
+        format::write(&path, &libraries, &INSTALLATION).unwrap();
+        assert_eq!(schema(&path), "schema = 2");
+        let old: InstallationMeta = format::read(&path, &V2).unwrap().unwrap();
+        assert_eq!(old.added, libraries.added);
+
+        let path = dir.path().join("symbolic.toml");
+        format::write(&path, &exhaustive_meta(), &INSTALLATION).unwrap();
+        assert_eq!(schema(&path), "schema = 3");
+        let err = format::read::<InstallationMeta, _>(&path, &V2).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+
+        // Reified: the key goes, the version stays.
+        format::write(&path, &libraries, &INSTALLATION).unwrap();
+        assert_eq!(schema(&path), "schema = 3");
     }
 
     #[test]

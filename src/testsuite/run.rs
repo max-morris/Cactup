@@ -207,8 +207,8 @@ fn start_impl(
     // is the compute-node re-entry (handled earlier in `start`).
     if !submit && machine.meta.in_allocation() == Some(false) {
         bail!(
-            "`cactup test run` needs a job allocation on {}, but none of [{}] is set; use \
-             `cactup test submit`, or run it inside an interactive allocation (e.g. `salloc`)",
+            "`cactup test run` needs a job allocation on {} (none of [{}] is set)\n\
+             Use `cactup test submit`, or run inside an interactive allocation (e.g. `salloc`).",
             machine.name,
             machine.meta.scheduler.allocation_env.join(", "),
         );
@@ -434,9 +434,8 @@ fn start_impl(
                 && !args.force
             {
                 bail!(
-                    "Test run \"{name}\" ended, but the scheduler could not be asked whether its job {} was \
-                     queued again: {failed}\nRun `cactup test stop {name}`, or pass -f to stop it and run the \
-                     tests",
+                    "Could not query job {} of ended test run \"{name}\": {failed}\n\
+                     Run `cactup test stop {name}`, or pass -f to stop the job and run the tests.",
                     job.id
                 );
             }
@@ -452,8 +451,8 @@ fn start_impl(
             }
             if !args.force {
                 bail!(
-                    "Test run \"{name}\" still has a live job ({}); \
-                     `cactup test stop {name}` first, or pass -f to stop it",
+                    "Test run \"{name}\" still has a live job ({})\n\
+                     Run `cactup test stop {name}` first, or pass -f to stop it.",
                     job.id
                 );
             }

@@ -192,7 +192,7 @@ fn library_sections(root: &str, base: &thornlist::Thornlist, added: &[AddedPacka
             crate::fetch::library::check_into(&l.inside)
                 .with_context(|| format!("{}'s library {} goes inside \"{}\"", a.package, l.package, l.inside))?;
             if l.inside.contains('/') {
-                bail!("{}'s library {} goes inside \"{}\", which is no clone's name", a.package, l.package, l.inside);
+                bail!("{}'s library {} goes inside \"{}\", which is not a clone name", a.package, l.package, l.inside);
             }
             let name = l.clone_name();
             if in_base.contains(&normalized(&l.url)) || left.contains(&fold(&l.inside)) {
@@ -210,7 +210,7 @@ fn library_sections(root: &str, base: &thornlist::Thornlist, added: &[AddedPacka
                     continue;
                 }
                 bail!(
-                    "{other} and {} both put a library at {path} ({} and {}); one path holds one checkout",
+                    "{other} and {} both put a library at {path} ({} and {})",
                     a.package,
                     them.package,
                     l.package
@@ -221,16 +221,14 @@ fn library_sections(root: &str, base: &thornlist::Thornlist, added: &[AddedPacka
                     && them.into.rsplit_once('/').map_or("", |(d, _)| d).eq_ignore_ascii_case(dir)
             }) {
                 bail!(
-                    "{}'s library {} and {}'s library {} both go in {}/{dir}; cactup places one library per \
-                     directory of a repository",
+                    "{}'s library {} and {}'s library {} both go in {}/{dir}; one library per directory",
                     other, them.package, a.package, l.package, l.inside
                 );
             }
             let source = (normalized(&l.url), Some(l.commit.clone()), l.package.clone());
             match sources.get(&fold(name)) {
                 Some((url, commit, who)) if (url, commit) != (&source.0, &source.1) => bail!(
-                    "{}'s library {} would be cloned as repos/{name}, a name {who} already uses for another source; \
-                     one clone holds one source",
+                    "{}'s library {} would be cloned as repos/{name}, which {who} already uses for another source",
                     a.package,
                     l.package
                 ),
@@ -323,8 +321,8 @@ fn share_base_clone(base: &thornlist::Thornlist, repo: &str, slug: &str, w: &mut
     {
         let names: Vec<&str> = stay.iter().map(|c| c.checkout.as_str()).collect();
         bail!(
-            "{slug} would share the clone {repo} with the base's {}, which stays at {}; one clone holds one \
-             commit. Add a version at that commit, or replace those thorns too",
+            "{slug} would share the clone {repo} with {}, which the base keeps at {}.\nAdd a version at that \
+             commit, or replace those thorns too.",
             names.join(", "),
             other.commit.as_deref().map_or_else(
                 || format!("branch {}", other.branch.as_deref().unwrap_or("(default)")),
@@ -602,22 +600,17 @@ fn check_library_dirs(install_root: &std::path::Path, root: &str, added: &[Added
             match record {
                 Some(r) if crate::fetch::git::normalize_url(&r.url) == url => {}
                 Some(r) => bail!(
-                    "{}'s library {} would be cloned at '{}', but cactup fetched that directory from {}, not from \
-                     {}: another repository. Move '{}' aside (it is that other repository's checkout), then run \
-                     the add again",
+                    "{}'s library {} would be cloned at '{}', which holds a clone of {}, not {}.\nMove it aside and \
+                     rerun the add.",
                     a.package,
                     l.package,
                     dir.display(),
                     r.url,
-                    l.url,
-                    dir.display()
+                    l.url
                 ),
                 None => bail!(
-                    "{}'s library {} would be cloned at '{}', which is already there but has no fetch record in \
-                     this installation: cactup did not fetch it, or an older cactup or an import did, and cactup \
-                     will not take over a directory it cannot tell is its own. If it is a checkout of {} you no \
-                     longer need, delete or move it aside; if it holds work of yours, move it elsewhere first. \
-                     Then run the add again, and cactup clones the library there",
+                    "{}'s library {} would be cloned at '{}', which exists and has no fetch record.\nMove it aside \
+                     (or delete it if it is an unneeded checkout of {}), then rerun the add.",
                     a.package,
                     l.package,
                     dir.display(),
@@ -655,8 +648,7 @@ fn libraries_inside(
     let mut clones = clones.iter();
     let (Some(own), None) = (clones.next(), clones.next()) else {
         bail!(
-            "{} builds against libraries, which go inside its repository, but its thorns come from several clones \
-             ({}), so cactup cannot tell which one is its repository",
+            "Cannot place the libraries of {}: its thorns come from several clones ({})",
             package.package,
             package_repos(package).into_iter().collect::<Vec<_>>().join(", ")
         );
@@ -677,8 +669,7 @@ fn libraries_inside(
         }
         if let Some(c) = in_base(&library.url) {
             notes.push(format!(
-                "{}'s library {} stays where the installation's thornlist puts it: it already checks out its \
-                 repository (as {}).",
+                "{}'s library {} stays where the installation's thornlist puts it (as {}).",
                 package.package, library.package, c.repo
             ));
             left.insert(library.clone_name().to_owned());
@@ -1090,6 +1081,7 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
     #[cfg(test)]
     AFTER_PROMPT.with(|h| h.get().map(|h| h(&start.inst.root)));
     let locked = start.inst.locked()?;
+    let _source_locks = super::copy::lock_sources(ctx, &start.inst)?;
     let mut meta = start.recheck(&locked)?;
     let now = fetch_plan_for(&start.inst, &composed, &base, &added).map_err(clones_changed)?;
     same_fetch(&fetch_plan, &now)?;
@@ -1154,6 +1146,7 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
     crate::fetch::FetchState::record(&inst.root, &report.records())?;
 
     let live_path = &start.live_path;
+    crate::cow::Cow::at(&inst.root)?.before_replace(live_path)?;
     std::fs::write(live_path, &composed).with_context(|| format!("Failed to write '{}'", live_path.display()))?;
     // The list is written: what it drops stays dropped, whatever follows.
     let unplacing = undo.commit();
@@ -1190,7 +1183,7 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
         println!("{note}");
     }
     for link in unplacing.links() {
-        println!("Took away the old library link at {link}.");
+        println!("Removed the old library link at {link}.");
     }
     for note in &unplacing.notes {
         println!("{note}");
@@ -1741,6 +1734,7 @@ pub fn remove(ctx: &Ctx, packages: &[String], flags: &RemoveFlags) -> Res<()> {
         return Ok(());
     }
     let locked = inst.locked()?;
+    let _source_locks = super::copy::lock_sources(ctx, inst)?;
     let mut meta = start.recheck(&locked)?;
     if let Some(checked) = &restore {
         let now = restore_plan(inst, &composed, &touched, &gone, &removed).map_err(clones_changed)?;
@@ -1765,6 +1759,7 @@ pub fn remove(ctx: &Ctx, packages: &[String], flags: &RemoveFlags) -> Res<()> {
         crate::fetch::FetchState::record(&inst.root, &report.records())?;
     }
     let live_path = &start.live_path;
+    crate::cow::Cow::at(&inst.root)?.before_replace(live_path)?;
     std::fs::write(live_path, &composed).with_context(|| format!("Failed to write '{}'", live_path.display()))?;
     // The list is written: what it drops stays dropped, whatever follows.
     let unplacing = undo.commit();
@@ -1784,14 +1779,15 @@ pub fn remove(ctx: &Ctx, packages: &[String], flags: &RemoveFlags) -> Res<()> {
         }
     }
     for link in unplacing.links() {
-        println!("Took away its library link at {link}.");
+        println!("Removed its library link at {link}.");
     }
     for note in &unplacing.notes {
         println!("{note}");
     }
     let left = left_on_disk(&removed, &base);
     if !left.is_empty() {
-        println!("Their repos {} stay on disk; `cactup inst refetch --prune` removes them.", left.join(", "));
+        println!("Their repos {} stay on disk.", left.join(", "));
+        println!("Remove them with `cactup inst refetch --prune`.");
     }
     for line in &restored {
         println!("{line}");
@@ -2275,7 +2271,7 @@ mod tests {
         // Another commit: refused.
         let mut other = wanted("1.1.0", "v1.1.0", &"d".repeat(40));
         let err = format!("{:#}", share_base_clone(&base, &repo, "max/carpetx@1.1.0", &mut other).unwrap_err());
-        assert!(err.contains("one clone holds one commit"), "{err}");
+        assert!(err.contains("which the base keeps at"), "{err}");
         // A tip over a pinned base clone: refused.
         let mut tip = wanted("head", "master", "e");
         assert!(share_base_clone(&base, &repo, "max/carpetx@head", &mut tip).is_err());
@@ -2601,7 +2597,7 @@ mod tests {
         check_library_dirs(tmp.path(), "Cactus", std::slice::from_ref(&package)).unwrap();
         std::fs::create_dir_all(repos.join("fuka")).unwrap();
         let err = format!("{:#}", check_library_dirs(tmp.path(), "Cactus", std::slice::from_ref(&package)).unwrap_err());
-        assert!(err.contains("has no fetch record") && err.contains("move it aside"), "{err}");
+        assert!(err.contains("has no fetch record") && err.contains("Move it aside"), "{err}");
         let record = |url: &str| crate::fetch::FetchRecords {
             repos: vec![("fuka".into(), crate::fetch::RepoRecord { url: url.into(), branch: None, head: "b".repeat(40), commit: None })],
             downloads: Vec::new(),
@@ -2668,6 +2664,7 @@ mod tests {
                         current_thornlist: None,
                         stack_contact: None,
                         unfetched_repos: Default::default(),
+                        copied_from: None,
                     },
                 );
                 d.active_installation = Some("t".into());

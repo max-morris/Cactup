@@ -518,6 +518,7 @@ impl Setup {
                     current_thornlist: None,
                     stack_contact: None,
                     unfetched_repos: Default::default(),
+                    copied_from: None,
                 },
             );
             d.active_installation = Some("t".into());

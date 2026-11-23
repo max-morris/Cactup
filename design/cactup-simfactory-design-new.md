@@ -555,7 +555,7 @@ written older).
 | File | Descriptor | Key | Current | `frozen_read` |
 |---|---|---|---|---|
 | `~/.cactup/database.json` | `database::DATABASE` (JSON; `legacy`: bare `detected-machine`) | `schema` | 1 | no |
-| `<inst>/.cactup/installation.toml` | `installation::INSTALLATION` (chain `[1 → 2]`, a no-op; down-step `[2 → 1]` unless some `[[added]]` has `libraries`, which an older writer would drop; once written as 2 a file stays 2. Binaries released before the bump read a schema-2 file's `root-dir` as `Cactus` on some paths, so with a custom `!DEFINE ROOT` they may report a missing tree instead of "upgrade") | `schema` | 2 | no |
+| `<inst>/.cactup/installation.toml` | `installation::INSTALLATION` (chain `[1 → 2, 2 → 3]`, no-ops; down-step `[2 → 1]` unless some `[[added]]` has `libraries`, which an older writer would drop; down-step `[3 → 2]` unless the record has `linked-to` (a symbolic copy, §3.1), into which an older binary would write through its links; once written as N a file stays N. Binaries released before the first bump read a schema-2 file's `root-dir` as `Cactus` on some paths, so with a custom `!DEFINE ROOT` they may report a missing tree instead of "upgrade") | `schema` | 3 | no |
 | `simulations.toml` | `installation::SIM_REGISTRY` | `schema` | 1 | no |
 | `tests.toml` | `installation::TEST_REGISTRY` | `schema` | 1 | no |
 | `<inst>/.cactup/fetch-state.toml` | `fetch::FETCH_STATE` | `schema` | 1 | no |
@@ -629,7 +629,6 @@ path flag.
 
 ```
 cactup install [release] [--alias …] [--silent] [--install-prefix …] …   (existing)
-cactup uninstall <alias> [-f]                                             (new; see §3.1)
 cactup show                        (aggregate state view: active installation +
                                     active config + resolved machine; read-only,
                                     never prompts, never writes the DB)
@@ -643,6 +642,37 @@ cactup installation refetch [THORNLIST | --release TAG] [-f]
                                                    see §3.2)
 cactup installation delta [<alias>]               (how the source trees diverged
                                                    from the last fetch — §3.3)
+cactup installation delete <alias> [-f]           (delete an installation: the
+                                                   Cactus tree and cactup's files
+                                                   beside it; the directory only
+                                                   once empty, the default symlink
+                                                   if it points there; refuses
+                                                   while a build is in flight
+                                                   unless -f)
+cactup installation cp <alias> <new-name>         (copy an installation: the
+       [--install-prefix P] [-s|--symbolic]        Cactus tree without configs/
+                                                   and exe/, imports/, the
+                                                   pristine thornlist, and the
+                                                   installation record and fetch
+                                                   state; new sim-home/test-home
+                                                   for the new alias, no active
+                                                   config, no simulations or test
+                                                   runs; staged in
+                                                   P/.cactup-cp-<new>.partial and
+                                                   registered last; holds the
+                                                   fetch locks of the source and
+                                                   of what it links into; DB
+                                                   entry records `copied-from`.
+                                                   -s: a symbolic copy, below)
+cactup installation reify <alias> [PATH…]         (make a symbolic copy's files
+                                                   its own: every copy link under
+                                                   PATH, or all of them, becomes
+                                                   a copy, a repo's borrowed
+                                                   objects are copied in, a link
+                                                   to a file the source no longer
+                                                   has is removed; all of them:
+                                                   `linked-to` goes. Holds its own
+                                                   and the source's fetch locks)
 cactup inst …                      (short form of `installation`, a duplicate
                                     clap variant routed identically, so the docs
                                     generator renders both)
@@ -724,6 +754,42 @@ Retired so far: `--variant` on `build` (and `build run`/`build submit`), now
 test scripts, as it picks every script (§11.2); `--variants` on `machine
 show`, now `--flavors`. They are kept indefinitely (`args::RETIRED_FLAGS`). This
 paragraph is the one place they are documented: user docs never mention them.
+
+**Symbolic copies (`installation cp -s`).** A symbolic copy makes the same
+real directories as a copy, and in them, for every file of the Cactus tree
+and of `imports/`, an absolute symlink to the same file in the source (a
+*copy link*). Real all the same: `.cactup/`, the pristine thornlist, the
+live thornlist (edited by hand, and an editor writes through a link), every
+repo's `.git` (git accepts no `HEAD` that links elsewhere, and writes refs,
+the index and reflogs in place), and any file named `.git*` (git reads
+`.gitignore`/`.gitattributes` only from a file). A repo's object store
+borrows the source's through `objects/info/alternates`, under a
+`# cactup: …` marker line that tells it from the user's own lines. The
+record names the source home (`installation.toml` `linked-to`, which made it
+version 3: an older binary must refuse the copy rather than write through
+its links).
+
+Copy-on-write: nothing may open a copy link for writing. A checkout (gix's,
+and git's) unlinks a link before writing the file, so a refetch gives every
+file it changes a copy of the installation's own and leaves the rest links;
+new objects land in the copy's store. cactup's whole-file writes (the
+thornlists, `import`'s parfile, a download's temp file) remove a link first
+(`cow::Cow::before_replace`); what writes in place (an svn/cvs/hg checkout)
+has its directory reified first (`cow::Cow::reify`). Status reads
+(`fetch::git::status_paths_until`, `local_edits`) count a link that resolves
+to a regular file with the index entry's content and executable bit as that
+file, unchanged (stat first, while the index is the copied one; else hashed),
+so refetch's dirty guard, `inst delta`, a build's source state and
+`sim export` see a symbolic copy as they see its source. Plain `git status` in
+the copy still reports each link as a type change.
+
+A symbolic copy follows its source: a file it has not made its own changes
+when the source's does. So `installation delete` refuses a source while any
+installation's `linked-to` names it (not even `-f`); refetch and add in a
+source say which symbolic copies see the change; refetch and add in a copy
+hold the source's fetch lock. A plain copy of a symbolic copy copies what its
+links point at and copies in its borrowed objects; a symbolic copy of one
+links to its paths (a chain). `installation reify` ends the dependence.
 
 ### 3.1 Command mapping from simfactory
 
@@ -3370,7 +3436,12 @@ compute node's own cactup has already written the outcome into the very
 A machine with no `blocking-submit` key gets the ordinary `submit`, followed
 by polling the attempt until it reports an outcome — reusing the exact loop
 `--follow` already builds on `tail::LogTail` and `tail::PollBackoff` for, just
-in a silent mode that skips the output streaming. Ctrl-C detaches without
+without the output streaming. Neither route is silent (§2.4): from the moment
+it is known the build is queued, one progress line names the job, the state
+the scheduler last gave and the time waited (`--follow` draws it until the
+output starts), and the native route says before it submits that the command
+holds until the job ends, since `sbatch --wait` may report the job id only at
+the end. Ctrl-C detaches without
 touching the queued job, exactly as `--follow` does. Both routes derive the
 verdict identically, from the attempt's own recorded outcome and never a
 relayed exit code, so the only difference a user sees between them is that the
@@ -4732,7 +4803,14 @@ kind of install-time provenance, `simfile`, beside `release` and `thornlist`;
 `cactup import <file.sim>` reproduces a `.sim` in one step: `install
 --simfile` under the file's name (or `--alias`), `cactup build` of a config of
 that name — in the foreground, or, on a machine that queues builds, submitted
-and blocked on (§7.9), with `--flavor` and `-j`/`--make-jobs` passed to it —
+with the plain `submit` and followed (`build submit --follow`, §7.9), with
+`--flavor` and `-j`/`--make-jobs` passed to it: the job is named at once, a
+line shows its state and the time waited until the build's output starts,
+and the output then streams as a foreground build's does. Never through
+`blocking-submit`, which can hold back even the job id until the job ends,
+leaving an import silent for the whole queue wait. Ctrl-C detaches, leaving
+the job running, and the import fails "interrupted"; running the same
+command again once the build is over finishes it —
 then `sim create` from the file's parfile, and with
 `--submit`/`--run` the simulation started. `import` takes every flag of the
 groups `sim submit` and `sim run` start with — the TOPOLOGY flags (§8.5), the
@@ -4858,7 +4936,12 @@ What uses it, all on the login node (D11):
 - `cactup import owner/name[/sim][@range|=X.Y.Z]` downloads the published sim
   (versions are semver, like packages and stacks; the newest matching, or
   the newest at all) to `~/.cactup/simfiles/<owner>/<name>/<X.Y.Z>.sim`,
-  checked against the registry's `x-sha256`, then imports it as a file. An
+  checked against the registry's `x-sha256`, then imports it as a file. It is
+  downloaded whenever the registry answers, a cached copy of the version
+  notwithstanding: an admin's reread of a moved tag changes a version's file,
+  and a copy kept by version alone would be imported stale for good. A copy
+  that changed is said (yellow); the cached copy stands in only when the
+  registry or the download cannot be reached. An
   entry holding several sims (`[sim.files]`, manifest format 2) names each:
   `owner/name/sim` goes to `/resolve` as is, which answers with the newest
   version in range that has the sim (and `newer-without-sim` when a newer one

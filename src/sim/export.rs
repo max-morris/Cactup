@@ -71,7 +71,7 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
             println!(
                 "{}",
                 format!(
-                    "{} is not pinned: config {} was built before cactup recorded download hashes; rebuild it to pin it",
+                    "{} is not pinned; rebuild config {} to pin it",
                     c.checkout, sim.meta.configuration
                 )
                 .yellow()
@@ -123,7 +123,7 @@ fn trimmed(
     parfile: &Parfile,
 ) -> Res<(String, thornlist::Thornlist)> {
     if parfile.kind != ParfileKind::Par {
-        bail!("--trim reads the parfile's ActiveThorns, which a .py parfile only produces when it runs");
+        bail!("--trim does not work with a .py parfile");
     }
     let keep = super::trim::needed(list, cactus_root, &parfile.text)?;
     let trimmed = super::trim::trim_text(&text, list, &keep)?;
@@ -194,8 +194,7 @@ fn refuse_unfetchable(repos: &[RepoPin], published: &[bool], allow_dirty: bool, 
     let dirty: Vec<&str> = repos.iter().filter(|r| r.dirty).map(|r| shown_repo(&r.name)).collect();
     if !dirty.is_empty() && !allow_dirty {
         bail!(
-            "These sources had uncommitted changes {when}, so no commit reproduces them: {}. Commit them (and \
-             rebuild), or pass --allow-dirty to mark them dirty",
+            "Uncommitted changes {when}: {}\nCommit them and rebuild, or pass --allow-dirty.",
             dirty.join(", ")
         );
     }
@@ -207,8 +206,7 @@ fn refuse_unfetchable(repos: &[RepoPin], published: &[bool], allow_dirty: bool, 
         .collect();
     if !unpushed.is_empty() && !allow_unpushed {
         bail!(
-            "These commits are on no remote branch or tag this installation knows of, so nobody else could fetch \
-             them: {}. Push them (and refetch, so cactup sees them), or pass --allow-unpushed",
+            "Commits on no known remote branch or tag: {}\nPush them and refetch, or pass --allow-unpushed.",
             unpushed.join(", ")
         );
     }
@@ -243,7 +241,7 @@ fn finish(ctx: &Ctx, describe: &SimDescribeArgs, file: &Path, parts: Parts) -> R
     let license = ask("License (SPDX, empty for none)", &describe.license, license_default.unwrap_or_default())?;
     let contact_default = ctx.db.read().ok().and_then(|db| db.knob("default-contact").map(str::to_owned));
     let contact = Some(ask(
-        "Where to go for help with it (an https:// URL or mailto: address, empty for none)",
+        "Contact (https:// URL or mailto: address, empty for none)",
         &describe.contact,
         contact_default.unwrap_or_default(),
     )?)
@@ -270,7 +268,7 @@ fn finish(ctx: &Ctx, describe: &SimDescribeArgs, file: &Path, parts: Parts) -> R
     for input in &mut inputs {
         if interactive {
             let answer = crate::commands::prompt_with_default(
-                &format!("What does the parfile need in knob {}? (a description for whoever imports it)", input.knob),
+                &format!("Description of input knob {}", input.knob),
                 "",
             )?;
             input.description = Some(answer).filter(|a| !a.is_empty());
@@ -278,7 +276,7 @@ fn finish(ctx: &Ctx, describe: &SimDescribeArgs, file: &Path, parts: Parts) -> R
         let url = match urls.get(&input.knob) {
             Some(url) => Some(url.clone()),
             None if interactive => Some(crate::commands::prompt_with_default(
-                &format!("Where can knob {}'s file be downloaded? (a URL, empty for nowhere)", input.knob),
+                &format!("Download URL for knob {} (empty for none)", input.knob),
                 "",
             )?)
             .filter(|u| !u.is_empty()),
@@ -343,7 +341,7 @@ fn finish(ctx: &Ctx, describe: &SimDescribeArgs, file: &Path, parts: Parts) -> R
         let what: Vec<String> = missing.iter().map(ToString::to_string).collect();
         println!(
             "{}",
-            format!("Not fully specified, so it cannot be published to the Cactarium: {}", what.join("; ")).yellow()
+            format!("Cannot be published to the Cactarium: {}", what.join("; ")).yellow()
         );
     }
     Ok(())
@@ -366,7 +364,7 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
         .with_context(|| format!("'{}' is not a GetComponents (CRL) list", args.thornlist.display()))?;
 
     if args.trim && ctx.globals.installation.is_none() {
-        bail!("--trim reads the thorns' .ccl files, so it needs an installation that has them: pass -I");
+        bail!("--trim needs an installation; pass -I");
     }
     let (repos, published, text, list) = if ctx.globals.installation.is_some() {
         let inst = Installation::resolve(ctx)?;
@@ -388,8 +386,7 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
         let repos = repo_pins(&list, |repo| tips.get(repo).map(ToString::to_string), |_| None);
         println!(
             "{}",
-            "Pinned each repo to the commit its branch or tag names today (pass -I to pin to what an installation \
-             has instead)."
+            "Pinned each repo to the tip of its branch or tag (-I pins an installation's checkouts instead)."
                 .dimmed()
         );
         // Each commit is a remote tip by construction.
@@ -447,7 +444,7 @@ fn installed_states(repos_dir: &Path, list: &thornlist::Thornlist) -> Res<std::c
     for (repo, elsewhere, state) in read? {
         if elsewhere {
             let repo = shown_repo(&repo);
-            println!("{}", format!("{repo}: the installation's checkout is of another repo; left unpinned").yellow());
+            println!("{}", format!("{repo}: checkout is of another repo; left unpinned").yellow());
         }
         if let Some(state) = state {
             states.insert(repo, state);
@@ -536,12 +533,12 @@ pub fn unpack(file: &Path, dir: &Path, force: bool) -> Res<()> {
     let unpinned: Vec<&str> =
         sim.repos.iter().filter(|r| r.pin().is_none()).map(|r| shown_repo(&r.name)).collect();
     if !unpinned.is_empty() {
-        println!("{}", format!("Not pinned, so they follow their branch: {}", unpinned.join(", ")).yellow());
+        println!("{}", format!("Unpinned (following their branch): {}", unpinned.join(", ")).yellow());
     }
     if !unchecked.is_empty() {
         println!(
             "{}",
-            format!("Left unchecked: the recorded hash names no single file: {}", unchecked.join(", ")).yellow()
+            format!("Unchecked (hash names no single file): {}", unchecked.join(", ")).yellow()
         );
     }
     for input in &sim.inputs {
@@ -561,8 +558,8 @@ fn frozen_config(inst: &Installation, sim: &Simulation) -> Res<ConfigMeta> {
     match ConfigMeta::load(&inst.cactus_root()?, &sim.meta.configuration)? {
         Some(config) if config.build_id == sim.meta.build_id => Ok(config),
         _ => bail!(
-            "Simulation \"{}\" was created before cactup recorded the sources of the build it runs, and config \
-             \"{}\" has been rebuilt since, so they are lost. Create a new simulation from it to export",
+            "Simulation \"{}\" predates recorded build sources, and config \"{}\" has been rebuilt since\n\
+             Create a new simulation to export.",
             sim.name,
             sim.meta.configuration
         ),
@@ -727,8 +724,7 @@ fn warn_about_paths(parfile: &Parfile) {
                 println!(
                     "{}",
                     format!(
-                        "Line {}: \"{quoted}\" is an absolute path, which whoever imports this simulation will not \
-                         have; consider a knob input such as @KNOB(my-data)@ instead",
+                        "Line {}: \"{quoted}\" is an absolute path; consider a knob input such as @KNOB(my-data)@",
                         n + 1
                     )
                     .yellow()

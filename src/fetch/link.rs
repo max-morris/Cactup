@@ -179,7 +179,7 @@ fn plan_link(pass: &LinkPass, component: &Component) -> crate::Res<LinkPlan> {
         .any(|tree| target_dir.starts_with(tree));
     if !inside {
         bail!(
-            "The !TARGET of '{}' ({}) resolves to '{}', outside the installation '{}'; not linking there",
+            "The !TARGET of '{}' ({}) resolves to '{}', outside the installation '{}'",
             component.checkout,
             component.target,
             target_dir.display(),
@@ -229,8 +229,7 @@ fn plan_link(pass: &LinkPass, component: &Component) -> crate::Res<LinkPlan> {
     };
     if pass.reserved.iter().any(|r| same(r, &link_path)) {
         bail!(
-            "'{}' ({} {}) would make '{}' a link; the Cactus root, its arrangements/ and its repos/ are never links \
-             a thornlist makes",
+            "'{}' ({} {}) would make '{}' a link; the Cactus root, arrangements/ and repos/ are never links",
             component.checkout,
             component.target,
             component.repo,
