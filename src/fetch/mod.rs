@@ -2104,7 +2104,9 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn commit_files(dir: &Path, files: &[(&str, &str)]) -> gix::ObjectId {
-        let repo = gix::open(dir).expect("open repo");
+        let mut repo = gix::open(dir).expect("open repo");
+        // CI runners have no git identity.
+        let _ = repo.committer_or_set_generic_fallback();
 
         #[derive(Default)]
         struct Dir<'a> {
@@ -2153,7 +2155,8 @@ pub(crate) mod tests {
             .and_then(|mut h| h.peel_to_commit().ok())
             .map(|c| vec![c.id])
             .unwrap_or_default();
-        let id = repo.commit("HEAD", "add files", tree_id, parents).expect("commit");
+        let sig = gix::actor::SignatureRef { name: "test".into(), email: "test@example.org".into(), time: "0 +0000" };
+        let id = repo.commit_as(sig, sig, "HEAD", "add files", tree_id, parents).expect("commit");
 
         let mut index = repo.index_from_tree(&tree_id).expect("index from tree");
         let mut opts = repo
@@ -2874,7 +2877,8 @@ pub(crate) mod tests {
         let dir = tmp.path().join("clone");
         let mut progress = prodash::tree::Root::new().add_child("test");
         git::clone(&url, Some("develop"), &dir, &mut progress).unwrap();
-        let clone = gix::open(&dir).unwrap();
+        let mut clone = gix::open(&dir).unwrap();
+        let _ = clone.committer_or_set_generic_fallback();
         clone.reference(format!("refs/remotes/origin/{main}"), c1, gix::refs::transaction::PreviousValue::Any, "test").unwrap();
         std::fs::write(clone.git_dir().join("refs/remotes/origin/HEAD"), format!("ref: refs/remotes/origin/{main}\n")).unwrap();
         assert_eq!(git::default_branch(&dir).as_deref(), Some(main.as_str()));
@@ -2916,7 +2920,8 @@ pub(crate) mod tests {
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         FetchState::record(&root, &report.records()).unwrap();
         // The clone knows the remote's default (main), as a full clone would.
-        let clone = gix::open(&repo_dir).unwrap();
+        let mut clone = gix::open(&repo_dir).unwrap();
+        let _ = clone.committer_or_set_generic_fallback();
         clone.reference(format!("refs/remotes/origin/{main}"), c2, gix::refs::transaction::PreviousValue::Any, "test").unwrap();
         std::fs::write(clone.git_dir().join("refs/remotes/origin/HEAD"), format!("ref: refs/remotes/origin/{main}\n")).unwrap();
         assert_eq!(git::default_branch(&repo_dir).as_deref(), Some(main.as_str()));
