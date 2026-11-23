@@ -852,6 +852,15 @@ pub fn source_delta(
             change.vanished.push(repo.clone());
         }
     }
+    // The flesh now comes from a repo the last build did not read (a flesh
+    // package added in place of the base's flesh, or removed again): nothing
+    // was compiled against it, as for a flesh whose commit moved.
+    if let Some(flesh) = &fresh.flesh
+        && !stored.is_empty()
+        && !stored.contains_key(flesh.as_str())
+    {
+        change.moved.push(flesh.clone());
+    }
     change.vanished.sort();
     if change.is_empty() {
         return (SourceDelta::Unchanged, change);
@@ -3560,6 +3569,13 @@ mod tests {
         // Incremental — is_flesh is what promotes it.
         let unnamed = heads(&[("cactusbase", "aaa"), ("flesh", "ggg")], None);
         assert_eq!(source_delta(Some(&stored), Some(&unnamed)).0, SourceDelta::Thorns);
+
+        // The flesh now from another repo (a flesh package in place of the
+        // base's flesh, or the base's back): a realclean, as for a moved one.
+        let swapped = heads(&[("cactusbase", "aaa"), ("cactus-mp", "mmm")], Some("cactus-mp"));
+        let (delta, change) = source_delta(Some(&stored), Some(&swapped));
+        assert_eq!(delta, SourceDelta::Flesh);
+        assert_eq!(change.moved, vec!["cactus-mp".to_string()]);
     }
 
     /// The git → non-git transition: swapping a checkout for a hand-built
