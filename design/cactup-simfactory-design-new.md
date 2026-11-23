@@ -4564,10 +4564,12 @@ the config's own record only while that still describes the same `build-id`.
     cannot swap one in between (an environment proxy connects on its own,
     and then the pin cannot hold). A host that does not resolve here at all
     is not refused for that: a proxy-only login node resolves nothing
-    itself. The check and the pin are skipped and the probe decides: it may
-    answer through the proxy, and without one its failed connection is the
-    refusal. The Cactarium vets addresses server-side for what is published
-    there, so this side may be lenient. `probe::is_answer` and
+    itself. The check is skipped and the host pinned to no address
+    (`resolve_to_addrs(host, &[])`), so reqwest never resolves it
+    unchecked: a direct connection fails, said as "dns lookup failed", and
+    a proxied one is unaffected (reqwest resolves only the proxy). The
+    Cactarium vets addresses server-side for what is published there, so
+    this side may be lenient. `probe::is_answer` and
     `probe::redirect_target` turn the response into an `Outcome`, and
     `probe::next_step` decides: publish the candidate, ask once more at a
     redirect to the same repo (GitLab's `.git` form; the candidate is still
@@ -4576,43 +4578,69 @@ the config's own record only while that still describes the same `build-id`.
     appending what the probe saw ("answered 401 Unauthorized"). A probe
     that got no HTTP response at all (a failed connection, a silence) is
     `url::unreachable_refusal`, its detail built from the error's kind
-    ("connection refused", "dns lookup failed"), never reqwest's words,
-    which quote the URL: nothing was asked, so the repo is not blamed. A
-    refusal names the repo without quotes or `.git`, and with its `!URL`'s
-    line when another section gives another URL the same name. One request
-    per remote, on the network fan-out (`ask_all`, 32 wide) within one 30 s
-    window, a progress line each, through the watcher (§2.4: Ctrl-C fails
-    at once, "Interrupted"). A remote published as another URL (an ssh
-    one) is rewritten in the thornlist's `!URL` lines (an import fetches
-    what the thornlist names, and the pins are built from it; a `$1`/`$2`
-    template is rewritten as one), said on one line; the result is parsed
-    back and must name exactly the expected URLs, so one that no `!URL`
-    line spells out (built from a `!DEFINE`) is refused. Tests reach their
-    local servers only through a `cfg(test)` route, never a runtime knob.
+    ("connection refused", "dns lookup failed", "no answer within N s",
+    the probe's own wait), never reqwest's words, which quote the URL:
+    nothing was asked, so the repo is not blamed. A refusal names the repo
+    without quotes or `.git`, cut at its first `?` or `#` (the parser names
+    a repo after its URL's last segment, query and all; `shown_repo`, used
+    by every message that shows a repo name, `sim pack`'s tip failures
+    with `--local` included), and with its `!URL`'s line when another
+    section gives another URL the same name. One request per remote, all
+    at once (`ask_all_at`, up to `anonymous::PROBES_AT_ONCE` = 128: a
+    silent host holds its worker for the whole window, so a narrower
+    fan-out left the remotes behind a few unasked) within one 30 s window,
+    each connecting within what is left of it, a progress line each,
+    through the watcher (§2.4: Ctrl-C fails at once, "Interrupted"). A
+    remote published as another URL (an ssh one) is rewritten in the
+    thornlist's `!URL` lines (an import fetches what the thornlist names,
+    and the pins are built from it; a `$1`/`$2` template is rewritten as
+    one, unless its host is a variable, which the crate's https equivalent
+    would lowercase), said on one line ("published as … (was …)"); the
+    result is parsed back and must give the same components but for the
+    URLs rewritten, so one that no `!URL` line spells out (built from a
+    `!DEFINE`) is refused. Tests reach their local servers only through
+    `cfg(test)` routes and resolvers (`ROUTES`, `RESOLVES`, `WIRES`,
+    `SWAPS`, `fetch::git::ASK_ROUTES`), never a runtime knob or the real
+    network.
   - *A non-git component's URL* (a download, svn) is not probed:
     `url::download_shareability` judges it, so a query is fine unless a key
     looks like a credential (`url::is_credential_key`), and ssh-based
     schemes (`svn+ssh`), local paths and schemes other than https, http and
     ftp are refused. A cvs root (no URL) is refused only for a password
-    (`:pserver:anonymous@…` is anonymous access). A `!AUTH_URL` is held to
+    (`:pserver:anonymous@…` is anonymous access): the main one, a CVSNT
+    option whose key holds `pass` (`;password=`), or a `;proxy=u:p@host`
+    userinfo. A query key is percent-decoded before it is judged
+    (`%74oken`; a local helper until the crate decodes keys), and
+    a refusal hides a fragment, which the crate's `Redacted` shows. A
+    `!AUTH_URL` is held to
     its type's rule where it is fetched (svn, cvs), and for git, which
     never fetches it, only to carrying no credentials.
   - *The whole thornlist text* that goes into the `.sim`, comments, unused
-    `!DEFINE`s and overridden lines included, is searched for any
-    `scheme://` URL that `download_shareability` finds carrying
-    credentials, each refusal naming its line. `!ANON_USER`/`!ANON_PASS`
-    hold bare anonymous logins, never a URL, and are never refused.
+    `!DEFINE`s and overridden lines included, is searched for credentials:
+    a `scheme://` URL that `download_shareability` finds carrying them (the
+    userinfo may hold quotes and backticks), an scp-like token that
+    `shareability` does, a cvs root with a password. One in what is
+    fetched is refused above. One where nothing fetches it is hidden, not
+    refused (Max's decision: export reads the frozen
+    `cfg/cactup-thornlist.src.th`, which nobody edits, so a refusal could
+    not be fixed): its secret becomes `***` in the `.sim`'s copy, one
+    yellow line quoting each line as it now reads (a number would be of
+    the spliced text, not the user's file). The hidden text is parsed
+    back and must give the same components, or the export fails.
+    `!ANON_USER`/`!ANON_PASS` hold bare anonymous logins, never a URL, and
+    are never refused.
   - *An input's URL* (`--input-url`, or one typed at the prompt) is judged
     as a download's.
   - The whole check, probes and rewrite included, runs before anything
     else asks the network: `sim pack` then asks its tips of the rewritten
     https URLs (never of an ssh URL, with the user's keys). A URL refused
     fails with no tip asked; every refusal is collected into one error,
-    before any question is asked, ending "or pass --local to export for use
-    here only". Messages show URLs redacted (`url::Redacted`, also behind
+    before any question is asked, ending "Pass --local to export for use
+    here only." Messages show URLs redacted (`url::Redacted`, also behind
     `fetch::git::redacted`; `scrub` hides a URL's userinfo, password and
-    query in a lower layer's words). `--local` writes every URL as it is
-    and probes nothing.
+    query in a lower layer's words, as given, percent-decoded, and as
+    `reqwest::Url` re-encodes them). `--local` writes every URL as it is,
+    hides nothing and probes nothing.
 - **Inputs.** Every required `@KNOB(name)@` in a `.par` that is not a
   standard knob (§5) becomes an `[[input]]`: something the simulation needs
   from outside the source tree. `vars` lists the `@VAR@`s used. Both come
