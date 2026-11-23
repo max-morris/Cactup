@@ -2228,6 +2228,17 @@ mod tests {
         assert!(err.contains("no !URL line spells them out"), "{err}");
         assert!(err.contains("Y/One: git@defined.share.test:o/y.git (to https://defined.share.test/o/y.git)"), "{err}");
         assert!(!out.exists());
+
+        // A template whose host is a variable: the same refusal, not a
+        // rewrite that lowercases the variable out of existence.
+        let list = format!(
+            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!DEFINE GH = defined.share.test\n{}",
+            section("git@$GH:o/$1.git", "Y/One", true)
+        );
+        let (packed, out, _) = pack_list(tmp.path(), &list, Default::default());
+        let err = format!("{:#}", packed.unwrap_err());
+        assert!(err.contains("Y/One: git@defined.share.test:o/Y.git (to https://defined.share.test/o/Y.git)"), "{err}");
+        assert!(!out.exists());
     }
 
     /// Credentials in what the thornlist fetches are refused, each named:

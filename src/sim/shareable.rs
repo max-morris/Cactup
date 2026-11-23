@@ -580,8 +580,8 @@ fn probe_all(asks: &[Ask], window: AskWindow) -> Res<Vec<Verdict>> {
 /// to the URL it is published as; and with an ssh `!URL` built from
 /// `$1`/`$2`, which several repos share, set to its own https equivalent
 /// (the caller made sure every repo it names answered, and checks the
-/// result). Every other
-/// byte stays as it was.
+/// result), unless its host is built from a variable. Every other byte
+/// stays as it was.
 fn rewrite_urls(text: &str, rewrites: &BTreeMap<String, String>) -> String {
     let mut out = String::with_capacity(text.len());
     for line in text.split_inclusive('\n') {
@@ -593,7 +593,11 @@ fn rewrite_urls(text: &str, rewrites: &BTreeMap<String, String>) -> String {
             .map(str::trim)
             .and_then(|url| {
                 rewrites.get(url).cloned().or_else(|| match shareability(url) {
-                    Shareability::Ssh { https } if url.contains('$') => https,
+                    // A host built from a variable is lowercased with it
+                    // (`$GH` → `$gh`, which nothing defines): left alone.
+                    Shareability::Ssh { https: Some(https) } if url.contains('$') && !host_of(&https).contains('$') => {
+                        Some(https)
+                    }
                     _ => None,
                 })
             });
@@ -609,6 +613,12 @@ fn rewrite_urls(text: &str, rewrites: &BTreeMap<String, String>) -> String {
         }
     }
     out
+}
+
+/// The host of the https URL `https`.
+fn host_of(https: &str) -> &str {
+    let rest = https.strip_prefix("https://").unwrap_or(https);
+    rest.split('/').next().unwrap_or(rest)
 }
 
 #[cfg(test)]
@@ -813,17 +823,18 @@ mod tests {
         assert!(matches!(&verdicts[0], Verdict::Refuse(why) if why.contains("no answer within")), "{:?}", verdicts[0]);
     }
 
-    /// An ssh `!URL` is rewritten as written or as a template; nothing else
-    /// moves, spacing and line endings included.
+    /// An ssh `!URL` is rewritten as written or as a template, but for one
+    /// whose host is a variable; nothing else moves, spacing and line
+    /// endings included.
     #[test]
     fn urls_are_rewritten_in_place() {
         let text = "!CRL_VERSION = 1.0\n# git@h.test:o/a.git\n!URL     = git@h.test:o/a.git\r\n!URL = git@h.test:o/$1.git\n\
-                    !URL = git@other.test:o/b.git\n!URL = https://h.test/o/c\n";
+                    !URL = git@other.test:o/b.git\n!URL = https://h.test/o/c\n!URL = git@$GH:o/$1.git\n";
         let rewrites = BTreeMap::from([("git@h.test:o/a.git".to_owned(), "https://h.test/o/a.git".to_owned())]);
         assert_eq!(
             rewrite_urls(text, &rewrites),
             "!CRL_VERSION = 1.0\n# git@h.test:o/a.git\n!URL     = https://h.test/o/a.git\r\n!URL = https://h.test/o/$1.git\n\
-             !URL = git@other.test:o/b.git\n!URL = https://h.test/o/c\n"
+             !URL = git@other.test:o/b.git\n!URL = https://h.test/o/c\n!URL = git@$GH:o/$1.git\n"
         );
     }
 }
