@@ -129,7 +129,7 @@ pub fn classify(list: &thornlist::Thornlist, text: &str, input_urls: &[(String, 
             } else if auth && c.ty == ComponentType::Git {
                 // Never fetched: only what it carries counts.
                 match download_shareability(url) {
-                    s @ Shareability::Credentials => scrubbed(s.download_refusal(url), url),
+                    s @ Shareability::Credentials => s.download_refusal(url),
                     _ => None,
                 }
             } else if auth || c.ty != ComponentType::Git {
@@ -428,18 +428,7 @@ fn same_but_url(old: &thornlist::Component, got: &thornlist::Component) -> bool 
 /// cannot be published, if it cannot: the shared crate's rule for
 /// downloads (`url::download_shareability`).
 fn download_refusal(url: &str) -> Option<String> {
-    scrubbed(download_shareability(url).download_refusal(url), url)
-}
-
-/// A refusal of `url` with its fragment hidden: the crate's `Redacted`
-/// hides a query but shows a fragment, which may hold a token too
-/// (`#access_token=…`).
-fn scrubbed(refusal: Option<String>, url: &str) -> Option<String> {
-    let fragment = unquote(url).split_once('#').map(|(_, f)| f).filter(|f| !f.is_empty());
-    match (refusal, fragment) {
-        (Some(why), Some(fragment)) => Some(why.replace(&format!("#{fragment}"), "#***")),
-        (refusal, _) => refusal,
-    }
+    download_shareability(url).download_refusal(url)
 }
 
 /// Why the cvs root `root` (no URL) cannot be published, if it cannot: a
