@@ -1436,6 +1436,7 @@ fn record_of_release(release: &crate::deps::Release, thorns: &[String], plan: &c
         replaces: Vec::new(),
         contact: release.contact.clone(),
         libraries,
+        flesh: Vec::new(),
     })
 }
 
@@ -1862,6 +1863,7 @@ mod tests {
     fn package(repo: &str, checkouts: &[(&str, &str)], replaces: &[&str]) -> AddedPackage {
         AddedPackage {
             libraries: Vec::new(),
+            flesh: Vec::new(),
             package: format!("max/{repo}"),
             version: "mixed-precision:1.0.0".into(),
             tag: Some("mixed-precision/v1.0.0".into()),
@@ -1930,6 +1932,7 @@ mod tests {
             let commit = crate::fetch::tests::commit_files(&dir, files);
             AddedPackage {
                 libraries: Vec::new(),
+                flesh: Vec::new(),
                 package: format!("et/{name}"),
                 version: "1.0.0".into(),
                 tag: None,
@@ -2240,6 +2243,7 @@ mod tests {
         let base = thornlist::parse(&base_text).unwrap();
         let wanted = |version: &str, tag: &str, commit: &str| AddedPackage {
             libraries: Vec::new(),
+            flesh: Vec::new(),
             package: "max/carpetx".into(),
             version: version.into(),
             tag: Some(tag.into()),
@@ -2342,6 +2346,7 @@ mod tests {
             replaces: Vec::new(),
             contact: None,
             libraries,
+            flesh: Vec::new(),
         }
     }
 

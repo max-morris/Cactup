@@ -1759,6 +1759,7 @@ mod tests {
         use crate::installation::{AddedPackage, AddedThorn};
         let package = AddedPackage {
             libraries: Vec::new(),
+            flesh: Vec::new(),
             package: "max/carpetx".into(),
             version: "1.0.0".into(),
             tag: None,

@@ -974,6 +974,7 @@ fn a_replaced_thorn_must_keep_the_base_s_checkout() {
         replaces: vec!["carpetx".into()],
         contact: None,
         libraries: Vec::new(),
+        flesh: Vec::new(),
     };
     let replaced = Replaced::Base { repo: "carpetx".into() };
     let by = PkgId::parse("max/carpetx-mp").unwrap();
@@ -1452,6 +1453,7 @@ fn thorns_added_to_a_second_base_clone_of_a_package_stay_present() {
         replaces: Vec::new(),
         contact: None,
         libraries: Vec::new(),
+        flesh: Vec::new(),
     };
     let pristine = std::fs::read_to_string(s.inst.source_thornlist()).unwrap();
     let list = thornlist::parse(&pristine).unwrap();
@@ -2682,6 +2684,7 @@ fn a_base_repo_renamed_to_a_pseudo_package_is_no_stand_in() {
         replaces: Vec::new(),
         contact: None,
         libraries: Vec::new(),
+        flesh: Vec::new(),
     };
     let pristine = std::fs::read_to_string(s.inst.source_thornlist()).unwrap();
     let list = thornlist::parse(&pristine).unwrap();
