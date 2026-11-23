@@ -185,7 +185,7 @@ pub struct AddedPackage {
     /// are dropped from the composed list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replaces: Vec<String>,
-    /// Where to report problems with the package, as the Cactarium gave it
+    /// Where to report problems with the package, as Cactarium gave it
     /// (its declared contact, else its repo).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact: Option<String>,
@@ -230,7 +230,7 @@ impl AddedLibrary {
 #[serde(rename_all = "kebab-case")]
 pub struct AddedThorn {
     pub checkout: String,
-    /// The `!REPO_PATH` its section is written with, verbatim: the
+    /// The `!REPO_PATH` written in its section, verbatim:
     /// Cactarium's (derived from where the thorn sits in the repository), or
     /// the base list's own when the base already clones the repository.
     /// Empty: no `!REPO_PATH`.

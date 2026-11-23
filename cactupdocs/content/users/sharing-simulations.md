@@ -158,7 +158,7 @@ refetch` will never move it. Every pinned download is checked against its
 hash: a file that has changed on the server since is refused, and the old
 copy, if any, stays.
 
-## The Cactarium
+## Cactarium
 
 cactup talks to `https://cactarium.cct.lsu.edu` unless the `cactarium-url`
 knob or the `CACTARIUM_URL` environment variable names another
@@ -186,7 +186,7 @@ and without it the next major version is used (`me/bbh@1.0.0`, `@2.0.0`, …).
 A new version may wait for an admin's review before anyone can import it;
 cactup says so when it does.
 
-### Importing from the Cactarium
+### Importing from Cactarium
 
 ```sh
 cactup import someone/bbh          # the newest version
@@ -211,8 +211,8 @@ range dropped that sim, cactup says so and imports the newest one that has
 it. An entry that is one sim is never named with a third part.
 
 A downloaded sim is kept in `~/.cactup/simfiles/`, so importing the same
-exact version again still works when the Cactarium cannot be reached. When
-it can, the sim is downloaded again, and if the Cactarium's copy has
+exact version again still works when Cactarium cannot be reached. When
+it can, the sim is downloaded again, and if Cactarium's copy has
 changed since (a version re-read after its tag was moved), cactup says so
 and imports the new one. Naming one sim of several needs a Cactarium that knows
 such entries; an older one is refused with a message saying so.
@@ -241,8 +241,8 @@ Without a version, the installation stays on the track its release came from
 repository's default branch) install unpinned, for development; cactup says
 so, because such an installation cannot be reproduced.
 
-Nobody reviews those branch tips. For a stack the Cactarium does not trust,
-the Cactarium may refuse to serve them at all; if it does serve one, cactup
+Nobody reviews those branch tips. For a stack not trusted by Cactarium,
+Cactarium may refuse to serve them at all; if it does serve one, cactup
 warns that it may fetch and build arbitrary code and asks you to type `yes`.
 `--risky-allow-untrusted-artifacts` skips the question (the warning still
 prints), and is the only way to take such a tip in a script.
@@ -257,7 +257,7 @@ cactup add max/carpetx/Loop max/spacetimex               # several packages at o
 cactup add max/carpetx#3f2c9e1                          # at one commit
 ```
 
-The package is fetched at the commit the Cactarium recorded for that version
+The package is fetched at the commit recorded by Cactarium for that version
 and added to the installation's live thornlist in a block marked as managed
 by cactup; only its repository is fetched. If your thornlist already has that
 repository (or one of its thorns), pass `--replace` to use the package in its
@@ -265,11 +265,11 @@ place. Packages you add survive moving the installation to a newer stack
 release. Rebuild a config to compile them.
 
 `#` and a commit id (at least its first 7 hex digits) adds the package as it
-was at that commit; if the prefix matches more than one commit, the
+was at that commit; if the prefix matches more than one commit,
 Cactarium lists them and you give more digits. If a published version was
 cut there, that version is what you get. Otherwise nobody has reviewed that commit, so
-the same rule as for a branch tip applies to a package the Cactarium does not
-trust: it may refuse, or cactup asks you to type `yes`. `cactup inst show`
+the same rule as for a branch tip applies to a package not trusted by
+Cactarium: it may refuse, or cactup asks you to type `yes`. `cactup inst show`
 lists such a package as `owner/name at commit 3f2c9e1a0011`. The package's
 repository must let a commit be fetched by its id, as GitHub, GitLab and other
 current git hosts do.
@@ -287,7 +287,7 @@ is not added on its own; add the package that uses it.
 `cactup remove max/carpetx` takes a package out again, putting back any
 repository it replaced at the commit the base names.
 
-If a version you install, add or import has been **yanked** on the
+If a version you install, add or import has been **yanked** on
 Cactarium (still available, but no longer chosen by default), cactup says so
 with the reason and goes on; `cactup inst show` also says when the stack or a
 package an installation uses was yanked later.
@@ -300,7 +300,7 @@ same address.
 
 ### Getting a new release noticed
 
-The Cactarium checks each package's repository for new release tags every few
+Cactarium checks each package's repository for new release tags every few
 hours. Right after tagging one, have it look now:
 
 ```sh

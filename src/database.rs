@@ -216,7 +216,7 @@ pub struct CactusInstallation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stack: Option<String>,
     /// Where to report problems with the stack release the tree is on now
-    /// (installed, or refetched to), as the Cactarium gave it: the stack's
+    /// (installed, or refetched to), as Cactarium gave it: the stack's
     /// declared contact, else its repo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stack_contact: Option<String>,
