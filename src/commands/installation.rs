@@ -270,7 +270,9 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
         // problems with it.
         for (i, package) in meta.added.iter().enumerate() {
             let label = if i == 0 { "added:" } else { "" };
-            let thorns: Vec<&str> = package.thorns.iter().map(|t| t.checkout.as_str()).collect();
+            let flesh = package.is_flesh().then_some("the flesh");
+            let thorns: Vec<&str> =
+                flesh.into_iter().chain(package.thorns.iter().map(|t| t.checkout.as_str())).collect();
             let replaces = if package.replaces.is_empty() {
                 String::new()
             } else {

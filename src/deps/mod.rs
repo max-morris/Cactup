@@ -40,7 +40,7 @@ use anyhow::{anyhow, bail};
 pub use overrides::{ClaimKind, ClaimPattern, Override, Rules};
 #[allow(unused_imports)]
 pub use plan::{
-    Choice, ChoiceKey, ChoiceRule, Library, LineKind, Placement, Plan, Record, Replaced, Step, Untrusted,
+    Choice, ChoiceKey, ChoiceRule, Library, LineKind, Placement, Plan, Record, Replaced, Step, Untrusted, FLESH_REBUILD,
 };
 #[allow(unused_imports)]
 pub use refusal::{Live, Refusal, UnreadNeed, Unmet, Ways};

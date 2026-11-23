@@ -966,6 +966,8 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
             }
             return Ok(report);
         }
+        #[cfg(test)]
+        BEFORE_LINK.with(|hook| hook.get().map(|hook| hook(c)));
         match pass.link(c) {
             Ok(outcome) => report.links.push((c.checkout.clone(), outcome)),
             Err(e) => {
@@ -1341,6 +1343,13 @@ pub fn source_heads_with_progress(
         renderer.shutdown_and_wait();
     }
     result
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What a test does just before each link of a fetch is made (`execute`'s
+    /// link pass runs on the calling thread): an interrupt part way through.
+    pub(crate) static BEFORE_LINK: std::cell::Cell<Option<fn(&Component)>> = const { std::cell::Cell::new(None) };
 }
 
 /// The flesh is the repo that checks the Cactus make system straight into the

@@ -811,7 +811,7 @@ fn records(s: &Setup, specs: &[&str], flags: &AddFlags) -> Res<Vec<AddedPackage>
     let client = crate::cactarium::Client::new(&s.ctx.db.read().unwrap());
     let specs: Vec<String> = specs.iter().map(|s| (*s).to_owned()).collect();
     let (plan, present, heads) = plan_add(&client, &s.inst.root, &base, &meta, None, &specs, flags)?;
-    let records = records_of(&plan, &present, &meta)?;
+    let records = records_of(&plan, &present, &meta, &base)?;
     place(&base, &meta, records, &plan, &mut Vec::new(), &heads)
 }
 
@@ -939,16 +939,17 @@ fn a_leftover_added_for_entry_is_not_inherited() {
     let _ = (&it.a2, &it.log);
 }
 
-/// A plan with a flesh step is refused, before anything is shown or
-/// changed: this cactup does not replace the flesh yet.
+/// A flesh package checks out what the base's flesh does: a base with no
+/// flesh has nothing for it to take the place of, and is refused before
+/// anything is shown or changed.
 #[test]
-fn a_flesh_step_is_refused() {
+fn a_flesh_package_needs_a_base_flesh_to_replace() {
     let flesh = version_with("1.0.0", &"a".repeat(40), "https://x/cactus.git", &[], "[]", true);
     let (base, _) = Fake::new().package("et/cactus", vec![flesh]).serve();
     let tmp = tempfile::tempdir().unwrap();
     let s = Setup::new(tmp, "", &base);
     let err = format!("{:#}", s.add(&["et/cactus"], yes()).unwrap_err());
-    assert!(err.contains("Cactus flesh") && err.contains("cannot do yet"), "{err}");
+    assert!(err.contains("et/cactus@1.0.0 is a Cactus flesh") && err.contains("none to replace"), "{err}");
     assert!(s.meta().added.is_empty());
 }
 
@@ -2800,4 +2801,334 @@ fn remove_reads_an_unfrozen_base_package_cactup_gave_thorns() {
     let err = format!("{:#}", s.remove(&["max/lib"], remove_yes()).unwrap_err());
     assert!(err.contains("Other packages depend on max/lib") && err.contains("et/admbase"), "{err}");
     let _ = (&it.a2, &it.log);
+}
+
+/// A base whose flesh is et/cactus 1.0.0 at `f` (`repos/flesh`; its
+/// `Makefile`, `lib` and `src` linked into the root; 2.0.0 is at `f2`, a
+/// commit later), beside base repo tb (et/tb, thorn Base/T). max/mp and
+/// max/mx 1.0.0 are fleshes of their own
+/// (cloned as `repos/cactus-mp`, `repos/cactus-mx`), and max/z4c 1.0.0
+/// (thorn Z4c) needs the flesh max/mp.
+struct Flesh {
+    setup: Setup,
+    f: String,
+    f2: String,
+    mp: String,
+}
+
+fn flesh() -> Flesh {
+    let tmp = tempfile::tempdir().unwrap();
+    let tree = |who: &str| -> Vec<(String, String)> {
+        ["Makefile", "lib/make.pl", "src/main.c"].iter().map(|f| (f.to_string(), format!("{who}\n"))).collect()
+    };
+    let up = |name: &str, who: &str| {
+        let files = tree(who);
+        let files: Vec<(&str, &str)> = files.iter().map(|(f, c)| (f.as_str(), c.as_str())).collect();
+        upstream(tmp.path(), name, &files)
+    };
+    let (furl, f) = up("cactus", "base");
+    let (_, f2) = up("cactus", "base2");
+    let (mpurl, mp) = up("cactus-mp", "mp");
+    let (mxurl, mx) = up("cactus-mx", "mx");
+    let (zurl, z) = upstream(tmp.path(), "z4c", &[("Z4c/interface.ccl", "IMPLEMENTS: z4c\n")]);
+    let (tburl, tb) = upstream(tmp.path(), "tb", &[("T/interface.ccl", "IMPLEMENTS: t\n")]);
+    let claims = format!("[{}]", depends("max/mp", ">=1.0", &[]));
+    let mut fake = Fake::new()
+        .package(
+            "et/cactus",
+            vec![version_with("2.0.0", &f2, &furl, &[], "[]", true), version_with("1.0.0", &f, &furl, &[], "[]", true)],
+        )
+        .package("max/mp", vec![version_with("1.0.0", &mp, &mpurl, &[], "[]", true)])
+        .package("max/mx", vec![version_with("1.0.0", &mx, &mxurl, &[], "[]", true)])
+        .package("max/z4c", vec![version("1.0.0", &z, &zurl, "Z4c", &["Z4c"], &claims)])
+        .package("et/tb", vec![version("1.0.0", &tb, &tburl, "Base", &["T"], "[]")])
+        .pin(&furl, "et/cactus", Some("1.0.0"))
+        .pin(&tburl, "et/tb", Some("1.0.0"));
+    fake.flesh.push(furl.clone());
+    let (cactarium, _) = fake.serve();
+    let base = format!(
+        "\n!TARGET = $ROOT\n!TYPE = git\n!URL = {furl}\n!NAME = flesh\n!REPO_COMMIT = {f}\n!CHECKOUT = Makefile lib src\n{}",
+        section(&tburl, &tb, &["Base/T"])
+    );
+    Flesh { setup: Setup::new(tmp, &base, &cactarium), f, f2, mp }
+}
+
+impl Flesh {
+    fn cactus(&self) -> std::path::PathBuf {
+        self.setup.inst.root.join("Cactus")
+    }
+
+    /// Every link at the root points into `repos/<clone>`, and the flesh
+    /// read through them is `who`'s.
+    fn flesh_is(&self, clone: &str, who: &str) {
+        let cactus = self.cactus();
+        for item in ["Makefile", "lib", "src"] {
+            let to = std::fs::read_link(cactus.join(item)).unwrap_or_else(|e| panic!("{item}: {e}"));
+            assert_eq!(to, std::path::Path::new("repos").join(clone).join(item), "{item}");
+        }
+        assert_eq!(std::fs::read_to_string(cactus.join("Makefile")).unwrap(), format!("{who}\n"));
+        assert_eq!(std::fs::read_to_string(cactus.join("src/main.c")).unwrap(), format!("{who}\n"));
+        assert!(cactus.join("arrangements/Base/T/interface.ccl").is_file(), "the base's thorns stay");
+    }
+
+    fn live(&self) -> String {
+        std::fs::read_to_string(self.setup.inst.live_thornlist().unwrap()).unwrap()
+    }
+
+    fn pristine(&self) -> String {
+        std::fs::read_to_string(self.setup.inst.source_thornlist()).unwrap()
+    }
+
+    fn schema(&self) -> String {
+        let path = self.setup.inst.cactup_dir().join("installation.toml");
+        std::fs::read_to_string(path).unwrap().lines().next().unwrap().to_owned()
+    }
+}
+
+/// `cactup add max/mp`, a flesh: it takes the place of the base's flesh
+/// (keyed on the flesh, whatever its name or URL), the root's links point
+/// into its clone, the plan says every config needs a rebuild, and the
+/// record is written as v4. `remove` points the links back into the base's
+/// flesh clone, fetched again when it was pruned.
+#[test]
+fn a_flesh_package_takes_the_base_flesh_s_place_and_gives_it_back() {
+    let it = flesh();
+    let s = &it.setup;
+    it.flesh_is("flesh", "base");
+    let pristine = it.pristine();
+    let base = thornlist::parse(&pristine).unwrap();
+    let client = crate::cactarium::Client::new(&s.ctx.db.read().unwrap());
+    let (plan, _, _) = plan_add(&client, &s.inst.root, &base, &s.meta(), None, &["max/mp".to_owned()], &yes()).unwrap();
+    let text = plan.render("cactup add max/mp");
+    assert!(text.contains("base repo flesh with max/mp") && text.contains(crate::deps::FLESH_REBUILD), "{text}");
+    assert!(plan.rebuild);
+
+    s.add(&["max/mp"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    it.flesh_is("cactus-mp", "mp");
+    let meta = s.meta();
+    let mp = &meta.added[0];
+    assert_eq!((mp.package.as_str(), mp.repo.as_str(), mp.commit.as_str()), ("max/mp", "cactus-mp", it.mp.as_str()));
+    let items: Vec<String> = ["Makefile", "lib", "src"].map(String::from).into();
+    assert_eq!((mp.flesh.clone(), mp.replaces.clone()), (items, vec!["flesh".to_owned()]));
+    assert_eq!(it.schema(), "schema = 4");
+    // The composed list: the base's flesh gone, the package's at the root.
+    let live = it.live();
+    let list = thornlist::parse(&live).unwrap();
+    assert!(list.components().iter().all(|c| c.repo != "flesh"), "{live}");
+    let root: Vec<(&str, &str, Option<&str>)> = (list.components().iter())
+        .filter(|c| c.target == "Cactus")
+        .map(|c| (c.checkout.as_str(), c.repo.as_str(), c.commit.as_deref()))
+        .collect();
+    let at = Some(it.mp.as_str());
+    assert_eq!(root, [("Makefile", "cactus-mp", at), ("lib", "cactus-mp", at), ("src", "cactus-mp", at)], "{live}");
+    assert!(build_hint(Some("the new flesh"), false).contains("Rebuild every config for the new flesh"));
+
+    s.remove(&["max/mp"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    it.flesh_is("flesh", "base");
+    assert_eq!(it.live(), pristine);
+    assert!(s.meta().added.is_empty());
+    assert!(s.inst.root.join("Cactus/repos/cactus-mp").is_dir(), "its clone stays, for a prune");
+
+    // Pruned while the package was there: fetched again at the base's pin.
+    s.add(&["max/mp"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    std::fs::remove_dir_all(it.cactus().join("repos/flesh")).unwrap();
+    s.remove(&["max/mp"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    it.flesh_is("flesh", "base");
+    let (_, head) = crate::fetch::git::head_of(&it.cactus().join("repos/flesh")).unwrap();
+    assert_eq!(head.to_string(), it.f);
+    assert_eq!(it.live(), pristine);
+}
+
+/// The base's flesh is et/cactus: moving it (`@=2.0.0 --upgrade`) makes a
+/// flesh package in the base's own clone, at the new commit, its links
+/// unmoved. A flesh package later takes its place; et/cactus added again
+/// then is no base package any more (the base's flesh is gone) but a flesh
+/// of its own, in place of that one. Removed, the clone goes back to the
+/// base's pin.
+#[test]
+fn the_base_flesh_s_own_package_moves_in_place() {
+    let it = flesh();
+    let s = &it.setup;
+    let head = || crate::fetch::git::head_of(&it.cactus().join("repos/flesh")).unwrap().1.to_string();
+    let upgrade = AddFlags { upgrade: true, yes: true, ..AddFlags::default() };
+    s.add(&["et/cactus@=2.0.0"], upgrade).unwrap_or_else(|e| panic!("{e:#}"));
+    let meta = s.meta();
+    let cactus = &meta.added[0];
+    let got = (cactus.package.as_str(), cactus.repo.as_str(), cactus.commit.as_str());
+    assert_eq!(got, ("et/cactus", "flesh", it.f2.as_str()));
+    assert_eq!((cactus.flesh.len(), cactus.replaces.clone()), (3, vec!["flesh".to_owned()]));
+    it.flesh_is("flesh", "base2");
+    assert_eq!(head(), it.f2);
+
+    s.add(&["max/mp"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    assert_eq!(s.added(), [("max/mp".to_owned(), vec![])]);
+    it.flesh_is("cactus-mp", "mp");
+    s.add(&["et/cactus"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    assert_eq!(s.added(), [("et/cactus".to_owned(), vec![])]);
+    it.flesh_is("flesh", "base2");
+
+    s.remove(&["et/cactus"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    it.flesh_is("flesh", "base");
+    assert_eq!(head(), it.f);
+    assert_eq!(it.live(), it.pristine());
+}
+
+/// A flesh another package depends on comes in as a dependency, in place of
+/// the base's flesh; removing the dependent takes it along and gives the
+/// base's flesh back.
+#[test]
+fn a_flesh_package_comes_in_as_a_dependency() {
+    let it = flesh();
+    let s = &it.setup;
+    s.add(&["max/z4c"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    assert_eq!(s.added(), [("max/z4c".to_owned(), vec!["Z4c/Z4c".to_owned()]), ("max/mp".to_owned(), vec![])]);
+    let meta = s.meta();
+    assert!(meta.added[1].is_flesh());
+    assert!(!meta.added_for["max/mp"].requested);
+    it.flesh_is("cactus-mp", "mp");
+    assert!(it.cactus().join("arrangements/Z4c/Z4c/interface.ccl").is_file());
+
+    s.remove(&["max/z4c"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    assert!(s.meta().added.is_empty());
+    it.flesh_is("flesh", "base");
+    assert_eq!(it.live(), it.pristine());
+}
+
+/// An installation has one flesh: two flesh packages at once are refused,
+/// and a second flesh package later takes the first one's place, which
+/// goes from the record.
+#[test]
+fn one_flesh_package_at_a_time() {
+    let it = flesh();
+    let s = &it.setup;
+    let err = format!("{:#}", s.add(&["max/mp", "max/mx"], yes()).unwrap_err());
+    assert!(err.contains("The plan needs two fleshes"), "{err}");
+    assert!(s.meta().added.is_empty());
+    it.flesh_is("flesh", "base");
+
+    s.add(&["max/mp"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    s.add(&["max/mx"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let meta = s.meta();
+    assert_eq!(meta.added.iter().map(|a| a.package.as_str()).collect::<Vec<_>>(), ["max/mx"]);
+    assert_eq!(meta.added_for.keys().collect::<Vec<_>>(), ["max/mx"]);
+    assert_eq!(meta.added[0].replaces, ["flesh"]);
+    it.flesh_is("cactus-mx", "mx");
+
+    s.remove(&["max/mx"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    it.flesh_is("flesh", "base");
+    assert_eq!(it.live(), it.pristine());
+}
+
+/// A symbolic copy (`inst cp -s`) gets a flesh package and loses it again:
+/// its own links move, its source's never do, and nothing is written
+/// through a copy link into the source.
+#[test]
+fn a_symbolic_copy_gets_a_flesh_package() {
+    let it = flesh();
+    let s = &it.setup;
+    let home = s._tmp.path().join("copy");
+    let copy = super::super::copy::symbolic_copy(&s.inst, &home, "c").unwrap();
+    let path = copy.root.display().to_string();
+    s.ctx
+        .db
+        .update(move |d| {
+            let mut entry = d.installations["t"].clone();
+            entry.alias = "c".into();
+            entry.path = path;
+            entry.copied_from = Some("t".into());
+            d.installations.insert("c".into(), entry);
+            d.active_installation = Some("c".into());
+            Ok(())
+        })
+        .unwrap();
+    let source_live = it.live();
+    let cactus = copy.root.join("Cactus");
+    let source_makefile = it.cactus().join("repos/flesh/Makefile");
+    assert_eq!(std::fs::read_link(cactus.join("repos/flesh/Makefile")).unwrap(), source_makefile, "a copy link");
+
+    s.add(&["max/mp"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    for item in ["Makefile", "lib", "src"] {
+        assert_eq!(std::fs::read_link(cactus.join(item)).unwrap(), std::path::Path::new("repos/cactus-mp").join(item));
+    }
+    assert_eq!(std::fs::read_to_string(cactus.join("Makefile")).unwrap(), "mp\n");
+    assert!(copy.meta().unwrap().added[0].is_flesh());
+    // The source: as it was.
+    it.flesh_is("flesh", "base");
+    assert_eq!(it.live(), source_live);
+    assert!(s.inst.meta().unwrap().added.is_empty());
+    assert!(!it.cactus().join("repos/cactus-mp").exists());
+
+    s.remove(&["max/mp"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    for item in ["Makefile", "lib", "src"] {
+        assert_eq!(std::fs::read_link(cactus.join(item)).unwrap(), std::path::Path::new("repos/flesh").join(item));
+    }
+    assert_eq!(std::fs::read_to_string(cactus.join("Makefile")).unwrap(), "base\n");
+    assert_eq!(std::fs::read_link(cactus.join("repos/flesh/Makefile")).unwrap(), source_makefile, "still a copy link");
+    assert_eq!(std::fs::read_to_string(&source_makefile).unwrap(), "base\n");
+    assert!(copy.meta().unwrap().added.is_empty());
+}
+
+/// Ctrl-C part way through the links (after `Makefile` and `lib` moved,
+/// before `src`): the command fails, the record and the list are as they
+/// were, and the root's links all point where they did. For `add`, and for
+/// `remove` (the flag is the process's: each case runs in a child).
+#[test]
+fn an_interrupt_among_the_flesh_links_leaves_a_consistent_tree() {
+    fn interrupt_after_lib(c: &Component) {
+        if c.checkout == "lib" {
+            gix::interrupt::IS_INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let Some(case) = std::env::var_os("CACTUP_TEST_INTERRUPT_CHILD") else {
+        for case in ["add", "remove"] {
+            let name = "commands::add::deps_tests::an_interrupt_among_the_flesh_links_leaves_a_consistent_tree";
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([name, "--exact", "--test-threads=1"])
+                .env("CACTUP_TEST_INTERRUPT_CHILD", case)
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success() && said.contains("1 passed"), "{case}: {said}{err}");
+        }
+        return;
+    };
+    let it = flesh();
+    let s = &it.setup;
+    let (clone, who) = match case.to_str() {
+        Some("add") => ("flesh", "base"),
+        _ => {
+            s.add(&["max/mp"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+            ("cactus-mp", "mp")
+        }
+    };
+    let (live, meta) = (it.live(), s.meta());
+    crate::fetch::BEFORE_LINK.with(|hook| hook.set(Some(interrupt_after_lib)));
+    let err = match case.to_str() {
+        Some("add") => s.add(&["max/mp"], yes()),
+        _ => s.remove(&["max/mp"], remove_yes()),
+    };
+    crate::fetch::BEFORE_LINK.with(|hook| hook.set(None));
+    let err = format!("{:#}", err.unwrap_err());
+    assert!(err.contains("Interrupted"), "{err}");
+    it.flesh_is(clone, who);
+    assert_eq!(it.live(), live);
+    assert_eq!(s.meta().added, meta.added);
+}
+
+/// `remove` gives back the flesh of the base as it is now: after a refetch
+/// to a base whose flesh is named otherwise (`core`, never fetched), the
+/// links point into that clone, fetched for it.
+#[test]
+fn remove_gives_back_the_flesh_of_the_base_as_it_is_now() {
+    let it = flesh();
+    let s = &it.setup;
+    s.add(&["max/mp"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    // What a refetch to such a base writes: the new base, and the list composed onto it.
+    let pristine = it.pristine().replace("!NAME = flesh", "!NAME = core");
+    std::fs::write(s.inst.source_thornlist(), &pristine).unwrap();
+    std::fs::write(s.inst.live_thornlist().unwrap(), compose(&pristine, &s.meta().added).unwrap()).unwrap();
+    s.remove(&["max/mp"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    it.flesh_is("core", "base");
+    assert_eq!(it.live(), pristine);
 }

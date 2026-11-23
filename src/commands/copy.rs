@@ -237,6 +237,24 @@ struct Copied {
     skipped: Vec<PathBuf>,
 }
 
+/// A symbolic copy of `from` at `dest` (a new directory), its record naming
+/// its source as `dispatch` leaves it, not registered: for tests of what
+/// other commands do in one.
+#[cfg(test)]
+pub(crate) fn symbolic_copy(from: &Installation, dest: &Path, name: &str) -> Res<Installation> {
+    fs::create_dir_all(dest)?;
+    let dest = fs::canonicalize(dest)?;
+    let plan = Plan::new(from, &dest, name, true)?;
+    copy_until(&plan, &AtomicBool::new(false), &|| ())?;
+    let to = Installation::new(name, &dest);
+    let locked = to.locked()?;
+    let mut meta = locked.meta()?;
+    meta.linked_to = Some(plan.from_home.clone());
+    locked.set_meta(&meta)?;
+    drop(locked);
+    Ok(to)
+}
+
 /// [`copy_until`] on one progress line counting files, stopping on Ctrl-C.
 fn copy_with_progress(plan: &Plan, alias: &str) -> Res<Copied> {
     use prodash::{Count, Progress};

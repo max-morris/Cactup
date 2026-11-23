@@ -6,6 +6,9 @@ use std::fmt;
 use super::remove::{is_requested, AddedFor};
 use super::{PkgId, Release, Req, Why};
 
+/// The plan's line when the flesh changes.
+pub const FLESH_REBUILD: &str = "  The flesh changes; every config needs a rebuild";
+
 /// What a [`Step::Replace`] takes the place of.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Replaced {
@@ -236,8 +239,7 @@ impl Plan {
             out.push((LineKind::Pending, format!("  {p} awaits review")));
         }
         if self.rebuild {
-            let text = "  The flesh changes; every config needs a rebuild";
-            out.push((LineKind::Rebuild, text.to_owned()));
+            out.push((LineKind::Rebuild, FLESH_REBUILD.to_owned()));
         }
         for n in &self.notes {
             out.push((LineKind::Note, format!("  note: {n}")));

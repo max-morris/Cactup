@@ -299,6 +299,13 @@ pub struct AddedPackage {
     pub flesh: Vec<String>,
 }
 
+impl AddedPackage {
+    /// Whether the package is the installation's flesh.
+    pub fn is_flesh(&self) -> bool {
+        !self.flesh.is_empty()
+    }
+}
+
 /// One library an added package builds against, frozen at the commit the
 /// registry served for the version its dependency resolved to. Its clone is
 /// `repos/<the last part of into>`, linked in at `repos/<inside>/<into>`.

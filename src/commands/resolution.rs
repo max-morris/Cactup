@@ -1020,8 +1020,11 @@ pub(crate) fn present(
         heads.insert(name, read.unwrap_or(recorded));
     }
 
+    // A flesh package takes the place of the base's flesh repos, every
+    // component of them (compose drops them).
+    let flesh_gone = crate::commands::add::flesh_replaced(base, added);
     let mut repos: Vec<BaseRepo> = Vec::new();
-    for c in base.components() {
+    for c in base.components().iter().filter(|c| !flesh_gone.contains(c.repo.as_str())) {
         let thorn = crate::sim::trim::is_arrangement_thorn(base, c);
         let flesh = crate::fetch::is_flesh(root, c);
         if !thorn && !flesh {
