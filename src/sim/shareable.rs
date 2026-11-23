@@ -328,12 +328,12 @@ fn hide_spots(text: &str, hidden: &[Spot]) -> String {
 /// remote as its https equivalent) rewritten to it and every credential of
 /// `checked`'s hidden ones hidden, a line said for each, or `None` when
 /// there were none. The new text is parsed back and must give the same
-/// components, but for the URLs rewritten. The probes run on the network
-/// fan-out within one [`REMOTE_ASK_TIMEOUT`], a line each; Ctrl-C fails the
-/// call ("Interrupted").
+/// components, but for the URLs rewritten. The probes run all at once
+/// within one [`REMOTE_ASK_TIMEOUT`], a line each; Ctrl-C fails the call
+/// ("Interrupted").
 pub fn settle(checked: Checked, text: &str) -> Res<Option<String>> {
     let Checked { mut refused, asks, hidden } = checked;
-    let verdicts = probe_all(&asks)?;
+    let verdicts = probe_all(&asks, AskWindow::from(std::time::Instant::now(), REMOTE_ASK_TIMEOUT))?;
     let mut rewrites = BTreeMap::new();
     for (ask, verdict) in asks.iter().zip(verdicts) {
         match verdict {
@@ -551,9 +551,10 @@ pub fn check_input_url(knob: &str, url: &str) -> Res<()> {
     }
 }
 
-/// Probe each of `asks` anonymously ([`anonymous::check`]), on the network
-/// fan-out within one window, with a progress line for each.
-fn probe_all(asks: &[Ask]) -> Res<Vec<Verdict>> {
+/// Probe each of `asks` anonymously ([`anonymous::check`]), all at once (up
+/// to [`anonymous::PROBES_AT_ONCE`]) within `window`, with a progress line
+/// for each.
+fn probe_all(asks: &[Ask], window: AskWindow) -> Res<Vec<Verdict>> {
     if asks.is_empty() {
         return Ok(Vec::new());
     }
@@ -561,8 +562,7 @@ fn probe_all(asks: &[Ask]) -> Res<Vec<Verdict>> {
     let item = progress.add_child("ask git remotes without credentials");
     item.init(Some(asks.len()), Some(prodash::unit::label("repos")));
     let item = std::sync::Mutex::new(item);
-    let window = AskWindow::from(std::time::Instant::now(), REMOTE_ASK_TIMEOUT);
-    let verdicts = crate::fetch::git::ask_all(asks, |ask| {
+    let verdicts = crate::fetch::git::ask_all_at(asks, anonymous::PROBES_AT_ONCE, |ask| {
         let current = item.lock().expect("probe progress poisoned").add_child(ask.repos.join(", "));
         let verdict = anonymous::check(&ask.url, &ask.candidate, window);
         drop(current);
@@ -795,6 +795,22 @@ mod tests {
                 ("git@github.com:o/d.git", "https://github.com/o/d.git"),
             ]
         );
+    }
+
+    /// Every remote is probed at once: forty that never answer leave the
+    /// one behind them asked, and published, within the window.
+    #[test]
+    fn remotes_behind_silent_ones_are_still_probed() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        serve("silent.many.test", Mode::Silent);
+        serve("public.many.test", Mode::Public);
+        let ask = |url: String| Ask { repos: vec!["r".to_owned()], candidate: url.clone(), url };
+        let mut asks: Vec<Ask> = (0..40).map(|i| ask(format!("https://silent.many.test/o/r{i}"))).collect();
+        asks.push(ask("https://public.many.test/o/r".to_owned()));
+        let window = AskWindow::from(std::time::Instant::now(), std::time::Duration::from_millis(1500));
+        let verdicts = probe_all(&asks, window).unwrap();
+        assert_eq!(verdicts[40], Verdict::Publish("https://public.many.test/o/r".to_owned()));
+        assert!(matches!(&verdicts[0], Verdict::Refuse(why) if why.contains("no answer within")), "{:?}", verdicts[0]);
     }
 
     /// An ssh `!URL` is rewritten as written or as a template; nothing else

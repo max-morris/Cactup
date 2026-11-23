@@ -20,8 +20,10 @@
 //! public ([`probe::is_public_address`]): a remote that resolves to a
 //! private address is not reachable for others. The connection is pinned
 //! to the addresses checked, so DNS cannot swap in another between the
-//! check and the request. (A proxy from the environment is used as for any
-//! download; the proxy then connects on its own, and the pin cannot hold.)
+//! check and the request; a host that does not resolve here is pinned to
+//! none, so nothing resolves it unchecked. (A proxy from the environment is
+//! used as for any download; the proxy then resolves and connects on its
+//! own, and the pin cannot hold.)
 
 use super::git::AskWindow;
 use super::watch::{abandonable, Bounds, Stop};
@@ -33,6 +35,12 @@ use std::time::{Duration, Instant};
 
 /// The longest a probe waits to connect (within what is left of its window).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How many remotes are probed at once: all of them, up to this many. A
+/// probe mostly waits, and a remote that never answers holds its worker for
+/// the whole window, so a narrower fan-out leaves the remotes behind a few
+/// silent ones unasked when the window ends.
+pub const PROBES_AT_ONCE: usize = 128;
 
 /// What the probe decided for a git remote.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,7 +96,8 @@ enum Unchecked {
     /// Its host, as written, resolves to an address that is not public.
     Private(String),
     /// No HTTP response, and why, in a few words with no URL in them
-    /// ("connection refused", "no answer within 30 s").
+    /// ("connection refused", "no answer within 30 s": the probe's own
+    /// wait).
     Unreachable(String),
 }
 
@@ -138,16 +147,16 @@ fn ask(asked: &str, window: AskWindow) -> Res<Result<Response, Unchecked>> {
     let owned = asked.to_owned();
     // The request reports no progress: the silence is the whole probe. Its
     // own timeout is a little longer than the watch's, so a silence is
-    // said as the window, and the thread ends soon after on its own.
+    // said as this probe's wait, and the thread ends soon after on its own.
     let bounds = Bounds { stall: left, total: Some(left), wind_down: Duration::ZERO };
-    match abandonable(gix::progress::Discard, bounds, move |_, _| request(&owned, left + Duration::from_secs(1))) {
+    match abandonable(gix::progress::Discard, bounds, move |_, _| request(&owned, left)) {
         Ok(found) => Ok(found),
         // Only building the client fails this way; its words are no
         // network's.
         Err(Stop::Failed(_)) => Ok(Err(Unchecked::Unreachable("the probe failed".to_owned()))),
         Err(Stop::Interrupted) => bail!("Interrupted"),
         Err(Stop::Stalled(_) | Stop::Overran(_)) => {
-            let secs = (window.length.as_secs_f64().round() as u64).max(1);
+            let secs = (left.as_secs_f64().round() as u64).max(1);
             Ok(Err(Unchecked::Unreachable(format!("no answer within {secs} s"))))
         }
         Err(Stop::Vanished) => Ok(Err(Unchecked::Unreachable("the probe failed".to_owned()))),
@@ -157,18 +166,32 @@ fn ask(asked: &str, window: AskWindow) -> Res<Result<Response, Unchecked>> {
 /// The request itself, on the probe's thread (so the resolution, too, is
 /// bounded by the window and given up on at a Ctrl-C): the host resolved
 /// and checked, then a bare GET of the advertisement, pinned to those
-/// addresses, turned into an [`Outcome`] by the crate's rules.
-fn request(asked: &str, timeout: Duration) -> Res<Result<Response, Unchecked>> {
+/// addresses (to none when the host does not resolve here), turned into an
+/// [`Outcome`] by the crate's rules. `left` is what is left of the window:
+/// the request may take a moment longer, and connect within it.
+fn request(asked: &str, left: Duration) -> Res<Result<Response, Unchecked>> {
     use reqwest::header;
     let target = probe::probe_url(asked);
     let parsed = match reqwest::Url::parse(&target) {
         Ok(parsed) => parsed,
         Err(_) => return Ok(Err(Unchecked::Unreachable("its URL does not parse".to_owned()))),
     };
-    let mut client = client(timeout);
+    let mut client = client(left);
+    // A host that does not resolve here is pinned to no address: a direct
+    // connection then fails (and is said as the lookup that failed), and a
+    // proxy, which resolves it on its own, is not affected.
+    let mut unresolved = false;
     match public_addresses(&parsed) {
-        Ok(Some((host, addrs))) => client = client.resolve_to_addrs(&host, &addrs),
-        Ok(None) => {}
+        Ok(Pin::To(host, addrs)) => {
+            #[cfg(test)]
+            let addrs: Vec<std::net::SocketAddr> = addrs.into_iter().map(wired).collect();
+            client = client.resolve_to_addrs(&host, &addrs);
+        }
+        Ok(Pin::Nothing(host)) => {
+            client = client.resolve_to_addrs(&host, &[]);
+            unresolved = true;
+        }
+        Ok(Pin::Address) => {}
         Err(unchecked) => return Ok(Err(unchecked)),
     }
     // A test's host is served by a local stand-in; the check above was of
@@ -180,6 +203,7 @@ fn request(asked: &str, timeout: Duration) -> Res<Result<Response, Unchecked>> {
     };
     let response = match client.build()?.get(parsed).send() {
         Ok(response) => response,
+        Err(e) if unresolved && e.is_connect() => return Ok(Err(Unchecked::Unreachable("dns lookup failed".to_owned()))),
         Err(e) => return Ok(Err(Unchecked::Unreachable(failure(&e)))),
     };
     let status = response.status();
@@ -207,58 +231,72 @@ fn request(asked: &str, timeout: Duration) -> Res<Result<Response, Unchecked>> {
 
 /// The probe's client: no redirect followed, no referer, a git user agent
 /// (`git/cactup-<version>`), nothing kept between probes (a client of its
-/// own each), and a connect timeout within `timeout`, the request's. Tests
-/// ignore the environment's proxies, so they ask their local servers
-/// wherever they run.
-fn client(timeout: Duration) -> reqwest::blocking::ClientBuilder {
+/// own each), a connect timeout within `left`, what is left of the window,
+/// and a request timeout a second past it. Tests ignore the environment's
+/// proxies, so they ask their local servers wherever they run, and resolve
+/// what is not pinned through [`SWAPS`], never the system.
+fn client(left: Duration) -> reqwest::blocking::ClientBuilder {
     let builder = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .referer(false)
         .user_agent(format!("{}cactup-{}", probe::USER_AGENT_PREFIX, env!("CARGO_PKG_VERSION")))
-        .connect_timeout(CONNECT_TIMEOUT.min(timeout))
-        .timeout(timeout);
+        .connect_timeout(CONNECT_TIMEOUT.min(left))
+        .timeout(left + Duration::from_secs(1));
     #[cfg(test)]
-    let builder = builder.no_proxy();
+    let builder = builder.no_proxy().dns_resolver(std::sync::Arc::new(TestDns));
     builder
 }
 
-/// `url`'s host resolved, once, with every address checked public: the
-/// domain and its addresses to pin the connection to; `None` for an IP
-/// address (checked, and needing no pin) and for a host that does not
-/// resolve here; else, when an address is not public, that address.
+/// What the connection is pinned to ([`public_addresses`]).
+#[derive(Debug, PartialEq, Eq)]
+enum Pin {
+    /// This domain, to these addresses, every one checked public.
+    To(String, Vec<std::net::SocketAddr>),
+    /// This domain, which does not resolve here, to no address at all.
+    Nothing(String),
+    /// Nothing to pin: the host is an IP address (checked public).
+    Address,
+}
+
+/// `url`'s host resolved, once, with every address checked public: what
+/// to pin the connection to; else, when an address is not public, the
+/// host.
 ///
 /// A host that does not resolve here (no answer, no such name) is not
 /// refused for that alone: a login node that reaches the world only
 /// through a proxy cannot resolve names itself, and the proxy may still
-/// reach the remote. The check and the pin are skipped, and the probe
-/// decides: through a proxy it may answer, and without one it fails to
-/// connect, which is then the refusal, with its own words. Leniency is
-/// safe on this side: the Cactarium vets the addresses of anything
-/// published there itself.
-fn public_addresses(url: &reqwest::Url) -> Result<Option<(String, Vec<std::net::SocketAddr>)>, Unchecked> {
+/// reach the remote. The check is skipped, the host pinned to no address,
+/// and the probe decides: through a proxy it may answer, and without one
+/// it fails to connect, which is then the refusal ("dns lookup failed").
+/// Leniency is safe on this side: the Cactarium vets the addresses of
+/// anything published there itself.
+fn public_addresses(url: &reqwest::Url) -> Result<Pin, Unchecked> {
     let port = url.port_or_known_default().unwrap_or(443);
     let Some(host) = url.host_str() else { return Err(Unchecked::Unreachable("it has no host".to_owned())) };
-    let (domain, addrs): (Option<String>, Vec<std::net::SocketAddr>) =
-        match host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>() {
-            Ok(ip) => (None, vec![(ip, port).into()]),
-            Err(_) => match resolve(host, port) {
-                Ok(addrs) if !addrs.is_empty() => (Some(host.to_owned()), addrs),
-                _ => return Ok(None),
-            },
-        };
+    let (pin, addrs) = match host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>() {
+        Ok(ip) => (Pin::Address, vec![(ip, port).into()]),
+        Err(_) => match resolve(host, port) {
+            Ok(addrs) if !addrs.is_empty() => (Pin::To(host.to_owned(), addrs.clone()), addrs),
+            _ => return Ok(Pin::Nothing(host.to_owned())),
+        },
+    };
     if addrs.iter().any(|a| !probe::is_public_address(a.ip())) {
         return Err(Unchecked::Private(host.to_owned()));
     }
-    Ok(domain.map(|d| (d, addrs)))
+    Ok(pin)
 }
 
 /// `host`'s addresses, as the system resolver gives them; in tests, a
 /// routed host ([`ROUTES`]) resolves to a public address (its stand-in is
-/// local) and one in [`UNRESOLVED`] not at all.
+/// local), one in [`RESOLVES`] to its addresses, and one in [`UNRESOLVED`]
+/// not at all.
 fn resolve(host: &str, port: u16) -> std::io::Result<Vec<std::net::SocketAddr>> {
     use std::net::ToSocketAddrs;
     #[cfg(test)]
     {
+        if let Some(ips) = RESOLVES.lock().expect("test hosts poisoned").get(host) {
+            return Ok(ips.iter().map(|ip| (*ip, port).into()).collect());
+        }
         if UNRESOLVED.lock().expect("test hosts poisoned").contains(host) {
             return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no such host (test)"));
         }
@@ -274,6 +312,49 @@ fn resolve(host: &str, port: u16) -> std::io::Result<Vec<std::net::SocketAddr>> 
 #[cfg(test)]
 pub static UNRESOLVED: std::sync::Mutex<std::collections::BTreeSet<String>> =
     std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// What hosts resolve to for the address check (tests only; see
+/// [`resolve`]).
+#[cfg(test)]
+pub static RESOLVES: std::sync::Mutex<std::collections::BTreeMap<String, Vec<std::net::IpAddr>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Where a connection pinned to an address really goes (tests only): a
+/// public address the check passed, wired to a local stand-in's. An
+/// address not listed goes where it says.
+#[cfg(test)]
+pub static WIRES: std::sync::Mutex<std::collections::BTreeMap<std::net::IpAddr, std::net::IpAddr>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+#[cfg(test)]
+fn wired(addr: std::net::SocketAddr) -> std::net::SocketAddr {
+    let wires = WIRES.lock().expect("test wires poisoned");
+    (wires.get(&addr.ip()).copied().unwrap_or(addr.ip()), addr.port()).into()
+}
+
+/// What a host resolves to when the request itself resolves it, past the
+/// pin (tests only): as DNS answering otherwise at the moment of the
+/// request. A host not listed does not resolve.
+#[cfg(test)]
+pub static SWAPS: std::sync::Mutex<std::collections::BTreeMap<String, std::net::IpAddr>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The request's resolver in tests: [`SWAPS`], never the system's.
+#[cfg(test)]
+struct TestDns;
+
+#[cfg(test)]
+impl reqwest::dns::Resolve for TestDns {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let found = SWAPS.lock().expect("test swaps poisoned").get(name.as_str()).copied();
+        Box::pin(async move {
+            match found {
+                Some(ip) => Ok(Box::new(std::iter::once(std::net::SocketAddr::from((ip, 0)))) as reqwest::dns::Addrs),
+                None => Err("no such host (test)".into()),
+            }
+        })
+    }
+}
 
 /// Every URL probed in this process, in order (tests only).
 #[cfg(test)]
@@ -328,6 +409,11 @@ pub mod testserver {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         super::ROUTES.lock().unwrap().insert(host.to_owned(), format!("http://127.0.0.1:{port}"));
+        serve_on(listener, mode)
+    }
+
+    /// Serve `mode` on `listener`, routed nowhere: reached by its address.
+    pub fn serve_on(listener: std::net::TcpListener, mode: Mode) -> std::sync::mpsc::Receiver<String> {
         let (send, recv) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut held = Vec::new();
@@ -394,7 +480,9 @@ mod tests {
 
     /// A public https remote is published as written, an ssh one as its
     /// https equivalent; the request carries no credentials of any kind
-    /// and says it is git.
+    /// and says it is git. (Nothing here can show a `Proxy-Authorization`
+    /// header: that goes to a proxy, never to the remote, and tests use
+    /// none.)
     #[test]
     fn a_public_remote_is_published_and_asked_anonymously() {
         let requests = serve("public.probe.test", Mode::Public);
@@ -402,7 +490,7 @@ mod tests {
         let request = requests.recv().unwrap().to_ascii_lowercase();
         assert!(request.starts_with("get /org/r/info/refs?service=git-upload-pack "), "{request}");
         assert!(request.contains("user-agent: git/cactup-"), "{request}");
-        for header in ["authorization", "cookie", "referer", "proxy-authorization"] {
+        for header in ["authorization", "cookie", "referer"] {
             assert!(!request.contains(&format!("{header}:")), "{request}");
         }
         assert_eq!(check_now("git@public.probe.test:org/r.git"), Verdict::Publish("https://public.probe.test/org/r.git".to_owned()));
@@ -424,7 +512,8 @@ mod tests {
         let moved = check_now("https://moved.probe.test/org/r.git");
         assert!(refused(&moved).contains("redirects to https://moved.probe.test/new/r.git: the repo has moved"), "{moved:?}");
         serve("silent.probe.test", Mode::Silent);
-        let short = AskWindow::from(Instant::now(), Duration::from_millis(600));
+        // Asked 600 ms before the end of a 10 s window: its own wait is said.
+        let short = AskWindow::from(Instant::now() - Duration::from_millis(9400), Duration::from_secs(10));
         let started = Instant::now();
         let silent = check_remote("https://silent.probe.test/org/r.git", short).unwrap();
         assert_eq!(
@@ -462,6 +551,67 @@ mod tests {
         assert_eq!(
             refused(&nowhere),
             "https://nowhere.invalid/o/r.git can't be checked: its host couldn't be reached (dns lookup failed); try again later"
+        );
+    }
+
+    /// The connection goes to the addresses checked, not to what the host
+    /// resolves to when the request is made: a host that resolved to a
+    /// public address for the check, then to a stand-in that asks for
+    /// credentials, is asked at the address checked (and published); one
+    /// that did not resolve for the check is asked nowhere, though it
+    /// resolves by then.
+    #[test]
+    fn the_connection_is_pinned_to_the_addresses_checked() {
+        use std::net::{IpAddr, Ipv4Addr, TcpListener};
+        // The same port on two loopback addresses: the honest server, and
+        // the one DNS swaps in.
+        let (honest, swapped) = loop {
+            let honest = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = honest.local_addr().unwrap().port();
+            if let Ok(swapped) = TcpListener::bind(("127.0.0.2", port)) {
+                break (honest, swapped);
+            }
+        };
+        let port = honest.local_addr().unwrap().port();
+        testserver::serve_on(honest, Mode::Public);
+        testserver::serve_on(swapped, Mode::Private);
+        let checked: IpAddr = Ipv4Addr::new(140, 82, 112, 4).into();
+        RESOLVES.lock().unwrap().insert("pinned.probe.test".to_owned(), vec![checked]);
+        WIRES.lock().unwrap().insert(checked, Ipv4Addr::LOCALHOST.into());
+        SWAPS.lock().unwrap().insert("pinned.probe.test".to_owned(), Ipv4Addr::new(127, 0, 0, 2).into());
+        let url = format!("http://pinned.probe.test:{port}/o/r");
+        assert_eq!(check_now(&url), Verdict::Publish(url.clone()));
+
+        // Not resolved for the check: pinned to nothing, so the swapped-in
+        // address (the honest server, this time) is never asked.
+        UNRESOLVED.lock().unwrap().insert("swapped.probe.test".to_owned());
+        SWAPS.lock().unwrap().insert("swapped.probe.test".to_owned(), Ipv4Addr::LOCALHOST.into());
+        let url = format!("http://swapped.probe.test:{port}/o/r");
+        assert_eq!(
+            refused(&check_now(&url)),
+            format!("{url} can't be checked: its host couldn't be reached (dns lookup failed); try again later")
+        );
+    }
+
+    /// A host with any address that is not public is refused, though its
+    /// other addresses are public, and is not asked.
+    #[test]
+    fn a_host_with_one_private_address_among_public_ones_is_refused() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let public: IpAddr = Ipv4Addr::new(140, 82, 112, 5).into();
+        let private: IpAddr = Ipv4Addr::new(10, 1, 2, 3).into();
+        RESOLVES.lock().unwrap().insert("mixed.probe.test".to_owned(), vec![public, private]);
+        // Were it asked, it would be refused for the connection instead.
+        WIRES.lock().unwrap().insert(public, Ipv4Addr::LOCALHOST.into());
+        WIRES.lock().unwrap().insert(private, Ipv4Addr::LOCALHOST.into());
+        let url = format!("http://mixed.probe.test:{closed}/o/r");
+        assert_eq!(
+            refused(&check_now(&url)),
+            format!(
+                "{url} can't be checked: mixed.probe.test is not a public address, so nobody outside your network can \
+                 fetch it; publish a URL on a public host"
+            )
         );
     }
 

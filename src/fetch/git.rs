@@ -1880,10 +1880,15 @@ pub fn ask_remote_tip(url: &str, git_ref: Option<&str>, window: AskWindow) -> Re
 /// the disk (the disk pool, `par::parallel_map`, is narrower). Ctrl-C:
 /// nothing more is started, and the map fails ("Interrupted").
 pub fn ask_all<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Res<Vec<R>> {
+    ask_all_at(items, REMOTE_ASKS_AT_ONCE, f)
+}
+
+/// [`ask_all`] on a fan-out `width` wide.
+pub fn ask_all_at<T: Sync, R: Send>(items: &[T], width: usize, f: impl Fn(&T) -> R + Sync) -> Res<Vec<R>> {
     let slots: Vec<std::sync::Mutex<Option<R>>> = items.iter().map(|_| std::sync::Mutex::new(None)).collect();
     let next = std::sync::atomic::AtomicUsize::new(0);
     std::thread::scope(|scope| {
-        for _ in 0..REMOTE_ASKS_AT_ONCE.min(items.len()) {
+        for _ in 0..width.min(items.len()) {
             scope.spawn(|| loop {
                 if gix::interrupt::is_triggered() {
                     return;
