@@ -468,9 +468,9 @@ fn predates_multi_sim(client: &crate::cactarium::Client, shown: &str, detail: &s
     )
 }
 
-/// `cactup login` (§8.10): store the API token for the server the
-/// `cactarium-url` knob names, in `~/.cactup/credentials` (owner-only),
-/// never as a knob itself.
+/// `cactup login` (§8.10): store the API token for the Cactarium server
+/// named by the `cactarium-url` knob, in `~/.cactup/credentials`
+/// (owner-only), never as a knob itself.
 pub fn login(ctx: &Ctx, token: Option<String>) -> Res<()> {
     let client = crate::cactarium::Client::new(&ctx.db.read()?);
     let token = match token {
