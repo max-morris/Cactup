@@ -2026,7 +2026,7 @@ pub fn origin_url(repo_dir: &Path) -> Option<String> {
 
 /// The file `path` of `commit` in the repository at `url`, written to
 /// `dest` (atomically): the commit is fetched by its id at depth 1 into a
-/// scratch repository (a server must grant the want; GitHub and the
+/// scratch repository (a server must grant the want; GitHub and
 /// Cactarium's hosts do), its tree walked to `path`, which must be a
 /// regular file. Interrupt-aware; reports on `progress`.
 pub fn file_at_commit(

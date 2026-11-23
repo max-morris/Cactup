@@ -136,8 +136,8 @@ pub fn fetch(dir: &Path, input: &Input, policy: &SizePolicy, repo: Option<&RepoS
     Ok(value)
 }
 
-/// Where a simulation's `repo-file` inputs come from: the repository the
-/// Cactarium publishes it from, at the version's commit.
+/// Where a simulation's `repo-file` inputs come from: the repository
+/// that Cactarium publishes it from, at the version's commit.
 pub struct RepoSource {
     pub url: String,
     pub commit: String,

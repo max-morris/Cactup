@@ -223,8 +223,8 @@ impl Client {
 
     /// A package read at something no published version names: a branch
     /// tip (`head` or `master`: both its default branch) or a commit. Its
-    /// thorns there, and whether the Cactarium does not trust it (then
-    /// nobody has reviewed that code); `None` when the Cactarium has no such
+    /// thorns there, and whether it is not trusted by Cactarium (then
+    /// nobody has reviewed that code); `None` when Cactarium has no such
     /// package or cannot find that commit in its repository.
     pub fn package_at_if_any(&self, owner: &str, name: &str, at: &str) -> Res<Option<(PackageVersion, bool)>> {
         let url = self.url(&format!("/packages/{owner}/{name}/versions/{at}"));
@@ -440,7 +440,7 @@ impl Client {
     /// says nothing more. Anything else keeps its full chain.
     fn unreachable(&self, e: reqwest::Error) -> anyhow::Error {
         if !(e.is_connect() || e.is_timeout()) {
-            return anyhow::Error::new(e).context(format!("Failed to reach the Cactarium at {}", self.base));
+            return anyhow::Error::new(e).context(format!("Failed to reach Cactarium at {}", self.base));
         }
         let mut cause: &dyn std::error::Error = &e;
         while let Some(next) = cause.source() {
@@ -448,7 +448,7 @@ impl Client {
         }
         let why = if e.is_timeout() { "it did not answer in time".to_owned() } else { cause.to_string() };
         anyhow!(
-            "The Cactarium at {} isn't reachable ({why})\nTo use another, set the {URL_KNOB} knob or CACTARIUM_URL.",
+            "Cactarium at {} isn't reachable ({why})\nTo use another server, set the {URL_KNOB} knob or CACTARIUM_URL.",
             self.base
         )
     }
@@ -511,7 +511,7 @@ impl Client {
         if let Some(generation) = generation
             && generation > API_GENERATION
         {
-            bail!("The Cactarium at {} needs a newer cactup (API generation {generation}); run `cactup update`", self.base);
+            bail!("Cactarium at {} needs a newer cactup (API generation {generation}); run `cactup update`", self.base);
         }
         let status = response.status();
         if status.is_success() {
@@ -553,7 +553,7 @@ impl Client {
         };
         let (message, code) = match serde_json::from_str::<ErrorBody>(&text) {
             Ok(body) => (format!("{}{login}", body.error.message), Some(body.error.code)),
-            Err(_) => (format!("The Cactarium at {} answered {status}", self.base), None),
+            Err(_) => (format!("Cactarium at {} answered {status}", self.base), None),
         };
         Err(anyhow::Error::new(Refused { status: status.as_u16(), message, retry_after, code }))
     }
@@ -575,8 +575,8 @@ impl Client {
     fn unreachable_read(&self, e: std::io::Error, url: &str) -> anyhow::Error {
         if e.kind() == std::io::ErrorKind::TimedOut || e.to_string().contains("timed out") {
             return anyhow!(
-                "The Cactarium at {} isn't reachable (it did not answer in time)\nTo use another, set the {URL_KNOB} \
-                 knob or CACTARIUM_URL.",
+                "Cactarium at {} isn't reachable (it did not answer in time)\nTo use another server, set the \
+                 {URL_KNOB} knob or CACTARIUM_URL.",
                 self.base
             );
         }
@@ -738,7 +738,7 @@ pub struct StackRelease {
     pub contact: Option<String>,
 }
 
-/// See [`StackRelease`]. A branch tip of a stack the Cactarium does not trust
+/// See [`StackRelease`]. A branch tip of a stack not trusted by Cactarium
 /// is code nobody has reviewed: it is said loudly, and taken only on a yes
 /// typed at the terminal, or with `allow_untrusted`
 /// (`--risky-allow-untrusted-artifacts`), which still prints the warning.
@@ -839,13 +839,13 @@ pub(crate) fn confirm_untrusted_on(slug: &str, kind: &str, what: Unreviewed, all
 /// A downloaded `.sim` is stamped as `want` (`owner/name/sim@X.Y.Z`): what
 /// was asked for, and not some other sim of the entry.
 fn check_stamp(bytes: &[u8], want: &str) -> Res<()> {
-    let text = std::str::from_utf8(bytes).map_err(|_| anyhow!("The Cactarium's file for {want} is not text"))?;
+    let text = std::str::from_utf8(bytes).map_err(|_| anyhow!("Cactarium's file for {want} is not text"))?;
     let file = cactup_ecosystem_common::sim::SimFile::from_toml(text)
-        .map_err(|e| anyhow!("The Cactarium's file for {want}: {e}"))?;
+        .map_err(|e| anyhow!("Cactarium's file for {want}: {e}"))?;
     match file.sim.cactarium.map(|s| s.to_string()) {
         Some(stamp) if stamp == want => Ok(()),
-        Some(stamp) => bail!("Asked the Cactarium for {want}, and it sent the file of {stamp}"),
-        None => bail!("Asked the Cactarium for {want}, and it sent a file that does not say which sim it is"),
+        Some(stamp) => bail!("Asked Cactarium for {want}, and it sent the file of {stamp}"),
+        None => bail!("Asked Cactarium for {want}, and it sent a file that does not say which sim it is"),
     }
 }
 
@@ -854,7 +854,7 @@ fn check_stamp(bytes: &[u8], want: &str) -> Res<()> {
 /// server would fail on whichever of them came first, with a message that
 /// never says to upgrade).
 fn stack_json(text: String, url: &str) -> Res<FrozenStack> {
-    let unexpected = || format!("The Cactarium's answer from {url} is not what cactup expects");
+    let unexpected = || format!("Cactarium's answer from {url} is not what cactup expects");
     let value: serde_json::Value = serde_json::from_str(&text).with_context(unexpected)?;
     if let Some(found) = value.get("format").and_then(serde_json::Value::as_u64)
         && found > u64::from(STACK_FORMAT)
@@ -940,7 +940,7 @@ pub fn token_for(base: &str) -> Res<String> {
     read_credentials(&credentials_path())?
         .tokens
         .remove(base)
-        .ok_or_else(|| anyhow!("No token for the Cactarium at {base}; run `cactup login` first"))
+        .ok_or_else(|| anyhow!("No token for Cactarium at {base}; run `cactup login` first"))
 }
 
 /// Store `token` for `base` in `path`, written whole under a temporary name
@@ -999,7 +999,7 @@ mod tests {
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let base = format!("http://127.0.0.1:{port}");
         let err = format!("{:#}", Client::at(&base).resolve("a/b", "package").unwrap_err());
-        assert!(err.starts_with(&format!("The Cactarium at {base} isn't reachable (")), "{err}");
+        assert!(err.starts_with(&format!("Cactarium at {base} isn't reachable (")), "{err}");
         assert!(err.contains("cactarium-url") && !err.contains("error sending request"), "{err}");
     }
 

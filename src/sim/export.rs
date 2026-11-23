@@ -341,7 +341,7 @@ fn finish(ctx: &Ctx, describe: &SimDescribeArgs, file: &Path, parts: Parts) -> R
         let what: Vec<String> = missing.iter().map(ToString::to_string).collect();
         println!(
             "{}",
-            format!("Cannot be published to the Cactarium: {}", what.join("; ")).yellow()
+            format!("Cannot be published to Cactarium: {}", what.join("; ")).yellow()
         );
     }
     Ok(())
