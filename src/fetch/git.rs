@@ -441,7 +441,9 @@ pub fn redacted(url: &str) -> String {
 /// the URL whole, or parts of it: the URL itself becomes [`redacted`]'s
 /// form, and then every secret of it, as given and percent-decoded — the
 /// userinfo before an `@` (but an ssh user name: only its password), and
-/// the query — is replaced by `***` wherever it still shows.
+/// the query — is replaced by `***` wherever it still shows. So are the
+/// forms the HTTP client re-encodes them in (`me:p%40ss@`, `?token=a%22b`):
+/// the URL, its user name, password and query as `reqwest::Url` gives them.
 pub fn scrub(text: &str, url: &str) -> String {
     let url = url.trim();
     let mut text = text.replace(url, &redacted(url));
@@ -462,6 +464,19 @@ pub fn scrub(text: &str, url: &str) -> String {
     if let Some((_, query)) = rest.split_once('?') {
         let query = query.split('#').next().unwrap_or(query);
         secrets.push((format!("?{query}"), "?***"));
+    }
+    if let Ok(parsed) = reqwest::Url::parse(url) {
+        text = text.replace(parsed.as_str(), &redacted(parsed.as_str()));
+        let (user, password) = (parsed.username(), parsed.password());
+        if !ssh && !user.is_empty() {
+            secrets.push((format!("{user}{}@", password.map_or(String::new(), |p| format!(":{p}"))), "***@"));
+        }
+        if let Some(password) = password {
+            secrets.push((format!(":{password}@"), ":***@"));
+        }
+        if let Some(query) = parsed.query().filter(|q| !q.is_empty()) {
+            secrets.push((format!("?{query}"), "?***"));
+        }
     }
     for (secret, hidden) in secrets {
         let decoded = percent_decode(&secret);
@@ -2089,8 +2104,8 @@ mod tests {
 
     /// Credentials in a URL are hidden wherever cactup shows it, as given
     /// and as another layer may quote it: a password, a token given as the
-    /// user name, a query; an ssh user name, and a URL without any, are
-    /// shown as they are.
+    /// user name, a query, in the forms the HTTP client re-encodes them in
+    /// too; an ssh user name, and a URL without any, are shown as they are.
     #[test]
     fn credentials_in_a_url_are_hidden() {
         let url = "https://max:s%40cret@example.org/r.git";
@@ -2107,6 +2122,15 @@ mod tests {
         let query = "https://gitlab.com/o/r.git?private_token=QTOKEN";
         assert!(!redacted(query).contains("QTOKEN"));
         assert!(!scrub("GET /o/r.git/info/refs?private_token=QTOKEN failed", query).contains("QTOKEN"));
+        // As the HTTP client re-encodes them.
+        let at = "https://me:p@ss@example.org/r.git";
+        let said = "error sending request for url (https://me:p%40ss@example.org/r.git/info/refs): me:p%40ss@";
+        assert_eq!(scrub(said, at), "error sending request for url (https://***@example.org/r.git/info/refs): ***@");
+        let quoted = "https://example.org/f.h5?token=a\"b c";
+        let said = "error sending request for url (https://example.org/f.h5?token=a%22b%20c)";
+        assert_eq!(scrub(said, quoted), "error sending request for url (https://example.org/f.h5?***)");
+        let ssh = "ssh://git:pa%20ss@example.org/r.git";
+        assert_eq!(scrub("ssh://git:pa ss@example.org/r.git", ssh), "ssh://git:***@example.org/r.git");
         for plain in ["/tmp/up", "git://127.0.0.1:9/r.git", "git@github.com:max/r.git", "ssh://git@github.com/max/r"] {
             assert_eq!(redacted(plain), plain);
             assert_eq!(scrub(&format!("x {plain} y"), plain), format!("x {plain} y"));
