@@ -48,8 +48,9 @@ Export refuses what nobody else could reproduce:
 - **Every git remote is checked.** Export asks each one over the network,
   as a stranger would, with no credentials of any kind: one small request
   per repository, all at once, within 30 seconds. A remote that asks for
-  credentials, isn't there, or does not answer is refused; one that
-  redirects to another path has moved, and export names where to. A remote
+  credentials, isn't there, or does not answer is refused, and so is one
+  that says it is busy or failing (try again later); one that redirects
+  to another path has moved, and export names where to. A remote
   whose host resolves to a private address (a machine on your own network)
   is refused too: nobody outside could reach it. (A host your machine
   cannot look up itself, as on a login node that goes out through a proxy,

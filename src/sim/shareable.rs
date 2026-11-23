@@ -48,9 +48,7 @@ use crate::thornlist::{self, ComponentType};
 use crate::Res;
 use anyhow::{bail, Context};
 use cactup_ecosystem_common::probe::{self, Start};
-use cactup_ecosystem_common::url::{
-    download_shareability, is_credential_key, shareability, unquote, Redacted, Shareability,
-};
+use cactup_ecosystem_common::url::{download_shareability, shareability, unquote, Redacted, Shareability};
 use colored::Colorize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
@@ -130,7 +128,7 @@ pub fn classify(list: &thornlist::Thornlist, text: &str, input_urls: &[(String, 
                 cvs_refusal(url)
             } else if auth && c.ty == ComponentType::Git {
                 // Never fetched: only what it carries counts.
-                match download_judged(url) {
+                match download_shareability(url) {
                     s @ Shareability::Credentials => scrubbed(s.download_refusal(url), url),
                     _ => None,
                 }
@@ -197,7 +195,7 @@ pub fn shown_repo(repo: &str) -> &str {
 /// Every credential in `text` but those in `already` (refused by name, as
 /// fetched): a `scheme://` URL that carries one as a download's would (a
 /// user name but an ssh one, a password, a credential-like query key:
-/// [`download_judged`]), an scp-like `user:password@host:path` (or one with a
+/// `url::download_shareability`), an scp-like `user:password@host:path` (or one with a
 /// query: `url::shareability`), a cvs root with a password ([`cvs_secrets`]).
 /// `!ANON_USER`/`!ANON_PASS` hold a bare login, no URL, so nothing there is
 /// found.
@@ -240,7 +238,7 @@ fn search_text(text: &str, already: &BTreeSet<String>) -> Vec<Spot> {
                 continue;
             }
             let found = match kind {
-                0 if download_judged(token) == Shareability::Credentials => url_secrets(token),
+                0 if download_shareability(token) == Shareability::Credentials => url_secrets(token),
                 1 => cvs_secrets(token),
                 2 if shareability(token) == Shareability::Credentials => url_secrets(token),
                 _ => Vec::new(),
@@ -428,29 +426,9 @@ fn same_but_url(old: &thornlist::Component, got: &thornlist::Component) -> bool 
 
 /// Why `url`, a download's, an input's or another kind of repo's than git,
 /// cannot be published, if it cannot: the shared crate's rule for
-/// downloads ([`download_judged`]).
+/// downloads (`url::download_shareability`).
 fn download_refusal(url: &str) -> Option<String> {
-    scrubbed(download_judged(url).download_refusal(url), url)
-}
-
-/// `url::download_shareability`, but with the URL's query and fragment keys
-/// percent-decoded first (`%74oken`), which the crate does not do
-/// yet. Drop this for the crate's own once it does.
-fn download_judged(url: &str) -> Shareability {
-    let judged = download_shareability(url);
-    let u = unquote(url);
-    let authority = u.find("://").map_or(0, |i| i + 3);
-    let tail = &u[authority..];
-    let encoded = tail.find(['?', '#']).is_some_and(|at| {
-        tail[at + 1..]
-            .split(['&', ';', '?', '#'])
-            .map(|pair| pair.split_once('=').map_or(pair, |(k, _)| k))
-            .any(|k| k.contains('%') && is_credential_key(&crate::fetch::git::percent_decode(k)))
-    });
-    match judged {
-        Shareability::Shareable if encoded => Shareability::Credentials,
-        judged => judged,
-    }
+    scrubbed(download_shareability(url).download_refusal(url), url)
 }
 
 /// A refusal of `url` with its fragment hidden: the crate's `Redacted`

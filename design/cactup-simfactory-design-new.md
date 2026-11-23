@@ -4569,13 +4569,15 @@ the config's own record only while that still describes the same `build-id`.
     unchecked: a direct connection fails, said as "dns lookup failed", and
     a proxied one is unaffected (reqwest resolves only the proxy). The
     Cactarium vets addresses server-side for what is published there, so
-    this side may be lenient. `probe::is_answer` and
-    `probe::redirect_target` turn the response into an `Outcome`, and
+    this side may be lenient. `probe::outcome` turns the response into an
+    `Outcome` (Answer, Redirect, Busy, Other), and
     `probe::next_step` decides: publish the candidate, ask once more at a
     redirect to the same repo (GitLab's `.git` form; the candidate is still
     what is published), or refuse (`moved_refusal` for a move on the same
-    host, else `unanswered_refusal`, in https or ssh wording), cactup
-    appending what the probe saw ("answered 401 Unauthorized"). A probe
+    host, `busy_refusal` for a busy or failing host, 408, 429 or 5xx,
+    which says to try again later, else `unanswered_refusal`, in https or
+    ssh wording), cactup appending what the probe saw ("answered 401
+    Unauthorized") but to a busy refusal, which says its status. A probe
     that got no HTTP response at all (a failed connection, a silence) is
     `url::unreachable_refusal`, its detail built from the error's kind
     ("connection refused", "dns lookup failed", "no answer within N s",
@@ -4609,9 +4611,8 @@ the config's own record only while that still describes the same `build-id`.
     ftp are refused. A cvs root (no URL) is refused only for a password
     (`:pserver:anonymous@…` is anonymous access): the main one, a CVSNT
     option whose key holds `pass` (`;password=`), or a `;proxy=u:p@host`
-    userinfo. A query key is percent-decoded before it is judged
-    (`%74oken`; a local helper until the crate decodes keys), and
-    a refusal hides a fragment, which the crate's `Redacted` shows. A
+    userinfo. The crate percent-decodes a query key before it judges it
+    (`%74oken`), and a refusal hides a fragment, which the crate's `Redacted` shows. A
     `!AUTH_URL` is held to
     its type's rule where it is fetched (svn, cvs), and for git, which
     never fetches it, only to carrying no credentials.

@@ -68,7 +68,9 @@ pub fn check(url: &str, candidate: &str, window: AskWindow) -> Res<Verdict> {
             Err(Unchecked::Private(host)) => return Ok(Verdict::Refuse(private_address_refusal(url, &host))),
             Err(Unchecked::Unreachable(detail)) => return Ok(Verdict::Refuse(unreachable_refusal(url, &detail))),
         };
-        let refused = |message: String| Verdict::Refuse(format!("{message} ({seen})"));
+        // A busy host's refusal says its status already.
+        let busy = matches!(outcome, Outcome::Busy(_));
+        let refused = |message: String| Verdict::Refuse(if busy { message } else { format!("{message} ({seen})") });
         match probe::next_step(url, candidate, &asked, &outcome) {
             Step::Publish(published) => return Ok(Verdict::Publish(published)),
             Step::Probe(target) if round == 0 => asked = target,
@@ -207,26 +209,20 @@ fn request(asked: &str, left: Duration) -> Res<Result<Response, Unchecked>> {
         Err(e) => return Ok(Err(Unchecked::Unreachable(failure(&e)))),
     };
     let status = response.status();
-    let kind = response.headers().get(header::CONTENT_TYPE).and_then(|t| t.to_str().ok()).map(str::to_owned);
-    if probe::is_answer(status.as_u16(), kind.as_deref()) {
-        return Ok(Ok((Outcome::Answer, "answered".to_owned())));
-    }
-    if status.is_redirection() {
-        let location = response.headers().get(header::LOCATION).and_then(|l| l.to_str().ok());
-        // Resolved against the URL asked, not a test's local stand-in.
-        let to = location.and_then(|l| probe::redirect_target(&probe::probe_url(asked), l));
-        let seen = match &to {
-            Some(to) => format!("redirected to {}", cactup_ecosystem_common::url::Redacted(to)),
-            None => format!("answered {status} with no location"),
-        };
-        return Ok(Ok((Outcome::Redirect(to), seen)));
-    }
-    let seen = match (status == reqwest::StatusCode::OK, kind) {
-        (false, _) => format!("answered {status}"),
-        (true, None) => "answered with no content type, not as git".to_owned(),
-        (true, Some(kind)) => format!("answered with {kind}, not as git"),
+    let header = |name| response.headers().get(name).and_then(|v: &header::HeaderValue| v.to_str().ok());
+    let kind = header(header::CONTENT_TYPE);
+    // A redirect is resolved against the URL asked, not a test's local
+    // stand-in.
+    let outcome = probe::outcome(&probe::probe_url(asked), status.as_u16(), kind, header(header::LOCATION));
+    let seen = match (&outcome, kind) {
+        (Outcome::Answer, _) => "answered".to_owned(),
+        (Outcome::Redirect(Some(to)), _) => format!("redirected to {}", cactup_ecosystem_common::url::Redacted(to)),
+        (Outcome::Redirect(None), _) => format!("answered {status} with no location"),
+        _ if status != reqwest::StatusCode::OK => format!("answered {status}"),
+        (_, None) => "answered with no content type, not as git".to_owned(),
+        (_, Some(kind)) => format!("answered with {kind}, not as git"),
     };
-    Ok(Ok((Outcome::Other, seen)))
+    Ok(Ok((outcome, seen)))
 }
 
 /// The probe's client: no redirect followed, no referer, a git user agent
@@ -400,6 +396,8 @@ pub mod testserver {
         Page,
         /// Accepts the connection and never answers.
         Silent,
+        /// This status, with nothing else (`503 Service Unavailable`).
+        Status(&'static str),
     }
 
     /// Serve `mode` at `https://<host>/` (and http) for probes
@@ -450,6 +448,9 @@ pub mod testserver {
                     Mode::Page => "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 6\r\n\
                                    Connection: close\r\n\r\n<html>"
                         .to_owned(),
+                    Mode::Status(status) => {
+                        format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    }
                     Mode::Silent => {
                         held.push(stream);
                         continue;
@@ -591,6 +592,45 @@ mod tests {
             refused(&check_now(&url)),
             format!("{url} can't be checked: its host couldn't be reached (dns lookup failed); try again later")
         );
+    }
+
+    /// A host that says it is busy or failing (429, 503) is refused as one
+    /// to try again later, not as a repo that is private or not there.
+    #[test]
+    fn a_busy_host_is_refused_for_now() {
+        serve("throttled.probe.test", Mode::Status("429 Too Many Requests"));
+        assert_eq!(
+            refused(&check_now("https://throttled.probe.test/o/r.git")),
+            "https://throttled.probe.test/o/r.git can't be checked right now (it answered 429); try again later"
+        );
+        serve("down.probe.test", Mode::Status("503 Service Unavailable"));
+        assert_eq!(
+            refused(&check_now("git@down.probe.test:o/r.git")),
+            "git@down.probe.test:o/r.git is an ssh URL, and its https equivalent https://down.probe.test/o/r.git can't \
+             be checked right now (it answered 503); try again later"
+        );
+        serve("gone.probe.test", Mode::Status("404 Not Found"));
+        assert!(refused(&check_now("https://gone.probe.test/o/r.git")).ends_with("(answered 404 Not Found)"));
+    }
+
+    /// A NAT64 address (64:ff9b::/96) is judged by the IPv4 address in it:
+    /// one embedding a public address passes the check.
+    #[test]
+    fn a_nat64_address_of_a_public_ipv4_passes() {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        testserver::serve_on(listener, Mode::Public);
+        // 64:ff9b::140.82.112.6
+        let nat64: IpAddr = Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0x8c52, 0x7006).into();
+        RESOLVES.lock().unwrap().insert("nat64.probe.test".to_owned(), vec![nat64]);
+        WIRES.lock().unwrap().insert(nat64, Ipv4Addr::LOCALHOST.into());
+        let url = format!("http://nat64.probe.test:{port}/o/r");
+        assert_eq!(check_now(&url), Verdict::Publish(url.clone()));
+        // One embedding a private address does not.
+        let private: IpAddr = Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0x0a00, 0x0001).into();
+        RESOLVES.lock().unwrap().insert("nat64-private.probe.test".to_owned(), vec![private]);
+        assert!(refused(&check_now("https://nat64-private.probe.test/o/r")).contains("is not a public address"));
     }
 
     /// A host with any address that is not public is refused, though its
