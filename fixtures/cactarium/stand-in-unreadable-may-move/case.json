@@ -31,7 +31,7 @@
       "add max/needs-sc@1.0.0 NeedsSC named",
       "upgrade et/admbase #abababababab -> 2026.5.1 ADMBase, StaticConformal needed by max/needs-sc@1.0.0 (--upgrade)",
       "replace base repo admbase with et/admbase",
-      "note: keeping et/admbase#abababababab was not considered: max/needs-sc@1.0.0 needs StaticConformal of et/admbase#abababababab, and the Cactarium did not read et/admbase there: et/admbase is at a commit the Cactarium does not have (is it pushed?)"
+      "note: keeping et/admbase#abababababab was not considered: max/needs-sc@1.0.0 needs StaticConformal of et/admbase#abababababab, and the Cactarium did not read et/admbase there: et/admbase is at a commit unknown to the Cactarium (is it pushed?)"
     ]
   }
 }

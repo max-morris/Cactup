@@ -316,8 +316,8 @@ pub fn branch_to_follow(
 /// Where a clone goes when its remote could not say its default branch.
 fn unanswered(label: Option<String>, e: &anyhow::Error) -> Follow {
     let then = match &label {
-        Some(l) => format!("going back to {l}, the label of its last, pinned fetch"),
-        None => "and nothing else names a branch".to_owned(),
+        Some(l) => format!("going back to {l}, the last pinned label"),
+        None => "nothing names a branch".to_owned(),
     };
     let note = Some(format!("its remote's default branch is unknown ({e:#}); {then}"));
     let unasked = Some(Unasked { error: format!("{e:#}"), silent: git::is_unanswered(e) });
@@ -574,25 +574,25 @@ fn announce_repo(
 
 /// Why a clone the plan sent back to `label`, its pinned fetch's label,
 /// because its remote could not say its default branch, was left as it was:
-/// what the ask met, where the clone is, and what puts it right, then how
-/// the fetch of the label failed (`fetched`) or that it was not tried.
+/// what the ask met and what puts it right, then how the fetch of the label
+/// failed (`fetched`) or that it was not tried.
 fn left_as_it_was(item: &GitRepoPlan, unasked: &Unasked, label: &str, fetched: Option<&anyhow::Error>) -> String {
     let (asked, then) = if unasked.silent {
         // The ask's error is the remote's silence itself ("<url> did not
         // answer within 30 s").
-        (format!("its remote {} when asked for its default branch", unasked.error), "refetch once the remote answers")
+        (format!("its remote {} when asked for its default branch", unasked.error), "Refetch once the remote answers.")
     } else {
         let url = git::redacted(&item.url);
         (
             format!("its remote {url} could not be asked for its default branch ({})", unasked.error),
-            "refetch once it can be",
+            "Refetch once it can be asked.",
         )
     };
     let label = match fetched {
-        Some(e) => format!("going back to {label} instead, the label of its last, pinned fetch, failed: {e:#}"),
-        None => format!("going back to {label} instead, the label of its last, pinned fetch, was not tried"),
+        Some(e) => format!("Going back to {label} failed: {e:#}"),
+        None => format!("Going back to {label} was not tried."),
     };
-    format!("{asked}, so the clone at '{}' was left as it was; {then} ({label})", item.dir.display())
+    format!("{asked}; left as it was. {then} {label}")
 }
 
 /// Run the plan: git repos and downloads on a [`WORKERS`]-wide pool keyed by
@@ -755,8 +755,8 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                                 // Reached only when neither the list, the
                                 // clone nor the remote names a branch.
                                 Err(anyhow::anyhow!(
-                                    "No branch to put {} on: the thornlist names none (!REPO_BRANCH), and neither the \
-                                     clone nor its remote says which is the default; name one with !REPO_BRANCH",
+                                    "No branch to put {} on: none in the thornlist, the clone or its remote. Name \
+                                     one with !REPO_BRANCH",
                                     item.repo
                                 ))
                             }
@@ -2695,9 +2695,7 @@ pub(crate) mod tests {
         let error = &report.failures[0].error;
         let plain = format!(
             "its remote {local} could not be asked for its default branch ({local} was not asked: the time for asking \
-             remotes was up), so the clone at '{}' was left as it was; refetch once it can be (going back to v1.0.0 \
-             instead",
-            dir.display()
+             remotes was up); left as it was. Refetch once it can be asked. Going back to v1.0.0 failed"
         );
         assert!(error.starts_with(&plain), "{error}");
         assert!(error.contains("refs/heads/v1.0.0"), "the fetch's own error comes last: {error}");
@@ -2730,12 +2728,9 @@ pub(crate) mod tests {
         let report = execute(&p, &root).unwrap();
         assert_eq!(report.failures.len(), 3, "{:?}", report.failures);
         for f in &report.failures {
-            let dir = root.join("Cactus/repos").join(&f.what);
             let plain = format!(
-                "its remote {url} did not answer within 1 s when asked for its default branch, so the clone at '{}' \
-                 was left as it was; refetch once the remote answers (going back to v1.0.0 instead, the label of its \
-                 last, pinned fetch, was not tried)",
-                dir.display()
+                "its remote {url} did not answer within 1 s when asked for its default branch; left as it was. \
+                 Refetch once the remote answers. Going back to v1.0.0 was not tried."
             );
             assert_eq!(f.error, plain);
         }

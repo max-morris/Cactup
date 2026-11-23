@@ -28,7 +28,7 @@
     "plan": [
       "add max/zpapp@1.0.0 ZP named",
       "add et/zpx@1.0.0 ZX needed by max/zpapp@1.0.0, ^1",
-      "note: et/zpx@2.0.0 was not considered: it needs StaticConformal of et/admbase#abababababab, and the Cactarium did not read et/admbase there: et/admbase is at a commit the Cactarium does not have (is it pushed?)"
+      "note: et/zpx@2.0.0 was not considered: it needs StaticConformal of et/admbase#abababababab, and the Cactarium did not read et/admbase there: et/admbase is at a commit unknown to the Cactarium (is it pushed?)"
     ]
   }
 }

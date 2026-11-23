@@ -133,14 +133,12 @@ pub(crate) fn extensions_left_behind(
         .map(|a| {
             let thorns: Vec<&str> = a.thorns.iter().map(|t| t.checkout.as_str()).collect();
             format!(
-                "{}'s thorns {} were added to base repo {}, which the new base no longer has: they are now fetched \
-                 on their own, at {} where they were added. Remove {} (`cactup remove {}`) and add again what \
-                 needs them",
+                "{} added thorns {} to base repo {}, which the new base lacks.\nThey are now fetched on their own, \
+                 at {}.\nRemove it with `cactup remove {}`, then add again what needs them.",
                 a.package,
                 thorns.join(", "),
                 a.repo,
                 &a.commit[..12.min(a.commit.len())],
-                a.package,
                 a.package
             )
         })
@@ -480,7 +478,7 @@ fn restore_plan(
     };
     if let Some(g) = fetch_plan.git.iter().find(lost) {
         bail!(
-            "Repo {} has no branch to go back to ({}); it was left alone, and {} is still added",
+            "Repo {} has no branch to go back to ({}).\n{} is still added.",
             g.repo,
             g.note.as_deref().unwrap_or("nothing names one"),
             gone.join(", ")
@@ -488,7 +486,7 @@ fn restore_plan(
     }
     if let Some(skipped) = fetch_plan.skipped.iter().find(|s| touched.contains(s.repo.as_str())) {
         bail!(
-            "Repo {} has {}; it was left alone, and {} is still added",
+            "Repo {} has {}.\n{} is still added.",
             skipped.repo,
             skipped.reason.describe(),
             gone.join(", ")
@@ -518,7 +516,7 @@ fn restored_lines(plan: &crate::fetch::Plan) -> Vec<String> {
 /// A refusal of the fetch made under the lock, as the clones changing while
 /// the plan waited.
 fn clones_changed(e: anyhow::Error) -> anyhow::Error {
-    anyhow!("The installation's clones changed while the plan waited ({e:#}); run the command again")
+    anyhow!("The installation's clones changed while the plan waited ({e:#}).\nRun the command again.")
 }
 
 /// Under the lock: the fetch made now must be the one checked before the
@@ -540,7 +538,7 @@ fn same_fetch(checked: &crate::fetch::Plan, now: &crate::fetch::Plan) -> Res<()>
         format!("{git:?} {:?} {:?} {:?} {:?} {:?} {:?}", p.skipped, p.downloads, p.external, p.links, p.libraries, p.root)
     };
     if shape(checked) != shape(now) {
-        bail!("The installation's clones changed while the plan waited; run the command again");
+        bail!("The installation's clones changed while the plan waited.\nRun the command again.");
     }
     Ok(())
 }
@@ -785,7 +783,7 @@ impl Start {
             || pristine != self.pristine
             || live != self.live
         {
-            bail!("The installation changed while the plan was being made; run the command again");
+            bail!("The installation changed while the plan was being made.\nRun the command again.");
         }
         Ok(meta)
     }
@@ -854,7 +852,7 @@ fn plan_add(
     let set = match super::resolution::present(&mut reg, install_root, base, &meta.added, local, &options) {
         Ok(set) => set,
         Err(e) if e.downcast_ref::<crate::cactarium::OldCactarium>().is_some() => {
-            bail!("{e:#}. Pass --no-deps to add exactly the packages named, without their dependencies")
+            bail!("{e:#}.\nPass --no-deps to add only the packages named, without their dependencies.")
         }
         Err(e) => return Err(e),
     };
@@ -896,15 +894,15 @@ fn plan_add(
         let moves = flags.upgrade || flags.upgrade_all || !moved.is_empty();
         if moves && !flags.no_deps {
             bail!(
-                "Cactup cannot tell what these installed packages depend on, so it will not move installed packages \
-                 beside them:{}\nAdd each again at a version the Cactarium serves, or pass --no-deps",
+                "Cannot move installed packages beside these, whose dependencies are unknown:{}\nAdd each again at \
+                 a version served by the Cactarium, or pass --no-deps.",
                 unread_lines(&unread)
             );
         }
         let labels: Vec<&str> = unread.iter().map(|u| u.label.as_str()).collect();
         println!(
             "{}",
-            format!("Cannot check what {} depend on: the Cactarium cannot read them.", labels.join(", ")).yellow()
+            format!("Not checked: what {} depend on (the Cactarium cannot read them).", labels.join(", ")).yellow()
         );
     }
     Ok((plan, set.present, set.heads))
@@ -948,7 +946,7 @@ fn keep_as_named(meta: &mut crate::installation::InstallationMeta, promoted: &[S
         });
         entry.requested = true;
         let thorns: Vec<&str> = a.thorns.iter().map(|t| t.checkout.as_str()).collect();
-        println!("Kept {} of {} as named: they stay when what brought them in goes.", thorns.join(", "), name.bold());
+        println!("Kept {} of {} as named.", thorns.join(", "), name.bold());
     }
 }
 
@@ -1233,8 +1231,8 @@ fn refuse_flesh(plan: &crate::deps::Plan) -> Res<()> {
 
 fn flesh_refusal(what: &str) -> Res<()> {
     bail!(
-        "The plan replaces the installation's Cactus flesh with {what}, which this cactup cannot do yet. To build on \
-         another flesh, install a stack that uses it (`cactup install`)"
+        "The plan replaces the installation's Cactus flesh with {what}, which cactup cannot do yet.\nTo build on \
+         another flesh, install a stack that uses it with `cactup install`."
     )
 }
 
@@ -1353,7 +1351,7 @@ fn record_of_release(release: &crate::deps::Release, thorns: &[String], plan: &c
             &slug,
             crate::progress::Layout::for_names([slug.as_str()]),
         );
-        line.phase("asking its repository for its default branch");
+        line.phase("asking for the default branch");
         let branch = crate::fetch::git::ask_remote_default_branch(&release.url, crate::fetch::git::AskWindow::now());
         drop(line);
         if let Some(renderer) = renderer {
@@ -1373,15 +1371,14 @@ fn record_of_release(release: &crate::deps::Release, thorns: &[String], plan: &c
         || clone.starts_with('-')
         || !clone.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
     {
-        bail!("The Cactarium gives {slug} the repository {}, whose name cactup will not use as a directory", release.url);
+        bail!("The Cactarium gives {slug} the repository {}, whose name is not a usable directory name", release.url);
     }
     let mut checkouts: Vec<AddedThorn> = Vec::new();
     for name in thorns {
         let t = release.thorn(name).ok_or_else(|| anyhow!("{slug} has no thorn {name}"))?;
         if t.repo_path.trim().is_empty() {
             bail!(
-                "The Cactarium gave no repo-path for {}/{} in {slug}, so cactup cannot tell where it sits in the \
-                 repository (a problem on the Cactarium's side; report it there)",
+                "The Cactarium gave no repo-path for {}/{} in {slug}.\nReport this to the Cactarium.",
                 t.arrangement,
                 t.thorn
             );
@@ -1505,8 +1502,8 @@ fn place(
                     && t.checkout != c.checkout
                 {
                     bail!(
-                        "{slug} would take the place of {} from base repo {base_repo}, but has it as {}; cactup puts \
-                         a thorn in another's place only at the same Arrangement/Thorn",
+                        "{slug} would replace {} of base repo {base_repo}, but has it as {}; a replacement needs the \
+                         same Arrangement/Thorn",
                         c.checkout,
                         t.checkout
                     );
@@ -1524,8 +1521,7 @@ fn place(
                 .collect();
             if !stays.is_empty() {
                 bail!(
-                    "{slug}'s repository would be cloned as repos/{}, which the base's repo of that name already is \
-                     (for {}); one clone holds one source",
+                    "{slug} would be cloned as repos/{}, which the base already uses for {}",
                     package.repo,
                     stays.join(", ")
                 );
@@ -1566,7 +1562,7 @@ fn plan_remove_with_deps(
     let named: Vec<String> = targets.iter().map(ToString::to_string).collect();
     // Without the Cactarium nothing can say what depends on what.
     let way = format!(
-        "Without the Cactarium, cactup cannot tell what depends on {}; pass --no-deps to remove exactly that",
+        "Pass --no-deps to remove {} without the Cactarium.",
         named.join(", ")
     );
     let client = crate::cactarium::Client::new(&ctx.db.read()?);
@@ -1616,8 +1612,8 @@ fn plan_remove_with_deps(
     if !unread_extensions.is_empty() {
         let lines: Vec<String> = unread_extensions.iter().map(|(id, u)| format!("\n  {id}: {}", u.why)).collect();
         bail!(
-            "Cactup cannot tell what the thorns it added to these base packages need, so it cannot tell what still \
-             needs {}:{}\nPass --no-deps to remove exactly what was named",
+            "Cannot tell what still needs {}.\nThe needs of thorns added to these base packages are unknown:{}\n\
+             Pass --no-deps to remove only the packages named.",
             named.join(", "),
             lines.concat()
         );
@@ -1627,8 +1623,8 @@ fn plan_remove_with_deps(
     let unread: Vec<&super::resolution::Unread> = set.unread.iter().filter(|u| !targets.contains(&u.id)).collect();
     if !unread.is_empty() {
         bail!(
-            "Cactup cannot tell what these installed packages depend on, so it cannot tell what still needs {}:{}\n\
-             Pass --no-deps to remove exactly what was named",
+            "Cannot tell what still needs {}.\nThe dependencies of these installed packages are unknown:{}\n\
+             Pass --no-deps to remove only the packages named.",
             named.join(", "),
             unread_lines(&unread)
         );
@@ -1644,7 +1640,7 @@ fn plan_remove_with_deps(
                 .collect();
             match (&r, lines.is_empty()) {
                 (deps::Refusal::HasDependents { .. }, false) => anyhow!(
-                    "{r}\nWhat comes back with the removal, which might meet them, cannot be read:{}",
+                    "{r}\nBase repos coming back cannot be read; they might meet these needs:{}",
                     lines.concat()
                 ),
                 _ => anyhow!("{r}"),
@@ -1658,9 +1654,9 @@ fn plan_remove_with_deps(
         unread_returning.iter().filter(|(replacer, _)| going.contains(replacer)).map(|(_, why)| why).collect();
     if !unread_back.is_empty() {
         let lines: Vec<String> = unread_back.iter().map(|u| format!("\n  {u}")).collect();
-        println!("{}", format!("Not checked: what these base repos need when they come back, as they cannot be read:{}", lines.concat()).yellow());
+        println!("{}", format!("Not checked (unreadable): what these returning base repos need:{}", lines.concat()).yellow());
         for o in &mut plan.orphans {
-            o.caveat = Some("unless what comes back unread needs it".to_owned());
+            o.caveat = Some("unless a returning base repo needs it".to_owned());
         }
     }
     // Base packages whose dependencies are unknown are normal (a base that
@@ -1687,7 +1683,7 @@ pub fn remove(ctx: &Ctx, packages: &[String], flags: &RemoveFlags) -> Res<()> {
     for package in packages {
         let slug: Slug = package.parse().map_err(|e| anyhow!("\"{package}\" is not a package (owner/name): {e}"))?;
         if slug.at.is_some() || slug.sha.is_some() || slug.thorn.is_some() {
-            bail!("Name the package as owner/name; remove takes the whole package");
+            bail!("Name the whole package as owner/name");
         }
         let id = PkgId::parse(&format!("{}/{}", slug.owner, slug.name))?;
         if !targets.contains(&id) {
@@ -1770,7 +1766,7 @@ pub fn remove(ctx: &Ctx, packages: &[String], flags: &RemoveFlags) -> Res<()> {
         if base.components().iter().any(|c| c.repo == package.repo) && package.replaces.is_empty() {
             let thorns: Vec<&str> = package.thorns.iter().map(|t| t.checkout.as_str()).collect();
             println!(
-                "Removed {} of {} from the thornlist; its repo is the base's own, and stays.",
+                "Removed {} of {} from the thornlist.\nIts repo belongs to the base and stays.",
                 thorns.join(", "),
                 package.package.bold()
             );
@@ -2305,7 +2301,7 @@ mod tests {
         let more = package("carpetx", &[("CarpetX/Arith", "$2")], &[]);
         let warnings = extensions_left_behind(&old, &new, std::slice::from_ref(&more));
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("max/carpetx's thorns CarpetX/Arith were added to base repo carpetx"), "{warnings:?}");
+        assert!(warnings[0].contains("max/carpetx added thorns CarpetX/Arith to base repo carpetx"), "{warnings:?}");
         assert!(extensions_left_behind(&old, &old, &[more]).is_empty());
     }
 
@@ -2515,7 +2511,7 @@ mod tests {
         let err = wanted(&base, &["et/fuka"]).map(drop).unwrap_err();
         let err = format!("{err:#}");
         assert!(err.contains("et/fuka is a library, which has no thorns"), "{err}");
-        assert!(err.contains("Add the package that builds against it"), "{err}");
+        assert!(err.contains("Add a package that builds against it"), "{err}");
         assert!(!err.contains("has no thorn "), "{err}");
     }
 

@@ -26,7 +26,7 @@
     "refusal": "Unreadable",
     "message": [
       "the command line needs StaticConformal of et/admbase#abababababab",
-      "the Cactarium did not read et/admbase there: et/admbase is at a commit the Cactarium does not have (is it pushed?)",
+      "the Cactarium did not read et/admbase there: et/admbase is at a commit unknown to the Cactarium (is it pushed?)",
       "Pass --upgrade to move it to a release"
     ],
     "not_in_message": [

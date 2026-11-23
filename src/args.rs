@@ -382,20 +382,30 @@ pub(crate) enum Commands {
         /// Add even if the thornlist has hand edits (they are overwritten).
         #[clap(short, long)]
         force: bool,
-        /// Move an installed package the plan needs at another version, rather than refusing.
+        /// Move installed packages to the versions the plan needs
+        ///
+        /// Without it, a plan that needs an installed package at another
+        /// version is refused.
         #[clap(long)]
         upgrade: bool,
-        /// Move every installed package to its newest version that fits, not only those the plan touches.
+        /// Move every installed package to its newest fitting version
         #[clap(long)]
         upgrade_all: bool,
-        /// Add only the packages named, none of their dependencies (libraries are still placed).
+        /// Add only the packages named, without their dependencies
+        ///
+        /// Libraries are still placed.
         #[clap(long)]
         no_deps: bool,
-        /// Leave out a package's claims for this command: OWNER/PKG for all of them, or
-        /// OWNER/PKG:KIND:TARGET for one (KIND is dependency, incompatible-with or fork-of). Repeatable.
+        /// Ignore a package's claims for this command (repeatable)
+        ///
+        /// OWNER/PKG ignores all of them. OWNER/PKG:KIND:TARGET ignores one;
+        /// KIND is dependency, incompatible-with or fork-of.
         #[clap(long, value_name = "OWNER/PKG[:KIND:TARGET]", action = ArgAction::Append)]
         ignore_claim: Vec<String>,
-        /// Go ahead without asking, even when the plan goes beyond the packages named.
+        /// Do not ask for confirmation
+        ///
+        /// Without it, cactup asks when the plan goes beyond the packages
+        /// named.
         #[clap(short, long)]
         yes: bool,
         /// Show the plan and change nothing.
@@ -405,9 +415,9 @@ pub(crate) enum Commands {
     // §8.11
     /// Remove packages added with `cactup add`
     ///
-    /// Any repo a package replaced is restored. Refuses while another package
-    /// depends on one named, and removes the packages that were brought in
-    /// only for the ones named, after showing them.
+    /// Any repo a package replaced is restored. Packages brought in only for
+    /// the ones named are removed too, after the plan is shown. Refused while
+    /// another package depends on one named.
     Remove {
         /// The packages: owner/name.
         #[clap(required = true, value_name = "PACKAGE")]
@@ -415,11 +425,15 @@ pub(crate) enum Commands {
         /// Remove even if the thornlist has hand edits (they are overwritten).
         #[clap(short, long)]
         force: bool,
-        /// Remove exactly the packages named: no check of what depends on them (no Cactarium needed), and
-        /// what was brought in for them stays.
+        /// Remove only the packages named, without checking dependents
+        ///
+        /// Packages brought in for them stay. No Cactarium is needed.
         #[clap(long)]
         no_deps: bool,
-        /// Go ahead without asking, even when packages brought in for the ones named go too.
+        /// Do not ask for confirmation
+        ///
+        /// Without it, cactup asks when packages brought in for the ones named
+        /// would go too.
         #[clap(short, long)]
         yes: bool,
         /// Show the plan and change nothing.
@@ -1367,16 +1381,14 @@ pub(crate) struct SimDescribeArgs {
     /// Archive member an input knob points at (KNOB=MEMBER; repeatable).
     #[clap(long = "input-path", value_name = "KNOB=MEMBER")]
     pub input_paths: Vec<String>,
-    /// Write the .sim for use on this machine only: keep repo and input URLs as they are
+    /// Keep repo and input URLs as they are, for use on this machine only
     ///
-    /// Without it, every URL must be one anybody can fetch, with no
-    /// credentials in it: a git repo's URL may not be a local path, a git://
-    /// URL, or carry a user name, password, token or query string, and every
-    /// git repo is asked over the network, without credentials, whether it
-    /// answers (one request each). An ssh URL is written as its https URL
-    /// instead when that answers; otherwise it is refused. A credential in a
-    /// comment or another line nothing fetches is written as ***. With
-    /// --local, nothing is checked, hidden or asked.
+    /// Without it, every URL must be fetchable by anyone, without
+    /// credentials. Local paths, git:// URLs, and URLs with a user name,
+    /// password, token or query string are refused. Each git repo is asked
+    /// once over the network, without credentials. An ssh URL is written as
+    /// https when that answers, and refused otherwise. A credential on a line
+    /// that nothing fetches is written as ***.
     #[clap(long)]
     pub local: bool,
 }

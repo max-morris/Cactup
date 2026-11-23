@@ -70,7 +70,7 @@
       "max/t"
     ],
     "orphans": [
-      "max/o@1.0.0: brought in by max/t@1.0.0, nothing else needs it"
+      "max/o@1.0.0: brought in by max/t@1.0.0, no longer needed"
     ]
   }
 }

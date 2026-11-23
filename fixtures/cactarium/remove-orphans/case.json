@@ -71,13 +71,13 @@
       "max/z4c"
     ],
     "orphans": [
-      "et/arith@1.3.0: brought in by et/carpetx@2026.5.1, nothing else needs it",
-      "et/carpetx@2026.5.1: brought in by max/z4c@1.2.0, nothing else needs it"
+      "et/arith@1.3.0: brought in by et/carpetx@2026.5.1, no longer needed",
+      "et/carpetx@2026.5.1: brought in by max/z4c@1.2.0, no longer needed"
     ],
     "plan": [
       "remove max/z4c@1.2.0 named",
-      "remove et/arith@1.3.0 brought in by et/carpetx@2026.5.1, nothing else needs it",
-      "remove et/carpetx@2026.5.1 brought in by max/z4c@1.2.0, nothing else needs it"
+      "remove et/arith@1.3.0 brought in by et/carpetx@2026.5.1, no longer needed",
+      "remove et/carpetx@2026.5.1 brought in by max/z4c@1.2.0, no longer needed"
     ]
   }
 }

@@ -44,12 +44,12 @@ pub struct Orphan {
 }
 
 impl Orphan {
-    /// `brought in by max/z4c@1.2.0, nothing else needs it`.
+    /// `brought in by max/z4c@1.2.0, no longer needed`.
     pub fn why(&self) -> String {
         let why = if self.by.is_empty() {
-            "brought in as a dependency, nothing else needs it".to_owned()
+            "brought in as a dependency, no longer needed".to_owned()
         } else {
-            format!("brought in by {}, nothing else needs it", self.by.join(", "))
+            format!("brought in by {}, no longer needed", self.by.join(", "))
         };
         match &self.caveat {
             Some(caveat) => format!("{why} ({caveat})"),

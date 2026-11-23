@@ -873,7 +873,7 @@ impl Search<'_, '_, '_> {
         self.tried.insert(id.clone());
         let commit = p.release.commit.clone();
         if commit.is_empty() {
-            let why = format!("the commit {id} is at is not known");
+            let why = format!("the commit of {id} is not known");
             self.unreadable.insert(id.clone(), Unanswered { kind: UnreadKind::Invalid, why });
             return Ok(());
         }
@@ -900,7 +900,7 @@ impl Search<'_, '_, '_> {
             }
             Err(mut u) => {
                 if u.kind == UnreadKind::Missing {
-                    u.why = format!("{id} is at a commit the Cactarium does not have (is it pushed?)");
+                    u.why = format!("{id} is at a commit unknown to the Cactarium (is it pushed?)");
                 }
                 self.unreadable.insert(id.clone(), u);
             }
@@ -2470,7 +2470,7 @@ impl Search<'_, '_, '_> {
                 Some((by, id)) => Refusal::BadClaim {
                     by,
                     claim: t.to_string(),
-                    detail: format!("{t} is a library, and the dependency does not say where it goes (into)"),
+                    detail: format!("{t} is a library, but the dependency has no `into`"),
                     ignore: format!("{id}:dependency:{t}"),
                 },
                 None => Refusal::NamedLibrary { target: t.clone() },
@@ -2700,7 +2700,7 @@ impl Search<'_, '_, '_> {
                 if matches!(&r.need.req, Req::Range(q) if *q != TrackedReq::any()) {
                     let l = r.need.live(r.kind);
                     let label = e.release.label();
-                    notes.insert(format!("{label} is at a commit no version names; taken to meet {} (from {})", l.req, l.source));
+                    notes.insert(format!("{label} is at an unreleased commit; taken to meet {} (from {})", l.req, l.source));
                 }
             }
         }

@@ -24,7 +24,7 @@
   "expect": {
     "refusal": "PresentLacksThorns",
     "message": [
-      "The installation has et/cactusbase#cacacacacaca, which has no SymBase",
+      "The installation has et/cactusbase#cacacacacaca, without SymBase",
       "Pass --upgrade to move it"
     ],
     "not_in_message": [

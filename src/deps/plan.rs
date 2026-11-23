@@ -233,10 +233,10 @@ impl Plan {
         let mut out = vec![(LineKind::Header, format!("Plan for {command}:"))];
         out.extend(table(&rows).into_iter().map(|l| (LineKind::Step, l)));
         for p in &self.pending {
-            out.push((LineKind::Pending, format!("  {p} is awaiting review: nobody has approved it")));
+            out.push((LineKind::Pending, format!("  {p} awaits review")));
         }
         if self.rebuild {
-            let text = "  The flesh changes: every config of this installation needs a rebuild";
+            let text = "  The flesh changes; every config needs a rebuild";
             out.push((LineKind::Rebuild, text.to_owned()));
         }
         for n in &self.notes {

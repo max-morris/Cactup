@@ -67,8 +67,8 @@ impl UnreadNeed {
             UnreadFor::Thorns(thorns) => format!("{} of {package}", thorns.join(", ")),
             UnreadFor::Every => format!("every thorn of {package}"),
             UnreadFor::ForkCheck { other, thorn } => format!(
-                "{other}, which has a thorn {thorn} as {package} has (only a read of {id} tells whether it is a fork \
-                 of {other})"
+                "{other}, which shares the thorn {thorn} with {package} (only a read of {id} tells whether it \
+                 is a fork of {other})"
             ),
         }
     }
@@ -200,18 +200,17 @@ impl Refusal {
                 (true, Some(ignore)) => format!("Pass --upgrade to move it, or --ignore-claim {ignore}"),
                 (true, None) => "Pass --upgrade to move it".to_owned(),
                 (false, Some(ignore)) => format!("Pass --ignore-claim {ignore}"),
-                (false, None) => "Change what asks for it: moving it (--upgrade) finds no plan either".to_owned(),
+                (false, None) => "Change what asks for it; --upgrade finds no plan either".to_owned(),
             },
             // P4: or `cactup claims override satisfies repo:<repo> <newcomer>`.
             Refusal::SameThorn { newcomer, base_repo: Some(repo), replace: true, .. } => {
                 format!("Pass --replace to use {newcomer} in place of base repo {repo}")
             }
             Refusal::SameThorn { ignore: Some(ignore), .. } => format!(
-                "Install only one of them: name single thorns (owner/pkg/Thorn) to leave the other's out, \
-                 or pass --ignore-claim {ignore}"
+                "Name single thorns (owner/pkg/Thorn) to leave one of them out, or pass --ignore-claim {ignore}"
             ),
             Refusal::SameThorn { .. } => {
-                "Install only one of them: name single thorns (owner/pkg/Thorn) to leave the other's out".to_owned()
+                "Name single thorns (owner/pkg/Thorn) to leave one of them out".to_owned()
             }
             // P4: or `cactup claims override drop <by>:incompatible-with:<target>` (for good).
             Refusal::Incompatible { by, target, .. } => {
@@ -244,7 +243,7 @@ impl Refusal {
             }
             Refusal::Unclaimed(unmet) => {
                 let mut s =
-                    String::from("Cactup adds only what a manifest declares. Add a provider yourself first");
+                    String::from("Add a provider first");
                 // A provider on another track than the default is named at
                 // its version there, or `cactup add` would look on the
                 // default track.
@@ -257,7 +256,7 @@ impl Refusal {
                     })
                     .collect();
                 if lines.is_empty() {
-                    s.push_str(", or ask the package's authors to declare the dependency");
+                    s.push_str(", or ask the package authors to declare the dependency");
                 } else {
                     s.push_str(":\n");
                     s.push_str(&dedup(lines).join("\n"));
@@ -265,7 +264,7 @@ impl Refusal {
                 s
             }
             Refusal::NamedLibrary { .. } => {
-                "Add the package that builds against it, and the library comes with it".to_owned()
+                "Add a package that builds against it".to_owned()
             }
             Refusal::NotALibrary { ignore: Some(ignore), .. } => {
                 format!("Pass --ignore-claim {ignore} (and tell the package's authors)")
@@ -290,10 +289,10 @@ impl Refusal {
                     out.push("pass --upgrade to move it to a release".to_owned());
                 }
                 if ways.replace {
-                    out.push("pass --replace to use the package coming in in place of its base repo".to_owned());
+                    out.push("pass --replace to replace its base repo with the new package".to_owned());
                 }
                 if ways.no_deps {
-                    out.push("pass --no-deps to add exactly the packages named".to_owned());
+                    out.push("pass --no-deps to add only the packages named".to_owned());
                 }
                 if out.is_empty() {
                     // Nothing cactup can do here finds a plan: what would.
@@ -303,12 +302,10 @@ impl Refusal {
                     out = (causes.into_iter())
                         .map(|(kind, id)| match kind {
                             UnreadKind::Retry => "try again later".to_owned(),
-                            UnreadKind::Missing => format!("push the commit {id} is at, then try again"),
-                            UnreadKind::Untrusted => {
-                                format!("the Cactarium reads {id} only at released versions: put it at one")
-                            }
+                            UnreadKind::Missing => format!("push the current commit of {id}, then try again"),
+                            UnreadKind::Untrusted => format!("put {id} at a released version"),
                             UnreadKind::Invalid => {
-                                format!("put {id} at a commit the Cactarium can read, such as a released version")
+                                format!("put {id} at a commit readable by the Cactarium, such as a released version")
                             }
                         })
                         .collect();
@@ -322,7 +319,7 @@ impl Refusal {
                 s
             }
             Refusal::HasDependents { .. } => {
-                "Pass --no-deps to remove only what was named, leaving its dependents without it".to_owned()
+                "Pass --no-deps to remove them anyway, leaving the dependents without them".to_owned()
             }
         }
     }
@@ -339,7 +336,7 @@ fn ignore_one(constraints: &[Live]) -> String {
     match ignores.as_slice() {
         [] => "Name another version".to_owned(),
         [one] => format!("Pass --ignore-claim {one}"),
-        many => format!("Pass --ignore-claim with the claim to drop: {}", many.join(", ")),
+        many => format!("Pass --ignore-claim with one of: {}", many.join(", ")),
     }
 }
 
@@ -351,18 +348,18 @@ impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Refusal::GaveUp { seconds, best } = self {
             // The closest refusal carries its own way past.
-            return write!(f, "Gave up after {seconds} s looking for a plan. The closest it came:\n{best}");
+            return write!(f, "No plan found in {seconds} s. The closest one:\n{best}");
         }
         match self {
             Refusal::GaveUp { .. } => unreachable!("written above"),
             Refusal::PresentOutsideRange { installed, live, .. } => write!(
                 f,
-                "The installation has {installed}, outside {} which {} asks",
+                "The installation has {installed}, outside {} (asked by {})",
                 live.req, live.source
             )?,
             Refusal::PresentLacksThorns { installed, thorns, live, .. } => write!(
                 f,
-                "The installation has {installed}, which has no {}, which {} needs",
+                "The installation has {installed}, without {} (needed by {})",
                 thorns.join(", "),
                 live.source
             )?,
@@ -374,11 +371,11 @@ impl fmt::Display for Refusal {
             }
             Refusal::ForkAndUpstream { fork_label, upstream, .. } => write!(
                 f,
-                "{fork_label} is a fork of {upstream}, and a fork is never installed beside its upstream"
+                "{fork_label} is a fork of {upstream}, and cannot be installed beside it"
             )?,
             Refusal::ForkDoesNotStandIn { fork_label, live, .. } => write!(
                 f,
-                "{} needs {} {}, and {fork_label}, a fork of it, does not stand in for those versions",
+                "{} needs {} {}, and the fork {fork_label} does not stand in for those versions",
                 live.source, live.target, live.req
             )?,
             Refusal::NoReleaseFits { target, constraints } => {
@@ -386,15 +383,15 @@ impl fmt::Display for Refusal {
             }
             Refusal::FleshUnmet { target, constraints } => write!(
                 f,
-                "The installation's flesh does not meet a flesh dependency, and no release of {target} does:{}",
+                "Neither the installation's flesh nor any release of {target} meets these:{}",
                 list(constraints)
             )?,
             Refusal::TwoFleshes { first, second, .. } => {
-                write!(f, "The plan needs two fleshes, {first} and {second}, and an installation has one")?
+                write!(f, "The plan needs two fleshes, {first} and {second}; an installation has one")?
             }
             Refusal::NoConsistentSet { constraints } => write!(
                 f,
-                "No consistent set of releases: no combination meets these constraints together:{}",
+                "No combination of releases meets these constraints together:{}",
                 list(constraints)
             )?,
             Refusal::NotAvailable { target, at, by, detail } => {
@@ -409,20 +406,19 @@ impl fmt::Display for Refusal {
             }
             Refusal::ReplacementLacksThorns { by_label, base_repo, thorns, .. } => write!(
                 f,
-                "{by_label} would take the place of base repo {base_repo}, but has no {}, which the \
-                 installation has enabled from it",
+                "{by_label} would replace base repo {base_repo}, but lacks its enabled thorns {}",
                 thorns.join(", ")
             )?,
             Refusal::LibraryClash { library, placements } => write!(
                 f,
-                "No release of the library {library} meets every package that places it:{}",
+                "No release of library {library} meets every package placing it:{}",
                 list(placements)
             )?,
             Refusal::Unclaimed(unmet) => {
                 if unmet.iter().any(|u| !u.ignored.is_empty()) {
-                    write!(f, "Requirements nothing in the installation meets:")?;
+                    write!(f, "Requirements not met by the installation:")?;
                 } else {
-                    write!(f, "Requirements nothing in the installation meets, which no manifest declares:")?;
+                    write!(f, "Undeclared requirements not met by the installation:")?;
                 }
                 for u in unmet {
                     write!(f, "\n  {} ({}) {}", u.thorn, u.package, u.requirement)?;
@@ -436,23 +432,21 @@ impl fmt::Display for Refusal {
             }
             Refusal::NamedLibrary { target } => write!(
                 f,
-                "{target} is a library, which has no thorns: it is checked out where a package that builds against \
-                 it says (the `into` of that package's dependency on it)"
+                "{target} is a library, which has no thorns"
             )?,
             Refusal::NotALibrary { target, by, into, .. } => write!(
                 f,
-                "{by} says where {target} goes (into = \"{into}\"), as for a library, but {target} is not a \
-                 library: it is a package with thorns, added as a package of its own"
+                "{by} places {target} (into = \"{into}\"), but {target} is not a library"
             )?,
             Refusal::NotRegistered { target, by: Some(live) } => {
                 write!(f, "{} needs {target}, which the Cactarium does not know", live.source)?
             }
             Refusal::NotRegistered { target, by: None } => write!(f, "The Cactarium does not know {target}")?,
             Refusal::BadClaim { by, claim, detail, .. } => {
-                write!(f, "{by} has a claim cactup cannot read ({claim}): {detail}")?
+                write!(f, "{by} has an unreadable claim ({claim}): {detail}")?
             }
             Refusal::Unreadable { needs, .. } => {
-                write!(f, "No plan works without what the Cactarium did not read:")?;
+                write!(f, "No plan works without packages unread by the Cactarium:")?;
                 for n in needs {
                     write!(f, "\n  {n}")?;
                 }

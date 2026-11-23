@@ -223,7 +223,7 @@ fn unanswered_why(r: &crate::cactarium::Refused) -> Unanswered {
 
 /// The 404 of a read at a commit: the package's repository has no such commit.
 fn missing_commit(id: &PkgId) -> Unanswered {
-    let why = format!("{id} is at a commit the Cactarium does not have (is it pushed?)");
+    let why = format!("{id} is at a commit unknown to the Cactarium (is it pushed?)");
     Unanswered { kind: UnreadKind::Missing, why }
 }
 
@@ -467,7 +467,7 @@ impl Registry {
                     let retry_after = r.retry_after;
                     if !self.wait_for_limit(retry_after)? {
                         let why = format!(
-                            "its read limit, and this command has waited {} for it already; try again later",
+                            "its read limit held after {} of waiting; try again later",
                             minutes(self.waited)
                         );
                         return Ok(Err(Unanswered { kind: UnreadKind::Retry, why }));
@@ -1371,7 +1371,7 @@ pub(crate) fn returning_base(
         let window = crate::fetch::git::AskWindow::now();
         let answers = crate::fetch::git::ask_all(&asks, |b| -> Res<Result<String, String>> {
             let line = Line::over(headline.lock().expect("headline poisoned").add_child(b.repo.clone()), &b.repo, layout.clone());
-            line.phase("its branch's tip".to_owned());
+            line.phase("asking for the branch tip".to_owned());
             let record = records.as_ref().and_then(|r| r.repos.get(&b.repo));
             // One listing either way: a branch's tip, or the remote's default and its tip.
             let asked = match crate::fetch::known_after_restore(&repos_dir.join(&b.repo), &b.url, b.listed, record) {
@@ -1381,7 +1381,7 @@ pub(crate) fn returning_base(
             let tip = match asked {
                 Ok(id) => Ok(id.to_string()),
                 Err(e) if gix::interrupt::is_triggered() => return Err(e),
-                Err(e) => Err(format!("its branch's tip cannot be told ({e:#})")),
+                Err(e) => Err(format!("the branch tip is unknown ({e:#})")),
             };
             drop(line);
             headline.lock().expect("headline poisoned").inc();
@@ -1720,7 +1720,7 @@ pub(crate) fn show_and_confirm(lines: &[(LineKind, String)], beyond_named: bool,
     }
     if !how.interactive {
         // Plan §4.5's last row.
-        bail!("The plan goes beyond the packages named, and there is no terminal to confirm it on; pass --yes, or --dry-run to see it");
+        bail!("No terminal to confirm a plan beyond the packages named.\nPass --yes, or --dry-run to see the plan.");
     }
     use std::io::Write;
     eprint!("Proceed? [Y/n] ");
@@ -1753,11 +1753,10 @@ pub(crate) fn refusal_text(e: anyhow::Error, finished: &Finished) -> anyhow::Err
                 ),
             };
             let lines: Vec<String> = unmet.iter().map(line).collect();
-            let undeclared = if unmet.iter().any(|u| !u.ignored.is_empty()) { "" } else { ", which no manifest declares" };
+            let what = if unmet.iter().any(|u| !u.ignored.is_empty()) { "Requirements" } else { "Undeclared requirements" };
             anyhow!(
-                "Requirements nothing in the installation meets{undeclared}:{}.\nThe Cactarium at {} \
-                 is older than this cactup and cannot list what provides them. Cactup adds only what a manifest \
-                 declares: add a provider yourself first, or ask the package's authors to declare the dependency",
+                "{what} not met by the installation:{}.\nThe Cactarium at {} is too old to list providers.\n\
+                 Add a provider first, or ask the package authors to declare the dependency",
                 lines.concat(),
                 finished.base
             )

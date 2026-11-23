@@ -10,7 +10,7 @@
     "refusal": "Unclaimed",
     "message": [
       "Z4c (max/z4c) inherits or befriends hyperslab; no registered package provides it",
-      "or ask the package's authors to declare the dependency"
+      "or ask the package authors to declare the dependency"
     ]
   }
 }

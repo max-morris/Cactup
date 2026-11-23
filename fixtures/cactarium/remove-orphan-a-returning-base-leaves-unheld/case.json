@@ -104,8 +104,8 @@
       "max/rt"
     ],
     "orphans": [
-      "max/rg@1.0.0: brought in by max/rh@1.0.0, nothing else needs it",
-      "max/rn@1.0.0: brought in by max/rt@1.0.0, nothing else needs it"
+      "max/rg@1.0.0: brought in by max/rh@1.0.0, no longer needed",
+      "max/rn@1.0.0: brought in by max/rt@1.0.0, no longer needed"
     ]
   }
 }

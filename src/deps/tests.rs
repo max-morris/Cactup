@@ -974,7 +974,7 @@ fn remove_plans_render() {
     assert!(plan.beyond_named());
     let lines = plan.lines("cactup remove max/z4c");
     assert_eq!(lines[0], (LineKind::Header, "Plan for cactup remove max/z4c:".to_owned()));
-    assert_eq!(collapse(&lines[2].1), "remove et/a@1.0.0 brought in by max/z4c@1.2.0, nothing else needs it");
+    assert_eq!(collapse(&lines[2].1), "remove et/a@1.0.0 brought in by max/z4c@1.2.0, no longer needed");
 }
 
 #[test]

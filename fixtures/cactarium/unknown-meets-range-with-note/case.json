@@ -25,7 +25,7 @@
   "expect": {
     "plan": [
       "add max/z4c@1.2.0 Z4c, Z4cTest named",
-      "note: et/carpetx#333333333333 is at a commit no version names; taken to meet ^2026.5 (from max/z4c@1.2.0)"
+      "note: et/carpetx#333333333333 is at an unreleased commit; taken to meet ^2026.5 (from max/z4c@1.2.0)"
     ]
   }
 }

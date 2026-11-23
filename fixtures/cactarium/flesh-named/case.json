@@ -19,7 +19,7 @@
     "plan": [
       "add max/cactus-mp@1.0.0 named",
       "replace base repo flesh with max/cactus-mp",
-      "The flesh changes: every config of this installation needs a rebuild"
+      "The flesh changes; every config needs a rebuild"
     ]
   }
 }

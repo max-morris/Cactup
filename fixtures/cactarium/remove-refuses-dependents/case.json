@@ -71,7 +71,7 @@
     "message": [
       "Other packages depend on et/carpetx",
       "max/z4c@1.2.0 (et/carpetx@^2026.5)",
-      "Pass --no-deps to remove only what was named"
+      "Pass --no-deps to remove them anyway"
     ]
   }
 }

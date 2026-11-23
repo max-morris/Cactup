@@ -39,7 +39,7 @@
   "expect": {
     "plan": [
       "add max/zpapq@1.0.0 ZQ named",
-      "note: max/zpapq@2.0.0 was not considered: it needs StaticConformal of et/admbase#abababababab, and the Cactarium did not read et/admbase there: et/admbase is at a commit the Cactarium does not have (is it pushed?); it needs SymBase of et/cactusbase#cacacacacaca, and the Cactarium did not read et/cactusbase there: et/cactusbase is at a commit the Cactarium does not have (is it pushed?)"
+      "note: max/zpapq@2.0.0 was not considered: it needs StaticConformal of et/admbase#abababababab, and the Cactarium did not read et/admbase there: et/admbase is at a commit unknown to the Cactarium (is it pushed?); it needs SymBase of et/cactusbase#cacacacacaca, and the Cactarium did not read et/cactusbase there: et/cactusbase is at a commit unknown to the Cactarium (is it pushed?)"
     ]
   }
 }

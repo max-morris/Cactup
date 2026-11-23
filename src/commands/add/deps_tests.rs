@@ -631,7 +631,7 @@ fn add_brings_in_the_needs_of_a_dependency() {
     let it = z4c();
     let s = &it.setup;
     let err = format!("{:#}", s.add(&["max/z4c"], AddFlags::default()).unwrap_err());
-    assert!(err.contains("pass --yes, or --dry-run to see it"), "{err}");
+    assert!(err.contains("Pass --yes, or --dry-run to see the plan"), "{err}");
     assert!(s.meta().added.is_empty());
     s.add(&["max/z4c"], AddFlags { dry_run: true, ..AddFlags::default() }).unwrap();
     assert!(s.meta().added.is_empty());
@@ -677,7 +677,7 @@ fn remove_refuses_a_dependency_and_takes_orphans_along() {
     assert_eq!(s.meta().added.len(), 2);
 
     let err = format!("{:#}", s.remove(&["max/z4c"], RemoveFlags::default()).unwrap_err());
-    assert!(err.contains("pass --yes, or --dry-run"), "{err}");
+    assert!(err.contains("Pass --yes, or --dry-run"), "{err}");
     s.remove(&["max/z4c"], RemoveFlags { dry_run: true, ..RemoveFlags::default() }).unwrap();
     assert_eq!(s.meta().added.len(), 2);
 
@@ -723,7 +723,7 @@ fn remove_offline_refuses_unless_no_deps() {
         })
         .unwrap();
     let err = format!("{:#}", s.remove(&["max/z4c"], remove_yes()).unwrap_err());
-    assert!(err.contains("isn't reachable") && err.contains("pass --no-deps"), "{err}");
+    assert!(err.contains("isn't reachable") && err.contains("Pass --no-deps"), "{err}");
     assert_eq!(s.meta().added.len(), 2);
     s.remove(&["max/z4c"], RemoveFlags { no_deps: true, ..RemoveFlags::default() }).unwrap();
     assert_eq!(s.added(), [("et/carpetx".to_owned(), vec!["CarpetX/CarpetX".to_owned(), "CarpetX/Loop".to_owned()])]);
@@ -1107,7 +1107,7 @@ fn an_older_cactarium_without_lookup() {
     });
     let s = &it.setup;
     let err = format!("{:#}", s.add(&["max/app"], yes()).unwrap_err());
-    assert!(err.contains("older than this cactup") && err.contains("--no-deps"), "{err}");
+    assert!(err.contains("too old to resolve dependencies") && err.contains("--no-deps"), "{err}");
     s.add(&["max/app"], AddFlags { no_deps: true, ..AddFlags::default() }).unwrap_or_else(|e| panic!("{e:#}"));
     assert_eq!(s.added(), [("max/app".to_owned(), vec!["App/App".to_owned()])]);
     let _ = (&it.a1, &it.a2, &it.log, &it.fake);
@@ -1201,7 +1201,7 @@ fn an_older_cactarium_without_providers_keeps_the_refusal() {
     let s = Setup::new(tmp, &section(&lurl, &l, &["MyLib/MyLib"]), &base);
     let err = format!("{:#}", s.add(&["max/z4c"], yes()).unwrap_err());
     assert!(err.contains("Z4c (max/z4c)") && err.contains("mylib"), "{err}");
-    assert!(err.contains("cannot list"), "{err}");
+    assert!(err.contains("too old to list providers"), "{err}");
     assert!(!err.contains("no registered package provides it"), "{err}");
 }
 
@@ -2335,8 +2335,8 @@ fn an_unread_returning_base_is_said_beside_every_orphan() {
     let plan = super::plan_remove_with_deps(&s.ctx, &start, &base, &target).unwrap();
     assert_eq!(plan.orphans.len(), 1, "{plan:?}");
     let why = plan.orphans[0].why();
-    assert!(why.contains("unless what comes back unread needs it"), "{why}");
-    assert!(plan.render("remove").contains("unless what comes back unread needs it"));
+    assert!(why.contains("unless a returning base repo needs it"), "{why}");
+    assert!(plan.render("remove").contains("unless a returning base repo needs it"));
 }
 
 /// Where a removal reads the base that comes back is where its restore puts
@@ -2741,7 +2741,7 @@ fn the_lookup_says_which_unfrozen_base_repo_is_the_flesh() {
 fn an_unread_base_package_says_why() {
     type Answer = fn(&mut Fake, &str);
     let cases: [(&str, Answer, String); 6] = [
-        ("404", |f, _| f.snapshots.clear(), "et/admbase is at a commit the Cactarium does not have (is it pushed?)".into()),
+        ("404", |f, _| f.snapshots.clear(), "et/admbase is at a commit unknown to the Cactarium (is it pushed?)".into()),
         ("400", |f, a1| f.bad_at.push(a1.to_owned()), "invalid manifest: no [package] table".into()),
         ("400 too large", |f, a1| f.too_large_at.push(a1.to_owned()), "its tree is too large to read".into()),
         ("403", |f, a1| f.refuse_at.push(a1.to_owned()), "it reads an untrusted package only at released versions".into()),

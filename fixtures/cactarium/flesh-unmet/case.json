@@ -18,7 +18,7 @@
   "expect": {
     "refusal": "FleshUnmet",
     "message": [
-      "The installation's flesh does not meet a flesh dependency, and no release of et/cactus does",
+      "Neither the installation's flesh nor any release of et/cactus meets these",
       "et/cactus ^2026.5 (from max/z4c@1.2.0)",
       "Pass --ignore-claim max/z4c:dependency:et/cactus"
     ]

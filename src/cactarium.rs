@@ -85,7 +85,7 @@ impl std::error::Error for InFlight {}
 /// Runs `request` on a thread of its own and waits for it, checking `stop`
 /// every 50 ms: once it is set, fails with "interrupted" at once and leaves
 /// the request to finish (or time out) on its own. Blocking reqwest cannot be
-/// cancelled, and an answer can take a while on a slow link.
+/// canceled, and an answer can take a while on a slow link.
 pub(crate) fn interruptibly<T: Send + 'static>(
     request: impl FnOnce() -> Res<T> + Send + 'static,
     stop: &std::sync::atomic::AtomicBool,
@@ -274,7 +274,7 @@ impl Client {
             let answer: LookedUp = response.json()?;
             if answer.pins.len() != chunk.len() {
                 bail!(
-                    "The Cactarium answered a lookup of {} repos with {}; cactup cannot tell which is which",
+                    "The Cactarium answered a lookup of {} repos with {} answers",
                     chunk.len(),
                     answer.pins.len()
                 );
@@ -327,8 +327,8 @@ impl Client {
     fn not_a_cactarium(&self, status: reqwest::StatusCode, path: &str) -> anyhow::Error {
         let route = path.find(API_PREFIX).map_or(path, |i| &path[i + API_PREFIX.len()..]);
         anyhow!(
-            "The server at {} does not look like a Cactarium: it answered {status} to {route}, without saying which \
-             Cactarium API it speaks. Check the {URL_KNOB} knob (or CACTARIUM_URL)",
+            "The server at {} does not look like a Cactarium: it answered {status} to {route} with no API \
+             generation.\nCheck the {URL_KNOB} knob (or CACTARIUM_URL).",
             self.base
         )
     }
@@ -461,13 +461,12 @@ impl Client {
     fn send_change(&self, request: reqwest::blocking::RequestBuilder, what: &str) -> Res<Answer> {
         self.send(request).map_err(|e| {
             if e.downcast_ref::<InFlight>().is_some() {
-                return anyhow!("Interrupted; {what} may have reached the Cactarium: check before trying again");
+                return anyhow!("Interrupted.\nCheck whether {what} reached the Cactarium before trying again.");
             }
             match e.downcast_ref::<Refused>() {
                 Some(r) if r.status >= 500 => {
-                    let mut what = what.to_owned();
-                    what[..1].make_ascii_uppercase();
-                    anyhow!("{}. {what} may have reached the Cactarium all the same: check before trying again", r.message)
+                    let failed = r.message.strip_suffix("; try again").unwrap_or(&r.message);
+                    anyhow!("{failed}.\nCheck whether {what} reached the Cactarium before trying again.")
                 }
                 _ => e,
             }
@@ -576,8 +575,8 @@ impl Client {
     fn unreachable_read(&self, e: std::io::Error, url: &str) -> anyhow::Error {
         if e.kind() == std::io::ErrorKind::TimedOut || e.to_string().contains("timed out") {
             return anyhow!(
-                "The Cactarium at {} isn't reachable (it did not answer in time). Check the network, or point \
-                 cactup at another Cactarium with the {URL_KNOB} knob or CACTARIUM_URL",
+                "The Cactarium at {} isn't reachable (it did not answer in time)\nTo use another, set the {URL_KNOB} \
+                 knob or CACTARIUM_URL.",
                 self.base
             );
         }
@@ -677,8 +676,7 @@ impl std::fmt::Display for OldCactarium {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "The Cactarium at {} is older than this cactup (it has no {}), so cactup cannot resolve dependencies \
-             with it",
+            "The Cactarium at {} is too old to resolve dependencies (it has no {})",
             self.base, self.endpoint
         )
     }
@@ -1251,7 +1249,7 @@ mod tests {
         let client = Client::at(&base);
         let err = client.lookup(&pins).unwrap_err();
         assert!(err.downcast_ref::<OldCactarium>().is_some_and(|o| o.endpoint == "/lookup"), "{err:#}");
-        assert!(format!("{err:#}").contains("older than this cactup"), "{err:#}");
+        assert!(format!("{err:#}").contains("too old to resolve dependencies"), "{err:#}");
         let err = client.providers(&Need::Capability("HDF5".into())).unwrap_err();
         assert!(err.downcast_ref::<OldCactarium>().is_some_and(|o| o.endpoint == "/providers"), "{err:#}");
         assert!(client.package_versions_if_any("et", "nope").unwrap().is_none());
@@ -1376,7 +1374,7 @@ mod tests {
         let client = Client::at(&base);
         let err = format!("{:#}", client.send_change(http_post(&client), "the refresh").unwrap_err());
         assert!(err.contains("(or a proxy in front of it) failed: 504 Gateway Timeout"), "{err}");
-        assert!(err.contains("The refresh may have reached the Cactarium all the same"), "{err}");
+        assert!(err.contains("Timeout.\nCheck whether the refresh reached the Cactarium before trying again."), "{err}");
     }
 
     /// After Ctrl-C nothing goes out; a change interrupted in flight says it
@@ -1406,7 +1404,7 @@ mod tests {
         });
         let client = Client::at(&base).stopped_by(&STOP);
         let err = format!("{:#}", client.send_change(http_post(&client), "the refresh").unwrap_err());
-        assert!(err.contains("the refresh may have reached the Cactarium") && err.contains("check before"), "{err}");
+        assert!(err.contains("Check whether the refresh reached the Cactarium"), "{err}");
     }
 
     fn http_post(client: &Client) -> reqwest::blocking::RequestBuilder {
