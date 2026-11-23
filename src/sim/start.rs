@@ -2152,10 +2152,10 @@ mod tests {
             "b: file:///srv/b.git is a local path",
             "c: ssh://git@home.share.test/~max/c.git is an ssh URL, which needs an account on the host, and has no https equivalent",
             "d: git@private.share.test:o/d.git is an ssh URL, which needs an account on the host, and https://private.share.test/o/d.git doesn't answer",
-            "it answered 401 Unauthorized",
+            "fetch (answered 401 Unauthorized)",
             "e: git@moved.share.test:o/e.git is an ssh URL, and its https equivalent https://moved.share.test/o/e.git redirects to https://moved.share.test/new/e.git: the repo has moved",
             "input data: https://***@example.org/f.h5?*** carries a user name and password, which must never be published",
-            "or pass --local to export for use here only",
+            "\nPass --local to export for use here only.",
         ] {
             assert!(err.contains(said), "{said:?} not in: {err}");
         }
@@ -2193,9 +2193,9 @@ mod tests {
         // Two sections name repo x: the one refused is told by its line.
         assert_eq!(
             err,
-            "These URLs cannot go into a .sim for others: nobody else could fetch them, or they would publish \
-             credentials:\n  x (thornlist line 11): https://***@github.com/b/x.git carries a user name or token, which \
-             must never be published; remove it from the URL\nFix them, or pass --local to export for use here only"
+            "These URLs cannot go into a shared .sim:\n  x (thornlist line 11): https://***@github.com/b/x.git carries \
+             a user name or token, which must never be published; remove it from the URL\nPass --local to export for \
+             use here only."
         );
         assert!(!out.exists());
 
@@ -2225,8 +2225,8 @@ mod tests {
         );
         let (packed, out, _) = pack_list(tmp.path(), &list, Default::default());
         let err = format!("{:#}", packed.unwrap_err());
-        assert!(err.contains("no !URL line spells them out"), "{err}");
-        assert!(err.contains("Y/One: git@defined.share.test:o/y.git (to https://defined.share.test/o/y.git)"), "{err}");
+        assert!(err.starts_with("No !URL line to rewrite as https for these ssh URLs:\n"), "{err}");
+        assert!(err.contains("\n  Y/One: git@defined.share.test:o/y.git (as https://defined.share.test/o/y.git)\n"), "{err}");
         assert!(!out.exists());
 
         // A template whose host is a variable: the same refusal, not a
@@ -2237,7 +2237,7 @@ mod tests {
         );
         let (packed, out, _) = pack_list(tmp.path(), &list, Default::default());
         let err = format!("{:#}", packed.unwrap_err());
-        assert!(err.contains("Y/One: git@defined.share.test:o/Y.git (to https://defined.share.test/o/Y.git)"), "{err}");
+        assert!(err.contains("\n  Y/One: git@defined.share.test:o/Y.git (as https://defined.share.test/o/Y.git)\n"), "{err}");
         assert!(!out.exists());
     }
 
@@ -2269,8 +2269,7 @@ mod tests {
         for said in [
             "\n  b (its !AUTH_URL): https://***@github.com/o/b.git carries a user name and password",
             // Named without the quote the parser leaves on the name.
-            "\n  c: https://***@github.com/o/c.git is written in quotes, which the thornlist parser keeps as part of \
-             the URL, so it could not be fetched; remove the quotes\n",
+            "\n  c: https://***@github.com/o/c.git is written in quotes; remove them\n",
         ] {
             assert!(err.contains(said), "{said:?} not in: {err}");
         }

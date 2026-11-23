@@ -68,7 +68,7 @@ pub fn check(url: &str, candidate: &str, window: AskWindow) -> Res<Verdict> {
             Err(Unchecked::Private(host)) => return Ok(Verdict::Refuse(private_address_refusal(url, &host))),
             Err(Unchecked::Unreachable(detail)) => return Ok(Verdict::Refuse(unreachable_refusal(url, &detail))),
         };
-        let refused = |message: String| Verdict::Refuse(format!("{message} (asked without credentials, it {seen})"));
+        let refused = |message: String| Verdict::Refuse(format!("{message} ({seen})"));
         match probe::next_step(url, candidate, &asked, &outcome) {
             Step::Publish(published) => return Ok(Verdict::Publish(published)),
             Step::Probe(target) if round == 0 => asked = target,
@@ -223,8 +223,8 @@ fn request(asked: &str, left: Duration) -> Res<Result<Response, Unchecked>> {
     }
     let seen = match (status == reqwest::StatusCode::OK, kind) {
         (false, _) => format!("answered {status}"),
-        (true, None) => "answered, but not as a git server (no content type)".to_owned(),
-        (true, Some(kind)) => format!("answered, but not as a git server ({kind})"),
+        (true, None) => "answered with no content type, not as git".to_owned(),
+        (true, Some(kind)) => format!("answered with {kind}, not as git"),
     };
     Ok(Ok((Outcome::Other, seen)))
 }
@@ -505,9 +505,9 @@ mod tests {
         let private = check_now("https://private.probe.test/org/r.git");
         let said = refused(&private);
         assert!(said.contains("https://private.probe.test/org/r.git doesn't answer git without credentials"), "{said}");
-        assert!(said.ends_with("(asked without credentials, it answered 401 Unauthorized)"), "{said}");
+        assert!(said.ends_with("; make it public, or publish a URL anyone can fetch (answered 401 Unauthorized)"), "{said}");
         serve("page.probe.test", Mode::Page);
-        assert!(refused(&check_now("https://page.probe.test/org/r")).contains("not as a git server"));
+        assert!(refused(&check_now("https://page.probe.test/org/r")).ends_with("(answered with text/html, not as git)"));
         serve("moved.probe.test", Mode::Moved("https://moved.probe.test/new/r.git/info/refs?service=git-upload-pack".to_owned()));
         let moved = check_now("https://moved.probe.test/org/r.git");
         assert!(refused(&moved).contains("redirects to https://moved.probe.test/new/r.git: the repo has moved"), "{moved:?}");

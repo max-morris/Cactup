@@ -56,8 +56,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::LazyLock;
 
-/// What every refusal ends with.
-const LOCAL_HINT: &str = "or pass --local to export for use here only";
+/// The line every refusal ends with.
+const LOCAL_HINT: &str = "Pass --local to export for use here only.";
 
 /// The offline half of the check: what [`classify`] found.
 #[derive(Debug)]
@@ -125,11 +125,7 @@ pub fn classify(list: &thornlist::Thornlist, text: &str, input_urls: &[(String, 
             let why = if unquote(url) != url.trim() {
                 let inner = unquote(url);
                 refused_urls.insert(inner.to_owned());
-                Some(format!(
-                    "{} is written in quotes, which the thornlist parser keeps as part of the URL, so it could not \
-                     be fetched; remove the quotes",
-                    Redacted(inner)
-                ))
+                Some(format!("{} is written in quotes; remove them", Redacted(inner)))
             } else if c.ty == ComponentType::Cvs {
                 cvs_refusal(url)
             } else if auth && c.ty == ComponentType::Git {
@@ -345,11 +341,7 @@ pub fn settle(checked: Checked, text: &str) -> Res<Option<String>> {
         }
     }
     if !refused.is_empty() {
-        bail!(
-            "These URLs cannot go into a .sim for others: nobody else could fetch them, or they would publish \
-             credentials:\n  {}\nFix them, {LOCAL_HINT}",
-            refused.join("\n  ")
-        );
+        bail!("These URLs cannot go into a shared .sim:\n  {}\n{LOCAL_HINT}", refused.join("\n  "));
     }
     if rewrites.is_empty() && hidden.is_empty() {
         return Ok(None);
@@ -360,11 +352,7 @@ pub fn settle(checked: Checked, text: &str) -> Res<Option<String>> {
     }
     for ask in &asks {
         if let Some(published) = rewrites.get(&ask.url) {
-            println!(
-                "{}: written as {published}, which anyone can fetch, in place of the ssh URL {}",
-                ask.repos.join(", "),
-                Redacted(&ask.url)
-            );
+            println!("{}: published as {published} (was {}).", ask.repos.join(", "), Redacted(&ask.url));
         }
     }
     Ok(Some(rewritten))
@@ -393,22 +381,22 @@ fn rewrite(text: &str, hidden: &[Spot], map: &BTreeMap<String, String>) -> Res<S
             }
             Some(_) if !map.contains_key(url) => changed.push(old.checkout.clone()),
             _ => {
-                let https = map.get(url).map_or(String::new(), |h| format!(" (to {h})"));
+                let https = map.get(url).map_or(String::new(), |h| format!(" (as {h})"));
                 stuck.push(format!("{}: {}{https}", old.checkout, Redacted(url)));
             }
         }
     }
     if !changed.is_empty() {
         bail!(
-            "Hiding the thornlist's unused credentials changed these components:\n  {}\nRemove the credentials, \
+            "Hiding a credential would change these components:\n  {}\nRemove the credentials from the thornlist.\n\
              {LOCAL_HINT}",
             changed.join("\n  ")
         );
     }
     if !stuck.is_empty() || check.components().len() != list.components().len() {
         bail!(
-            "The thornlist's ssh URLs answer as https, but rewriting its !URL lines did not rewrite these, as no \
-             !URL line spells them out:\n  {}\nWrite the https URLs in the thornlist, {LOCAL_HINT}",
+            "No !URL line to rewrite as https for these ssh URLs:\n  {}\nWrite their https URLs in the \
+             thornlist.\n{LOCAL_HINT}",
             if stuck.is_empty() { "(the list changed shape)".to_owned() } else { stuck.join("\n  ") }
         );
     }
@@ -546,7 +534,7 @@ fn cvs_secrets(root: &str) -> Vec<Range<usize>> {
 /// or nothing.
 pub fn check_input_url(knob: &str, url: &str) -> Res<()> {
     match download_refusal(url) {
-        Some(why) => bail!("Input {knob}: {why}, {LOCAL_HINT}"),
+        Some(why) => bail!("Input {knob}: {why}.\n{LOCAL_HINT}"),
         None => Ok(()),
     }
 }
@@ -733,7 +721,7 @@ mod tests {
         let spot = search_text(text, &BTreeSet::new());
         assert_eq!(spot.len(), 1);
         let err = format!("{:#}", rewrite(text, &spot, &BTreeMap::new()).unwrap_err());
-        assert!(err.contains("changed these components:\n  B/One\n"), "{err}");
+        assert!(err.contains("would change these components:\n  B/One\n"), "{err}");
     }
 
     /// A cvs root is refused for a password, written in any of its places,

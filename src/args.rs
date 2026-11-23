@@ -1282,8 +1282,9 @@ pub(crate) struct SimDescribeArgs {
     /// URL, or carry a user name, password, token or query string, and every
     /// git repo is asked over the network, without credentials, whether it
     /// answers (one request each). An ssh URL is written as its https URL
-    /// instead when that answers; otherwise it is refused. With --local,
-    /// nothing is checked or asked.
+    /// instead when that answers; otherwise it is refused. A credential in a
+    /// comment or another line nothing fetches is written as ***. With
+    /// --local, nothing is checked, hidden or asked.
     #[clap(long)]
     pub local: bool,
 }

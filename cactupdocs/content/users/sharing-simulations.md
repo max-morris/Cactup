@@ -59,10 +59,14 @@ Export refuses what nobody else could reproduce:
   (`https://github.com/me/thorns.git`) instead: if it answers, the `.sim`
   names the https URL, in the thornlist too, and export says so.
 
-A user name, password or token anywhere in the thornlist is refused too,
-in a comment or a line nothing uses, with its line number, and so is a URL
-written in quotes (cactup would take the quotes as part of it). Every URL
-refused is listed in one error. A download's URL, and an input's
+A URL written in quotes is refused too (cactup would take the quotes as
+part of it). Every URL refused is listed in one error.
+
+A user name, password or token in a line nothing fetches (a comment, an
+unused `!DEFINE`, an overridden `!URL`) is not refused but hidden: the
+`.sim` gets `***` in its place, and export prints each line it changed.
+This covers URLs, `user:password@host:path` remotes and cvs roots with a
+password. A download's URL, and an input's
 (`--input-url`), may carry a query (`?download=1` is how many download links
 work), but not one that looks like a token or a signature, nor a user name
 or password; an ssh or local one is refused as well.
