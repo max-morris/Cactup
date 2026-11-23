@@ -7,7 +7,7 @@ description = "Complete reference for the machine configuration file schema"
 
 The **meta.toml** file is the core configuration for a machine in the MDB. It defines machine identity, paths, hardware specs, scheduler commands, queue definitions, and the routes that pick a submit, run, or build-submit script for each queue.
 
-The schema is closed: every table below accepts only the keys listed for it, and an unrecognized key fails the load with `unknown field \`x\`` plus the accepted spellings. A misspelled key is never silently ignored — so if you want to record something cactup has no key for, write it as a `#` comment.
+The schema is closed: every table below accepts only the keys listed for it, and an unrecognized key fails the load with `unknown field \`x\`` plus the accepted spellings. A misspelled key is never silently ignored — so if you want to record something that cactup has no key for, write it as a `#` comment.
 
 ## File structure overview
 
@@ -75,7 +75,7 @@ and how to update a machine written for an older generation.
 A `[paths]` key may also be `build-cache-home`, where the build cache keeps
 its objects; no machine needs it, since the cache's default is beside the
 installations in `install-home`. And `inputs-home` is where `cactup import`
-keeps the files and unpacked archives a shared simulation needs (default
+keeps the files and unpacked archives needed by a shared simulation (default
 `~/.cactup/inputs`); on a cluster, put it on the same work or scratch
 filesystem as `simulation-home`, since inputs are often large. Every `[paths]` key is a default for each
 user: a knob of the same name, an absolute path, wins over it.
@@ -275,7 +275,7 @@ running-pattern = " R "
 live job of `@USER@`, one per line, with the job id as the first field; the rest of
 the line is classified by the same `status`/`queued`/`running`/`holding` patterns
 used for `get-status`. A job id absent from the listing is treated as not queued
-(a listing says nothing of the jobs it leaves out, so `unknown-job-pattern`
+(a listing says nothing of the jobs that it leaves out, so `unknown-job-pattern`
 plays no part there). A listing command that exits non-zero has failed:
 cactup then asks job by job with `get-status`, so the listing must exit 0
 when it ran, also when it lists nothing. The listing serves `sim list`, `sim
@@ -293,7 +293,7 @@ ended a few minutes ago and is not yet forgotten. For Torque's `qstat`, it is
 `Unknown Job Id`; for PBS Pro's, `Unknown Job Id|Job has finished` (the
 second for a finished job, when job history is on).
 
-With it set, cactup tells a job the scheduler has forgotten from a status
+With it set, cactup tells a job that the scheduler has forgotten from a status
 query that failed: output with no line for the job (no line matching
 `status-pattern`) means the job is gone only if a line matches
 `unknown-job-pattern`. Otherwise the query failed (the controller timed out,
@@ -305,8 +305,8 @@ submit`/`sim run`, `test run`/`test submit` and build; `sim list`, `test
 list`, `build list` and their `show`s print the state as `UNKNOWN`, and
 `build prune` keeps the attempt. For a run that has recorded its end (a
 finished simulation restart, test run or build), asking is the check for a
-job the scheduler put back in the queue, made for 14 days after the end and
-only on the machine the record was made for (later, or elsewhere, the job
+job that the scheduler put back in the queue, made for 14 days after the end and
+only on the machine that the record was made for (later, or elsewhere, the job
 id may name an unrelated job, and the record is taken as ended without
 asking). A failed query then is taken as the job ended where cactup only
 shows records (`sim list`, `test list`, their `show`s: the recorded end) or
@@ -316,11 +316,11 @@ run`, and a new test run or build refuse, printing the query, both patterns
 and what it printed, and naming the stop command (`-f` stops the job and
 goes ahead); `sim stop`, `test stop` and `build stop` ask the scheduler to
 stop the job anyway, saying they could not ask. Where the scheduler takes
-the stop, or refuses it with output this pattern matches (it does not
+the stop, or refuses it with output matched by this pattern (it does not
 know the job), cactup records the stop, and the job is taken as ended
 without asking from then on. Any other failure of the stop command (the
 controller not reached) is an error and records nothing. Slurm's
-`scancel` of a job the controller does not know exits 0 and prints
+`scancel` of a job that the controller does not know exits 0 and prints
 nothing (Slurm 24.11.7), so there the stop is taken and the job settled;
 Torque's `qdel` refuses one (`Unknown Job Id`, exit 153), which the
 pattern then matches, as it is matched against the stop command's output
@@ -329,8 +329,8 @@ its message for a forgotten job settles nothing: the commands refuse,
 each showing the output to fix the pattern against. Without the key, no line for the
 job means the job is gone, as before: a query that failed reads as a job no
 longer in the queue. Check the pattern against what the command really
-prints for a job the scheduler no longer knows (an old job id will do): one
-that never matches makes every job the scheduler has forgotten look like a
+prints for a job that the scheduler no longer knows (an old job id will do): one
+that never matches makes every job that the scheduler has forgotten look like a
 failed query wherever cactup asks job by job (`sim stop`'s wait, `test
 stop` and `delete`, `build stop`, the checks before a new run or build),
 which then refuse; where the listing answers instead (`sim list`, `sim show`, `test list`,
@@ -389,10 +389,10 @@ to survive to reach `wait` — and the job id is echoed *before* the wait so
 it parses immediately instead of only once the job is already done.
 
 Set `job-ids = "pids"` on such a machine (the default is `"scheduler"`): it
-declares that a job id is the pid of a process on the host the job was
+declares that a job id is the pid of a process on the host that the job was
 submitted from, so the scheduler is that host's own processes. A pid means
 nothing on another host and is reused once its process is gone, so cactup
-records with each job id the host it was submitted from and the start time
+records with each job id the host that it was submitted from and the start time
 of the process with that pid, read as soon as the id is known. Later it runs
 `get-status` or `stop` for the job only on that host, and only while the
 process with that pid is still the one that started then; otherwise the job
@@ -410,9 +410,9 @@ such a machine, where nothing requeues a job.
 The `submit` (and `blocking-submit`) of such a machine must start each job
 in a process group of its own, with `setsid` as above: `stop` stops a whole
 group (`pkill -g`), so cactup runs it only for a job whose group holds
-nothing but the job and the processes it started, and refuses otherwise (a
+nothing but the job and the processes that it started, and refuses otherwise (a
 job sharing the submitting shell's group would take the shell and its other
-jobs with it), naming the pid to stop by hand with the processes it
+jobs with it), naming the pid to stop by hand with the processes that it
 started. `setsid` keeps the backgrounded pid: it starts a new session in the
 same process when that process does not lead a group already, as a
 background job of `sh -c` does not.
@@ -447,7 +447,7 @@ anywhere; anything that makes or fetches what a phase needs (a software
 environment created the first time, a file under `$HOME`) belongs in a
 provisioning key instead (below), which neither these tests nor
 `cactup cache doctor` run. A setup that sources a module system's init file
-the test host has is not run there: the test says it is not checked on that
+that the test host has is not run there: the test says it is not checked on that
 host, and CI, which lacks the file, checks it (where the environment
 variable `CI` is set to anything but empty, `0` or `false`, case and
 surrounding blanks ignored, such a skip
@@ -485,7 +485,7 @@ since the build was prepared (the build script that follows provisions),
 sets, and cactup's own tests of the MDB's build setups (above).
 For a queued job, `provision` runs twice, as `env-setup` does: once in the
 submit script (the job's script, where the scheduler starts it) and once in
-the run or build script that job runs. In each phase the order is: the setup
+the run or build script run by that job. In each phase the order is: the setup
 (`env-setup`, then the phase's `*-env-setup`), then `provision`, then the
 phase's own `*-provision`, so a provisioning step can use what the setup
 loaded (a module that provides `curl`).
@@ -504,10 +504,10 @@ fi
 
 Each provisioning step runs in a subshell of its own, under `set -e`:
 
-- **Nothing it sets reaches the phase.** What it exports, the directory it
-  changes to, a function it defines: all lost when it ends. Put what the
-  phase needs to see (`PATH`, `PERL5LIB`) in the setup, which may name
-  directories the provisioning step creates.
+- **Nothing that it sets reaches the phase.** What it exports, the directory
+  that it changes to, a function that it defines: all lost when it ends. Put
+  what the phase needs to see (`PATH`, `PERL5LIB`) in the setup, which may
+  name directories created by the provisioning step.
 - **The setup must not source or run what provisioning creates.** The setup
   runs first: on a host where a Python virtual environment or a conda
   environment does not exist yet, `. ~/venv/bin/activate` (or a conda
@@ -525,15 +525,15 @@ Each provisioning step runs in a subshell of its own, under `set -e`:
 - **A universe inherits it.** A universe that sets no provisioning key of
   its own runs the machine's: in a build or run script inside its wrapper
   (a container) when it has one, since cactup starts those scripts through
-  the universe, where the tools the step uses (`python3`, `curl`) may be
+  the universe, where the tools that the step uses (`python3`, `curl`) may be
   missing; in a submit script wherever the scheduler starts that script.
   Set the key empty in the universe (`provision = ""`,
   `build-provision = ""`, …) to turn the machine's step off there.
 - **Unlike a failing setup line in a submit or run script, a failing step
   is fatal there.** The setup is put at the top of those scripts, ahead of
   any `set -e` of their own, so a failing setup line goes on (but for `.`
-  of a missing file, which ends a script `/bin/sh` runs, though not one
-  `bash` runs); a failing provisioning step stops the script, in any
+  of a missing file, which ends a script run by `/bin/sh`, though not one
+  run by `bash`); a failing provisioning step stops the script, in any
   shell. (The build script runs its setup under `set -e` too.)
 - It runs every time its phase does, so make it cheap when there is nothing
   to do (check first, as above), and safe when two builds run it at once
@@ -541,7 +541,7 @@ Each provisioning step runs in a subshell of its own, under `set -e`:
 
 Provisioning is not run before cactup's scheduler commands, by
 `cactup cache doctor`, or by the MDB's tests, and it is not part of what the
-build cache keys a compile by: it cannot change the environment a compile
+build cache keys a compile by: it cannot change the environment that a compile
 sees. In a `.py` script, `ENV_SETUP` already carries the steps after the
 setup, so printing it provisions.
 
@@ -565,7 +565,7 @@ own quotes). Declaring neither gives an identity universe, useful purely as a ca
 for env-setup overrides.
 
 Universes can override environment setup and provisioning key-by-key (each
-`env-setup`, `*-env-setup`, `provision` or `*-provision` key a universe sets
+`env-setup`, `*-env-setup`, `provision` or `*-provision` key that a universe sets
 replaces the machine's; unset keys inherit):
 
 ```toml
@@ -597,8 +597,8 @@ rather than a job — `autoupdate`, `update-url` and `mdb-url` (see
 [Building Configs](../users/building-configs.html)), and one per `[paths]`
 key, `install-home`, `simulation-home`, `test-home`, `scratch-home`,
 `build-cache-home` and `inputs-home`, an absolute path that wins over the
-machine's value; those thirteen are never recorded with a simulation as knobs (the paths a job
-needs are recorded as the paths they are). Users can also create
+machine's value; those thirteen are never recorded with a simulation as knobs (the paths needed
+by a job are recorded as the paths that they are). Users can also create
 **custom knobs**
 (`cactup knob -c my-name value`, removed with `cactup knob delete my-name`) and
 override any knob for one command with `-K name=value`.

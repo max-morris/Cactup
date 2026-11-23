@@ -216,12 +216,12 @@ fn stop_by_hand(id: &str, group: Option<&crate::lock::ProcGroup>) -> String {
             pids(&group.outside)
         ),
         Some(group) if group.tree.len() > 1 => format!(
-            "stop pid {id} and the processes it started (now pids {}; see `pstree -p {id}`), or interrupt \
+            "stop pid {id} and the processes that it started (now pids {}; see `pstree -p {id}`), or interrupt \
              the run (Ctrl-C)",
             pids(&group.tree)
         ),
         _ => format!(
-            "stop pid {id} and any process it started (see `pstree -p {id}`), or interrupt the run (Ctrl-C)"
+            "stop pid {id} and any process that it started (see `pstree -p {id}`), or interrupt the run (Ctrl-C)"
         ),
     }
 }
@@ -253,7 +253,7 @@ impl std::fmt::Display for SharedGroup {
         write!(
             f,
             "job {0} shares its process group{pgid} with processes that may not be the job's; cactup \
-             will not stop it\nStop pid {0} and the processes it started by hand (see `pstree -p {0}`), \
+             will not stop it\nStop pid {0} and the processes that it started yourself (see `pstree -p {0}`), \
              or interrupt the run (Ctrl-C)",
             self.0
         )

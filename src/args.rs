@@ -292,7 +292,7 @@ pub(crate) struct GlobalOpts {
     /// Show more detail
     #[clap(short, long, global = true)]
     pub verbose: bool,
-    /// Print every shell command cactup runs to stderr.
+    /// Print every shell command that cactup runs to stderr.
     #[clap(long, global = true)]
     pub trace: bool,
     /// Einstein Toolkit manifest repository to read releases from
@@ -421,7 +421,7 @@ pub(crate) enum Commands {
     // §8.11
     /// Remove packages added with `cactup add`
     ///
-    /// Any repo a package replaced is restored. Packages brought in only for
+    /// Any repo replaced by a package is restored. Packages brought in only for
     /// the ones named are removed too, after the plan is shown. Refused while
     /// another package depends on one named.
     Remove {
@@ -903,7 +903,7 @@ pub(crate) struct BuildOpts {
     /// Rebuild a config that was built for another machine, at your own risk.
     #[clap(long)]
     pub ignore_machine: bool,
-    /// Thornlist to build (default: the one this config was last built from)
+    /// Thornlist to build (default: the one that this config was last built from)
     ///
     /// A config never built uses <Cactus root>/thornlists/installation-default.th.
     #[clap(long, value_name = "PATH")]
@@ -1091,8 +1091,8 @@ pub(crate) enum CacheCommand {
     /// key, why the others did not, and the time spent computing keys.
     ///
     /// With --against, --against-installation or --against-attempt, it also
-    /// prints how many compiles the other build could have served, and
-    /// which part of the key differs for the rest.
+    /// prints how many compiles could have been served by the other build,
+    /// and which part of the key differs for the rest.
     ///
     ///   cactup cache report sim --against sim-debug
     ///   cactup cache report sim --against-installation other-install
@@ -1113,7 +1113,7 @@ pub(crate) enum CacheCommand {
         /// Compare with this build attempt (default: the newest other recorded one).
         #[clap(long, value_name = "N")]
         against_attempt: Option<u32>,
-        /// Also list each compile the other build would not serve, and why.
+        /// Also list each compile that the other build would not serve, and why.
         #[clap(long)]
         long: bool,
     },
@@ -1160,7 +1160,7 @@ pub(crate) enum CacheCommand {
     /// Remove unused objects from the build cache
     ///
     /// The cache is never pruned automatically. --unused-for removes objects
-    /// no build has used or stored for that long. --to-size then removes the
+    /// not used or stored by any build for that long. --to-size then removes the
     /// least recently used until the cache fits. Either may be given alone.
     ///
     ///   cactup cache gc --unused-for 60d
@@ -1498,7 +1498,7 @@ pub(crate) struct ImportArgs {
 }
 
 /// `cactup sim export`. Every field the .sim carries has a default; on a
-/// terminal, export asks for each one a flag did not give (`--yes` takes
+/// terminal, export asks for each one not given by a flag (`--yes` takes
 /// them all as they are).
 // §8.9
 #[derive(clap::Args, Debug)]
@@ -1509,9 +1509,9 @@ pub(crate) struct SimExportArgs {
     pub file: Option<PathBuf>,
     #[command(flatten)]
     pub describe: SimDescribeArgs,
-    /// Trim the thornlist to the thorns the parfile needs
+    /// Trim the thornlist to the thorns needed by the parfile
     ///
-    /// Keeps the thorns the parfile activates and what they require. The
+    /// Keeps the thorns activated by the parfile and what they require. The
     /// rest become #DISABLED lines.
     #[clap(long)]
     pub trim: bool,
@@ -1529,9 +1529,9 @@ pub(crate) struct SimPackArgs {
     pub file: Option<PathBuf>,
     #[command(flatten)]
     pub describe: SimDescribeArgs,
-    /// Trim the thornlist to the thorns the parfile needs
+    /// Trim the thornlist to the thorns needed by the parfile
     ///
-    /// Keeps the thorns the parfile activates and what they require. The
+    /// Keeps the thorns activated by the parfile and what they require. The
     /// rest become #DISABLED lines.
     #[clap(long)]
     pub trim: bool,
@@ -1568,13 +1568,13 @@ pub(crate) struct SimDescribeArgs {
     ///
     /// The file is downloaded once and its SHA-256 recorded. An archive
     /// (.tar, .tar.gz, .tar.xz, .zip) is unpacked on import. The knob then
-    /// points at the archive member its current value ends with, or the one
-    /// --input-path names. Lines in the archive's text files that differ
+    /// points at the archive member that its current value ends with, or the
+    /// one named by --input-path. Lines in the archive's text files that differ
     /// from your copy only by the unpack location become edits applied
     /// after unpacking.
     #[clap(long = "input-url", value_name = "KNOB=URL")]
     pub input_urls: Vec<String>,
-    /// Archive member an input knob points at (KNOB=MEMBER; repeatable).
+    /// Archive member that an input knob points at (KNOB=MEMBER; repeatable).
     #[clap(long = "input-path", value_name = "KNOB=MEMBER")]
     pub input_paths: Vec<String>,
     /// Skip the checks for sharing: a .sim for this machine only
@@ -1635,7 +1635,7 @@ pub(crate) enum SimCommand {
     // §8.9 (Cactarium .sim files)
     /// Export a simulation as a .sim file
     ///
-    /// Records its parfile and the exact sources and build it ran on.
+    /// Records its parfile and the exact sources and build that it ran on.
     Export(SimExportArgs),
     // §8.9
     /// Make a .sim file from a thornlist and a parfile
@@ -1738,7 +1738,7 @@ pub(crate) struct SimStartArgs {
 }
 
 // §4.4, §7.4, §8.8
-/// The start flags `sim submit`, `sim run` and `import` share, beside the
+/// The start flags shared by `sim submit`, `sim run` and `import`, beside the
 /// TOPOLOGY and universe flags.
 #[derive(clap::Args, Debug, Clone, Default)]
 pub(crate) struct StartFlags {
@@ -1894,7 +1894,7 @@ pub(crate) enum MachineCommand {
     /// List all machines in the MDB
     List,
     // §4.3
-    /// Show the machine this host resolves to, or a named one
+    /// Show the machine that this host resolves to, or a named one
     Show {
         name: Option<String>,
         /// List the machine's optionlist flavors instead of its summary.

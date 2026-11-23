@@ -103,14 +103,14 @@ exec @CACTUP@ build run @CONFIGURATION@ \
 
 `@CONFIG_DIR@`/`@ATTEMPT_ID@` are the build-submit-only variables (see below)
 that let the compute node locate exactly which build to run, without
-touching cactup's global state on this machine — the same role
+touching cactup's global state on this machine — the same role that
 `@SIMULATION_DIR@`/`@RESTART_ID@` play for a simulation re-invocation. Most
 machines never need a build submit script at all; it exists only for
 clusters whose login-node policy forbids compiling there. See
 [Porting a Cluster](porting-a-cluster.html) for when to add one and
 [meta.toml Reference](meta-toml.html) for the `[build]` keys that control
 when it's used, and [Building Configs](../users/building-configs.html) for
-the user-facing `cactup build`/`build run`/`build submit` split this feeds.
+the user-facing `cactup build`/`build run`/`build submit` split that this feeds.
 
 ## Template variables
 
@@ -228,7 +228,7 @@ for standard vs. custom knobs and `-K`.
 `@CACTUP@`, which every re-invocation line above uses, is the absolute path of
 the exact cactup build that rendered the script — the versioned file
 `~/.cactup/bin/cactup-<build>`, not the `~/.cactup/bin/cactup` link on the
-user's `PATH`. A job therefore runs the build it was submitted with, even if
+user's `PATH`. A job therefore runs the build that it was submitted with, even if
 cactup updates itself while the job is queued (see
 [Updating cactup](../users/updating.html#where-builds-live-and-why-jobs-are-safe)).
 Always call cactup through `@CACTUP@` in scripts, never by a bare `cactup`.
@@ -253,7 +253,7 @@ mpirun -np @TASKS@ @EXECUTABLE@ @PARFILE@  →  mpirun -np 8 /path/to/cactus_sim
 ```
 
 > **Note:** there is no `@UNIVERSE_WRAPPER@` token. When a config's build/run
-> universe declares a wrapper, cactup wraps the *entire* command your script
+> universe declares a wrapper, cactup wraps the *entire* command that your script
 > runs (see [Universes](meta-toml.html#universes)) — the script itself just
 > invokes `@EXECUTABLE@` and cactup applies the wrapper around it.
 
@@ -271,7 +271,7 @@ runscripts/
 ```
 
 Route them in meta.toml. Each key names a script file, and its entry lists the
-queues it serves:
+queues that it serves:
 
 ```toml
 [submitscripts]
@@ -285,7 +285,7 @@ queues it serves:
 
 Users never pick a script for a simulation: cactup routes by the chosen queue
 (and the config's build universe, below). A script serves exactly the queues
-it lists, with no fallback, so the normal submit scripts must list every
+that it lists, with no fallback, so the normal submit scripts must list every
 queue in `[queues.*]`, and so must the normal run scripts; cactup checks that
 when it loads the machine.
 
@@ -329,8 +329,8 @@ In meta.toml, associate scripts with build universes:
 
 Then cactup automatically selects the right script based on the config's build universe.
 
-The `build-universes` key gates purely on the universe a config was **built**
-in (never the universe you run or submit in). An omitted key means "compatible
+The `build-universes` key gates purely on the universe that a config was **built**
+in (never the universe that you run or submit in). An omitted key means "compatible
 with every build universe"; an explicitly empty list is a validation error.
 
 ### Gating queues by build universe
@@ -401,7 +401,7 @@ sys.stdout.write("\n".join(lines) + "\n")    # stdout is the generated script
 ```
 
 `knob(name)` is the Python counterpart of `@KNOB(name)@`: an unset or empty
-knob refuses the run with the same message cactup would print for the token.
+knob refuses the run with the same message that cactup would print for the token.
 `knob(name, default)` mirrors `@KNOB-OPTIONAL(name, default)@`, and the raw
 `knobs` dict is there when you want `in`/`.get()`. Environment variables are
 plain `os.environ`. The same conventions hold for a `.py` **parfile**.
@@ -443,9 +443,9 @@ Python is useful for complex script generation, but shell is simpler for most ma
 
 #### Refusing a request
 
-Some clusters have rules cactup cannot know about — a partition that only grants
-GPUs in certain multiples, a combination of directives the scheduler silently
-mangles. When the variables you were handed describe a job your machine cannot
+Some clusters have rules that cactup cannot know about — a partition that only grants
+GPUs in certain multiples, a combination of directives that the scheduler silently
+mangles. When the variables that you were handed describe a job that your machine cannot
 actually run, `raise CactupError(...)`:
 
 ```python
@@ -475,7 +475,7 @@ full traceback, so a typo stays debuggable instead of looking like a site rule.
 
 ## Environment setup: @ENV_SETUP@
 
-The `@ENV_SETUP@` variable expands to shell commands that set up the environment of the script's phase: the submit environment in a submit or build-submit script (in the submit universe, never the build universe a build's `make` runs in), the run environment in a run script:
+The `@ENV_SETUP@` variable expands to shell commands that set up the environment of the script's phase: the submit environment in a submit or build-submit script (in the submit universe, never the build universe that a build's `make` runs in), the run environment in a run script:
 
 ```bash
 export PATH="/opt/bin:$PATH"
@@ -544,7 +544,7 @@ To see the expanded script without running it, use `--trace`:
 cactup --trace sim submit mysim mysim.par -n 4 -w 1:00:00
 ```
 
-The `--trace` flag prints every command cactup runs, including the script content.
+The `--trace` flag prints every command that cactup runs, including the script content.
 
 ## Writing a minimal submit script
 
@@ -596,7 +596,7 @@ If the script has errors, cactup will show them.
 ### SLURM with GPU
 
 `@GPU@` is `true`/`false` for the selected queue's GPU flag; there is no
-per-task GPU-count token, so hard-code the `--gres` count your queue provides
+per-task GPU-count token, so hard-code the `--gres` count that your queue provides
 (one per node here):
 
 ```bash
@@ -616,7 +616,7 @@ per-task GPU-count token, so hard-code the `--gres` count your queue provides
 
 Your script does **not** wrap the executable in `singularity`/`apptainer`
 itself. Declare a `[universes.*]` entry with a `wrapper-argv` (or `wrapper`) in
-meta.toml and point the build/run at it; cactup wraps the whole command your
+meta.toml and point the build/run at it; cactup wraps the whole command that your
 script runs. The script stays container-agnostic:
 
 ```bash

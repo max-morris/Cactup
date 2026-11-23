@@ -527,8 +527,8 @@ knobs = _cactup_d[\"knobs\"]
 class CactupError(Exception):
     \"\"\"Raise to refuse the run with a message shown to the user.
 
-    For a request this machine cannot serve — a scheduler rule the topology
-    violates, an unsupported combination of variables. cactup prints the
+    For a request that this machine cannot serve — a scheduler rule violated
+    by the topology, an unsupported combination of variables. cactup prints the
     message and stops; nothing is submitted. Any OTHER exception is treated
     as a bug in the script and reported with its full traceback.
     \"\"\"

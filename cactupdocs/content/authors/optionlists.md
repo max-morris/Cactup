@@ -22,7 +22,7 @@ Each machine can have multiple optionlists, called **flavors** (e.g., `default`,
 > While porting a machine you do not have to install an optionlist into the MDB
 > to try it. `cactup build <config> --optionlist <path>` builds from any file —
 > a full optionlist like the ones below, an `[options]` table on its own, or the
-> native Cactus `.cfg` you are porting *from*. A file with a `[cactup]` header
+> native Cactus `.cfg` that you are porting *from*. A file with a `[cactup]` header
 > is validated exactly as if it already lived in `optionlists/`, so you can
 > settle the header before committing it. See
 > [Building Configs](../users/building-configs.html) for the details.
@@ -67,18 +67,18 @@ default-queue = "cpu"             # where its simulations go without -q (optiona
 ```
 
 None of these keys are emitted to the native optionlist. Both `[cactup]` and
-`[cactup.runs-on]` reject keys they do not know, so a misspelling fails the
+`[cactup.runs-on]` reject keys that they do not know, so a misspelling fails the
 load instead of being ignored. `runs-on` describes the *binary*: it is checked
-when a simulation or test is submitted or run, never against the queue a
+when a simulation or test is submitted or run, never against the queue that a
 `cactup build submit` job compiles on.
 
 `default-queue` is where a simulation or test of this flavor goes when the
-user passes no `-q` and has no `queue` knob this flavor can use. Without it,
+user passes no `-q` and has no `queue` knob that this flavor can use. Without it,
 that is the machine's default queue, which a flavor may not be allowed to
 use. A CPU-only flavor on a machine whose default partition is a GPU one is
 the usual case, and setting `default-queue` saves its users from typing `-q`
 on every submit. It must be one of `queues` when that list is given, and a
-queue the machine has; the build refuses it otherwise. Unlike the rest of
+queue that the machine has; the build refuses it otherwise. Unlike the rest of
 `runs-on`, which is recorded with each config when it is built, cactup reads
 `default-queue` from the flavor's current file whenever a job is submitted,
 so changing it takes effect for existing configs without a rebuild.
@@ -128,7 +128,7 @@ OPENMP  = "yes"
 MPI     = "MPICH"
 ```
 
-These are standard Cactus optionlist names — the same ones you would put in a
+These are standard Cactus optionlist names — the same ones that you would put in a
 hand-written Einstein Toolkit `.cfg` optionlist. cactup does not invent its own
 compiler-flag schema; it renders `[options]` straight back to the native format.
 Booleans render as Cactus's `yes`/`no`, integers as plain decimals, strings verbatim.
@@ -230,7 +230,7 @@ MPI      = "MPICH"
 ## Per-flavor thorn toggles
 
 Different flavors sometimes compile different thorns — e.g. a CUDA flavor that
-drops a thorn nvcc cannot build. Put those toggles in the `[cactup]` header; they are
+drops a thorn that nvcc cannot build. Put those toggles in the `[cactup]` header; they are
 merged on top of the machine-level `[build].enabled-thorns`/`disabled-thorns`:
 
 ```toml
@@ -280,7 +280,7 @@ cactup build myconfig --universe host  # use a different universe
 ```
 
 The build universe is recorded with the config and (unless `coerce-run-universe` is
-set false in the header) also becomes the default universe its simulations run in.
+set false in the header) also becomes the default universe that its simulations run in.
 
 ## Validating optionlists
 

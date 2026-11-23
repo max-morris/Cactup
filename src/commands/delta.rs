@@ -256,7 +256,7 @@ pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     if !diverged.is_empty() {
         println!(
             "\n  {}",
-            format!("{} thorn(s) are not linked the way the thornlist says:", diverged.len())
+            format!("{} thorn(s) are not linked as the thornlist says:", diverged.len())
                 .yellow()
                 .bold()
         );
@@ -490,7 +490,7 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
         // Built before stamps: nothing can say whether thorn files changed.
         SourceDelta::Unchanged if stamps_unrecorded => println!(
             "  {} thorn files have no baseline yet; the next `cactup build {name}` records one.\n  \
-             If files git does not track changed since the last build, run `cactup build {name} --reconfig`.",
+             If files not tracked by git changed since the last build, run `cactup build {name} --reconfig`.",
             "note:".yellow().bold()
         ),
         SourceDelta::Unchanged if !untracked.is_empty() => {

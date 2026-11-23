@@ -42,7 +42,7 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
     let config = frozen_config(inst, &sim)?;
     let cfg_dir = sim.cactup_dir().join("cfg");
     let source_text = std::fs::read_to_string(cfg_dir.join(build::THORNLIST_SNAPSHOT)).with_context(|| {
-        format!("Simulation \"{}\" has no copy of the thornlist it was built from", sim.name)
+        format!("Simulation \"{}\" has no copy of the thornlist that it was built from", sim.name)
     })?;
     // `!INCLUDE`s spliced in, resolved where the list the config was built
     // from lives: a `.sim` carries the whole list, verbatim otherwise.

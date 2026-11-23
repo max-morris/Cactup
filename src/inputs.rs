@@ -255,7 +255,7 @@ fn unpacked(
     line: &mut crate::progress::Line,
     obtain: impl FnOnce(&Path, &mut crate::progress::Line) -> Res<tempfile::TempPath>,
 ) -> Res<(PathBuf, String)> {
-    let kind = ArchiveKind::of_url(name).ok_or_else(|| anyhow!("{name} is not an archive cactup can unpack"))?;
+    let kind = ArchiveKind::of_url(name).ok_or_else(|| anyhow!("{name} is not an archive that cactup can unpack"))?;
     let trees = dir.join("unpacked");
     let tree = trees.join(tree_key(identity, input));
     let value = |tree: &Path| input.path.as_deref().map_or_else(|| tree.to_owned(), |p| tree.join(p));
@@ -753,7 +753,7 @@ fn unpack_tar(reader: impl Read, dest: &Path, budget: &mut Budget) -> Res<(u64, 
                 // a regular file already unpacked, reached through no link.
                 let Some(source) = member_path(&target)? else { bail!("The archive hard-links {} to its root", rel.display()) };
                 let from = within(dest, &source).ok().filter(|(_, m)| m.is_file()).map(|(p, _)| p).ok_or_else(|| {
-                    anyhow!("The archive hard-links {} to {}, which is not a file it unpacked before", rel.display(), source.display())
+                    anyhow!("The archive hard-links {} to {}, which is not a file that it unpacked before", rel.display(), source.display())
                 })?;
                 let path = place(dest, &rel)?;
                 std::fs::hard_link(&from, &path)?;
@@ -1237,7 +1237,7 @@ mod tests {
                 raw_entry(&mut b, b"x", tar::EntryType::Symlink, Some("."), b"");
                 raw_entry(&mut b, b"h", tar::EntryType::Link, Some("x/victim"), b"");
                 b.into_inner().unwrap()
-            }, "not a file it unpacked before"),
+            }, "not a file that it unpacked before"),
         ];
         for (tar_bytes, expect) in cases {
             let dir = tempfile::tempdir().unwrap();

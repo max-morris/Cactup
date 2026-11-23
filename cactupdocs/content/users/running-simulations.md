@@ -5,7 +5,7 @@ description = "Create, submit, and run Cactus simulations with flexible topology
 
 # Running Simulations
 
-This guide covers everything you need to know about creating, submitting, and running Einstein Toolkit simulations with cactup.
+This guide covers everything that you need to know about creating, submitting, and running Einstein Toolkit simulations with cactup.
 
 ## Creating a simulation
 
@@ -36,7 +36,7 @@ cactup sim create mysim mysim.par --force
 ### Parfile substitution
 
 A `.par` parfile is a template: cactup expands `@NAME@` tokens in it when the
-restart starts, using the same variables submit and run scripts see. A copy of
+restart starts, using the same variables seen by submit and run scripts. A copy of
 your parfile is kept as the master; each restart gets its own expanded
 `<name>.par` next to its output.
 
@@ -61,7 +61,7 @@ ADMBase::comment = "email me@@example.org"
 
 `cactup sim submit` checks the parfile before anything is queued: a stray `@`,
 an unknown variable or a required knob that is unset fail the submit on the
-spot. Environment variables are the one thing it cannot check — their values
+spot. Environment variables are the one thing that it cannot check — their values
 belong to the compute node — so `@ENV(NAME)@` is only judged when the job
 runs.
 
@@ -136,16 +136,16 @@ $ cactup sim submit mysim -T 100 -c 1 -q gpu2
 Asking for 50 nodes: at most 2 tasks per node (the queue's 2 GPUs per node at 1 GPU per task) for 100 tasks; pass -n to choose
 ```
 
-Node counts are derived only from a node size the machine database declares (in a machine you created yourself, per queue). If cactup had to detect it from the machine it runs on (a login node), it keeps one node unless you give `-n` or `-t`.
+Node counts are derived only from a node size declared by the machine database (in a machine that you created yourself, per queue). If cactup had to detect it from the machine that it runs on (a login node), it keeps one node unless you give `-n` or `-t`.
 
-An explicit `-n` always wins. If the tasks can't fit on the nodes you asked for, `sim submit` refuses before anything reaches the scheduler, and says how many nodes would work:
+An explicit `-n` always wins. If the tasks can't fit on the nodes that you asked for, `sim submit` refuses before anything reaches the scheduler, and says how many nodes would work:
 
 ```console
 $ cactup sim submit mysim -n 1 -T 256 -c 1 -q checkpt
 Error: 256 tasks of 1 CPU each do not fit on 1 node: a node of queue "checkpt" has room for 64 of them (64 CPUs per node at 1 CPU per task); ask for -n 4, or leave out -n to have it derived
 ```
 
-On a GPU queue the count it suggests is one the GPUs allow too.
+On a GPU queue the count that it suggests is one that the GPUs allow too.
 
 ### CPUs per task
 
@@ -236,9 +236,9 @@ cactup sim submit mysim -q cpu       # CPU queue
 
 If not specified, cactup uses your `queue` knob if you set one, else the
 flavor's default queue if its optionlist names one, else the machine's
-default queue. A `queue` knob naming a queue your config's binary may not
-run on (a GPU partition, say, for a CPU-only build) is passed over with a
-note, so one knob does not break every flavor it cannot serve; `--force-queue`
+default queue. A `queue` knob naming a queue that your config's binary may
+not run on (a GPU partition, say, for a CPU-only build) is passed over with a
+note, so one knob does not break every flavor that it cannot serve; `--force-queue`
 keeps it. The `queue` knob applies to simulations and test runs only. Builds
 have their own, `build-queue` (see [Building Configs](building-configs.html)).
 
@@ -252,7 +252,7 @@ cactup sim submit mysim -a my_project
 
 The default allocation comes from the `allocation` knob if you've set one.
 `-a my_project` is shorthand for `-K allocation=my_project` (see below): it
-outranks a simulation's own `allocation` knob and the one you set with
+outranks a simulation's own `allocation` knob and the one that you set with
 `cactup knob`, and scripts see the same value whichever way it was given.
 Passing both `-a` and `-K allocation=` with different values is an error.
 
@@ -271,7 +271,7 @@ cactup sim submit mysim --job-name my-run-123
 
 ## Knobs
 
-A **knob** is a value cactup remembers for you on this machine. The
+A **knob** is a value that cactup remembers for you on this machine. The
 **standard knobs** — `allocation`, `queue`, `build-queue`, `mail`,
 `mail-type`, `user`, `email`, `wisdom-frequency`, `wisdom-kind` — are the
 defaults behind the
@@ -281,7 +281,7 @@ default.
 Three more standard knobs configure how cactup updates itself —
 `autoupdate` (`auto`, the default, `notify` or `off`), `update-url` and
 `mdb-url`. They are described in [Updating cactup](updating.html) and, unlike
-the others, are not frozen into the simulations you submit. The same goes for
+the others, are not frozen into the simulations that you submit. The same goes for
 `build-cache`, `build-cache-relocate`, `build-cache-size` and
 `build-cache-preserve-exact-warnings`, described in
 [Building Configs](building-configs.html), and for the path knobs:
@@ -300,7 +300,7 @@ cactup knob allocation hpc_xxx     # set one
 
 You can also define your own. A custom knob is a named value for your
 parfiles, scripts and optionlists to read through `@KNOB(name)@` — a path to
-initial data, a resolution tag, anything you would otherwise edit into the
+initial data, a resolution tag, anything that you would otherwise edit into the
 parfile by hand on every machine. Names are kebab-case: lowercase letters,
 digits after the first character, dashes inside.
 
@@ -313,7 +313,7 @@ cactup knob kadath-initial-data /work/me/ID/BHNS_v2.info
 ```
 
 Setting a name that is neither standard nor an existing custom knob is an
-error, so a typo cannot quietly create a knob nothing reads. `cactup knob`
+error, so a typo cannot quietly create a knob that nothing reads. `cactup knob`
 lists standard and custom knobs separately. To get rid of a custom knob:
 
 ```sh
@@ -328,7 +328,7 @@ to its default (standard knobs always exist).
 `-K NAME=VALUE` (or `-K NAME VALUE`) is a global flag that overlays a knob for
 the duration of one command. Nothing is stored; the value applies everywhere
 the command would have read the knob — the topology defaults, and every
-`@KNOB(name)@` in the scripts, optionlist or parfile it processes. The knob
+`@KNOB(name)@` in the scripts, optionlist or parfile that it processes. The knob
 need not exist yet.
 
 ```sh
@@ -376,7 +376,7 @@ cactup sim submit mysim --universe et-sif     # Force a specific universe
 cactup sim submit mysim --no-universe          # Force native (host) execution
 ```
 
-By default, the simulation runs in the universe it was built in.
+By default, the simulation runs in the universe that it was built in.
 
 ## Forcing submission
 
@@ -399,8 +399,8 @@ cactup sim stop mysim --force      # Kill the job (scheduler `stop` command)
 ```
 
 On a machine without a batch system (the generic machine, where a job is a
-background process), cactup records with each job the host it was started on
-and when its process started. It asks about the job, and stops it, only on
+background process), cactup records with each job the host that it was started
+on and when its process started. It asks about the job, and stops it, only on
 that host and only while that process is still running; a job that has ended
 is taken as gone even if its process number now belongs to another process,
 which is never stopped. Run from another host, `sim stop --force` says the
@@ -408,11 +408,11 @@ job runs on the host that submitted it and to stop it there, and changes
 nothing, and `sim delete` refuses, while the simulation's run still holds
 its lock; once the run has let go of it (a lock left behind by a lost host
 expires within 15 minutes) the job is taken as ended. cactup stops only a
-job whose process group holds nothing but the job and the processes it
+job whose process group holds nothing but the job and the processes that it
 started (the machine's `submit` starts it with `setsid`; a job submitted
 without it from an interactive shell is in such a group too), and otherwise
 says so and leaves it: no single command stops the job alone then, so stop
-it and the processes it started yourself (`pstree -p <pid>` shows them), or
+it and the processes that it started yourself (`pstree -p <pid>` shows them), or
 interrupt the run where it runs (Ctrl-C). A `cactup sim run` typed alone at
 a shell prompt has a group of its own, so `sim stop --force` from another
 terminal stops it; one started from a script, or with other commands in a
@@ -423,15 +423,15 @@ says (`kill -- -<group>` where its process group holds only the job, which
 stops the whole run; else it names the processes to stop).
 
 On a batch system whose machine definition says how the scheduler reports a
-job it does not know, a status query that fails (the scheduler not
+job that it does not know, a status query that fails (the scheduler not
 answering, say) stops `sim delete` (and the wait of a graceful `sim stop`)
 with the scheduler's output instead of taking the job for ended, and `sim
 list` shows the simulation as `UNKNOWN`; try again once the scheduler
 answers.
 
 On a batch system, the job of a simulation's newest restart is looked at
-for 14 days after the restart finished (only on the machine the simulation
-was made for: two clusters sharing a home directory do not share job
+for 14 days after the restart finished (only on the machine that the
+simulation was made for: two clusters sharing a home directory do not share job
 numbers): if the scheduler still lists it, it is either put back in the
 queue (preemption, `scontrol requeue`) or just leaving it (Slurm lists an
 ended job as completing for a moment, or timed out for a few minutes), and
@@ -449,7 +449,7 @@ ahead, while `sim stop`, `sim submit` and `sim run`, which ask about the one
 job, still see it listed.
 
 If the scheduler cannot be asked about such a job (it does not answer, or
-the machine's `unknown-job-pattern` misses its message for a job it has
+the machine's `unknown-job-pattern` misses its message for a job that it has
 forgotten), `sim list` and `sim show` show the restart as it recorded its
 end, and `sim delete` notes it and goes ahead. The commands that act take
 the safe reading instead, since the job may have been queued again: `sim
@@ -460,9 +460,9 @@ know the job (by the machine's `unknown-job-pattern`: Torque's `qdel`
 says "Unknown Job Id"), that settles it: cactup records the stop, and from
 then on takes the job as ended (unless it really was queued again and
 runs). `--force` on `sim submit` or `sim run` does the same and goes ahead
-(the new submission not chained: Slurm refuses a dependency on a job it
+(the new submission not chained: Slurm refuses a dependency on a job that it
 has forgotten). If the cancel fails otherwise (the controller not
-reached), or fails for a job the scheduler has just listed, it is an
+reached), or fails for a job just listed by the scheduler, it is an
 error and nothing is recorded: try again once the scheduler answers. If
 the scheduler's message for a forgotten job is among what it printed,
 the machine's `unknown-job-pattern` does not match it, and every message
@@ -472,13 +472,13 @@ know the job, or lists it as over, or (where it did not ask) that the
 restart has recorded its end. Either way, it names the later restarts
 submitted chained behind a job (`sim submit` again while one was queued)
 that are still waiting, and the scheduler command that stops each: they
-run after the job they are chained behind, and cactup does not stop them
+run after the job that they are chained behind, and cactup does not stop them
 for you. One that has been canceled, or has run, is not named.
 
 `sim stop` stops a simulation's running restart first: only when none is
 running does it turn to the newest restart's job. `sim submit` also refuses while the simulation runs
 in the foreground on a batch system: wait for that run, or interrupt it. A simulation run in the foreground (`cactup sim run`) on a batch
-system has no job the scheduler knows: `sim stop --force` tells you to
+system has no job known to the scheduler: `sim stop --force` tells you to
 interrupt it where it runs, and `sim delete` refuses while it runs.
 
 Clean up aborted restart data:
@@ -508,8 +508,8 @@ cactup sim show mysim --output-dir          # Print the current output directory
 cactup sim show mysim --output-dir --restart-id 2  # Print the 3rd restart output dir
 ```
 
-`--long` also prints the paths of the optionlist and thornlist this simulation's
-executable was built from. Those are copies taken when the simulation was
+`--long` also prints the paths of the optionlist and thornlist that this
+simulation's executable was built from. Those are copies taken when the simulation was
 created, so they still answer "which thorns and compiler flags produced this
 run?" long after the config itself has been rebuilt or deleted. Simulations
 created by an older cactup show `(not recorded)`.

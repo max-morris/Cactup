@@ -110,7 +110,7 @@ pub fn needed(list: &Thornlist, cactus_root: &Path, par: &str) -> Res<BTreeSet<S
     let missing: Vec<&String> = active.iter().filter(|t| !by_name.contains_key(t.as_str())).collect();
     if !missing.is_empty() {
         let names: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
-        bail!("The parfile activates thorns the thornlist does not build: {}", names.join(", "));
+        bail!("The parfile activates thorns not built by the thornlist: {}", names.join(", "));
     }
     // The thorns as the shared rule reads them (Cactarium's dependency
     // check reads the same), with one difference: a thorn without an

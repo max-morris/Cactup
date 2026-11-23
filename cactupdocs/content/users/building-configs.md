@@ -5,7 +5,7 @@ description = "Build Cactus configurations with optionlist flavors, universes, a
 
 # Building Cactus Configurations
 
-A Cactus **configuration** is a compiled Cactus executable built from your installation with specific thorns, compiler settings, and optionlist flavor. This guide covers everything you need to know about building configs.
+A Cactus **configuration** is a compiled Cactus executable built from your installation with specific thorns, compiler settings, and optionlist flavor. This guide covers everything that you need to know about building configs.
 
 ## Basic build
 
@@ -41,7 +41,7 @@ cactup build myconfig
   compute node.
 
 Which one happens is decided by the machine's definition, not by anything
-you typed — see [meta.toml Reference](../authors/meta-toml.html#mdb-build) for exactly
+that you typed — see [meta.toml Reference](../authors/meta-toml.html#mdb-build) for exactly
 how a machine opts into queued builds. If you want to force one or the other
 regardless of what the machine prefers:
 
@@ -50,8 +50,8 @@ cactup build run myconfig       # always foreground, even if the machine can sub
 cactup build submit myconfig    # always submit — errors if the machine can't
 ```
 
-On a workstation (the built-in `generic` machine, or one `cactup machine
-create` made from it) there is no batch system: `build submit` starts the
+On a workstation (the built-in `generic` machine, or one made from it by
+`cactup machine create`) there is no batch system: `build submit` starts the
 build in the background on this host, as `sim submit` does a simulation, and
 prints its process id as the job id. Log out and it keeps going; `build log`
 and `build stop` work on it as on any queued build.
@@ -94,9 +94,9 @@ picked by its queue.
 
 Without `-q`, a build goes to the queue named by your `build-queue` knob, if
 you set one (`cactup knob build-queue single`), else to the machine's own
-build queue, else to its default queue. The `queue` knob you may have set for
-simulations is never used for builds. A `build-queue` naming a queue this
-machine cannot queue a build on is passed over with a note.
+build queue, else to its default queue. The `queue` knob that you may have set
+for simulations is never used for builds. A `build-queue` naming a queue that
+this machine cannot queue a build on is passed over with a note.
 
 A queue-submitted build behaves like any other queued job: it can sit
 waiting for resources, and if you close your terminal or lose your
@@ -190,7 +190,7 @@ cactup build myconfig --thornlist /path/to/custom.th
 
 For a brand-new config, cactup defaults to the installation's built-in
 thornlist (`<Cactus root>/thornlists/installation-default.th`). After that, the
-config remembers the thornlist it was built from, so you don't have to repeat
+config remembers the thornlist that it was built from, so you don't have to repeat
 `--thornlist` on every rebuild — pass it again only to switch to a different
 file.
 
@@ -205,7 +205,7 @@ rebuilds fall back to the config's snapshot).
 
 #### Editing a thornlist and rebuilding
 
-Edit the **source** thornlist — the file you passed to `--thornlist`, or the
+Edit the **source** thornlist — the file that you passed to `--thornlist`, or the
 installation's `thornlists/installation-default.th`. Then rebuild:
 
 ```sh
@@ -229,7 +229,7 @@ copies, rewritten on every build, so your edits there would be overwritten:
   is the one Cactus compiles from.
 - `<installation root>/installation-source.th` — the pristine as-fetched copy
   of the thornlist, written at install time and updated by `cactup
-  installation refetch`. It's the baseline cactup diffs the live thornlist
+  installation refetch`. It's the baseline that cactup diffs the live thornlist
   against to detect hand edits; don't edit it directly.
 
 (Both names are recent: the pristine and the live copy used to share one name,
@@ -257,18 +257,18 @@ A config is built from two things, and cactup tracks changes to both:
   `Cactus/thornlists/installation-default.th`; a config built with an explicit
   `--thornlist` keeps building from that same file, wherever it lives.
 - **What those thorns are built from** comes from the source repos under
-  `Cactus/repos/`. At every build, cactup records the commit each of that
+  `Cactus/repos/`. At every build, cactup records the commit that each of that
   config's repos was on and whether its worktree had local modifications, then
   compares that against the tree at the next build. It also records, per
-  thorn, when each of the files it compiles was last written. That is what
-  notices an edit to files git doesn't track: a thorn generated into a
+  thorn, when each of the files that it compiles was last written. That is what
+  notices an edit to files not tracked by git: a thorn generated into a
   checkout without being committed, say.
 
   The thornlist can be in GetComponents (CRL) form or a plain Cactus
   `ThornList` (one `Arrangement/Thorn` per line). For a plain list, cactup
   finds each thorn's repo by following its `arrangements/<A>/<T>` link into
-  `Cactus/repos/`. A thorn that isn't such a link (a directory you created by
-  hand, say) is still built, and edits to its files are still noticed, but
+  `Cactus/repos/`. A thorn that isn't such a link (a directory that you created
+  by hand, say) is still built, and edits to its files are still noticed, but
   not which commit it came from. If cactup can't track a config's repos at
   all (none of them can be found or read), every build says so and why. As
   long as cactup can read the thornlist itself, edits to thorn files still
@@ -280,8 +280,8 @@ The second half is what makes ordinary source work visible. All of these are
 picked up by a plain `cactup build <name>`, with no `-f`:
 
 - **You edited a thorn in place.** Same commit, changed files — the everyday
-  workflow of hacking on a thorn and rebuilding. That includes files git
-  doesn't track, such as a thorn a code generator rewrites.
+  workflow of hacking on a thorn and rebuilding. That includes files not
+  tracked by git, such as a thorn rewritten by a code generator.
 - **You checked out a different branch or commit inside a repo.**
 - **A refetch moved the repos** (see
   [Installing Releases](installing-releases.html)), even though it usually
@@ -295,7 +295,7 @@ What each costs:
 | A thorn's body code edited in place (a `.cc`, `.F90`, header, …), tracked by git or not | reconfigure + rebuild what the edit affects; that thorn's `build/<Thorn>/` is left alone |
 | A thorn's *shape* changed — a file added or removed, or a `.ccl` / `make.code.defn` / `make.configuration.defn` / `make.code.deps` edited | that thorn's `build/<Thorn>/` and `libthorn_<Thorn>.a` are deleted, then rebuilt from scratch |
 | A thorn repo on a different commit | reconfigure + rebuild what that affects |
-| The **Cactus flesh** on a different commit | a from-scratch rebuild — the make system and everything `config-data` is generated from have changed |
+| The **Cactus flesh** on a different commit | a from-scratch rebuild — the make system and everything that `config-data` is generated from have changed |
 
 Editing the flesh *in place* is deliberately **not** escalated to a
 from-scratch rebuild: `make` recompiles what the edit affects, and a realclean
@@ -318,10 +318,10 @@ than a body edit. As with source tracking, a config built before this landed
 has no recorded shape baseline; its first build afterward records one and
 invalidates nothing, and every build after that is detected. The same holds
 for the record of when a thorn's files were written: if you regenerated a
-thorn git doesn't track before your first build with a cactup that keeps that
+thorn not tracked by git before your first build with a cactup that keeps that
 record, that build says so, and `--reconfig` picks the change up.
 
-Files git doesn't track count only where the build reads them: a thorn's own
+Files not tracked by git count only where the build reads them: a thorn's own
 top-level files and everything under its `src/`. Anywhere else they are
 ignored. The test harness leaves output inside the source tree, and that must
 never read as a source change.
@@ -384,7 +384,7 @@ Build with a specific flavor:
 cactup build myconfig --flavor cuda
 ```
 
-If your machine has multiple flavors, you must choose one explicitly (unless one is marked default). Each flavor can have different compiler flags and its own rules for where the binary may run (GPU support and the queues its simulations may be submitted to).
+If your machine has multiple flavors, you must choose one explicitly (unless one is marked default). Each flavor can have different compiler flags and its own rules for where the binary may run (GPU support and the queues that its simulations may be submitted to).
 
 The choice sticks. Once a config is built with `--flavor cuda`, later rebuilds
 keep using `cuda` without the flag; you pass `--flavor` again only to switch it
@@ -421,8 +421,8 @@ It replaces flavor selection entirely, so it cannot be combined with
    ```
 
    With no `[cactup]` header there is no GPU claim and no queue restriction.
-3. **A native Cactus `.cfg`** — the plain `NAME = value` format Cactus itself
-   consumes, which is what most optionlists in the wild already are:
+3. **A native Cactus `.cfg`** — the plain `NAME = value` format consumed by
+   Cactus itself, which is what most optionlists in the wild already are:
 
    ```
    VERSION = 2026-09-01
@@ -440,8 +440,8 @@ a file must pick one style and stick to it — mixing `CC = "gcc"` and
 `CFLAGS = -O2` in one file is rejected, naming both lines, rather than guessed
 at.
 
-Like `--thornlist`, `--optionlist` sticks: the config records the file it was
-built from, and later rebuilds keep using it, so you only pass the flag when you
+Like `--thornlist`, `--optionlist` sticks: the config records the file that it
+was built from, and later rebuilds keep using it, so you only pass the flag when you
 want to change something. Editing the file and running a bare `cactup build`
 picks the edit up and forces a full rebuild, just as editing an MDB optionlist
 does — which is what makes the edit/rebuild porting loop work:
@@ -457,8 +457,8 @@ one instead. To go back to one of the machine's own flavors, pass `--flavor`,
 which clears the recorded file.
 
 > [!NOTE]
-> If the file you built from is moved or deleted, the build does not break and
-> does not silently change: cactup falls back to the verbatim copy it
+> If the file that you built from is moved or deleted, the build does not break
+> and does not silently change: cactup falls back to the verbatim copy that it
 > snapshotted inside the config and warns you. Pass `--optionlist` again to
 > point at the file's new home.
 
@@ -491,7 +491,7 @@ The universe is **recorded** with your config and affects how simulations are su
 > host. Queued builds say *how the build reaches a machine at all* — through
 > the batch scheduler, versus running immediately in your terminal. A machine
 > that requires compute-node builds isn't declaring a universe; it's declaring
-> that `make` has to go through the same queue a simulation would.
+> that `make` has to go through the same queue that a simulation would.
 
 ## Viewing build status
 
@@ -555,7 +555,7 @@ A **universe** is an optional build wrapper (Singularity, modules, etc.):
 
 - The optionlist can specify a default universe, or you can override with `--universe`
 - `--no-universe` forces native (host) compilation
-- The recorded universe affects how simulations run — they run in the same universe they were built in
+- The recorded universe affects how simulations run — they run in the same universe that they were built in
 - Useful for machines that support both container-based and native builds with different optimizations
 
 ### Common patterns
@@ -584,7 +584,7 @@ cactup build native-build --no-universe
 
 cactup has a build cache shared by all the installations of one
 `~/.cactup`, so that a new installation or a from-scratch rebuild reuses the
-objects an earlier build already compiled. It caches C and C++, and Fortran
+objects already compiled by an earlier build. It caches C and C++, and Fortran
 compiled with gfortran, and CUDA compiled with `nvcc`. It is on unless you
 turn it off with the `build-cache` knob:
 
@@ -592,7 +592,7 @@ turn it off with the `build-cache` knob:
 |-------|-------------------|
 | `serve` (the default) | Each compile that some build of this `~/.cactup` already made is taken from the cache instead of compiled; each one compiled is kept for the next build |
 | `off` | Nothing: the build is exactly what it is without the cache |
-| `audit` | As `serve`, but every object the cache has is compiled anyway and compared, to check the cache: slower than a plain build, and the way to trust it |
+| `audit` | As `serve`, but every object that the cache has is compiled anyway and compared, to check the cache: slower than a plain build, and the way to trust it |
 | `record` | Only measures: works out what each compile would be cached under and logs it. Nothing is stored or reused, and the build is exactly what it is without the cache |
 
 ```sh
@@ -618,10 +618,10 @@ cactup: build cache: 350 of 389 objects reused; 39 compiled: 22 new, 9 with othe
 - *built otherwise*: it had one compiled with another compiler, other
   flags, another environment or on another kind of host, or by another
   version of cactup;
-- *kept out*: the cache could not take part in that compile (a flag it does
-  not know, a compiler setting it cannot follow), could not use what it had
-  (an object it could not read), or could not keep what was compiled (a
-  cache it cannot write in);
+- *kept out*: the cache could not take part in that compile (a flag that it
+  does not know, a compiler setting that it cannot follow), could not use what
+  it had (an object that it could not read), or could not keep what was
+  compiled (a cache that it cannot write in);
 - *failed*: the compile failed.
 
 `cactup cache doctor` says which, and why, for the newest build of a
@@ -652,7 +652,7 @@ Then, for the newest build that went through the cache, it lists the
 compiles kept out by reason, with what would let them in where cactup
 knows; for the objects with other sources, the files that differed,
 most often first, and whether the cache compared each file whole or left
-out definitions the compile did not use; and what differed for those built
+out definitions not used by the compile; and what differed for those built
 otherwise.
 
 **Your objects name their sources differently.** So that installations can
@@ -666,7 +666,7 @@ names the file the same way when the optionlist turns on
 `F_LINE_DIRECTIVES`, and otherwise by its path from the configuration's
 `scratch` directory, `../build/<Thorn>/<file>.f90`. A runtime check's
 message ("In file '...', around line 7") names the file by that path
-always; with `F_LINE_DIRECTIVES` on, that is the copy the cache compiled,
+always; with `F_LINE_DIRECTIVES` on, that is the copy compiled by the cache,
 `../build/<Thorn>/.cactup/<file>.f90`, kept beside the build copy
 (the `.cactup` directories are the cache's, and safe to delete). In gdb, the configuration's rule first (gdb uses the
 first rule that matches), then the tree's:
@@ -679,7 +679,7 @@ set substitute-path /cactup-root /path/to/Cactus
 (Cactus compiles a copy of each source made in the configuration's
 `build` directory, so it is the first rule that finds most of them.)
 
-Or turn this off for a build you mean to debug:
+Or turn this off for a build that you mean to debug:
 
 ```sh
 cactup -K build-cache-relocate=no build myconfig
@@ -688,7 +688,7 @@ cactup -K build-cache-relocate=no build myconfig
 Its objects then keep the full paths, and are shared only between builds of
 the same configuration.
 
-A served object comes with the warnings its compile printed, shown again as
+A served object comes with the warnings printed by its compile, shown again as
 if it had compiled. Two configurations a few thorns apart share most of their
 objects, because the cache does not look at the lines of Cactus's generated
 headers that only list the thorns of a configuration. In rare cases a warning
@@ -712,13 +712,13 @@ cactup: build cache: compiles recorded: 357
 The compilers, their flags and the objects are untouched, and so is
 everything that is not a Cactus object compile — external libraries are
 built exactly as before. One thing you will see: if you build with
-`SILENT=no`, where Cactus prints each command it runs, the compile lines
+`SILENT=no`, where Cactus prints each command that it runs, the compile lines
 show cactup in front of the compiler.
 
 A recording build is slower than a plain one: for every C and C++ file,
 cactup runs the compiler's preprocessor twice more, before and after the
-compile, and reads the source and every header it includes, which is what a
-cache has to do for a file it cannot serve. `cactup cache report` says what
+compile, and reads the source and every header that it includes, which is what
+a cache has to do for a file that it cannot serve. `cactup cache report` says what
 that cost, and what it would buy:
 
 ```sh
@@ -729,17 +729,17 @@ cactup cache report myconfig --against-attempt 3 --long
 ```
 
 The first form counts the compiles that got a key, per language, and lists
-why the others did not (a compiler cactup does not recognize; a flag it does
-not know; Fortran that gfortran would preprocess itself). The comparing forms say how many of
+why the others did not (a compiler not recognized by cactup; a flag that it
+does not know; Fortran that gfortran would preprocess itself). The comparing forms say how many of
 this build's compiles a cache filled by the other build would have served,
 and for the rest, which part of the key differs — the compiler, its
 arguments, the platform, the environment, the preprocessed source, or the
-files it was made from.
+files that it was made from.
 
-A key covers every byte of every file a compile reads, so an edit that
+A key covers every byte of every file read by a compile, so an edit that
 changes no code — a comment, the spacing — is still a different key: debug
 information records columns, and the cache only ever hands back the exact
-object a compile would have produced. Some compiles get no key at all,
+object that a compile would have produced. Some compiles get no key at all,
 because no key could say what comes out of them: a source that pulls in a
 file through the assembler (`.incbin`), a compile that would use a
 precompiled header, a compiler that takes flags from a file of its own (a
@@ -758,8 +758,8 @@ Two kinds of compile go through cactup without a key, run exactly as
   `make.code.deps` includes other makefiles, uses `define`, `load`,
   `$(eval …)` or `$(guile …)`: such a thorn could define its own compile
   rule where cactup cannot see it, so cactup leaves it alone;
-- a compiler name your shell gives a meaning of its own at startup (a
-  function or alias defined in the file `BASH_ENV` names, as module
+- a compiler name that your shell gives a meaning of its own at startup (a
+  function or alias defined in the file named by `BASH_ENV`, as module
   systems set it up): cactup asks the shell what the name means once per
   build, and if it is not the program on your `PATH`, the shell runs it.
 
@@ -781,8 +781,8 @@ else `~/.cactup/cacti`), where your builds already do their I/O. The
 `build-cache-home` knob, an absolute path, puts them somewhere else; so
 does a machine's `build-cache-home`, for a site whose builds belong
 elsewhere. `cactup cache stats` says where it is, and why there. Where that
-is storage the site purges, the purge removes objects no build has used for
-a while, as `cactup cache gc` would: those compiles run again, nothing
+is storage that the site purges, the purge removes objects not used by any
+build for a while, as `cactup cache gc` would: those compiles run again, nothing
 worse. Anyone who can write in that directory can put objects into your
 builds, so keep it your own. Point the cache somewhere new (or change
 `install-home`) and the old directory stays where it was, out of sight of
@@ -844,11 +844,11 @@ installation rather than a job.
 
 **"No optionlist flavor named \<name\> (known: …)"**: Check the spelling against the list in the message, or `cactup machine show --flavors`.
 
-**"was built with flavor \<name\>, which machine \<m\> no longer has"**: this config records a flavor the machine definition has since renamed or dropped, so a rebuild has nothing to build. The message lists what the machine does offer now — pick one with `--flavor`, or build from your own file with `--optionlist`.
+**"was built with flavor \<name\>, which machine \<m\> no longer has"**: this config records a flavor since renamed or dropped by the machine definition, so a rebuild has nothing to build. The message lists what the machine does offer now — pick one with `--flavor`, or build from your own file with `--optionlist`.
 
 **"Optionlist mixes TOML and native-Cactus values"**: an `--optionlist` file has to be written in one of the three accepted formats, not a blend of two. Either quote every string (the TOML forms) or quote none of them (the native `.cfg` form) — the message names the two lines that disagree.
 
-**"Optionlist \<path\> of config \<name\> is unreadable and has no snapshot"**: the file you built this config from was moved or deleted, and the config has no snapshot to fall back on. Pass `--optionlist` with the file's new location, or `--flavor` to switch to one of the machine's own.
+**"Optionlist \<path\> of config \<name\> is unreadable and has no snapshot"**: the file that you built this config from was moved or deleted, and the config has no snapshot to fall back on. Pass `--optionlist` with the file's new location, or `--flavor` to switch to one of the machine's own.
 
 **"the thornlist builds thorns without what they need, so they would not compile"**: before it runs `make` (or queues the build), cactup checks that every thorn the list builds has what its `.ccl` files require, and every header it includes from another thorn. Each line names a thorn, what it needs, and which thorn in the repos you fetched would meet it, for example `EinsteinInitialData/TwoPuncturesX includes the header TP_Guts.h; TwoPunctures (repo einsteininitialdata) would meet it`. Add that thorn to the thornlist, or stop building the one that needs it.
 

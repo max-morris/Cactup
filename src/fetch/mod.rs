@@ -1363,7 +1363,7 @@ impl std::fmt::Display for NoSources {
                 repos_dir.display()
             ),
             NoSources::NoneOnDisk { repos_dir, count, plain } => {
-                write!(f, "none of the {count} git repo(s) its thornlist names is in '{}'", repos_dir.display())?;
+                write!(f, "none of the {count} git repo(s) named by its thornlist is in '{}'", repos_dir.display())?;
                 if !repos_dir.is_dir() {
                     write!(f, " (that directory does not exist")?;
                     if !plain {
