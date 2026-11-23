@@ -141,12 +141,13 @@ pub fn classify(list: &thornlist::Thornlist, text: &str, input_urls: &[(String, 
 }
 
 /// How a refusal names the repo `repo` (as the thornlist derives the name)
-/// of a component whose URL is `url`: the name without surrounding quotes
+/// of a component whose URL is `url`: the name [`shown_repo`] shows,
+/// without surrounding quotes
 /// (a quoted URL's name keeps its closing one) or a trailing `.git`; and
 /// when another section gives the same name to another URL, the thornlist
 /// line of this one's `!URL`, so the section can be told apart.
 fn repo_label(list: &thornlist::Thornlist, text: &str, repo: &str, url: Option<&str>) -> String {
-    let bare = repo.trim_matches(['"', '\'']);
+    let bare = shown_repo(repo).trim_matches(['"', '\'']);
     let name = bare.strip_suffix(".git").unwrap_or(bare);
     let urls: BTreeSet<&str> = list.components().iter().filter(|c| c.repo == repo).filter_map(|c| c.url.as_deref()).collect();
     let line = url.filter(|_| urls.len() > 1).and_then(|url| {
@@ -163,6 +164,14 @@ fn repo_label(list: &thornlist::Thornlist, text: &str, repo: &str, url: Option<&
         Some(n) => format!("{name} (thornlist line {n})"),
         None => name.to_owned(),
     }
+}
+
+/// The repo name `repo` (as the thornlist derives it) as any message shows
+/// it: cut at its first `?` or `#`. The parser names a repo after its URL's
+/// last segment, query and all, and a query may hold a token
+/// (`r.git?private_token=…`, `f.tar.gz?token=…`).
+pub fn shown_repo(repo: &str) -> &str {
+    repo.split(['?', '#']).next().unwrap_or(repo)
 }
 
 /// Every `scheme://` URL in `text` that carries credentials as a download's
@@ -397,6 +406,27 @@ mod tests {
         assert!(found[1].starts_with("thornlist line 3: https://***@example.org/x"), "{found:?}");
         assert!(found[2].starts_with("thornlist line 4: https://gitlab.com/o/b.git?*** carries `private_token` in its query"), "{found:?}");
         assert!(!found.concat().contains("TOKEN"), "{found:?}");
+    }
+
+    /// A repo named after a URL with a query (the parser keeps it in the
+    /// name) is shown cut at the query, in a refusal and wherever else a
+    /// repo name is shown.
+    #[test]
+    fn a_repo_name_is_shown_without_its_query() {
+        let text = "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\
+                    !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://github.com/o/r.git?private_token=SECRETQ\n\
+                    !CHECKOUT = R/One\n\
+                    !TARGET = $ROOT/dl\n!TYPE = https\n!URL = https://example.org/f.tar.gz?token=SECRETD\n!CHECKOUT = f.tgz\n";
+        let list = thornlist::parse(text).unwrap();
+        assert!(list.components().iter().any(|c| c.repo.contains("SECRETQ")), "the parser's key keeps the query");
+        let checked = classify(&list, text, &[]);
+        assert_eq!(checked.refused.len(), 2, "{:#?}", checked.refused);
+        assert!(checked.refused[0].starts_with("r: "), "{:?}", checked.refused);
+        assert!(checked.refused[1].starts_with("f.tar.gz: "), "{:?}", checked.refused);
+        assert!(!checked.refused.concat().contains("SECRET"), "{:?}", checked.refused);
+        assert_eq!(shown_repo("r.git?private_token=SECRETQ"), "r.git");
+        assert_eq!(shown_repo("g.tar.gz#access_token=SECRETF"), "g.tar.gz");
+        assert_eq!(shown_repo("zlib"), "zlib");
     }
 
     /// Offline, a git:// remote is refused by its form (nothing to probe),

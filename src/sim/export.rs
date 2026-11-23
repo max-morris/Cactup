@@ -9,6 +9,7 @@
 //! froze it from the fetch record). The thornlist and parfile go in verbatim;
 //! the pins go in a per-repo table beside them.
 
+use super::shareable::shown_repo;
 use super::Simulation;
 use crate::args::{SimDescribeArgs, SimExportArgs, SimPackArgs};
 use crate::build::{self, ConfigMeta, OptionlistSource};
@@ -190,7 +191,7 @@ fn refuse_overwrite(file: &Path, describe: &SimDescribeArgs) -> Res<()> {
 /// Refuse pins nobody else could reproduce: sources with uncommitted edits
 /// (`when` says when they had them), and commits no remote has.
 fn refuse_unfetchable(repos: &[RepoPin], published: &[bool], allow_dirty: bool, allow_unpushed: bool, when: &str) -> Res<()> {
-    let dirty: Vec<&str> = repos.iter().filter(|r| r.dirty).map(|r| r.name.as_str()).collect();
+    let dirty: Vec<&str> = repos.iter().filter(|r| r.dirty).map(|r| shown_repo(&r.name)).collect();
     if !dirty.is_empty() && !allow_dirty {
         bail!(
             "These sources had uncommitted changes {when}, so no commit reproduces them: {}. Commit them (and \
@@ -202,7 +203,7 @@ fn refuse_unfetchable(repos: &[RepoPin], published: &[bool], allow_dirty: bool, 
         .iter()
         .zip(published)
         .filter(|(_, published)| !**published)
-        .map(|(r, _)| format!("{} ({})", r.name, short(r.commit.as_deref().unwrap_or(""))))
+        .map(|(r, _)| format!("{} ({})", shown_repo(&r.name), short(r.commit.as_deref().unwrap_or(""))))
         .collect();
     if !unpushed.is_empty() && !allow_unpushed {
         bail!(
@@ -427,7 +428,7 @@ fn installed_states(repos_dir: &Path, list: &thornlist::Thornlist) -> Res<std::c
     item.init(Some(repos.len()), Some(prodash::unit::label("repos")));
     let item = std::sync::Mutex::new(item);
     let read = crate::par::parallel_map(&repos, |(repo, url, _, _)| {
-        let current = item.lock().expect("pack progress poisoned").add_child(repo.clone());
+        let current = item.lock().expect("pack progress poisoned").add_child(shown_repo(repo).to_owned());
         let dir = repos_dir.join(repo);
         let same_repo = gix::open(&dir)
             .ok()
@@ -445,6 +446,7 @@ fn installed_states(repos_dir: &Path, list: &thornlist::Thornlist) -> Res<std::c
     let mut states = std::collections::BTreeMap::new();
     for (repo, elsewhere, state) in read? {
         if elsewhere {
+            let repo = shown_repo(&repo);
             println!("{}", format!("{repo}: the installation's checkout is of another repo; left unpinned").yellow());
         }
         if let Some(state) = state {
@@ -467,7 +469,7 @@ fn remote_tips(list: &thornlist::Thornlist) -> Res<std::collections::BTreeMap<St
     let item = std::sync::Mutex::new(item);
     let window = fetch::git::AskWindow::now();
     let asked = fetch::git::ask_all(&repos, |(repo, url, git_ref, _)| {
-        let current = item.lock().expect("pack progress poisoned").add_child(repo.clone());
+        let current = item.lock().expect("pack progress poisoned").add_child(shown_repo(repo).to_owned());
         let tip = fetch::git::ask_remote_tip(url, git_ref.as_deref(), window);
         drop(current);
         item.lock().expect("pack progress poisoned").inc();
@@ -488,7 +490,7 @@ fn remote_tips(list: &thornlist::Thornlist) -> Res<std::collections::BTreeMap<St
             Ok(tip) => {
                 tips.insert(repo, tip);
             }
-            Err(e) => failed.push(format!("{repo}: {e:#}")),
+            Err(e) => failed.push(format!("{}: {e:#}", shown_repo(&repo))),
         }
     }
     if !failed.is_empty() {
@@ -532,7 +534,7 @@ pub fn unpack(file: &Path, dir: &Path, force: bool) -> Res<()> {
         println!("Wrote '{}'", path.display());
     }
     let unpinned: Vec<&str> =
-        sim.repos.iter().filter(|r| r.pin().is_none()).map(|r| r.name.as_str()).collect();
+        sim.repos.iter().filter(|r| r.pin().is_none()).map(|r| shown_repo(&r.name)).collect();
     if !unpinned.is_empty() {
         println!("{}", format!("Not pinned, so they follow their branch: {}", unpinned.join(", ")).yellow());
     }
@@ -651,7 +653,7 @@ fn check_repos(repos_dir: &Path, pins: &[RepoPin], fetched: Option<&FetchState>)
     item.init(Some(pins.len()), Some(prodash::unit::label("repos")));
     let item = std::sync::Mutex::new(item);
     let checked = crate::par::parallel_map(pins, |pin| {
-        let current = item.lock().expect("export progress poisoned").add_child(pin.name.clone());
+        let current = item.lock().expect("export progress poisoned").add_child(shown_repo(&pin.name).to_owned());
         let published = match pin.commit.as_deref().map(|c| gix::ObjectId::from_hex(c.as_bytes())) {
             None => true,
             Some(Err(_)) => false,
