@@ -2296,17 +2296,32 @@ mod tests {
     }
 
     /// `sim pack` without an installation asks the tips of the rewritten
-    /// https URL, never of the ssh one (which would use the user's keys).
+    /// https URL, never of the ssh one (which would use the user's keys),
+    /// and pins the tip it gets.
     #[test]
     fn pack_asks_tips_of_the_https_url_an_ssh_remote_is_written_as() {
         use crate::fetch::anonymous::testserver::{serve, Mode};
+        use cactup_ecosystem_common::sim::SimFile;
         let tmp = tempfile::tempdir().unwrap();
         serve("tipped.share.test", Mode::Public);
-        let (packed, out, _) = pack_urls(tmp.path(), &[("git@tipped.share.test:o/r.git", "R/One")], false, Default::default());
-        // The tip is asked of the real host, which does not exist.
-        let err = format!("{:#}", packed.unwrap_err());
-        assert!(err.contains("Could not ask every remote for its tip") && err.contains("https://tipped.share.test/o/r.git"), "{err}");
-        assert!(!out.exists());
+        // The tips are asked of a local repo standing in for the https URL.
+        let upstream = tmp.path().join("upstream/r");
+        crate::fetch::git::testrepo::init(&upstream);
+        let tip = crate::fetch::git::testrepo::commit_tree(&upstream, &[("v", "1\n", false)]);
+        let (branch, _) = crate::fetch::git::head_of(&upstream).unwrap();
+        crate::fetch::git::ASK_ROUTES
+            .lock()
+            .unwrap()
+            .insert("https://tipped.share.test/o/r.git".to_owned(), upstream.to_string_lossy().into_owned());
+        let list = format!(
+            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!TARGET = $ROOT/arrangements\n!TYPE = git\n\
+             !URL = git@tipped.share.test:o/r.git\n!REPO_BRANCH = {branch}\n!CHECKOUT = R/One\n"
+        );
+        let (packed, out, _) = pack_list(tmp.path(), &list, Default::default());
+        packed.unwrap();
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(file.repos[0].url, "https://tipped.share.test/o/r.git");
+        assert_eq!(file.repos[0].commit.as_deref(), Some(tip.to_string().as_str()));
         let asked = crate::fetch::git::ASKED.lock().unwrap().clone();
         assert!(asked.iter().any(|u| u == "https://tipped.share.test/o/r.git"), "{asked:?}");
         assert!(!asked.iter().any(|u| u.contains("git@tipped.share.test")), "{asked:?}");

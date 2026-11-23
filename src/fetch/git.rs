@@ -1403,6 +1403,12 @@ pub fn set_upstream_if_absent(repo_dir: &Path, branch: &str) -> Res<()> {
 #[cfg(test)]
 pub(crate) static ASKED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
+/// Where [`ask_remote`] asks a URL instead (tests only): a local stand-in
+/// for a host that does not exist. Recorded in [`ASKED`] as the URL given.
+#[cfg(test)]
+pub(crate) static ASK_ROUTES: std::sync::Mutex<std::collections::BTreeMap<String, String>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
 /// Clones whose upstream a test makes [`set_upstream_if_absent`] fail to write.
 #[cfg(test)]
 pub(crate) static FAIL_UPSTREAM: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
@@ -1844,6 +1850,8 @@ fn ask_remote<T: Send + 'static>(
     #[cfg(test)]
     ASKED.lock().expect("test record poisoned").push(url.to_owned());
     let owned = url.to_owned();
+    #[cfg(test)]
+    let owned = ASK_ROUTES.lock().expect("test routes poisoned").get(url).cloned().unwrap_or(owned);
     // An ask reports no progress: the silence is the whole ask.
     let bounds = Bounds { stall: left, total: Some(left), wind_down: std::time::Duration::ZERO };
     let answer = abandonable(gix::progress::Discard, bounds, move |_, _| {
