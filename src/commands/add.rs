@@ -198,7 +198,7 @@ fn library_sections(root: &str, base: &thornlist::Thornlist, added: &[AddedPacka
 }
 
 /// The clone thorn `t` of a package is fetched into. `t.repo_path` is the
-/// `!REPO_PATH` written for it, verbatim (the Cactarium derives it from where
+/// `!REPO_PATH` written for it, verbatim (Cactarium derives it from where
 /// the thorn sits in the repository, or it is the base list's own, when the
 /// base already clones the repository). GetComponents links the checkout to
 /// `repos/<clone>/<REPO_PATH>`, so a path that starts `../<name>` leaves the
@@ -301,7 +301,7 @@ pub(crate) fn describe(package: &str, version: &str) -> String {
     }
 }
 
-/// The names the Cactarium gives a thorn become paths on disk and words in a
+/// The names Cactarium gives a thorn become paths on disk and words in a
 /// thornlist (which GetComponents also hands to a shell, single-quoted), so
 /// they are checked before anything is written: an arrangement and a thorn
 /// are single plain path components; a `!REPO_PATH` is plain path
@@ -316,7 +316,7 @@ fn check_registry_names(slug: &str, arrangement: &str, thorn: &str, repo_path: &
             && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
     };
     if !plain(arrangement) || !plain(thorn) {
-        bail!("The Cactarium names a thorn of {slug} \"{arrangement}/{thorn}\", which is not a plain Arrangement/Thorn");
+        bail!("Cactarium names a thorn of {slug} \"{arrangement}/{thorn}\", which is not a plain Arrangement/Thorn");
     }
     // `..` only as the leading `../<clone>` that reaches another clone by
     // name; anywhere else it would climb out of the clone (or of `repos/`).
@@ -326,12 +326,12 @@ fn check_registry_names(slug: &str, arrangement: &str, thorn: &str, repo_path: &
     let checkout = format!("{arrangement}/{thorn}");
     let clone = clone_of("package", &crate::installation::AddedThorn { checkout, repo_path: repo_path.to_owned() });
     if !path_ok || !plain(&clone) {
-        bail!("The Cactarium gives {arrangement}/{thorn} of {slug} the repo-path \"{repo_path}\", which cactup will not write");
+        bail!("Cactarium gives {arrangement}/{thorn} of {slug} the repo-path \"{repo_path}\", which cactup will not write");
     }
     Ok(())
 }
 
-/// The source the Cactarium gives a package goes into its thornlist section,
+/// The source Cactarium gives a package goes into its thornlist section,
 /// which GetComponents hands to a shell (`git clone --branch '<label>'`,
 /// `git checkout <label>` unquoted): the URL holds no whitespace, quote or
 /// control character, the commit is hex, and the label (the version's tag,
@@ -339,10 +339,10 @@ fn check_registry_names(slug: &str, arrangement: &str, thorn: &str, repo_path: &
 /// ref characters.
 fn check_registry_source(slug: &str, url: &str, commit: &str, label: Option<&str>) -> Res<()> {
     if url.is_empty() || url.chars().any(|c| c.is_whitespace() || c.is_control() || "'\"`$;\\".contains(c)) {
-        bail!("The Cactarium gives {slug} the repository \"{}\", which cactup will not write", url.escape_debug());
+        bail!("Cactarium gives {slug} the repository \"{}\", which cactup will not write", url.escape_debug());
     }
     if commit.is_empty() || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
-        bail!("The Cactarium gives {slug} the commit \"{}\", which is not a commit id", commit.escape_debug());
+        bail!("Cactarium gives {slug} the commit \"{}\", which is not a commit id", commit.escape_debug());
     }
     if let Some(label) = label
         && (label.is_empty()
@@ -482,7 +482,7 @@ fn repo_name(url: &str) -> String {
 /// at which commit, and which of its thorns.
 struct Wanted {
     entry: String,
-    /// `owner/name@version`, as the Cactarium names the resolved version.
+    /// `owner/name@version`, as Cactarium names the resolved version.
     slug: String,
     version: String,
     tag: Option<String>,
@@ -533,8 +533,8 @@ fn resolve_all(
         }
         crate::cactarium::warn_if_yanked(&resolved.slug, &resolved.version);
         let commit =
-            resolved.version.commit.clone().ok_or_else(|| anyhow!("The Cactarium gave {} no commit", resolved.slug))?;
-        let url = resolved.url.clone().ok_or_else(|| anyhow!("The Cactarium gave {} no repository", resolved.slug))?;
+            resolved.version.commit.clone().ok_or_else(|| anyhow!("Cactarium gave {} no commit", resolved.slug))?;
+        let url = resolved.url.clone().ok_or_else(|| anyhow!("Cactarium gave {} no repository", resolved.slug))?;
         // A branch tip (`@head`, `@master`) is no version in the list: its
         // thorns come at the tip's commit, with whether anyone vouches for it.
         let tip_version;
@@ -552,7 +552,7 @@ fn resolve_all(
         if let Some(sha) = slug.sha()
             && !commit.starts_with(sha)
         {
-            bail!("Asked the Cactarium for {req}, and it answered with {} at commit {commit}", resolved.slug);
+            bail!("Asked Cactarium for {req}, and it answered with {} at commit {commit}", resolved.slug);
         }
         let read_at_commit = resolved.slug.contains('#') || is_commit(&resolved.version.version);
         let wanted_version = if read_at_commit { commit.clone() } else { resolved.version.version.clone() };
@@ -560,14 +560,14 @@ fn resolve_all(
             // What was asked must be what came back: a prefix of the full id.
             let asked = slug.sha().or_else(|| slug.commit_fallback());
             if !is_commit(&commit) || !asked.is_some_and(|prefix| commit.starts_with(prefix)) {
-                bail!("Asked the Cactarium for {req}, and it answered with {} at commit {commit}", resolved.slug);
+                bail!("Asked Cactarium for {req}, and it answered with {} at commit {commit}", resolved.slug);
             }
             let (version, untrusted) = client.package_at(slug.owner.as_str(), slug.name.as_str(), &commit)?;
             // A version frozen at that commit since `/resolve` answers here as
             // that version: not the read this was asked for, so start over.
             if version.version.version != commit {
                 bail!(
-                    "The Cactarium published {}@{} at commit {commit} while it was being added; run the add again",
+                    "Cactarium published {}@{} at commit {commit} while it was being added; run the add again",
                     entry,
                     version.version.version
                 );
@@ -610,7 +610,7 @@ fn resolve_all(
                 .versions
                 .iter()
                 .find(|v| v.version.version == resolved.version.version)
-                .ok_or_else(|| anyhow!("The Cactarium lists no thorns for {}", resolved.slug))?
+                .ok_or_else(|| anyhow!("Cactarium lists no thorns for {}", resolved.slug))?
         };
         check_registry_source(&resolved.slug, &url, &commit, label.as_deref())?;
         // A package with no thorns by design is no empty package, and has
@@ -645,11 +645,11 @@ fn resolve_all(
             || clone.starts_with('-')
             || !clone.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
         {
-            bail!("The Cactarium gives {} the repository {url}, whose name cactup will not use as a directory", resolved.slug);
+            bail!("Cactarium gives {} the repository {url}, whose name cactup will not use as a directory", resolved.slug);
         }
         if let Some(t) = thorns.iter().find(|t| t.repo_path.trim().is_empty()) {
             bail!(
-                "The Cactarium gave no repo-path for {} in {}.\nReport this to the Cactarium.",
+                "Cactarium gave no repo-path for {} in {}.\nReport this to Cactarium.",
                 t.checkout,
                 resolved.slug
             );
@@ -722,7 +722,7 @@ fn resolve_all(
     Ok(wanted)
 }
 
-/// What resolving a library asks the Cactarium with: the client, the trust
+/// What resolving a library asks Cactarium with: the client, the trust
 /// flags, and the version listings already fetched.
 struct Asker<'a> {
     client: &'a crate::cactarium::Client,
@@ -770,19 +770,19 @@ fn resolve_libraries(
         }
         crate::cactarium::warn_if_yanked(&resolved.slug, &resolved.version);
         let commit =
-            resolved.version.commit.clone().ok_or_else(|| anyhow!("The Cactarium gave {} no commit", resolved.slug))?;
-        let url = resolved.url.clone().ok_or_else(|| anyhow!("The Cactarium gave {} no repository", resolved.slug))?;
+            resolved.version.commit.clone().ok_or_else(|| anyhow!("Cactarium gave {} no commit", resolved.slug))?;
+        let url = resolved.url.clone().ok_or_else(|| anyhow!("Cactarium gave {} no repository", resolved.slug))?;
         if let Some(sha) = &claim.sha
             && !commit.starts_with(sha.as_str())
         {
-            bail!("Asked the Cactarium for {req}, and it answered with {} at commit {commit}", resolved.slug);
+            bail!("Asked Cactarium for {req}, and it answered with {} at commit {commit}", resolved.slug);
         }
         // A commit no published version names comes back as the package
         // read there, as for `cactup add owner/pkg#<sha>`.
         let read_at_commit = resolved.slug.contains('#') || is_commit(&resolved.version.version);
         let (version, label, read) = if read_at_commit {
             if !is_commit(&commit) {
-                bail!("Asked the Cactarium for {req}, and it answered with {} at commit {commit}", resolved.slug);
+                bail!("Asked Cactarium for {req}, and it answered with {} at commit {commit}", resolved.slug);
             }
             let (at, untrusted) = ask.client.package_at(target.owner.as_str(), target.name.as_str(), &commit)?;
             if untrusted {
@@ -801,7 +801,7 @@ fn resolve_libraries(
                 .iter()
                 .find(|v| v.version.version == resolved.version.version)
                 .cloned()
-                .ok_or_else(|| anyhow!("The Cactarium does not list {}", resolved.slug))?;
+                .ok_or_else(|| anyhow!("Cactarium does not list {}", resolved.slug))?;
             (resolved.version.version.clone(), resolved.version.tag.clone(), read)
         };
         check_registry_source(&resolved.slug, &url, &commit, label.as_deref())?;
@@ -1150,7 +1150,7 @@ mod tests {
         assert!(compose(BASE, &[unrecorded]).is_err(), "two repos claiming one checkout must not compose");
     }
 
-    /// `!REPO_PATH` is the Cactarium's value, verbatim, for every layout,
+    /// `!REPO_PATH` is Cactarium's value, verbatim, for every layout,
     /// and the clone follows from it: `../$1-$2` (a repository that is one
     /// thorn) reaches a clone named `<Arrangement>-<Thorn>`, anything else
     /// the package's own. Checked by fetching real repositories and
@@ -1210,7 +1210,7 @@ mod tests {
 
     /// A base that already clones the repository keeps its clone: an ET
     /// list's ExternalLibraries-HDF5 section is reused, name and layout,
-    /// whatever the Cactarium derived; a repository the base does not have
+    /// whatever Cactarium derived; a repository the base does not have
     /// keeps the package's own.
     #[test]
     fn a_repository_the_base_already_clones_is_reused() {
@@ -1332,7 +1332,7 @@ mod tests {
         base
     }
 
-    /// `owner/pkg#<sha>` (full or abbreviated), or `owner/pkg@<sha>` the
+    /// `owner/pkg#<sha>` (full or abbreviated), or `owner/pkg@<sha>`
     /// Cactarium reads as a commit, that no published version was frozen
     /// at: the package read there, pinned to the full commit id with no
     /// branch label, and the untrusted confirmation applied as for a tip.
@@ -1407,7 +1407,7 @@ mod tests {
     }
 
     /// A slug's third segment may hold a sim name (`owner/name/qc0-z4c`), but
-    /// for a package it is a thorn: anything else is refused before asking the
+    /// for a package it is a thorn: anything else is refused before asking
     /// Cactarium (nothing listens at this address).
     #[test]
     fn a_package_spec_names_a_thorn_not_a_sim() {

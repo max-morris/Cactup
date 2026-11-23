@@ -533,7 +533,7 @@ of a server or update site.
 | `<sim>/.cactup/cfg/cactup-config.toml` | `sim create`, once, by `replace` | login readers (`sim export`) | Written once, at the oldest version that holds it. | The config chain. |
 | `.sim` | `cactup export` | (c) every cactup import, the server | Written at the oldest generation that holds the content (`SimFile::required_format`), so a file needing nothing new stays readable by older cactups. | Reads generations 1 to `SIM_FORMAT`; a newer one is refused with an upgrade message, and a file claiming a generation older than its content needs is refused as invalid. |
 | `cactarium.toml`, `cactarium-stack.toml`, `cactarium-sim.toml` | authors | the server | Read 1..=`MANIFEST_FORMAT` forever: tags are immutable. | n/a |
-| Stack release (API JSON, `FrozenStack`) | the server | (c) all clients | Gated by the `api-generation` header, and cactup checks the release's `format` against the shared crate's `STACK_FORMAT` before the typed parse, so a newer one says to upgrade rather than failing on an unknown key. The server should keep answering older-generation clients in their generation beside the new one until a deliberate cutoff (a rule for the Cactarium repository). | n/a |
+| Stack release (API JSON, `FrozenStack`) | the server | (c) all clients | Gated by the `api-generation` header, and cactup checks the release's `format` against the shared crate's `STACK_FORMAT` before the typed parse, so a newer one says to upgrade rather than failing on an unknown key. The server should keep answering older-generation clients in their generation beside the new one until a deliberate cutoff (a rule for Cactarium repository). | n/a |
 | `latest.json` | CI (`ci/assemble-site.sh`) | (c) every deployed binary and the installer | **Never versioned and never broken**: a refusal would leave old binaries unable to update themselves. It carries no version key; **the path is the version**. Keys may only be added (it is read leniently), and a change that cannot be additive is published at a new path beside the old one. | n/a |
 
 **The hard case.** A newer L rewriting `restart.toml` at a bumped version
@@ -4616,7 +4616,7 @@ the config's own record only while that still describes the same `build-id`.
   from outside the source tree. `vars` lists the `@VAR@`s used. Both come
   from the shared crate's parfile lexer (`par::references`), which lexes as
   substitution does — comments (`par::comment_spans`) and `@@` skipped — and
-  which the Cactarium's review uses too, so the registry flags exactly what
+  which Cactarium's review uses too, so the registry flags exactly what
   export declares. A `.py` parfile has neither. An input can be given where
   its file is downloaded (`--input-url KNOB=URL`, else asked on a terminal):
   the file is downloaded once into the inputs directory and its `sha256`
@@ -4727,7 +4727,7 @@ none), else a prompt offering the user's global value. `<inputs>` is the
 
 An **archive input** (`.sim` format 2: `unpack = true`, with `url` and the
 archive's `sha256` required, an optional `path` and `[[input.fixup]]`s; the
-shared crate validates all of it, so the Cactarium and cactup agree) is
+shared crate validates all of it, so Cactarium and cactup agree) is
 unpacked into `<inputs>/unpacked/<key>/`, `<key>` a digest of the archive's
 hash and its fixups in order, so two files that edit the same archive
 differently never share a tree. The archive is downloaded beside it,
@@ -4789,7 +4789,7 @@ It names the repos left unpinned and the knob inputs the parfile needs.
 
 ### 8.10 The Cactarium registry
 
-The Cactarium (a registry of thorn packages, stacks and `.sim` files) is
+Cactarium (a registry of thorn packages, stacks and `.sim` files) is
 reached over its HTTP API, whose request and response shapes are the shared
 crate's `api` module — the structs the server itself serves — so the two
 sides cannot drift apart silently. `src/cactarium.rs` is only transport:
@@ -4817,7 +4817,7 @@ What uses it, all on the login node (D11):
   exact release; its frozen thornlist is pinned (`crl::pin_text`) and installed
   like `--simfile`, and the DB records the release as `stack` provenance.
   `@head`/`@master` are installed unpinned, and said not to be reproducible.
-  A tip of a stack the Cactarium does not trust (`x-cactarium-untrusted:
+  A tip of a stack Cactarium does not trust (`x-cactarium-untrusted:
   true`, or no such header on a tip at all: the check fails closed; the
   server may instead refuse such tips with a 403, whose message is printed
   as is) is code nobody reviewed: cactup says so loudly and takes it only on
@@ -4854,7 +4854,7 @@ What uses it, all on the login node (D11):
   is no thorn name, or answers without `sim`) is refused, saying so. It
   resolves even an exact version, which is how a yank is told; an exact
   version already downloaded still imports when the registry cannot be
-  reached, its yank status unknown. A sim the Cactarium publishes from its
+  reached, its yank status unknown. A sim Cactarium publishes from its
   repository (`cactarium-sim.toml`) may have `repo-file` inputs (`.sim`
   format 3): files of that repository, fetched at the version's commit (by
   id, at depth 1) from the URL and commit `/resolve` gives for the file's

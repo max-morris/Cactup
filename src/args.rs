@@ -330,7 +330,7 @@ pub(crate) struct GlobalOpts {
     /// Accept untrusted branch tips and commits without asking
     ///
     /// Covers a stack or package at a branch tip (@head, @master), or a
-    /// package at an unpublished commit (#commit), from a source the
+    /// package at an unpublished commit (#commit), from a source
     /// Cactarium does not trust. Nobody reviews these. They may fetch and
     /// build arbitrary code. The warning is still printed.
     #[clap(long, global = true)]
@@ -367,7 +367,7 @@ pub(crate) enum Commands {
     // §8.11
     /// Add Cactarium packages to the active installation
     ///
-    /// Each version is added at the commit the Cactarium recorded for it.
+    /// Each version is added at the commit Cactarium recorded for it.
     Add {
         /// Packages to add: owner/name, or owner/name/Thorn for one thorn
         ///
@@ -400,7 +400,7 @@ pub(crate) enum Commands {
     #[clap(subcommand)]
     Stack(StackCommand),
     // §8.10
-    /// Ask the Cactarium to check a package or stack for new releases now
+    /// Ask Cactarium to check a package or stack for new releases now
     Refresh {
         /// The package or stack: owner/name.
         target: String,
@@ -408,7 +408,7 @@ pub(crate) enum Commands {
     // §8.10
     /// Store a Cactarium API token
     ///
-    /// Create a token on the Cactarium settings page.
+    /// Create a token on Cactarium settings page.
     Login {
         /// The token (default: asked for).
         #[clap(long, value_name = "TOKEN")]
@@ -1158,7 +1158,7 @@ pub(crate) enum ConfigCommand {
 // §8.10
 #[derive(Subcommand, Debug)]
 pub(crate) enum StackCommand {
-    /// Publish a stack release to the Cactarium
+    /// Publish a stack release to Cactarium
     Publish {
         /// The stack definition, a cactarium-stack.toml.
         definition: PathBuf,
@@ -1390,7 +1390,7 @@ pub(crate) enum SimCommand {
     /// branch's tip today.
     Pack(SimPackArgs),
     // §8.10
-    /// Publish a .sim file to the Cactarium as a version of owner/name
+    /// Publish a .sim file to Cactarium as a version of owner/name
     Publish {
         /// The .sim file; it must be fully specified.
         file: PathBuf,

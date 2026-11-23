@@ -123,7 +123,7 @@ impl Client {
 
     /// A package read at something no published version names: a branch
     /// tip (`head` or `master`: both its default branch) or a full commit
-    /// id. Its thorns there, and whether the Cactarium does not trust it
+    /// id. Its thorns there, and whether Cactarium does not trust it
     /// (then nobody has reviewed that code).
     pub fn package_at(&self, owner: &str, name: &str, at: &str) -> Res<(cactup_ecosystem_common::api::PackageVersion, bool)> {
         let url = self.url(&format!("/packages/{owner}/{name}/versions/{at}"));
@@ -240,7 +240,7 @@ impl Client {
     /// says nothing more. Anything else keeps its full chain.
     fn unreachable(&self, e: reqwest::Error) -> anyhow::Error {
         if !(e.is_connect() || e.is_timeout()) {
-            return anyhow::Error::new(e).context(format!("Failed to reach the Cactarium at {}", self.base));
+            return anyhow::Error::new(e).context(format!("Failed to reach Cactarium at {}", self.base));
         }
         let mut cause: &dyn std::error::Error = &e;
         while let Some(next) = cause.source() {
@@ -248,7 +248,7 @@ impl Client {
         }
         let why = if e.is_timeout() { "it did not answer in time".to_owned() } else { cause.to_string() };
         anyhow!(
-            "The Cactarium at {} isn't reachable ({why})\nTo use another, set the {URL_KNOB} knob or CACTARIUM_URL.",
+            "Cactarium at {} isn't reachable ({why})\nTo use another server, set the {URL_KNOB} knob or CACTARIUM_URL.",
             self.base
         )
     }
@@ -268,7 +268,7 @@ impl Client {
             let generation: u32 = generation.to_str().ok().and_then(|g| g.parse().ok()).unwrap_or(0);
             if generation > API_GENERATION {
                 bail!(
-                    "The Cactarium at {} needs a newer cactup (API generation {generation}); run `cactup update`",
+                    "Cactarium at {} needs a newer cactup (API generation {generation}); run `cactup update`",
                     self.base
                 );
             }
@@ -286,7 +286,7 @@ impl Client {
         };
         match serde_json::from_str::<ErrorBody>(&text) {
             Ok(body) => Err(anyhow!("{}{login}", body.error.message)),
-            Err(_) => Err(anyhow!("The Cactarium at {} answered {status}", self.base)),
+            Err(_) => Err(anyhow!("Cactarium at {} answered {status}", self.base)),
         }
     }
 }
@@ -332,7 +332,7 @@ pub struct StackRelease {
     pub contact: Option<String>,
 }
 
-/// See [`StackRelease`]. A branch tip of a stack the Cactarium does not trust
+/// See [`StackRelease`]. A branch tip of a stack Cactarium does not trust
 /// is code nobody has reviewed: it is said loudly, and taken only on a yes
 /// typed at the terminal, or with `allow_untrusted`
 /// (`--risky-allow-untrusted-artifacts`), which still prints the warning.
@@ -433,20 +433,20 @@ pub(crate) fn confirm_untrusted_on(slug: &str, kind: &str, what: Unreviewed, all
 /// A downloaded `.sim` is stamped as `want` (`owner/name/sim@X.Y.Z`): what
 /// was asked for, and not some other sim of the entry.
 fn check_stamp(bytes: &[u8], want: &str) -> Res<()> {
-    let text = std::str::from_utf8(bytes).map_err(|_| anyhow!("The Cactarium's file for {want} is not text"))?;
+    let text = std::str::from_utf8(bytes).map_err(|_| anyhow!("Cactarium's file for {want} is not text"))?;
     let file = cactup_ecosystem_common::sim::SimFile::from_toml(text)
-        .map_err(|e| anyhow!("The Cactarium's file for {want}: {e}"))?;
+        .map_err(|e| anyhow!("Cactarium's file for {want}: {e}"))?;
     match file.sim.cactarium.map(|s| s.to_string()) {
         Some(stamp) if stamp == want => Ok(()),
-        Some(stamp) => bail!("Asked the Cactarium for {want}, and it sent the file of {stamp}"),
-        None => bail!("Asked the Cactarium for {want}, and it sent a file that does not say which sim it is"),
+        Some(stamp) => bail!("Asked Cactarium for {want}, and it sent the file of {stamp}"),
+        None => bail!("Asked Cactarium for {want}, and it sent a file that does not say which sim it is"),
     }
 }
 
 fn json<T: DeserializeOwned>(response: reqwest::blocking::Response) -> Res<T> {
     let url = response.url().to_string();
     let text = response.text().with_context(|| format!("Failed to read the answer from {url}"))?;
-    serde_json::from_str(&text).with_context(|| format!("The Cactarium's answer from {url} is not what cactup expects"))
+    serde_json::from_str(&text).with_context(|| format!("Cactarium's answer from {url} is not what cactup expects"))
 }
 
 /// A stack release's JSON, its `format` checked before the typed parse
@@ -456,7 +456,7 @@ fn json<T: DeserializeOwned>(response: reqwest::blocking::Response) -> Res<T> {
 fn stack_json(response: reqwest::blocking::Response) -> Res<FrozenStack> {
     let url = response.url().to_string();
     let text = response.text().with_context(|| format!("Failed to read the answer from {url}"))?;
-    let unexpected = || format!("The Cactarium's answer from {url} is not what cactup expects");
+    let unexpected = || format!("Cactarium's answer from {url} is not what cactup expects");
     let value: serde_json::Value = serde_json::from_str(&text).with_context(unexpected)?;
     if let Some(found) = value.get("format").and_then(serde_json::Value::as_u64)
         && found > u64::from(STACK_FORMAT)
@@ -542,7 +542,7 @@ pub fn token_for(base: &str) -> Res<String> {
     read_credentials(&credentials_path())?
         .tokens
         .remove(base)
-        .ok_or_else(|| anyhow!("No token for the Cactarium at {base}; run `cactup login` first"))
+        .ok_or_else(|| anyhow!("No token for Cactarium at {base}; run `cactup login` first"))
 }
 
 /// Store `token` for `base` in `path`, written whole under a temporary name
@@ -601,7 +601,7 @@ mod tests {
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let base = format!("http://127.0.0.1:{port}");
         let err = format!("{:#}", Client::at(&base).resolve("a/b", "package").unwrap_err());
-        assert!(err.starts_with(&format!("The Cactarium at {base} isn't reachable (")), "{err}");
+        assert!(err.starts_with(&format!("Cactarium at {base} isn't reachable (")), "{err}");
         assert!(err.contains("cactarium-url") && !err.contains("error sending request"), "{err}");
     }
 

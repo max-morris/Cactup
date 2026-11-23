@@ -244,7 +244,7 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     if let Some(slug) = current_stack(entry)
         && let Some(why) = yanked.get(slug)
     {
-        println!("{}", format!("  yanked:       {slug} is yanked on the Cactarium{}", reason(why)).yellow());
+        println!("{}", format!("  yanked:       {slug} is yanked on Cactarium{}", reason(why)).yellow());
     }
     for (tone, line) in conformance_lines(entry) {
         match tone {
@@ -285,7 +285,7 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
                 println!("  {:<13}   library {what} at {}/{}", "", library.inside, library.into);
             }
             if let Some(why) = yanked.get(&format!("{}@{}", package.package, package.version)) {
-                println!("{}", format!("  {:<13}   yanked on the Cactarium{}", "", reason(why)).yellow());
+                println!("{}", format!("  {:<13}   yanked on Cactarium{}", "", reason(why)).yellow());
             }
         }
     }
@@ -320,7 +320,7 @@ fn reason(why: &str) -> String {
     if why.is_empty() { String::new() } else { format!(": {why}") }
 }
 
-/// What the Cactarium says is yanked now: the installation's stack
+/// What Cactarium says is yanked now: the installation's stack
 /// release and each added package version, by `owner/name@version`. Only
 /// asked when there is something to ask about; asked in parallel, with
 /// progress. An entry that cannot be asked is left out, with one note, since
@@ -354,7 +354,7 @@ fn yanked_since(
     let layout = crate::progress::Layout::for_names(asks.iter().map(|(_, slug)| slug.as_str()));
     let answers = crate::par::parallel_map(&asks, |(kind, slug)| {
         let line = crate::progress::Line::over(progress.add_child(slug.clone()), slug, layout.clone());
-        line.phase("asking the Cactarium whether it is yanked");
+        line.phase("asking Cactarium whether it is yanked");
         let answer = (|| {
             let (entry, version) = slug.rsplit_once('@').ok_or_else(|| anyhow!("{slug} names no version"))?;
             let (owner, name) = entry.split_once('/').ok_or_else(|| anyhow!("{entry} is not owner/name"))?;
@@ -378,7 +378,7 @@ fn yanked_since(
         }
     }
     if let Some(e) = failed {
-        println!("{}", format!("Could not ask the Cactarium whether anything was yanked: {e}").dimmed());
+        println!("{}", format!("Could not ask Cactarium whether anything was yanked: {e}").dimmed());
     }
     Ok(yanked)
 }

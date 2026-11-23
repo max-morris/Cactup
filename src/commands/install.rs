@@ -538,7 +538,7 @@ pub(crate) fn valid_alias(alias: &str) -> bool {
         && alias.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-/// Resolve `req` (`owner/stack[@range|version|head|master]`) on the
+/// Resolve `req` (`owner/stack[@range|version|head|master]`) on
 /// Cactarium (§8.10) to one release, fetched with its pins and pinned into
 /// its thornlist. A range is resolved once, here: the installation records
 /// the exact release, and moving to another is an explicit refetch.

@@ -260,7 +260,7 @@ fn paste_word(word: &str) -> String {
 }
 
 /// What `import`'s argument names: a `.sim` file, or a sim published on
-/// the Cactarium.
+/// Cactarium.
 #[derive(Debug, PartialEq, Eq)]
 enum Source {
     File(PathBuf),
@@ -284,7 +284,7 @@ fn source_of(arg: &Path) -> Res<Source> {
     }
 }
 
-/// Where the copy of a published sim downloaded from the Cactarium is kept,
+/// Where the copy of a published sim downloaded from Cactarium is kept,
 /// under `root` (`~/.cactup/simfiles`): `<owner>/<name>/<version>.sim` for an
 /// entry that is one sim (the layout since sims were first published, so
 /// copies downloaded before stay in use), `<owner>/<name>/<sim>/<version>.sim`
@@ -308,7 +308,7 @@ pub(crate) fn simfile_cache_path(
     dir.join(format!("{version}.sim"))
 }
 
-/// Download published sim `req` from the Cactarium (§8.10) into
+/// Download published sim `req` from Cactarium (§8.10) into
 /// `~/.cactup/simfiles` (see [`simfile_cache_path`]); see [`fetch_published`].
 fn download_published(ctx: &Ctx, req: &str) -> Res<PathBuf> {
     let client = crate::cactarium::Client::new(&ctx.db.read()?);
@@ -343,7 +343,7 @@ fn exact_version(slug: &cactup_ecosystem_common::slug::Slug) -> Option<TrackedVe
 /// `owner/name/sim[@range|=X.Y.Z]` for one sim of a multi-sim entry (the
 /// newest version in range that has that sim; a newer one in range that
 /// dropped it is warned about). A bare `owner/name` of a multi-sim entry is
-/// refused by the Cactarium, listing its sims, and that message is shown as
+/// refused by Cactarium, listing its sims, and that message is shown as
 /// is.
 fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) -> Res<PathBuf> {
     use cactup_ecosystem_common::slug::Slug;
@@ -368,7 +368,7 @@ fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) ->
         (Err(e), Some(v)) if cached(v).is_file() => {
             println!(
                 "{}",
-                format!("Could not ask the Cactarium about {req} ({e:#}); using the cached copy").dimmed()
+                format!("Could not ask Cactarium about {req} ({e:#}); using the cached copy").dimmed()
             );
             return Ok(cached(v));
         }
@@ -394,9 +394,9 @@ fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) ->
     match (sim, resolved.sim.as_deref()) {
         (Some(want), Some(got)) if want == got => {}
         (Some(_), None) => return Err(predates_multi_sim(client, &shown, "its answer names no sim")),
-        (Some(want), Some(got)) => bail!("Asked the Cactarium for the sim {want} of {owner}/{name}, and it answered with {got}"),
+        (Some(want), Some(got)) => bail!("Asked Cactarium for the sim {want} of {owner}/{name}, and it answered with {got}"),
         (None, Some(got)) => bail!(
-            "The Cactarium answered {req} with the sim {got}; name the sim you want, as {owner}/{name}/{got}"
+            "Cactarium answered {req} with the sim {got}; name the sim you want, as {owner}/{name}/{got}"
         ),
         (None, None) => {}
     }
@@ -407,7 +407,7 @@ fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) ->
         .version
         .version
         .parse()
-        .map_err(|_| anyhow!("The Cactarium named sim version \"{}\"", resolved.version.version.escape_debug()))?;
+        .map_err(|_| anyhow!("Cactarium named sim version \"{}\"", resolved.version.version.escape_debug()))?;
     // An exact request answered with another version would import code the
     // user did not ask for; refuse rather than trust the server's matching.
     // Checked with the range itself, as the server matches: build metadata
@@ -417,7 +417,7 @@ fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) ->
         && !range.matches(&version)
     {
         bail!(
-            "Asked the Cactarium for {shown}@{}, and it answered with version {version}",
+            "Asked Cactarium for {shown}@{}, and it answered with version {version}",
             slug.at.as_deref().unwrap_or_default()
         );
     }
@@ -430,7 +430,7 @@ fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) ->
         );
     }
     let dest = cached(&version);
-    // Downloaded whenever the Cactarium answers, even when a copy of this
+    // Downloaded whenever Cactarium answers, even when a copy of this
     // version is cached: a version's file can change under it (an admin
     // rereads a tag that was moved), and a copy kept by version alone would
     // be imported stale forever. The cached copy only stands in offline.
@@ -451,7 +451,7 @@ fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) ->
         None => println!("Downloaded {shown}@{version} from {}", client.base()),
         Some(before) if std::fs::read(&dest).ok().as_deref() != Some(before.as_slice()) => println!(
             "{}",
-            format!("{shown}@{version} changed on the Cactarium; using the new copy")
+            format!("{shown}@{version} changed on Cactarium; using the new copy")
                 .yellow()
         ),
         Some(_) => {}
@@ -463,13 +463,14 @@ fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) ->
 /// them, and would read `owner/name/sim` as a package's thorn.
 fn predates_multi_sim(client: &crate::cactarium::Client, shown: &str, detail: &str) -> anyhow::Error {
     anyhow!(
-        "The Cactarium at {} predates sims named as owner/name/sim and cannot serve {shown} ({detail})",
+        "Cactarium at {} predates sims named as owner/name/sim and cannot serve {shown} ({detail})",
         client.base()
     )
 }
 
-/// `cactup login` (§8.10): store a token for the Cactarium this cactup
-/// talks to, in `~/.cactup/credentials` (owner-only), never as a knob.
+/// `cactup login` (§8.10): store the API token for the server the
+/// `cactarium-url` knob names, in `~/.cactup/credentials` (owner-only),
+/// never as a knob itself.
 pub fn login(ctx: &Ctx, token: Option<String>) -> Res<()> {
     let client = crate::cactarium::Client::new(&ctx.db.read()?);
     let token = match token {
@@ -547,7 +548,7 @@ pub fn publish_stack(
     Ok(())
 }
 
-/// `cactup refresh owner/name` (§8.10): have the Cactarium look for new
+/// `cactup refresh owner/name` (§8.10): have Cactarium look for new
 /// release tags in a package's (or a repo-kept stack's) repository now, so a
 /// release just tagged can be installed without waiting for the next poll.
 pub fn refresh(ctx: &Ctx, target: &str) -> Res<()> {
@@ -564,7 +565,7 @@ pub fn refresh(ctx: &Ctx, target: &str) -> Res<()> {
         1 => println!("{}: {}", refreshed.slug, "1 new version.".green()),
         n => println!("{}: {}", refreshed.slug, format!("{n} new versions.").green()),
     }
-    // New versions of a public entry may wait for an admin; until then the
+    // New versions of a public entry may wait for an admin; until then
     // Cactarium neither serves nor lists them.
     match refreshed.awaiting_review {
         0 => {}
@@ -591,7 +592,7 @@ fn print_published(published: &cactup_ecosystem_common::api::Published) {
 /// simulation records nothing for it); one with neither is an error now,
 /// not at submit.
 /// Where the `.sim`'s `repo-file` inputs come from, when it has any not
-/// given with `--input`: the repository the Cactarium publishes it from, at
+/// given with `--input`: the repository Cactarium publishes it from, at
 /// the commit of the version its `cactarium` stamp names.
 fn repo_source(ctx: &Ctx, sim: &SimFile, given: &[String]) -> Res<Option<crate::inputs::RepoSource>> {
     let given_knob = |knob: &str| given.iter().any(|g| g.split_once('=').is_some_and(|(k, _)| k == knob));
@@ -608,8 +609,8 @@ fn repo_source(ctx: &Ctx, sim: &SimFile, given: &[String]) -> Res<Option<crate::
     if resolved.kind != "sim" {
         bail!("{} is a {}, not a sim", resolved.slug, resolved.kind);
     }
-    let url = resolved.url.ok_or_else(|| anyhow!("The Cactarium names no repository for {slug}"))?;
-    let commit = resolved.version.commit.ok_or_else(|| anyhow!("The Cactarium names no commit for {slug}"))?;
+    let url = resolved.url.ok_or_else(|| anyhow!("Cactarium names no repository for {slug}"))?;
+    let commit = resolved.version.commit.ok_or_else(|| anyhow!("Cactarium names no commit for {slug}"))?;
     Ok(Some(crate::inputs::RepoSource { url, commit }))
 }
 
@@ -1133,7 +1134,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// A `.sim` as the Cactarium stores it, stamped with `stamp`.
+    /// A `.sim` as Cactarium stores it, stamped with `stamp`.
     pub(crate) fn stamped(stamp: &str) -> String {
         let mut sim = sim_without_hints();
         sim.sim.cactarium = Some(stamp.parse().unwrap());
@@ -1285,7 +1286,7 @@ pub(crate) mod tests {
         assert!(heads[3].starts_with("GET /api/v1/sims/et/cottonmouth-sims/2026.5.1/download?sim=mag-tov "), "{}", heads[3]);
     }
 
-    /// A version whose file changed on the Cactarium (a moved tag an admin
+    /// A version whose file changed on Cactarium (a moved tag an admin
     /// reread) is downloaded again, not taken from the cache by its version.
     #[test]
     fn a_changed_version_replaces_the_cached_copy() {
@@ -1351,7 +1352,7 @@ pub(crate) mod tests {
         assert!(!tmp.path().join("et").exists(), "nothing downloaded");
     }
 
-    /// A bare `owner/name` of a multi-sim entry: the Cactarium's refusal,
+    /// A bare `owner/name` of a multi-sim entry: Cactarium's refusal,
     /// which lists its sims, is what the user reads.
     #[test]
     fn a_bare_multi_sim_entry_relays_its_sims() {
@@ -1415,9 +1416,9 @@ pub(crate) mod tests {
         assert_eq!(err, "invalid: 'qc0-z4c' in 'et/carpetx/qc0-z4c' is not a thorn name");
     }
 
-    /// One sim of several, downloaded before: downloaded again while the
+    /// One sim of several, downloaded before: downloaded again while
     /// Cactarium answers (the copy is checked against it), and used as it
-    /// is when the download fails, or, for an exact version, when the
+    /// is when the download fails, or, for an exact version, when
     /// Cactarium cannot be reached.
     #[test]
     fn one_sim_of_several_is_cached_and_used_offline() {
