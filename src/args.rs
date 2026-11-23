@@ -331,7 +331,7 @@ pub(crate) struct GlobalOpts {
     ///
     /// Covers a stack or package at a branch tip (@head, @master), or a
     /// package at an unpublished commit (#commit), from a source
-    /// Cactarium does not trust. Nobody reviews these. They may fetch and
+    /// not trusted by Cactarium. Nobody reviews these. They may fetch and
     /// build arbitrary code. The warning is still printed.
     #[clap(long, global = true)]
     pub risky_allow_untrusted_artifacts: bool,
@@ -367,7 +367,7 @@ pub(crate) enum Commands {
     // §8.11
     /// Add Cactarium packages to the active installation
     ///
-    /// Each version is added at the commit Cactarium recorded for it.
+    /// Each version is added at the commit recorded for it by Cactarium.
     Add {
         /// Packages to add: owner/name, or owner/name/Thorn for one thorn
         ///
@@ -408,7 +408,7 @@ pub(crate) enum Commands {
     // §8.10
     /// Store a Cactarium API token
     ///
-    /// Create a token on Cactarium settings page.
+    /// Create a token on the Cactarium settings page.
     Login {
         /// The token (default: asked for).
         #[clap(long, value_name = "TOKEN")]

@@ -241,7 +241,7 @@ Without a version, the installation stays on the track its release came from
 repository's default branch) install unpinned, for development; cactup says
 so, because such an installation cannot be reproduced.
 
-Nobody reviews those branch tips. For a stack Cactarium does not trust,
+Nobody reviews those branch tips. For a stack not trusted by Cactarium,
 Cactarium may refuse to serve them at all; if it does serve one, cactup
 warns that it may fetch and build arbitrary code and asks you to type `yes`.
 `--risky-allow-untrusted-artifacts` skips the question (the warning still
@@ -257,7 +257,7 @@ cactup add max/carpetx/Loop max/spacetimex               # several packages at o
 cactup add max/carpetx#3f2c9e1                          # at one commit
 ```
 
-The package is fetched at the commit Cactarium recorded for that version
+The package is fetched at the commit recorded by Cactarium for that version
 and added to the installation's live thornlist in a block marked as managed
 by cactup; only its repository is fetched. If your thornlist already has that
 repository (or one of its thorns), pass `--replace` to use the package in its
@@ -268,8 +268,8 @@ release. Rebuild a config to compile them.
 was at that commit; if the prefix matches more than one commit,
 Cactarium lists them and you give more digits. If a published version was
 cut there, that version is what you get. Otherwise nobody has reviewed that commit, so
-the same rule as for a branch tip applies to a package Cactarium does not
-trust: it may refuse, or cactup asks you to type `yes`. `cactup inst show`
+the same rule as for a branch tip applies to a package not trusted by
+Cactarium: it may refuse, or cactup asks you to type `yes`. `cactup inst show`
 lists such a package as `owner/name at commit 3f2c9e1a0011`. The package's
 repository must let a commit be fetched by its id, as GitHub, GitLab and other
 current git hosts do.

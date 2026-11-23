@@ -332,7 +332,7 @@ pub struct StackRelease {
     pub contact: Option<String>,
 }
 
-/// See [`StackRelease`]. A branch tip of a stack Cactarium does not trust
+/// See [`StackRelease`]. A branch tip of a stack not trusted by Cactarium
 /// is code nobody has reviewed: it is said loudly, and taken only on a yes
 /// typed at the terminal, or with `allow_untrusted`
 /// (`--risky-allow-untrusted-artifacts`), which still prints the warning.

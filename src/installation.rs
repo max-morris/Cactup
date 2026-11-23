@@ -230,7 +230,7 @@ impl AddedLibrary {
 #[serde(rename_all = "kebab-case")]
 pub struct AddedThorn {
     pub checkout: String,
-    /// The `!REPO_PATH` its section is written with, verbatim:
+    /// The `!REPO_PATH` written in its section, verbatim:
     /// Cactarium's (derived from where the thorn sits in the repository), or
     /// the base list's own when the base already clones the repository.
     /// Empty: no `!REPO_PATH`.

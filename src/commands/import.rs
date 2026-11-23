@@ -592,8 +592,8 @@ fn print_published(published: &cactup_ecosystem_common::api::Published) {
 /// simulation records nothing for it); one with neither is an error now,
 /// not at submit.
 /// Where the `.sim`'s `repo-file` inputs come from, when it has any not
-/// given with `--input`: the repository Cactarium publishes it from, at
-/// the commit of the version its `cactarium` stamp names.
+/// given with `--input`: the repository that Cactarium publishes it from, at
+/// the commit of the version named by its `cactarium` stamp.
 fn repo_source(ctx: &Ctx, sim: &SimFile, given: &[String]) -> Res<Option<crate::inputs::RepoSource>> {
     let given_knob = |knob: &str| given.iter().any(|g| g.split_once('=').is_some_and(|(k, _)| k == knob));
     let Some(first) = sim.inputs.iter().find(|i| i.repo_file.is_some() && !given_knob(&i.knob)) else { return Ok(None) };
@@ -1286,7 +1286,7 @@ pub(crate) mod tests {
         assert!(heads[3].starts_with("GET /api/v1/sims/et/cottonmouth-sims/2026.5.1/download?sim=mag-tov "), "{}", heads[3]);
     }
 
-    /// A version whose file changed on Cactarium (a moved tag an admin
+    /// A version whose file changed on Cactarium (a moved tag that an admin
     /// reread) is downloaded again, not taken from the cache by its version.
     #[test]
     fn a_changed_version_replaces_the_cached_copy() {

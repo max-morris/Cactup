@@ -301,7 +301,7 @@ pub(crate) fn describe(package: &str, version: &str) -> String {
     }
 }
 
-/// The names Cactarium gives a thorn become paths on disk and words in a
+/// The names given to a thorn by Cactarium become paths on disk and words in a
 /// thornlist (which GetComponents also hands to a shell, single-quoted), so
 /// they are checked before anything is written: an arrangement and a thorn
 /// are single plain path components; a `!REPO_PATH` is plain path
@@ -331,7 +331,7 @@ fn check_registry_names(slug: &str, arrangement: &str, thorn: &str, repo_path: &
     Ok(())
 }
 
-/// The source Cactarium gives a package goes into its thornlist section,
+/// The source given to a package by Cactarium goes into its thornlist section,
 /// which GetComponents hands to a shell (`git clone --branch '<label>'`,
 /// `git checkout <label>` unquoted): the URL holds no whitespace, quote or
 /// control character, the commit is hex, and the label (the version's tag,
@@ -1210,7 +1210,7 @@ mod tests {
 
     /// A base that already clones the repository keeps its clone: an ET
     /// list's ExternalLibraries-HDF5 section is reused, name and layout,
-    /// whatever Cactarium derived; a repository the base does not have
+    /// whatever Cactarium derived; a repository that the base does not have
     /// keeps the package's own.
     #[test]
     fn a_repository_the_base_already_clones_is_reused() {
