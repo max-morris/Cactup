@@ -185,8 +185,7 @@ will never schedule:
 ```
 $ cactup sim submit mysim -q gpu2 -c 16 -t 4
 Error: This layout needs 4 GPUs per node (1 per task × 4 tasks/node) but queue
-"gpu2" has 2; each rank already takes one GPU, so lower --tpn/--tasks to put at
-most 2 on a node
+"gpu2" has 2; lower --tpn/--tasks to put at most 2 ranks on a node
 ```
 
 Some machines enforce extra rules of their own and will refuse a request with a

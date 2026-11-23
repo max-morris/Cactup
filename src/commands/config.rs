@@ -146,9 +146,7 @@ pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -
     let name = match name {
         Some(name) => name.to_owned(),
         None => installation.meta()?.active_config.ok_or_else(|| {
-            anyhow::anyhow!(
-                "This installation has no active config; see `cactup config list`"
-            )
+            anyhow::anyhow!("No active config; see `cactup config list`")
         })?,
     };
     let name = name.as_str();
@@ -186,7 +184,7 @@ pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -
         // silently uses the config's snapshot — worth surfacing here.
         format!(
             "recorded from --thornlist; {}",
-            "no longer readable; builds use this config's snapshot".yellow()
+            "unreadable; builds use the snapshot".yellow()
         )
     };
     println!("  thornlist: {} ({provenance})", meta.thornlist);
@@ -238,8 +236,8 @@ fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
         .collect();
     if !dependents.is_empty() && !force {
         bail!(
-            "{} simulation(s) were built from config \"{name}\": {}; they keep working but lose \
-             their config metadata. Pass -f to delete anyway.",
+            "{} simulation(s) were built from config \"{name}\": {}\nPass -f to delete anyway; \
+             they keep working, without config metadata.",
             dependents.len(),
             dependents.join(", ")
         );
@@ -256,8 +254,8 @@ fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
         .collect();
     if !test_dependents.is_empty() && !force {
         bail!(
-            "{} test run(s) use config \"{name}\": {}; re-running them will need the config \
-             rebuilt. Pass -f to delete anyway.",
+            "{} test run(s) use config \"{name}\": {}\nPass -f to delete anyway; rerunning them \
+             needs the config rebuilt.",
             test_dependents.len(),
             test_dependents.join(", ")
         );
@@ -298,7 +296,7 @@ fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
         locked.set_meta(&meta)?;
         match &meta.active_config {
             Some(next) => println!("Active config switched to {}.", next.bold()),
-            None => println!("No configs left; this installation has no active config."),
+            None => println!("No configs left."),
         }
     }
     drop(locked);

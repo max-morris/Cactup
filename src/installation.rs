@@ -242,8 +242,8 @@ impl InstallationMeta {
     pub fn active_config(&self) -> Res<&str> {
         self.active_config.as_deref().ok_or_else(|| {
             anyhow!(
-                "This installation has no active config; \
-                 build one with `cactup build <name>` or select one with `cactup config use <name>`"
+                "This installation has no active config.\n\
+                 Build one with `cactup build <name>` or select one with `cactup config use <name>`."
             )
         })
     }
@@ -533,7 +533,7 @@ impl Installation {
                 eprintln!(
                     "{}",
                     format!(
-                        "Renamed this installation's thornlists: pristine copy '{}', live copy '{}'.",
+                        "Renamed the thornlists to '{}' (pristine) and '{}' (live).",
                         self.source_thornlist().display(),
                         live.display()
                     )
@@ -543,7 +543,7 @@ impl Installation {
             Ok(false) => {}
             Err(e) => eprintln!(
                 "{}",
-                format!("Warning: could not rename this installation's thornlists: {e:#}").yellow()
+                format!("Warning: could not rename the thornlists: {e:#}").yellow()
             ),
         }
     }

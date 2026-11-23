@@ -90,8 +90,7 @@ pub fn dispatch(ctx: &Ctx, source: &str, new_name: &str, install_prefix: Option<
     ctx.db.update(|database| {
         if database.installations.contains_key(new_name) {
             bail!(
-                "An installation named {new_name} appeared while the copy ran; the copy at '{}' was NOT \
-                 registered",
+                "An installation named {new_name} appeared during the copy; '{}' was not registered",
                 dest.display()
             );
         }
@@ -114,32 +113,16 @@ pub fn dispatch(ctx: &Ctx, source: &str, new_name: &str, install_prefix: Option<
         )
         .bright_green()
     );
-    if symbolic {
-        println!(
-            "Its files are links to {source}'s, and follow them, until changed: a refetch or a git checkout there \
-             gives each file it changes a copy of its own, but an editor may write through a link into {source}'s \
-             file, so before you edit files by hand, make them its own with `{}`.",
-            format!("cactup inst reify {new_name} PATH").bold()
-        );
-    }
     if !copied.skipped.is_empty() {
         let shown: Vec<String> = copied.skipped.iter().take(3).map(|p| format!("'{}'", p.display())).collect();
         let more = copied.skipped.len().saturating_sub(shown.len());
         let more = if more > 0 { format!(" and {more} more") } else { String::new() };
-        println!(
-            "{}",
-            format!("Left out what is neither a file, a directory nor a link: {}{more}.", shown.join(", ")).yellow()
-        );
-    }
-    match configs_of(&from)?.as_slice() {
-        [] => println!("It starts with no configs, simulations or test runs."),
-        configs => println!(
-            "It starts with no configs, simulations or test runs; build {} anew there with `{}`.",
-            configs.join(", "),
-            format!("cactup -I {new_name} build <config>").bold()
-        ),
+        println!("{}", format!("Skipped special files: {}{more}.", shown.join(", ")).yellow());
     }
     println!("Switch to it with `{}`.", format!("cactup use {new_name}").bold());
+    if symbolic {
+        println!("Convert to real files with `{}`.", format!("cactup inst reify {new_name}").bold());
+    }
     Ok(())
 }
 
@@ -176,21 +159,9 @@ pub(crate) fn lock_sources(ctx: &Ctx, inst: &Installation) -> Res<Vec<HeartbeatL
 /// them and so see the change too.
 pub(crate) fn note_dependents(ctx: &Ctx, inst: &Installation) -> Res<()> {
     let dependents = dependents(&ctx.db.read()?, &inst.root);
-    if let Some(first) = dependents.first() {
-        let (are, copies, they) = match dependents.len() {
-            1 => ("is a", "copy", "it sees"),
-            _ => ("are", "copies", "they see"),
-        };
-        println!(
-            "{}",
-            format!(
-                "{} {are} symbolic {copies} of {}: {they} what this changes in the files not yet made their \
-                 own (`cactup inst reify {first}` first keeps it as it is).",
-                dependents.join(", "),
-                inst.alias
-            )
-            .yellow()
-        );
+    if !dependents.is_empty() {
+        let copies = if dependents.len() == 1 { "copy" } else { "copies" };
+        println!("{} this also changes symbolic {copies} {}", "note:".yellow(), dependents.join(", "));
     }
     Ok(())
 }
@@ -209,18 +180,6 @@ pub(crate) fn dependents(db: &crate::database::Database, home: &Path) -> Vec<Str
         })
         .map(|entry| entry.alias.clone())
         .collect()
-}
-
-/// The configs in the source's tree, which the copy does not get.
-fn configs_of(from: &Installation) -> Res<Vec<String>> {
-    let Ok(entries) = fs::read_dir(from.cactus_root()?.join("configs")) else { return Ok(Vec::new()) };
-    let mut names: Vec<String> = entries
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    Ok(names)
 }
 
 /// Where everything goes. Paths under the homes are relative to them.
@@ -246,7 +205,7 @@ impl Plan {
             .with_context(|| format!("Failed to resolve '{}'", from.root.display()))?;
         if dest.starts_with(&from_home) {
             bail!(
-                "'{}' is inside installation {}; make the copy somewhere else with --install-prefix",
+                "'{}' is inside installation {}; choose another location with --install-prefix",
                 dest.display(),
                 from.alias
             );
@@ -264,7 +223,7 @@ impl Plan {
         for rel in &placed {
             let there = dest.join(rel);
             if fs::symlink_metadata(&there).is_ok() {
-                bail!("'{}' already exists; make the copy somewhere else with --install-prefix", there.display());
+                bail!("'{}' already exists; choose another location with --install-prefix", there.display());
             }
         }
         let staging = dest.join(format!(".cactup-cp-{new_name}.partial"));
@@ -311,11 +270,7 @@ fn copy_until(plan: &Plan, stop: &AtomicBool, counted: &(dyn Fn() + Sync)) -> Re
     let failed = failed.or_else(|| own_live_thornlists(plan).err());
     let failed = failed.or_else(|| finish_staged(plan, &copier).err());
     if let Some(e) = failed {
-        let left = format!(
-            "nothing was registered, and the partial copy in '{}' is removed by running the same command \
-             again (or delete it)",
-            plan.staging.display()
-        );
+        let left = format!("nothing was registered; rerun to clean up '{}'", plan.staging.display());
         return Err(match stop.load(std::sync::atomic::Ordering::Relaxed) {
             true => anyhow!("Interrupted; {left}"),
             false => e.context(format!("The copy failed; {left}")),

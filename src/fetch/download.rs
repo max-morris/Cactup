@@ -128,8 +128,7 @@ pub fn download_component(
         if actual != *expected {
             let _ = std::fs::remove_file(&tmp_path);
             bail!(
-                "{fetch_url} is not the file the thornlist pins: its SHA-256 is {actual}, not {expected}. The file \
-                 on the server has changed since the list was pinned"
+                "{fetch_url} is not the file the thornlist pins: its SHA-256 is {actual}, not {expected}"
             );
         }
     }

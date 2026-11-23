@@ -234,8 +234,8 @@ fn stats(root: &Path) -> Res<()> {
     }
     for dir in &scan.other_formats {
         println!(
-            "  '{}' holds objects in another cactup version's format; \
-             once no older cactup builds with this cache, remove it with `rm -r '{}'`",
+            "  '{}' holds another cactup version's objects; remove it with `rm -r '{}'` once no older \
+             cactup uses this cache",
             dir.display(),
             dir.display()
         );
@@ -260,8 +260,8 @@ fn gc(root: &Path, unused_for: Option<Duration>, to_size: Option<u64>, dry_run: 
     // entry can be judged unused.
     if let Some((log, why)) = scan.unreadable_logs.first() {
         bail!(
-            "Cannot read use log '{}' ({why}); nothing was removed \
-             (make it readable or remove it, then run `cactup cache gc` again)",
+            "Cannot read use log '{}' ({why}); nothing was removed\nMake it readable or remove it, then \
+             run `cactup cache gc` again.",
             log.display()
         );
     }
@@ -287,7 +287,7 @@ fn gc(root: &Path, unused_for: Option<Duration>, to_size: Option<u64>, dry_run: 
     let done = upkeep::carry_out(&plan)?;
     upkeep::stamp_size(root, plan.bytes_after)?;
     println!(
-        "Removed {} objects and {} unit record(s) ({} in all), and {} file(s) left over from interrupted builds; the build cache holds {}.",
+        "Removed {} objects and {} unit record(s) ({} in all), and {} file(s) left over from interrupted builds.\nThe build cache holds {}.",
         done.entries,
         done.records,
         upkeep::human(done.bytes),
@@ -445,7 +445,7 @@ fn doctor(events: &[Event], mode: Option<crate::objcache::Mode>) -> String {
         }
         let unlisted: u64 = other.iter().map(|event| event.differs_more).sum();
         if unlisted > 0 {
-            out.push_str(&format!("           (and {unlisted} more not listed; each compile lists at most {})\n", crate::objcache::event::DIFFERS_KEPT));
+            out.push_str(&format!("           (and {unlisted} more not listed)\n"));
         }
     }
 

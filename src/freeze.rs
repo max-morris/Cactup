@@ -47,8 +47,8 @@ fn freeze(exe: &Path, stamp: Option<Stamp>, open: impl FnOnce(&Path) -> Res<File
                 eprintln!(
                     "{}",
                     format!(
-                        "Warning: could not make a versioned copy of '{}': {e:#}. Jobs \
-                         submitted now run that file, which an update may replace.",
+                        "Warning: could not make a versioned copy of '{}': {e:#}\n\
+                         Jobs submitted now run the unversioned binary.",
                         exe.display()
                     )
                     .yellow()

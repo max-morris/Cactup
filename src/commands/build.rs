@@ -107,7 +107,7 @@ fn added_package_hint(installation: &Installation, name: Option<&str>) {
         println!(
             "{}",
             format!(
-                "{checkout} comes from {} (added with cactup add); problems with it? {contact}",
+                "{checkout} comes from {} (cactup add); report problems to {contact}",
                 crate::commands::add::describe(&package.package, &package.version)
             )
             .yellow()
@@ -192,8 +192,7 @@ fn build_to_completion_with(
     watch_build(machine, &config_dir, attempt_id, Watch::Follow)?;
     if gix::interrupt::is_triggered() {
         bail!(
-            "Interrupted; the build goes on in the queue. Once it is over, run the same command again to finish \
-             the import"
+            "Interrupted; the build stays in the queue.\nRerun once it ends to finish the import."
         );
     }
     Ok(())
@@ -330,9 +329,8 @@ fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force
             && !force
         {
             bail!(
-                "Config \"{name}\"'s last build attempt ended, but the scheduler could not be asked \
-                 whether its job {} was queued again: {failed}\nRun `cactup build stop {name}`, or pass \
-                 -f to stop it and build",
+                "Could not ask the scheduler whether build job {} of config \"{name}\" was requeued: \
+                 {failed}\nRun `cactup build stop {name}`, or pass -f to stop it and build.",
                 job.id
             );
         }
@@ -342,7 +340,7 @@ fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force
             && !force
         {
             bail!(
-                "Config \"{name}\"'s last build attempt ended, but the scheduler still lists its job \
+                "The last build of config \"{name}\" ended, but the scheduler still lists its job \
                  {} {}; or pass -f to stop it",
                 job.id,
                 crate::scheduler::listed_after_end(status, &format!("cactup build stop {name}"))
@@ -350,8 +348,8 @@ fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force
         }
         if !force {
             bail!(
-                "Config \"{name}\" already has a live build attempt (job {}); \
-                 run `cactup build stop {name}` first, or pass -f to stop it",
+                "Config \"{name}\" is already building (job {})\nRun `cactup build stop {name}` first, \
+                 or pass -f to stop it.",
                 job.id
             );
         }
@@ -388,8 +386,7 @@ fn run(ctx: &Ctx, args: BuildStartArgs) -> Res<()> {
     // after.
     if args.block {
         bail!(
-            "--block does not apply to `cactup build run`, which builds in the foreground; drop the \
-             flag or use `cactup build submit --block`"
+            "--block does not apply to `cactup build run`\nDrop it, or use `cactup build submit --block`."
         );
     }
     if let (Some(config_dir), Some(attempt_id)) = (args.config_dir.clone(), args.attempt_id) {
@@ -433,13 +430,12 @@ fn start_name(inst: &Installation, name: Option<&str>) -> Res<String> {
         .collect();
     if existing.is_empty() {
         bail!(
-            "This installation has no active config yet; name the config to build: \
-             `cactup build <name>`"
+            "No active config\nName the config to build: `cactup build <name>`."
         );
     }
     bail!(
-        "This installation has no active config; name the config to build (`cactup build <name>`) \
-         or select one with `cactup config use <name>`. Configs here: {}",
+        "No active config; configs here: {}\nName one with `cactup build <name>`, or select one with \
+         `cactup config use <name>`.",
         config_name_list(&existing)
     )
 }
@@ -531,8 +527,8 @@ fn submit_impl(
     // `make` — queueing it would just burn a scheduler slot to run `cp`.
     if args.opts.virtual_executable.is_some() {
         bail!(
-            "`cactup build submit` cannot be combined with --virtual-executable; use `cactup \
-             build run --virtual-executable` instead"
+            "`cactup build submit` does not take --virtual-executable\nUse `cactup build run \
+             --virtual-executable`."
         );
     }
 
@@ -572,8 +568,7 @@ fn submit_impl(
     let topo = resolve_topology(&flags, machine, db, None, false, Placement::submit(machine))?;
     if let Some(knob) = skipped_knob {
         eprintln!(
-            "{} ignoring `build-queue` knob \"{knob}\": machine \"{}\" cannot queue a build there; \
-             using \"{}\"",
+            "{} machine \"{}\" cannot queue builds in \"{knob}\" (build-queue knob); using \"{}\"",
             "note:".yellow(),
             machine.name,
             topo.queue
@@ -688,7 +683,7 @@ fn submit_impl(
         // back the job id until the end too: said up front, and a line shows
         // the wait is alive meanwhile.
         println!(
-            "Submitting build of {} and waiting for it to finish; Ctrl-C stops waiting, not the job.",
+            "Submitting build of {} and waiting for it.\nCtrl-C stops waiting, not the job.",
             name.bold()
         );
         let waiting = WaitLine::start(&name, None);
@@ -974,7 +969,7 @@ fn watch_build(machine: &Machine, config_dir: &Path, attempt_id: u32, mode: Watc
                 Watch::Block => "Waiting for",
             };
             println!(
-                "{what} build of {} (job {job_id}); Ctrl-C detaches without stopping the job.",
+                "{what} build of {} (job {job_id}).\nCtrl-C detaches without stopping the job.",
                 config_name.bold()
             );
             if !output_started {
@@ -1541,8 +1536,7 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
             Some((job, AfterEnd::Listed(_))) => match sched.stop_judged(job, StopCase::Listed)? {
                 EndedStop::Sent => {
                     println!(
-                        "Asked the scheduler to stop build job {}, which it still lists after the build \
-                         ended",
+                        "Asked the scheduler to stop build job {}, still listed after the build ended",
                         job.id.bold()
                     );
                     false
@@ -1555,8 +1549,7 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
             Some((job, AfterEnd::Unanswered(failed))) => {
                 match sched.stop_judged(job, StopCase::Unanswered(&failed))? {
                     EndedStop::Sent => println!(
-                        "Could not query the scheduler about build job {}; asked it to stop the job in \
-                         case it was queued again",
+                        "Could not query build job {}; asked the scheduler to stop it in case it was requeued",
                         job.id.bold()
                     ),
                     EndedStop::NotKnown(said) => refused(job, &said),
@@ -1565,8 +1558,8 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
             }
             Some((job, AfterEnd::Over(JobStatus::Unknown))) => {
                 println!(
-                    "Config {}'s latest build attempt already finished, and the scheduler does not know its \
-                     job {}; nothing to stop",
+                    "The last build of {} already finished, and the scheduler does not know its job {}; \
+                     nothing to stop",
                     name.bold(),
                     job.id
                 );
@@ -1574,15 +1567,14 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
             }
             Some((job, AfterEnd::Over(_))) => {
                 println!(
-                    "Config {}'s latest build attempt already finished, and the scheduler lists its job {} as \
-                     over; nothing to stop",
+                    "The last build of {} already finished, and its job {} is over; nothing to stop",
                     name.bold(),
                     job.id
                 );
                 false
             }
             None => {
-                println!("Config {}'s latest build attempt already finished; nothing to stop", name.bold());
+                println!("The last build of {} already finished; nothing to stop", name.bold());
                 false
             }
         };
@@ -1611,7 +1603,7 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
             return Ok(());
         }
         println!(
-            "Build job {} was submitted on host {host} and its run's lock is not held; treating it as ended",
+            "Build job {} was submitted on host {host} and is not running; treating it as ended",
             attempt.meta.job_id
         );
     } else if attempt.meta.submitted {
@@ -1631,15 +1623,14 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
         }
     } else if force {
         println!(
-            "Config {}'s build is running in the foreground (pid {}); cactup cannot stop it. \
-             Press Ctrl-C in its terminal.",
+            "The build of {} runs in the foreground (pid {}); -f cannot stop it.\nPress Ctrl-C in its \
+             terminal.",
             name.bold(),
             attempt.meta.job_id
         );
     } else {
         println!(
-            "Config {}'s build is running in the foreground (pid {}); press Ctrl-C in its \
-             terminal to stop it.",
+            "The build of {} runs in the foreground (pid {}).\nPress Ctrl-C in its terminal to stop it.",
             name.bold(),
             attempt.meta.job_id
         );
@@ -1674,7 +1665,7 @@ fn attempt_is_live(attempt: &BuildAttempt, sched: &Scheduler) -> Res<bool> {
                 bail!("Interrupted");
             }
             eprintln!(
-                "{} attempt {} kept: its job's status query failed ({})",
+                "{} kept attempt {}: status query failed ({})",
                 "note:".yellow(),
                 BuildAttempt::dir_name(attempt.id),
                 format!("{e:#}").lines().next().unwrap_or_default()
@@ -2619,13 +2610,13 @@ mod tests {
         // A second submit is refused...
         let err =
             submit_impl(&inst, &machine, &db, &submit_args("sim", bare_topology()), Some("h")).unwrap_err();
-        assert!(format!("{err:#}").contains("already has a live build attempt"), "{err:#}");
+        assert!(format!("{err:#}").contains("is already building (job "), "{err:#}");
 
         // ...and so is a foreground run of the same config.
         let mut run_args = start_args(None, None);
         run_args.name = Some("sim".to_owned());
         let err = run_with(&machine, &inst, run_args).unwrap_err();
-        assert!(format!("{err:#}").contains("already has a live build attempt"), "{err:#}");
+        assert!(format!("{err:#}").contains("is already building (job "), "{err:#}");
 
         // -f stops the old job (our fake `stop` always succeeds) and a fresh
         // submit proceeds, minting attempt 0001.
@@ -2709,7 +2700,7 @@ mod tests {
         let db = Database::new();
 
         let err = format!("{:#}", run_with(&machine, &inst, start_args(None, None)).unwrap_err());
-        assert!(err.contains("name the config to build"), "{err}");
+        assert!(err.contains("Name the config to build"), "{err}");
         assert!(err.contains("cactup build <name>"), "{err}");
         let submitted = format!(
             "{:#}",
@@ -2720,7 +2711,7 @@ mod tests {
         // A config on disk with nothing active: point at it, not at creation.
         fs::create_dir_all(cactus.join("configs/sim")).unwrap();
         let err = format!("{:#}", run_with(&machine, &inst, start_args(None, None)).unwrap_err());
-        assert!(err.contains("Configs here: sim"), "{err}");
+        assert!(err.contains("configs here: sim"), "{err}");
         assert!(err.contains("cactup config use <name>"), "{err}");
     }
 
@@ -3129,7 +3120,7 @@ mod tests {
         let failing = machine("echo 'slurm_load_jobs error: Socket timed out on send/recv operation' >&2; exit 1");
         let failing_sched = Scheduler::new(&failing.meta);
         let refused = guard_no_live_attempt(&config_dir, "sim", &failing_sched, false).unwrap_err().to_string();
-        assert!(refused.contains("could not be asked whether its job 4242 was queued again"), "{refused}");
+        assert!(refused.contains("whether build job 4242 of config \"sim\" was requeued"), "{refused}");
         // The failed query's own text, and the way out that always works.
         assert!(refused.contains("Socket timed out") && refused.contains("unknown-job-pattern"), "{refused}");
         assert!(refused.contains("`cactup build stop sim`"), "{refused}");
