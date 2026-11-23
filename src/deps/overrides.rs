@@ -1,6 +1,6 @@
 //! Claim overrides (`cactup claims override …`, kept in the installation) and `--ignore-claim`
 //! (one command), applied to every release's claims as the resolver loads it.
-// Plan §2.2 step 1, §4.4; misfits 14 (any-of targets) and 15 (`repo:<name>`).
+// Plan §2.2 step 1, §4.4; misfits 14 (any-of targets) and 15 (`local:<name>`).
 
 use std::fmt;
 use std::str::FromStr;
@@ -107,7 +107,7 @@ pub enum Override {
     /// Add `needs` thorns to the package's dependency on `target`.
     Needs { package: PkgId, target: PkgId, thorns: Vec<String> },
     /// `by` stands in for `target`: it takes every need for `target`, with no version check.
-    /// `by` may be a pseudo-package (`repo:<name>`).
+    /// `by` may be a pseudo-package (`local:<name>`).
     Satisfies { by: PkgId, target: PkgId },
 }
 

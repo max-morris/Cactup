@@ -982,7 +982,7 @@ pub(crate) struct PresentSet {
 
 /// The installation as [`deps::resolve`] and [`deps::plan_remove`] see it:
 /// every added package at its release, and every base repo, mapped to its
-/// package by the lookup (or a pseudo-package `repo:<name>` when it is no
+/// package by the lookup (or a pseudo-package `local:<name>` when it is no
 /// registered package's), each with the thorns it has enabled. An `[[added]]`
 /// entry that only gives a base repo's own package more thorns (at the base's
 /// commit, in the base's clone) is one present package with that repo. Present

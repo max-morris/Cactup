@@ -883,7 +883,7 @@ fn tips_and_commits_are_read_from_the_version() {
     let pending = read_json(&cases_dir().join("pool/et--c--pending.json"))["versions"][0].clone();
     let pv: PackageVersion = serde_json::from_value(pending).unwrap();
     assert!(Release::from_served(&PkgId::parse("et/c").unwrap(), &pv, None).unwrap().pending, "review: pending");
-    assert_eq!(PkgId::repo("carpetx").as_str(), "repo:carpetx");
+    assert_eq!(PkgId::repo("carpetx").as_str(), "local:carpetx");
 }
 
 /// A tip that moves shows the commits, not "head -> head".

@@ -9,7 +9,7 @@
   ],
   "present": [
     {
-      "package": "repo:carpetx",
+      "package": "local:carpetx",
       "unknown": "2222222222222222222222222222222222222222",
       "thorns": [
         "CarpetX",
@@ -25,7 +25,7 @@
   "overrides": [
     {
       "satisfies": {
-        "by": "repo:carpetx",
+        "by": "local:carpetx",
         "target": "et/carpetx"
       }
     }
@@ -33,7 +33,7 @@
   "expect": {
     "plan": [
       "add max/z4c@1.2.0 Z4c, Z4cTest named",
-      "keep repo:carpetx repo:carpetx stands in for et/carpetx (a claims override)"
+      "keep local:carpetx local:carpetx stands in for et/carpetx (a claims override)"
     ]
   }
 }

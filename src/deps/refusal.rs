@@ -202,7 +202,7 @@ impl Refusal {
                 (false, Some(ignore)) => format!("Pass --ignore-claim {ignore}"),
                 (false, None) => "Change what asks for it; --upgrade finds no plan either".to_owned(),
             },
-            // P4: or `cactup claims override satisfies repo:<repo> <newcomer>`.
+            // P4: or `cactup claims override satisfies local:<repo> <newcomer>`.
             Refusal::SameThorn { newcomer, base_repo: Some(repo), replace: true, .. } => {
                 format!("Pass --replace to use {newcomer} in place of base repo {repo}")
             }

@@ -901,7 +901,7 @@ fn the_base_is_looked_up_in_one_request_and_null_commit_known_maps() {
         .map(|p| (p.release.id.to_string(), p.release.label()))
         .collect();
     assert!(ids.contains(&("et/one".to_owned(), "et/one@1.0.0".to_owned())), "{ids:?}");
-    assert_eq!(ids.iter().filter(|(id, _)| id.starts_with("repo:")).count(), 4, "{ids:?}");
+    assert_eq!(ids.iter().filter(|(id, _)| id.starts_with("local:")).count(), 4, "{ids:?}");
     // Naming a base package: it is in the base already, so its new thorn
     // goes into the base's own clone.
     log.lock().unwrap().clear();
@@ -2690,7 +2690,7 @@ fn a_base_repo_renamed_to_a_pseudo_package_is_no_stand_in() {
     let set = super::super::resolution::present(&mut reg, &s.inst.root, &list, &[added], None, &Default::default());
     reg.finish();
     let set = set.unwrap_or_else(|e| panic!("{e:#}"));
-    let pseudo = set.present.iter().find(|p| p.release.id.as_str() == "repo:r0").expect("the base repo as a pseudo-package");
+    let pseudo = set.present.iter().find(|p| p.release.id.as_str() == "local:r0").expect("the base repo as a pseudo-package");
     assert!(!pseudo.stand_in);
     assert_eq!(fake.lock().unwrap().unfrozen_reads, 0);
     // Not asked for in a batch either.

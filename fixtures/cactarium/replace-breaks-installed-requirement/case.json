@@ -8,7 +8,7 @@
   ],
   "present": [
     {
-      "package": "repo:carpetx",
+      "package": "local:carpetx",
       "unknown": "2222222222222222222222222222222222222222",
       "thorns": [
         "CarpetX",
@@ -28,7 +28,7 @@
       ]
     },
     {
-      "package": "repo:other",
+      "package": "local:other",
       "unknown": "5555555555555555555555555555555555555555",
       "thorns": [
         {
@@ -52,7 +52,7 @@
   "expect": {
     "refusal": "Unclaimed",
     "message": [
-      "Other (repo:other) inherits or befriends arith"
+      "Other (local:other) inherits or befriends arith"
     ]
   }
 }

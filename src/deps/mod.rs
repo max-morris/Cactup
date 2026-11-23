@@ -49,17 +49,17 @@ pub use remove::{is_requested, may_bring_back, plan_remove, AddedFor, Extension,
 #[allow(unused_imports)]
 pub use resolve::resolve;
 
-/// A package: `owner/name`, or `repo:<name>` for a repo of the installation's base that no
+/// A package: `owner/name`, or `local:<name>` for a repo of the installation's base that no
 /// registered package is known to be (a pseudo-package, so conflicts still see its thorns).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PkgId(String);
 
 impl PkgId {
-    /// `owner/name` (checked against the registry's name rules) or `repo:<name>`.
+    /// `owner/name` (checked against the registry's name rules) or `local:<name>`.
     pub fn parse(s: &str) -> Res<PkgId> {
-        if let Some(repo) = s.strip_prefix("repo:") {
+        if let Some(repo) = s.strip_prefix("local:") {
             if repo.is_empty() || repo.contains('/') {
-                bail!("\"{s}\" is not a repo of the installation (repo:<name>)");
+                bail!("\"{s}\" is not a repo of the installation (local:<name>)");
             }
             return Ok(PkgId(s.to_owned()));
         }
@@ -73,12 +73,12 @@ impl PkgId {
 
     /// The pseudo-package for an unmapped base repo.
     pub fn repo(name: &str) -> PkgId {
-        PkgId(format!("repo:{name}"))
+        PkgId(format!("local:{name}"))
     }
 
-    /// A pseudo-package (`repo:<name>`), which the registry knows nothing about.
+    /// A pseudo-package (`local:<name>`), which the registry knows nothing about.
     pub fn is_repo(&self) -> bool {
-        self.0.starts_with("repo:")
+        self.0.starts_with("local:")
     }
 
     pub fn as_str(&self) -> &str {

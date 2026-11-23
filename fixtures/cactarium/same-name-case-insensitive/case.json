@@ -8,7 +8,7 @@
   ],
   "present": [
     {
-      "package": "repo:carpetx",
+      "package": "local:carpetx",
       "unknown": "2222222222222222222222222222222222222222",
       "thorns": [
         "CarpetX",
@@ -24,7 +24,7 @@
   "expect": {
     "refusal": "SameThorn",
     "message": [
-      "both have a thorn carpetx",
+      "both have a thorn CarpetX",
       "base repo carpetx"
     ]
   }
