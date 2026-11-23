@@ -1,5 +1,5 @@
 {
-  "about": "The newest version needs a thorn of a base package the Cactarium did not read, an older one needs nothing: the older one, with a note on the newest",
+  "about": "The newest version needs a thorn of a base package unread by Cactarium, an older one needs nothing: the older one, with a note on the newest",
   "packages": [
     "max--zza",
     "et--admbase"
@@ -26,7 +26,7 @@
   "expect": {
     "plan": [
       "add max/zza@1.0.0 ZA named",
-      "note: max/zza@2.0.0 was not considered: it needs StaticConformal of et/admbase#abababababab, and the Cactarium did not read et/admbase there: et/admbase is at a commit unknown to the Cactarium (is it pushed?)"
+      "note: max/zza@2.0.0 was not considered: it needs StaticConformal of et/admbase#abababababab, and Cactarium did not read et/admbase there: et/admbase is at a commit unknown to Cactarium (is it pushed?)"
     ],
     "reads": [
       "et/admbase@abababababab"

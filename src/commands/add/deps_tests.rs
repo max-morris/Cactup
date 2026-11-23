@@ -490,7 +490,7 @@ fn section(url: &str, commit: &str, checkouts: &[&str]) -> String {
     )
 }
 
-/// An installation (alias `t`, active) of `base`, fetched, with the
+/// An installation (alias `t`, active) of `base`, fetched, with
 /// Cactarium at `cactarium`.
 struct Setup {
     _tmp: tempfile::TempDir,
@@ -707,7 +707,7 @@ fn a_missing_or_stale_added_for_never_orphans_a_package() {
     }
 }
 
-/// Without the Cactarium, `remove` cannot tell what depends on what: it
+/// Without Cactarium, `remove` cannot tell what depends on what: it
 /// refuses, naming `--no-deps`, which removes exactly what was named.
 #[test]
 fn remove_offline_refuses_unless_no_deps() {
@@ -1017,7 +1017,7 @@ fn the_ccl_check_reads_present_thorns_from_the_tree() {
     }
 }
 
-/// A remaining added package whose release the Cactarium no longer serves
+/// A remaining added package whose release Cactarium no longer serves
 /// (unapproved since, renamed, a commit it cannot find) hides what it
 /// depends on: `remove` refuses rather than delete something it may need,
 /// naming it and `--no-deps`.
@@ -1187,7 +1187,7 @@ fn a_replaced_checkout_is_checked_before_the_prompt() {
 }
 
 /// No `/providers` on an older Cactarium: the unmet requirement is still the
-/// refusal, saying the Cactarium cannot list what provides it.
+/// refusal, saying Cactarium cannot list what provides it.
 #[test]
 fn an_older_cactarium_without_providers_keeps_the_refusal() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1258,7 +1258,7 @@ fn a_base_at_unfrozen_commits_is_read_in_one_batch() {
     assert_eq!(fake.lock().unwrap().unfrozen_reads, 0);
 }
 
-/// A base package's frozen release that the Cactarium will not serve now
+/// A base package's frozen release that Cactarium will not serve now
 /// (403: not served to this caller; 429 alike) leaves its dependencies
 /// unknown, no failure; replacing it is no move beside an unread package.
 #[test]
@@ -1992,7 +1992,7 @@ fn an_added_package_at_a_commit_is_read_in_the_batch() {
         assert!(!log.iter().any(|(p, _)| p.contains(&format!("/versions/{c}"))), "{log:?}");
         assert!(log.iter().any(|(p, b)| p.ends_with("/packages/read") && b.contains("max/c")), "{log:?}");
     }
-    // Its commit gone from the Cactarium: the batch's own words say so,
+    // Its commit gone from Cactarium: the batch's own words say so,
     // beside the package that cannot be read.
     s.add(&["max/d"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
     fake.lock().unwrap().snapshots.retain(|(p, _, _)| p != "max/c");
@@ -2160,7 +2160,7 @@ fn remove_finds_a_base_package_that_depends_on_what_goes() {
 /// A base whose et/carpet (1.0.0 at c1; 2.0.0 at c2, its branch's tip) is
 /// pinned at c1 or follows its branch, beside et/x (at a commit no version
 /// froze, read in the batch) and et/f (frozen at 1.0.0), both depending on
-/// et/carpet >=1.0.0. `head`: whether the Cactarium can read et/carpet's tip
+/// et/carpet >=1.0.0. `head`: whether Cactarium can read et/carpet's tip
 /// (else a commit no version froze, which it has never seen, follows 2.0.0).
 /// `tag`: the tag 2.0.0 was frozen from (in the upstream too), which `add`
 /// writes as the replacement's `!REPO_BRANCH`.
@@ -2256,7 +2256,7 @@ fn removing_a_replacement_counts_the_base_that_comes_back() {
     let flags = RemoveFlags { dry_run: true, ..remove_yes() };
     let err = format!("{:#}", s.remove(&["et/carpet"], flags).unwrap_err());
     assert!(err.contains("Repo carpet has detached HEAD") && err.contains("is still added"), "{err}");
-    // A base that follows its branch, whose tip the Cactarium cannot read:
+    // A base that follows its branch, whose tip Cactarium cannot read:
     // what comes back is unknown, and the refusal says so.
     let (s, _) = replaced_base(false, false, None);
     s.add(&["et/carpet@=2.0.0"], AddFlags { upgrade: true, yes: true, ..AddFlags::default() }).unwrap();
@@ -2341,8 +2341,8 @@ fn an_unread_returning_base_is_said_beside_every_orphan() {
 
 /// Where a removal reads the base that comes back is where its restore puts
 /// it: the one decision both make. Here the remote renamed its default
-/// branch after the base was cloned (a new `trunk`, at a commit the
-/// Cactarium cannot read); the clone still knows its own (`master`), and
+/// branch after the base was cloned (a new `trunk`, at a commit
+/// unreadable by Cactarium); the clone still knows its own (`master`), and
 /// the restore goes there, so the removal reads the base there too.
 #[test]
 fn the_base_comes_back_where_the_restore_puts_it() {
@@ -2741,7 +2741,7 @@ fn the_lookup_says_which_unfrozen_base_repo_is_the_flesh() {
 fn an_unread_base_package_says_why() {
     type Answer = fn(&mut Fake, &str);
     let cases: [(&str, Answer, String); 6] = [
-        ("404", |f, _| f.snapshots.clear(), "et/admbase is at a commit unknown to the Cactarium (is it pushed?)".into()),
+        ("404", |f, _| f.snapshots.clear(), "et/admbase is at a commit unknown to Cactarium (is it pushed?)".into()),
         ("400", |f, a1| f.bad_at.push(a1.to_owned()), "invalid manifest: no [package] table".into()),
         ("400 too large", |f, a1| f.too_large_at.push(a1.to_owned()), "its tree is too large to read".into()),
         ("403", |f, a1| f.refuse_at.push(a1.to_owned()), "it reads an untrusted package only at released versions".into()),
@@ -2755,7 +2755,7 @@ fn an_unread_base_package_says_why() {
         it.fake.lock().unwrap().batch = batch;
         let err = format!("{:#}", it.setup.add(&["max/app"], yes()).unwrap_err());
         let needs = format!("max/app@1.0.0 needs StaticConformal of et/admbase#{}", &it.a1[..12]);
-        assert!(err.contains(&needs) && err.contains("the Cactarium did not read et/admbase there: "), "{status} batch {batch}: {err}");
+        assert!(err.contains(&needs) && err.contains("Cactarium did not read et/admbase there: "), "{status} batch {batch}: {err}");
         assert!(err.contains(why.as_str()), "{status} batch {batch}: {err}");
         if *status == "400" {
             assert!(err.contains(&format!("et/admbase at commit {}: ", &it.a1[..12])), "{status}: {err}");

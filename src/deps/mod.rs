@@ -1,4 +1,4 @@
-//! Dependency resolution over the Cactarium's claims (design/dependency-resolution-plan.md §2):
+//! Dependency resolution over Cactarium's claims (design/dependency-resolution-plan.md §2):
 //! which releases an `add` brings in, and which packages a `remove` leaves unneeded.
 //!
 //! Pure: no I/O, no printing, no network, no filesystem. Everything the resolver knows about the
@@ -170,7 +170,7 @@ fn short(commit: &str) -> &str {
     commit.get(..12).unwrap_or(commit)
 }
 
-/// One release of a package: what the resolver chooses among. Built from the Cactarium's
+/// One release of a package: what the resolver chooses among. Built from Cactarium's
 /// `PackageVersion` ([`Release::from_served`]), or by the caller for a present base repo.
 #[derive(Clone, Debug)]
 pub struct Release {
@@ -198,25 +198,25 @@ pub struct Release {
 }
 
 impl Release {
-    /// A release as the Cactarium serves it: a version, a commit no version froze (the version
+    /// A release as Cactarium serves it: a version, a commit no version froze (the version
     /// is the full commit), or a tip (`head`/`master`); `contact` is the package's, from the
     /// answer that listed it.
     pub fn from_served(id: &PkgId, v: &PackageVersion, contact: Option<&str>) -> Res<Release> {
         let info = &v.version;
         let commit = info.commit.clone().unwrap_or_default();
         if !is_commit_id(&commit) {
-            bail!("The Cactarium gave {id}@{} \"{}\" as its commit, which is none", info.version, commit.escape_debug());
+            bail!("Cactarium gave {id}@{} \"{}\" as its commit, which is none", info.version, commit.escape_debug());
         }
         let at = match info.version.as_str() {
             "head" | "master" => At::Tip { name: info.version.clone(), commit: commit.clone() },
             version if is_commit_id(version) => {
                 if version != commit {
-                    bail!("The Cactarium read {id} at {version} and answered with commit {commit}");
+                    bail!("Cactarium read {id} at {version} and answered with commit {commit}");
                 }
                 At::Commit(commit.clone())
             }
             version => {
-                let v = version.parse().map_err(|e| anyhow!("The Cactarium gave {id} a version that is none: {e}"))?;
+                let v = version.parse().map_err(|e| anyhow!("Cactarium gave {id} a version that is none: {e}"))?;
                 At::Version(v)
             }
         };
@@ -480,8 +480,8 @@ impl fmt::Display for Why {
     }
 }
 
-/// A hard CCL requirement of a thorn: the shared definition the Cactarium's dependency check and
-/// `--trim` use too (`ccl::needs_of` makes them, `ccl::meets` tells whether a thorn meets one).
+/// A hard CCL requirement of a thorn: the shared definition that Cactarium's dependency check
+/// and `--trim` use too (`ccl::needs_of` makes them, `ccl::meets` tells whether a thorn meets one).
 /// Named `Requirement` here, since [`resolve`]'s own need is a dependency on a package.
 pub use cactup_ecosystem_common::ccl::Need as Requirement;
 
@@ -494,7 +494,7 @@ pub struct Provider {
     pub thorn: String,
 }
 
-/// Why the Cactarium did not answer a read at a commit, as far as what to do about it goes.
+/// Why Cactarium did not answer a read at a commit, as far as what to do about it goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum UnreadKind {
     /// It has no such commit (not pushed?).
@@ -507,7 +507,7 @@ pub enum UnreadKind {
     Retry,
 }
 
-/// A read at a commit the Cactarium did not answer with the package: the kind, and why in words
+/// A read at a commit that Cactarium did not answer with the package: the kind, and why in words
 /// that say what is true.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Unanswered {
@@ -532,18 +532,18 @@ pub trait Facts {
     /// Fetches the served versions of these packages: one wave. Packages already loaded, and
     /// pseudo-packages, are never asked for. Returns an error when interrupted (the flag is
     /// polled per package), never a partial load: a package missing from a finished load is one
-    /// the Cactarium does not have.
+    /// unknown to Cactarium.
     fn load(&mut self, ids: &[PkgId]) -> Res<()>;
-    /// A loaded package's releases, newest first within each track; `None` when the Cactarium
+    /// A loaded package's releases, newest first within each track; `None` when Cactarium
     /// has no such package.
     fn releases(&self, id: &PkgId) -> Option<&[Release]>;
     /// The package read at a commit (full or abbreviated) or a tip (`head`, `master`); `None`
-    /// when the Cactarium has no such commit (the search then tries something else). An error is
+    /// when Cactarium has no such commit (the search then tries something else). An error is
     /// for what should stop the command: the network, an interrupt. Never asks the user anything:
     /// an untrusted snapshot is only marked, and confirmed by the caller once the plan is known.
     fn snapshot(&mut self, id: &PkgId, at: &str) -> Res<Option<Snapshot>>;
     /// Why a snapshot just answered `None` was not answered (rate-limited, not served to this
-    /// caller, a package the Cactarium cannot read there, the server failing), rather than not
+    /// caller, a package unreadable by Cactarium there, the server failing), rather than not
     /// found; `None` when it was not found.
     fn unanswered(&self, _id: &PkgId, _at: &str) -> Option<Unanswered> {
         None

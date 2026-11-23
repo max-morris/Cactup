@@ -1,5 +1,5 @@
 {
-  "about": "An any-of whose alternative the installation has (listed first) is held by it; the other alternative, a base package the Cactarium does not read, decides nothing",
+  "about": "An any-of whose alternative the installation has (listed first) is held by it; the other alternative, a base package unread by Cactarium, decides nothing",
   "packages": ["max--y--anyof-carpet-adm", "et--carpet", "et--admbase"],
   "specs": ["max/y"],
   "present": [

@@ -112,7 +112,7 @@ pub fn needed(list: &Thornlist, cactus_root: &Path, par: &str) -> Res<BTreeSet<S
         let names: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
         bail!("The parfile activates thorns the thornlist does not build: {}", names.join(", "));
     }
-    // The thorns as the shared rule reads them (the Cactarium's dependency
+    // The thorns as the shared rule reads them (Cactarium's dependency
     // check reads the same), with one difference: a thorn without an
     // IMPLEMENTS line implements its own name here, where the shared rule
     // has it implement nothing. Cactus refuses to build such a thorn, and a

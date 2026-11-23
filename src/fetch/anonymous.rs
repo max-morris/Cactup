@@ -1,6 +1,6 @@
 //! Whether a git remote answers a stranger: the anonymous probe every git
 //! remote in a `.sim` must pass before it is published (spec §8.9). The
-//! rules are the shared crate's (`cactup_ecosystem_common::probe`), so the
+//! rules are the shared crate's (`cactup_ecosystem_common::probe`), so
 //! Cactarium decides exactly as cactup does: [`probe::start`] refuses a URL
 //! by its form or names the candidate to publish (an https or http remote
 //! itself, an ssh remote's https equivalent), and [`probe::next_step`],
@@ -264,7 +264,7 @@ enum Pin {
 /// reach the remote. The check is skipped, the host pinned to no address,
 /// and the probe decides: through a proxy it may answer, and without one
 /// it fails to connect, which is then the refusal ("dns lookup failed").
-/// Leniency is safe on this side: the Cactarium vets the addresses of
+/// Leniency is safe on this side: Cactarium vets the addresses of
 /// anything published there itself.
 fn public_addresses(url: &reqwest::Url) -> Result<Pin, Unchecked> {
     let port = url.port_or_known_default().unwrap_or(443);

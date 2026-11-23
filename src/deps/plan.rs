@@ -191,7 +191,7 @@ pub struct Plan {
     pub steps: Vec<Step>,
     pub choices: Vec<Choice>,
     pub notes: Vec<String>,
-    /// Releases the search could not consider because they need what the Cactarium did not
+    /// Releases the search could not consider because they need what Cactarium did not
     /// read, each with why: such a plan is always shown and confirmed.
     pub skipped: Vec<String>,
     /// Releases awaiting review that the plan chose, `owner/name@version`.

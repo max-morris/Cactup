@@ -5,7 +5,7 @@
 """The package pool the resolver's table tests read (src/deps/tests.rs).
 
 Each pool file is one `GET /packages/{o}/{n}/versions` answer (`PackageVersions`, every field as
-the Cactarium serves it), or under pool/snapshots/ one `GET .../versions/{commit|head|master}`
+Cactarium serves it), or under pool/snapshots/ one `GET .../versions/{commit|head|master}`
 answer wrapped as {"slug", "at", "untrusted", "served"}. A case's case.json names the pool files
 it uses ("packages", "snapshots"); case.json files are edited by hand, never generated.
 

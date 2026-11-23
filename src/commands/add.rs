@@ -99,7 +99,7 @@ pub fn compose(base: &str, added: &[AddedPackage]) -> Res<String> {
 
 /// The base's clone an added package only adds thorns to, when it is one: a
 /// package that replaces nothing, whose clone the base list has under the
-/// same name, from the same repository (compared as the Cactarium compares
+/// same name, from the same repository (compared as Cactarium compares
 /// them). Its thorns live in that clone, at whatever the base has it at:
 /// `compose` writes them with the base's source for it (URL, branch, pin),
 /// and `present` reads them there too (as the base package's, when the
@@ -282,7 +282,7 @@ fn reuse_base_clone(
     repo: &mut String,
     thorns: &mut [crate::installation::AddedThorn],
 ) -> bool {
-    // Compared as the Cactarium compares repositories: a forge that ignores
+    // Compared as Cactarium compares repositories: a forge that ignores
     // path case is one repository however it is spelled.
     let same_repo = |u: &str| cactup_ecosystem_common::url::same_repo_lenient(u, url);
     let Some(same) = base.components().iter().find(|c| c.url.as_deref().is_some_and(same_repo)) else {
@@ -789,7 +789,7 @@ impl Start {
     }
 }
 
-/// The Cactarium's error, or the refusal of a command that cannot go on
+/// Cactarium's error, or the refusal of a command that cannot go on
 /// without it.
 fn needs_the_cactarium(e: anyhow::Error, way: &str) -> anyhow::Error {
     if gix::interrupt::is_triggered() {
@@ -798,7 +798,7 @@ fn needs_the_cactarium(e: anyhow::Error, way: &str) -> anyhow::Error {
     anyhow!("{e:#}\n{way}")
 }
 
-/// One line for each present package whose release the Cactarium cannot
+/// One line for each present package whose release Cactarium cannot
 /// give, for a refusal.
 fn unread_lines(unread: &[&super::resolution::Unread]) -> String {
     unread.iter().map(|u| format!("\n  {}", u.line())).collect()
@@ -827,7 +827,7 @@ fn plan_add(
         .chain(base.components().iter().map(|c| c.repo.clone()))
         .collect();
     let mut reg = Registry::new(client, names.iter().map(String::as_str));
-    // `/resolve` first, for the Cactarium's own word on a name that is no
+    // `/resolve` first, for Cactarium's own word on a name that is no
     // package (a stack, a sim, a typo).
     let asked: Vec<(String, String)> = (specs.iter().zip(&named))
         .map(|(spec, n)| {
@@ -895,14 +895,14 @@ fn plan_add(
         if moves && !flags.no_deps {
             bail!(
                 "Cannot move installed packages beside these, whose dependencies are unknown:{}\nAdd each again at \
-                 a version served by the Cactarium, or pass --no-deps.",
+                 a version served by Cactarium, or pass --no-deps.",
                 unread_lines(&unread)
             );
         }
         let labels: Vec<&str> = unread.iter().map(|u| u.label.as_str()).collect();
         println!(
             "{}",
-            format!("Not checked: what {} depend on (the Cactarium cannot read them).", labels.join(", ")).yellow()
+            format!("Not checked: what {} depend on (Cactarium cannot read them).", labels.join(", ")).yellow()
         );
     }
     Ok((plan, set.present, set.heads))
@@ -1332,7 +1332,7 @@ fn records_of(
 }
 
 /// `release`'s record with `thorns` enabled and the libraries the plan places
-/// for it, after the checks every name and source the Cactarium gives
+/// for it, after the checks every name and source given by Cactarium
 /// passes before it is written anywhere.
 fn record_of_release(release: &crate::deps::Release, thorns: &[String], plan: &crate::deps::Plan) -> Res<AddedPackage> {
     use crate::deps::At;
@@ -1371,14 +1371,14 @@ fn record_of_release(release: &crate::deps::Release, thorns: &[String], plan: &c
         || clone.starts_with('-')
         || !clone.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
     {
-        bail!("The Cactarium gives {slug} the repository {}, whose name is not a usable directory name", release.url);
+        bail!("Cactarium gives {slug} the repository {}, whose name is not a usable directory name", release.url);
     }
     let mut checkouts: Vec<AddedThorn> = Vec::new();
     for name in thorns {
         let t = release.thorn(name).ok_or_else(|| anyhow!("{slug} has no thorn {name}"))?;
         if t.repo_path.trim().is_empty() {
             bail!(
-                "The Cactarium gave no repo-path for {}/{} in {slug}.\nReport this to the Cactarium.",
+                "Cactarium gave no repo-path for {}/{} in {slug}.\nReport this to Cactarium.",
                 t.arrangement,
                 t.thorn
             );
@@ -1547,7 +1547,7 @@ fn left_on_disk(removed: &[AddedPackage], base: &thornlist::Thornlist) -> Vec<St
         .collect()
 }
 
-/// What `remove` takes away beyond `targets`, and whether it may: asks the
+/// What `remove` takes away beyond `targets`, and whether it may: asks
 /// Cactarium for the current claims of every present package. An
 /// `[[added]]` entry that only gives a base repo's package more thorns is one
 /// package with that repo: named, it goes unless a remaining package needs
@@ -1560,9 +1560,9 @@ fn plan_remove_with_deps(
 ) -> Res<crate::deps::RemovePlan> {
     use crate::deps::{self, Extension, Origin, PkgId, Rules};
     let named: Vec<String> = targets.iter().map(ToString::to_string).collect();
-    // Without the Cactarium nothing can say what depends on what.
+    // Without Cactarium nothing can say what depends on what.
     let way = format!(
-        "Pass --no-deps to remove {} without the Cactarium.",
+        "Pass --no-deps to remove {} without Cactarium.",
         named.join(", ")
     );
     let client = crate::cactarium::Client::new(&ctx.db.read()?);
@@ -1670,7 +1670,7 @@ fn plan_remove_with_deps(
 }
 
 /// `cactup remove owner/name…` (§8.11): undo adds. Unless `--no-deps`, it
-/// first asks the Cactarium what depends on what (the current claims of
+/// first asks Cactarium what depends on what (the current claims of
 /// every present package): it refuses while another package depends on one
 /// named, and takes along the packages only the removed ones needed, after
 /// showing them. The records go, the live list is recomposed without them,
@@ -2065,7 +2065,7 @@ mod tests {
     }
 
     /// What `cactup add specs` would record on an installation with an empty
-    /// base, against the Cactarium at `base` (nothing confirmed at a
+    /// base, against Cactarium at `base` (nothing confirmed at a
     /// terminal, nothing untrusted taken), with `flags`.
     fn wanted_with(base: &str, specs: &[&str], flags: &AddFlags) -> Res<Vec<AddedPackage>> {
         let client = crate::cactarium::Client::at(base);
@@ -2305,7 +2305,7 @@ mod tests {
         assert!(extensions_left_behind(&old, &old, &[more]).is_empty());
     }
 
-    /// The base's clone is found as the Cactarium compares repositories: a
+    /// The base's clone is found as Cactarium compares repositories: a
     /// forge that ignores path case is one repository however spelled.
     #[test]
     fn a_base_clone_is_found_however_its_url_is_spelled() {
@@ -2613,7 +2613,7 @@ mod tests {
         check_registry_names("et/x", "Arr", "Thorn", "../$1-$2").unwrap();
     }
 
-    /// `remove` of exactly what is named, asking the Cactarium nothing.
+    /// `remove` of exactly what is named, asking Cactarium nothing.
     const NO_DEPS: RemoveFlags = RemoveFlags { force: false, no_deps: true, yes: false, dry_run: false };
 
     // Command-level: `add`, `remove` and `refetch` taking a dropped

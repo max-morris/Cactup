@@ -34,7 +34,7 @@ pub struct Ways {
     pub no_deps: bool,
 }
 
-/// What a branch of the search needed of a present package the Cactarium did not read at its
+/// What a branch of the search needed of a present package unread by Cactarium at its
 /// commit (its thorns are known from the tree; what they depend on, and what it forks, are not).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct UnreadNeed {
@@ -74,7 +74,7 @@ impl UnreadNeed {
     }
 
     /// The note a plan carries for a release it was not considered: `skipped` (or keeping the
-    /// package where it is, `keeping`), with everything it needs that the Cactarium did not read.
+    /// package where it is, `keeping`), with everything it needs that Cactarium did not read.
     pub(super) fn note(skipped: &str, keeping: bool, needs: &[UnreadNeed]) -> String {
         // In the order of what is needed (thorn names), so that it does not follow package ids.
         let mut needs: Vec<&UnreadNeed> = needs.iter().collect();
@@ -83,9 +83,9 @@ impl UnreadNeed {
             .map(|n| {
                 let (wanted, id, why) = (n.wanted(), &n.id, &n.why.why);
                 if keeping {
-                    format!("{} needs {wanted}, and the Cactarium did not read {id} there: {why}", n.by)
+                    format!("{} needs {wanted}, and Cactarium did not read {id} there: {why}", n.by)
                 } else {
-                    format!("it needs {wanted}, and the Cactarium did not read {id} there: {why}")
+                    format!("it needs {wanted}, and Cactarium did not read {id} there: {why}")
                 }
             })
             .collect();
@@ -96,7 +96,7 @@ impl UnreadNeed {
 
 impl fmt::Display for UnreadNeed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} needs {}; the Cactarium did not read {} there: {}", self.by, self.wanted(), self.id, self.why.why)
+        write!(f, "{} needs {}; Cactarium did not read {} there: {}", self.by, self.wanted(), self.id, self.why.why)
     }
 }
 
@@ -156,7 +156,7 @@ pub enum Refusal {
     NoConsistentSet { constraints: Vec<Live> },
     /// The search ran past its wall-time safety net; `best` is the closest it came.
     GaveUp { seconds: u64, best: Box<Refusal> },
-    /// A commit or tip the Cactarium cannot read.
+    /// A commit or tip unreadable by Cactarium.
     NotAvailable { target: PkgId, at: String, by: Option<Live>, detail: String },
     /// Whoever takes a need lacks thorns it names.
     MissingThorns { taker: String, thorns: Vec<String>, live: Live },
@@ -179,12 +179,12 @@ pub enum Refusal {
     /// A dependency places `target` at `into` as a library, but it is a
     /// package with thorns.
     NotALibrary { target: PkgId, by: String, into: String, ignore: Option<String> },
-    /// The Cactarium has no such package.
+    /// Cactarium has no such package.
     NotRegistered { target: PkgId, by: Option<Live> },
     /// A claim cactup cannot read.
     BadClaim { by: String, claim: String, detail: String, ignore: String },
-    /// No plan, and some branch failed for want of the claims of present packages the Cactarium
-    /// did not read at their commits: what needed which, and why it was not read; with the ways
+    /// No plan, and some branch failed for want of the claims of present packages unread by
+    /// Cactarium at their commits: what needed which, and why it was not read; with the ways
     /// past that find a plan.
     Unreadable { needs: Vec<UnreadNeed>, ways: Ways },
     /// Removing these would leave dependents without what they need.
@@ -278,7 +278,7 @@ impl Refusal {
             Refusal::NotAvailable { by: Some(Live { ignore: Some(ignore), .. }), .. } => {
                 format!("Pass --ignore-claim {ignore}")
             }
-            Refusal::NotAvailable { .. } => "Name a commit or version the Cactarium has".to_owned(),
+            Refusal::NotAvailable { .. } => "Name a commit or version known to Cactarium".to_owned(),
             Refusal::GaveUp { best, .. } => best.way_past(),
             Refusal::BadClaim { ignore, .. } => {
                 format!("Pass --ignore-claim {ignore} (and tell the package's authors)")
@@ -305,7 +305,7 @@ impl Refusal {
                             UnreadKind::Missing => format!("push the current commit of {id}, then try again"),
                             UnreadKind::Untrusted => format!("put {id} at a released version"),
                             UnreadKind::Invalid => {
-                                format!("put {id} at a commit readable by the Cactarium, such as a released version")
+                                format!("put {id} at a commit readable by Cactarium, such as a released version")
                             }
                         })
                         .collect();
@@ -399,7 +399,7 @@ impl fmt::Display for Refusal {
                     Some(live) => write!(f, "{} needs {target} at {at}", live.source)?,
                     None => write!(f, "{target} at {at} was asked for")?,
                 }
-                write!(f, ", which the Cactarium cannot read: {detail}")?
+                write!(f, ", which Cactarium cannot read: {detail}")?
             }
             Refusal::MissingThorns { taker, thorns, live } => {
                 write!(f, "{taker} has no {}, which {} needs", thorns.join(", "), live.source)?
@@ -439,14 +439,14 @@ impl fmt::Display for Refusal {
                 "{by} places {target} (into = \"{into}\"), but {target} is not a library"
             )?,
             Refusal::NotRegistered { target, by: Some(live) } => {
-                write!(f, "{} needs {target}, which the Cactarium does not know", live.source)?
+                write!(f, "{} needs {target}, which Cactarium does not know", live.source)?
             }
-            Refusal::NotRegistered { target, by: None } => write!(f, "The Cactarium does not know {target}")?,
+            Refusal::NotRegistered { target, by: None } => write!(f, "Cactarium does not know {target}")?,
             Refusal::BadClaim { by, claim, detail, .. } => {
                 write!(f, "{by} has an unreadable claim ({claim}): {detail}")?
             }
             Refusal::Unreadable { needs, .. } => {
-                write!(f, "No plan works without packages unread by the Cactarium:")?;
+                write!(f, "No plan works without packages unread by Cactarium:")?;
                 for n in needs {
                     write!(f, "\n  {n}")?;
                 }

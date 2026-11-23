@@ -1,4 +1,4 @@
-//! What `cactup add` and `cactup remove` ask the Cactarium, and what they
+//! What `cactup add` and `cactup remove` ask Cactarium, and what they
 //! show before they change anything: the registry side of [`crate::deps`]
 //! (its [`Facts`], over HTTP, in parallel, with progress), the installation
 //! as the resolver sees it (which package each base repo is, by one lookup
@@ -28,12 +28,12 @@ use crate::progress::{Headline, Layout, Line};
 use crate::thornlist::{Component, ComponentType, Thornlist};
 use crate::Res;
 
-/// The headline over every request to the Cactarium.
-const ASK: &str = "ask the Cactarium";
+/// The headline over every request to Cactarium.
+const ASK: &str = "ask Cactarium";
 /// The line a long search shows on.
 const SEARCH: &str = "look for a plan";
-/// The line a wait for the Cactarium's read limit shows on.
-const READ_LIMIT: &str = "the Cactarium's read limit";
+/// The line a wait for Cactarium's read limit shows on.
+const READ_LIMIT: &str = "Cactarium's read limit";
 /// The headline over reading the installation's clones.
 const CLONES: &str = "read the installation's clones";
 /// How many search steps go by between two updates of the search line.
@@ -44,7 +44,7 @@ const TICK_EVERY: usize = 1024;
 /// by checkout.
 pub(crate) type LocalFacts = BTreeMap<String, Option<ThornFacts>>;
 
-/// The Cactarium, as [`deps::resolve`] reads it: every package's versions
+/// Cactarium, as [`deps::resolve`] reads it: every package's versions
 /// loaded once, in parallel waves, each request on a line under a headline;
 /// snapshots and provider searches one at a time, each on its line too. One
 /// renderer for the whole conversation, shut down by [`Registry::finish`] (or
@@ -61,7 +61,7 @@ pub(crate) struct Registry {
     layout: Layout,
     search: Option<Line>,
     last_tick: usize,
-    /// The Cactarium has no `/providers` (it is older than this cactup).
+    /// Cactarium has no `/providers` (it is older than this cactup).
     no_providers: bool,
     /// Snapshots not answered now, by package and what was asked, with why.
     unanswered: BTreeMap<(PkgId, String), Unanswered>,
@@ -75,7 +75,7 @@ pub(crate) struct Registry {
     /// What batch reads answered, by package and full commit: what a read
     /// of one of them needs no request for.
     batch: BTreeMap<(PkgId, String), Batched>,
-    /// No batch request again in this command: the Cactarium has no batch
+    /// No batch request again in this command: Cactarium has no batch
     /// reads (older than this cactup), or answered one with something cactup
     /// cannot use at all. Every read left is a single one, as before.
     no_batch: bool,
@@ -204,9 +204,9 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-/// A read at a commit the Cactarium did not answer with the package: its
-/// status and why, in words that say what is true (they follow "the
-/// Cactarium did not read <id> there: ").
+/// A read at a commit that Cactarium did not answer with the package: its
+/// status and why, in words that say what is true (they follow
+/// "Cactarium did not read <id> there: ").
 fn unanswered_why(r: &crate::cactarium::Refused) -> Unanswered {
     let (status, message) = (r.status, r.message.as_str());
     let (kind, why) = match (status, r.code.as_deref()) {
@@ -223,7 +223,7 @@ fn unanswered_why(r: &crate::cactarium::Refused) -> Unanswered {
 
 /// The 404 of a read at a commit: the package's repository has no such commit.
 fn missing_commit(id: &PkgId) -> Unanswered {
-    let why = format!("{id} is at a commit unknown to the Cactarium (is it pushed?)");
+    let why = format!("{id} is at a commit unknown to Cactarium (is it pushed?)");
     Unanswered { kind: UnreadKind::Missing, why }
 }
 
@@ -234,7 +234,7 @@ fn refused_read(e: &anyhow::Error) -> Option<&crate::cactarium::Refused> {
 }
 
 impl Registry {
-    /// A conversation with the Cactarium `client` talks to; `names` sizes
+    /// A conversation with the Cactarium server that `client` talks to; `names` sizes
     /// the progress lines (package ids and repo names known so far).
     pub(crate) fn new<'a>(client: &Client, names: impl IntoIterator<Item = &'a str>) -> Registry {
         // Only bars: no line here ever calls `info`/`fail`.
@@ -265,7 +265,7 @@ impl Registry {
     }
 
     /// Stops the renderer: after this, the terminal is the caller's. Says
-    /// whether the Cactarium could not list providers.
+    /// whether Cactarium could not list providers.
     pub(crate) fn finish(mut self) -> Finished {
         self.stop();
         Finished { base: self.client.base().to_owned(), no_providers: self.no_providers }
@@ -360,8 +360,8 @@ impl Registry {
     }
 
     /// Asks `/resolve` about each named package, as a package, in parallel:
-    /// a name that is a stack or a sim, or that the Cactarium does not know,
-    /// fails here with the Cactarium's own words.
+    /// a name that is a stack or a sim, or that Cactarium does not know,
+    /// fails here with Cactarium's own words.
     pub(crate) fn check_named(&self, specs: &[(String, String)]) -> Res<()> {
         let answers = self.wave(specs, "packages", |(entry, _)| entry.clone(), "resolving", |(_, req), c| {
             let req = req.clone();
@@ -387,7 +387,7 @@ impl Registry {
         self.one("the installation's repos", &phase, move |c| c.lookup(&pins))
     }
 
-    /// Each package read at a commit, in parallel: what the Cactarium serves
+    /// Each package read at a commit, in parallel: what Cactarium serves
     /// there (the version that froze it, or the package read now), or `None`
     /// when it has no such package or commit.
     pub(crate) fn read_at(&mut self, at: &[(PkgId, String)]) -> Res<Vec<Read>> {
@@ -577,7 +577,7 @@ impl Registry {
             if stalls > STALLS || round == MAX_ROUNDS {
                 break;
             }
-            let doing = if stalled { "waiting for the Cactarium's network" } else { "waiting for what it is reading" };
+            let doing = if stalled { "waiting for Cactarium's network" } else { "waiting for what it is reading" };
             if !self.pause(round_wait(stalled), deadline, &status, doing)? {
                 break;
             }
@@ -937,7 +937,7 @@ pub(crate) struct PresentOptions {
     pub no_base_reads: bool,
 }
 
-/// An added package whose release the Cactarium cannot give: what it
+/// An added package whose release Cactarium cannot give: what it
 /// depends on is unknown.
 #[derive(Clone, Debug)]
 pub(crate) struct Unread {
@@ -948,7 +948,7 @@ pub(crate) struct Unread {
 }
 
 impl Unread {
-    /// `max/z4c@1.0.0: the Cactarium does not serve version 1.0.0 at commit …`.
+    /// `max/z4c@1.0.0: Cactarium does not serve version 1.0.0 at commit …`.
     pub fn line(&self) -> String {
         format!("{}: {}", self.label, self.why)
     }
@@ -987,7 +987,7 @@ pub(crate) struct PresentSet {
 /// entry that only gives a base repo's own package more thorns (at the base's
 /// commit, in the base's clone) is one present package with that repo. Present
 /// thorns carry the facts read from the tree (`local`), where they were read:
-/// what is installed, rather than what the Cactarium scanned.
+/// what is installed, rather than what Cactarium scanned.
 pub(crate) fn present(
     reg: &mut Registry,
     install_root: &Path,
@@ -1052,7 +1052,7 @@ pub(crate) fn present(
     repos.retain(|r| !r.thorns.is_empty() || r.flesh);
 
     // One lookup for every pinned git repo, each pin asked once (one repo
-    // under two spellings is one pin, as the Cactarium compares URLs).
+    // under two spellings is one pin, as Cactarium compares URLs).
     let mut pins: Vec<PinQuery> = Vec::new();
     let mut pin_of: Vec<Option<usize>> = Vec::new();
     for r in &repos {
@@ -1193,9 +1193,9 @@ pub(crate) fn present(
         }
     }
     let why = |i: usize| match (&refused[i], &wants[i].version) {
-        (Some(u), _) => format!("the Cactarium did not read it there: {}", u.why),
-        (None, Some(v)) => format!("the Cactarium does not serve version {v} at commit {}", short(&wants[i].commit)),
-        (None, None) => format!("the Cactarium cannot read it at commit {}", short(&wants[i].commit)),
+        (Some(u), _) => format!("Cactarium did not read it there: {}", u.why),
+        (None, Some(v)) => format!("Cactarium does not serve version {v} at commit {}", short(&wants[i].commit)),
+        (None, None) => format!("Cactarium cannot read it at commit {}", short(&wants[i].commit)),
     };
 
     let mut out: Vec<Present> = Vec::new();
@@ -1418,7 +1418,7 @@ pub(crate) fn returning_base(
         let info = info_of.remove(&(b.url.clone(), commit.clone()));
         match info.as_ref().and_then(|i| i.package.as_deref()).and_then(|p| PkgId::parse(p).ok()) {
             Some(id) => wanted.push((k, id, commit, info.and_then(|i| i.version))),
-            None => unread.push((b.replacer.clone(), format!("base repo {}: the Cactarium knows no package at {}", b.repo, short(&commit)))),
+            None => unread.push((b.replacer.clone(), format!("base repo {}: Cactarium knows no package at {}", b.repo, short(&commit)))),
         }
     }
     // Frozen ones from their version lists, the rest in one batch read.
@@ -1436,7 +1436,7 @@ pub(crate) fn returning_base(
             None => reg.snapshot(&id, &commit)?.map(|s| s.release),
         };
         let Some(release) = release else {
-            let why = reg.unanswered(&id, &commit).map_or_else(|| "the Cactarium cannot read it there".to_owned(), |u| u.why);
+            let why = reg.unanswered(&id, &commit).map_or_else(|| "Cactarium cannot read it there".to_owned(), |u| u.why);
             unread.push((b.replacer.clone(), format!("base repo {}: {id} at {}: {why}", b.repo, short(&commit))));
             continue;
         };

@@ -4614,7 +4614,7 @@ the config's own record only while that still describes the same `build-id`.
 - **Shareable URLs** (`sim::shareable`; export and pack alike). A `.sim`
   leaves the machine, so every repo URL in it must be one anybody can fetch
   and nothing in it may carry credentials. The shared crate decides
-  (`url`, `probe`), the same code the Cactarium runs, so the two refuse
+  (`url`, `probe`), the same code that Cactarium runs, so the two refuse
   exactly the same URLs.
   - *Every component's URL* is judged, once per URL string, not once per
     repo name (two sections may share one). A quoted URL is refused for its
@@ -4638,7 +4638,7 @@ the config's own record only while that still describes the same `build-id`.
     itself. The check is skipped and the host pinned to no address
     (`resolve_to_addrs(host, &[])`), so reqwest never resolves it
     unchecked: a direct connection fails, said as "dns lookup failed", and
-    a proxied one is unaffected (reqwest resolves only the proxy). The
+    a proxied one is unaffected (reqwest resolves only the proxy).
     Cactarium vets addresses server-side for what is published there, so
     this side may be lenient. `probe::outcome` turns the response into an
     `Outcome` (Answer, Redirect, Busy, Other), and

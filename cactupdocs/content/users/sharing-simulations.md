@@ -43,7 +43,7 @@ Export refuses what nobody else could reproduce:
   local path or `file://` URL, a URL with a user name, password or token in
   it (`https://TOKEN@host/…`), a query string (`?private_token=…`), or a
   `git://` URL (it can't be checked, and has no encryption) is refused, as
-  the Cactarium refuses it. Remove the credentials, or push the repository
+  Cactarium refuses it. Remove the credentials, or push the repository
   somewhere others can reach and use its https URL.
 - **Every git remote is checked.** Export asks each one over the network,
   as a stranger would, with no credentials of any kind: one small request

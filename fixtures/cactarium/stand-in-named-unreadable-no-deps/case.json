@@ -1,5 +1,5 @@
 {
-  "about": "A named thorn of a base package the Cactarium does not read, under --no-deps: the way past is --upgrade, never --no-deps again (nor naming a released version, which a held base package does not take)",
+  "about": "A named thorn of a base package unread by Cactarium, under --no-deps: the way past is --upgrade, never --no-deps again (nor naming a released version, which a held base package does not take)",
   "packages": [
     "et--admbase"
   ],

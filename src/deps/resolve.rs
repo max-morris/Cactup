@@ -266,7 +266,7 @@ fn preferred(mut rs: Vec<&Rel>) -> Vec<&Rel> {
 struct Catalog<'a> {
     facts: &'a mut dyn Facts,
     rules: &'a Rules,
-    /// `None`: the Cactarium has no such package.
+    /// `None`: Cactarium has no such package.
     loaded: BTreeMap<PkgId, Option<Vec<Rel>>>,
     /// Snapshots read (or found unreadable, with why), by package and what was asked, and by the
     /// commit found.
@@ -334,7 +334,7 @@ impl<'a> Catalog<'a> {
         self.releases(id).iter().filter_map(published).collect()
     }
 
-    /// The package read at a commit or tip; `Err(why)` when the Cactarium cannot read it (a
+    /// The package read at a commit or tip; `Err(why)` when Cactarium cannot read it (a
     /// failed candidate, never a failed command).
     fn snapshot(&mut self, id: &PkgId, at: &str) -> Res<Result<Rel, Unanswered>> {
         let key = (id.clone(), at.to_owned());
@@ -350,7 +350,7 @@ impl<'a> Catalog<'a> {
         let read = match self.facts.snapshot(id, at)? {
             None => Err(self.facts.unanswered(id, at).unwrap_or_else(|| Unanswered {
                 kind: UnreadKind::Missing,
-                why: format!("the Cactarium has no commit {} of {id}", short(at)),
+                why: format!("Cactarium has no commit {} of {id}", short(at)),
             })),
             Some(snap) => {
                 let mut release = snap.release;
@@ -697,7 +697,7 @@ struct Failure {
     /// Parties whose part in it no decision can change: present packages that keep the clashing
     /// thorn whatever release they end up at (see [`Search::keeps_thorn`]).
     fixed: Vec<PkgId>,
-    /// It failed for want of the claims of a stand-in the Cactarium did not read: what needed
+    /// It failed for want of the claims of a stand-in unread by Cactarium: what needed
     /// them, and the release (or the stand-in kept where it is) the branch had chosen.
     unread: Vec<UnreadNeed>,
 }
@@ -900,7 +900,7 @@ impl Search<'_, '_, '_> {
             }
             Err(mut u) => {
                 if u.kind == UnreadKind::Missing {
-                    u.why = format!("{id} is at a commit unknown to the Cactarium (is it pushed?)");
+                    u.why = format!("{id} is at a commit unknown to Cactarium (is it pushed?)");
                 }
                 self.unreadable.insert(id.clone(), u);
             }
@@ -1398,7 +1398,7 @@ impl Search<'_, '_, '_> {
         Failure { fixed, ..Failure::of(r, Vec::new(), parties) }
     }
 
-    /// Why a present package still stands in (the Cactarium did not read it), when it does.
+    /// Why a present package still stands in (Cactarium did not read it), when it does.
     fn unread(&self, id: &PkgId) -> Option<Unanswered> {
         if !self.present.get(id).is_some_and(|p| p.stand_in) || id.is_repo() {
             return None;
@@ -1410,7 +1410,7 @@ impl Search<'_, '_, '_> {
         }))
     }
 
-    /// A branch enabling thorns of a present stand-in the Cactarium did not read (a need naming
+    /// A branch enabling thorns of a present stand-in unread by Cactarium (a need naming
     /// thorns it does not have enabled, or every thorn when it has more): what those thorns depend
     /// on is unknown, so the branch fails for want of it. Its thorns are known (the tree's): a
     /// thorn it does not have is a plain failure. Waits while the stand-in may still move (a
@@ -1464,7 +1464,7 @@ impl Search<'_, '_, '_> {
         Some(Failure { needs, unread, ..Failure::of(r, Vec::new(), parties) })
     }
 
-    /// A thorn-name clash between a present stand-in the Cactarium did not read and a package a
+    /// A thorn-name clash between a present stand-in unread by Cactarium and a package a
     /// need brings in (not named, not present): were the stand-in a fork of it, it would stand in
     /// for it and nothing would clash, and only a read tells. What failed is bringing that
     /// package in.
@@ -1491,7 +1491,7 @@ impl Search<'_, '_, '_> {
     }
 
     /// The notes of a plan: every release the search would have preferred to the one the plan
-    /// has (or keeping a present package where it is, before moving it) that needs what the
+    /// has (or keeping a present package where it is, before moving it) that needs what
     /// Cactarium did not read. Worked out from the plan and the facts alone, never from which
     /// branches the search happened to explore, so they do not depend on package ids; and from
     /// what each release asks itself, never from constraints the plan has only because it went
@@ -1555,8 +1555,8 @@ impl Search<'_, '_, '_> {
         out
     }
 
-    /// What release `r` needs, for the thorns `thorns`, of present stand-ins the Cactarium did not
-    /// read: thorns of one it has not enabled (or every thorn, when it has more), or a package
+    /// What release `r` needs, for the thorns `thorns`, of present stand-ins unread by Cactarium:
+    /// thorns of one it has not enabled (or every thorn, when it has more), or a package
     /// with a thorn named as one it has enabled (whether it forks that is unknown).
     fn unread_needs_of(&self, r: &Rel, thorns: &BTreeSet<String>, d: &Derived) -> Vec<UnreadNeed> {
         let mut out: Vec<UnreadNeed> = Vec::new();
@@ -1607,7 +1607,7 @@ impl Search<'_, '_, '_> {
     }
 
     /// What needs the plan gives a present stand-in it moved, kept where it is instead: thorns it
-    /// has not enabled, whose claims the Cactarium did not read.
+    /// has not enabled, whose claims Cactarium did not read.
     fn keeping_needs(&self, id: &PkgId, d: &Derived) -> Vec<UnreadNeed> {
         let (Some(p), Some(why)) = (self.present.get(id).filter(|p| p.stand_in), self.unreadable.get(id)) else {
             return Vec::new();
@@ -2439,7 +2439,7 @@ impl Search<'_, '_, '_> {
         }
         if let Some(Req::Tip(tip)) = named.as_ref().map(|s| &s.req) {
             let r = if self.cat.known(t) {
-                let detail = "the Cactarium cannot read that branch".to_owned();
+                let detail = "Cactarium cannot read that branch".to_owned();
                 Refusal::NotAvailable { target: t.clone(), at: tip.clone(), by: None, detail }
             } else {
                 Refusal::NotRegistered { target: t.clone(), by: None }

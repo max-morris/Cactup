@@ -1,7 +1,7 @@
 //! Table tests: every directory under `fixtures/cactarium/` holding a `case.json` is one case.
 //!
 //! - `fixtures/cactarium/pool/*.json`: `GET /packages/{o}/{n}/versions` answers
-//!   (`PackageVersions`), as the Cactarium serves them, shared by the cases; `pool/snapshots/`
+//!   (`PackageVersions`), as Cactarium serves them, shared by the cases; `pool/snapshots/`
 //!   holds `GET …/versions/{commit|head|master}` answers as `{"slug", "at", "untrusted",
 //!   "served"}`. `fixtures/cactarium/generate.py` writes the pool. A version may carry
 //!   `"review": "pending"` (S6, plan §6), read as the crate's `VersionInfo.review`.
@@ -49,7 +49,7 @@ struct FixtureFacts {
     reads: Vec<String>,
     /// How many had been asked for when the search started.
     reads_at_search: Option<usize>,
-    /// Packages whose reads the Cactarium does not answer, with why.
+    /// Packages whose reads Cactarium does not answer, with why.
     unanswered: BTreeMap<PkgId, Unanswered>,
 }
 
@@ -96,7 +96,7 @@ impl Facts for FixtureFacts {
 struct Case {
     #[allow(dead_code)]
     about: String,
-    /// Pool files (`pool/<name>.json`) whose packages the Cactarium serves.
+    /// Pool files (`pool/<name>.json`) whose packages Cactarium serves.
     packages: Vec<String>,
     #[serde(default)]
     snapshots: Vec<String>,
@@ -116,7 +116,7 @@ struct Case {
     providers: BTreeMap<String, Vec<ProviderSpec>>,
     #[serde(default)]
     remove: Option<RemoveSpec>,
-    /// Packages whose reads at a commit the Cactarium does not answer: `retry` (its read limit,
+    /// Packages whose reads at a commit Cactarium does not answer: `retry` (its read limit,
     /// the server failing), `untrusted`, `invalid` (a 400).
     #[serde(default)]
     unanswered: BTreeMap<String, String>,

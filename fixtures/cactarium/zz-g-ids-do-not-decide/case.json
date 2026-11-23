@@ -29,7 +29,7 @@
     "plan": [
       "add max/zzg@1.0.0 G named",
       "add max/zzh@2.0.0 H named",
-      "note: max/zzg@2.0.0 was not considered: it needs StaticConformal of et/admbase#abababababab, and the Cactarium did not read et/admbase there: et/admbase is at a commit unknown to the Cactarium (is it pushed?)"
+      "note: max/zzg@2.0.0 was not considered: it needs StaticConformal of et/admbase#abababababab, and Cactarium did not read et/admbase there: et/admbase is at a commit unknown to Cactarium (is it pushed?)"
     ]
   }
 }

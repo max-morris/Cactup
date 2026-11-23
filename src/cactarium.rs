@@ -105,7 +105,7 @@ pub(crate) fn interruptibly<T: Send + 'static>(
         match receive.recv_timeout(std::time::Duration::from_millis(50)) {
             Ok(answer) => return answer,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => bail!("A request to the Cactarium died"),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => bail!("A request to Cactarium died"),
         }
     }
 }
@@ -214,7 +214,7 @@ impl Client {
         self.send(self.http().get(&url))?.json()
     }
 
-    /// [`Client::package_versions`], or `None` when the Cactarium has no
+    /// [`Client::package_versions`], or `None` when Cactarium has no
     /// such package.
     pub fn package_versions_if_any(&self, owner: &str, name: &str) -> Res<Option<PackageVersions>> {
         let url = self.url(&format!("/packages/{owner}/{name}/versions"));
@@ -241,7 +241,7 @@ impl Client {
     /// [`OldCactarium`]; the request as a whole counts once against the
     /// server's limit on reads made now, and a 429 refuses all of it.
     pub fn read_packages(&self, request: &ReadRequest) -> Res<ReadAnswer> {
-        request.validate().map_err(|e| anyhow!("Cannot ask the Cactarium to read these packages: {e}"))?;
+        request.validate().map_err(|e| anyhow!("Cannot ask Cactarium to read these packages: {e}"))?;
         let body = serde_json::to_vec(request).context("Failed to encode the read request")?;
         let post = self.http().post(self.url("/packages/read")).header("content-type", "application/json").body(body);
         let response = self.send_found(post, MISSING_ROUTE)?.map_err(|m| self.missing("/packages/read", m))?;
@@ -264,7 +264,7 @@ impl Client {
                 bail!("Interrupted");
             }
             let request = LookupRequest { pins: chunk.to_vec(), downloads: Vec::new() };
-            request.validate().map_err(|e| anyhow!("Cannot ask the Cactarium about these repos: {e}"))?;
+            request.validate().map_err(|e| anyhow!("Cannot ask Cactarium about these repos: {e}"))?;
             let body = serde_json::to_vec(&request).context("Failed to encode the lookup request")?;
             let request = self.http()
                 .post(self.url("/lookup"))
@@ -274,7 +274,7 @@ impl Client {
             let answer: LookedUp = response.json()?;
             if answer.pins.len() != chunk.len() {
                 bail!(
-                    "The Cactarium answered a lookup of {} repos with {} answers",
+                    "Cactarium answered a lookup of {} repos with {} answers",
                     chunk.len(),
                     answer.pins.len()
                 );
@@ -286,7 +286,7 @@ impl Client {
                 let same = cactup_ecosystem_common::url::same_repo_lenient(&info.url, &asked.url);
                 if !same || !info.commit.eq_ignore_ascii_case(&asked.commit) {
                     bail!(
-                        "The Cactarium answered a lookup of {} at {} with {} at {}, out of order",
+                        "Cactarium answered a lookup of {} at {} with {} at {}, out of order",
                         asked.url,
                         asked.commit,
                         info.url,
@@ -304,7 +304,7 @@ impl Client {
     pub fn providers(&self, need: &cactup_ecosystem_common::ccl::Need) -> Res<Providers> {
         let query = ProvidersQuery::of(need)
             .to_query_string()
-            .map_err(|e| anyhow!("Cannot ask the Cactarium what provides {need}: {e}"))?;
+            .map_err(|e| anyhow!("Cannot ask Cactarium what provides {need}: {e}"))?;
         let url = format!("{}?{query}", self.url("/providers"));
         let response = self.send_found(self.http().get(&url), MISSING_ROUTE)?.map_err(|m| self.missing("/providers", m))?;
         response.json()
@@ -453,7 +453,7 @@ impl Client {
         )
     }
 
-    /// [`Client::send`] for a request that changes something on the
+    /// [`Client::send`] for a request that changes something on
     /// Cactarium (`what`): interrupted in flight, it may have done so.
     /// The same for a server (or a proxy in front of it) failing with a 5xx:
     /// the change may have landed before it did (a proxy timing out on an
@@ -461,12 +461,12 @@ impl Client {
     fn send_change(&self, request: reqwest::blocking::RequestBuilder, what: &str) -> Res<Answer> {
         self.send(request).map_err(|e| {
             if e.downcast_ref::<InFlight>().is_some() {
-                return anyhow!("Interrupted.\nCheck whether {what} reached the Cactarium before trying again.");
+                return anyhow!("Interrupted.\nCheck whether {what} reached Cactarium before trying again.");
             }
             match e.downcast_ref::<Refused>() {
                 Some(r) if r.status >= 500 => {
                     let failed = r.message.strip_suffix("; try again").unwrap_or(&r.message);
-                    anyhow!("{failed}.\nCheck whether {what} reached the Cactarium before trying again.")
+                    anyhow!("{failed}.\nCheck whether {what} reached Cactarium before trying again.")
                 }
                 _ => e,
             }
@@ -524,7 +524,7 @@ impl Client {
                 .map_err(|e| self.unreachable_read(e, &url))?;
             return Ok(Ok(Answer { headers, body, url }));
         }
-        // An answer from a route of the Cactarium (not from where a route
+        // An answer from a route of Cactarium (not from where a route
         // redirected, a download's store) that does not say which API
         // generation it speaks: no route there (404, 405, 501) means the
         // address is wrong; a 5xx is the server or a proxy in front of it
@@ -534,7 +534,7 @@ impl Client {
             return Err(self.not_a_cactarium(status, response.url().path()));
         }
         if ours && status.is_server_error() {
-            let message = format!("The Cactarium (or a proxy in front of it) failed: {status}; try again");
+            let message = format!("Cactarium (or a proxy in front of it) failed: {status}; try again");
             return Err(anyhow::Error::new(Refused { status: status.as_u16(), message, retry_after: None, code: None }));
         }
         if missing.contains(&status) {
@@ -654,13 +654,13 @@ impl Answer {
 
     fn text(self) -> Res<String> {
         let url = self.url.clone();
-        String::from_utf8(self.body).with_context(|| format!("The Cactarium's answer from {url} is not text"))
+        String::from_utf8(self.body).with_context(|| format!("Cactarium's answer from {url} is not text"))
     }
 
     fn json<T: DeserializeOwned>(self) -> Res<T> {
         let url = self.url.clone();
         let text = self.text()?;
-        serde_json::from_str(&text).with_context(|| format!("The Cactarium's answer from {url} is not what cactup expects"))
+        serde_json::from_str(&text).with_context(|| format!("Cactarium's answer from {url} is not what cactup expects"))
     }
 }
 
@@ -676,7 +676,7 @@ impl std::fmt::Display for OldCactarium {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "The Cactarium at {} is too old to resolve dependencies (it has no {})",
+            "Cactarium at {} is too old to resolve dependencies (it has no {})",
             self.base, self.endpoint
         )
     }
@@ -691,7 +691,7 @@ pub struct UnusableAnswer(pub String);
 
 impl std::fmt::Display for UnusableAnswer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "The Cactarium's answer to a batch read cannot be used ({})", self.0)
+        write!(f, "Cactarium's answer to a batch read cannot be used ({})", self.0)
     }
 }
 
@@ -1212,7 +1212,7 @@ mod tests {
     }
 
     /// `/providers` is asked with the one parameter the requirement maps to;
-    /// a package the Cactarium does not have reads as none, not an error.
+    /// a package unknown to Cactarium reads as none, not an error.
     #[test]
     fn providers_and_missing_packages() {
         use cactup_ecosystem_common::ccl::Need;
@@ -1374,11 +1374,11 @@ mod tests {
         let client = Client::at(&base);
         let err = format!("{:#}", client.send_change(http_post(&client), "the refresh").unwrap_err());
         assert!(err.contains("(or a proxy in front of it) failed: 504 Gateway Timeout"), "{err}");
-        assert!(err.contains("Timeout.\nCheck whether the refresh reached the Cactarium before trying again."), "{err}");
+        assert!(err.contains("Timeout.\nCheck whether the refresh reached Cactarium before trying again."), "{err}");
     }
 
     /// After Ctrl-C nothing goes out; a change interrupted in flight says it
-    /// may have reached the Cactarium.
+    /// may have reached Cactarium.
     #[test]
     fn a_change_interrupted_in_flight_says_it_may_have_reached_the_cactarium() {
         use std::io::Read;
@@ -1404,7 +1404,7 @@ mod tests {
         });
         let client = Client::at(&base).stopped_by(&STOP);
         let err = format!("{:#}", client.send_change(http_post(&client), "the refresh").unwrap_err());
-        assert!(err.contains("Check whether the refresh reached the Cactarium"), "{err}");
+        assert!(err.contains("Check whether the refresh reached Cactarium"), "{err}");
     }
 
     fn http_post(client: &Client) -> reqwest::blocking::RequestBuilder {

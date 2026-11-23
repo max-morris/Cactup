@@ -10,7 +10,7 @@
 //! names every URL refused.
 //!
 //! The rules are the shared crate's (`cactup_ecosystem_common::url` and
-//! `::probe`), so the Cactarium refuses exactly what export does. Every
+//! `::probe`), so Cactarium refuses exactly what export does. Every
 //! component's URL is judged, not one per repo name. A git remote goes
 //! through `probe::start`: refused by its form (credentials or a query, a
 //! local path, git://, an ssh URL with no https equivalent), or probed
