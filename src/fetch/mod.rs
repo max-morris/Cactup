@@ -1213,6 +1213,20 @@ pub fn source_heads(
             out.missing.insert(c.repo.clone());
         }
     }
+    // The flesh used by a build is where the root's `Makefile` links into
+    // `repos/`, whatever the list names: a config's own list keeps naming the
+    // base's flesh after a flesh package took its place. That repo is probed
+    // even when the list does not name it.
+    let repos_real = std::fs::canonicalize(&repos_dir).ok();
+    let makefile = install_root.join(list.root()).join("Makefile");
+    if let Some(repo) = crate::thornlist::repo_behind(&makefile, &repos_dir, repos_real.as_deref())
+        && repos_dir.join(&repo).is_dir()
+    {
+        if seen.insert(repo.clone()) {
+            repos.push(repo.clone());
+        }
+        out.flesh = Some(repo);
+    }
 
     progress.init(Some(repos.len()), Some(prodash::unit::label("repos")));
     let progress = std::sync::Mutex::new(progress);

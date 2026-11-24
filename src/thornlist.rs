@@ -170,7 +170,7 @@ fn plain_thorns(text: &str) -> Result<Vec<String>, String> {
 /// than each thorn — through `path` canonicalized against `repos_real`
 /// (`repos_dir` canonicalized once by the caller). `None` for anything that
 /// does not land in `repos_dir`, including a plain directory.
-fn repo_behind(path: &Path, repos_dir: &Path, repos_real: Option<&Path>) -> Option<String> {
+pub(crate) fn repo_behind(path: &Path, repos_dir: &Path, repos_real: Option<&Path>) -> Option<String> {
     let first = |rest: &Path| rest.components().next()?.as_os_str().to_str().map(str::to_owned);
     if let Ok(target) = std::fs::read_link(path) {
         let joined = path.parent()?.join(target);
