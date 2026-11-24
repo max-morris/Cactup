@@ -39,10 +39,10 @@ Export refuses what nobody else could reproduce:
 - **Commits that are on no remote branch or tag.** Push them, then run
   `cactup inst refetch`.
 - **A repository that is no registered package's.** Every git repository
-  must be one of a package registered with Cactarium: register it on
-  Cactarium's site, or fork a registered package. (The refusal names
-  `cactup package init <repo> --publish`, the registration from cactup
-  itself, which is not in this release yet.)
+  must be one of a package registered with Cactarium: register it with
+  `cactup package init <repo> --publish` (see
+  [Publishing Packages](publishing-packages.html)) or on Cactarium's site, or
+  fork a registered package.
 - **A thorn nobody else can fetch**: a `!TYPE = ignore` component, which
   exists only on this machine.
 - **A download Cactarium has not approved.** A download (a tarball the
