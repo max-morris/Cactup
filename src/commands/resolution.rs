@@ -1774,7 +1774,7 @@ pub(crate) fn refusal_text(e: anyhow::Error, finished: &Finished) -> anyhow::Err
             let lines: Vec<String> = unmet.iter().map(line).collect();
             let what = if unmet.iter().any(|u| !u.ignored.is_empty()) { "Requirements" } else { "Undeclared requirements" };
             anyhow!(
-                "{what} not met by the installation:{}.\nThe Cactarium at {} is too old to list providers.\n\
+                "{what} not met by the installation:{}.\nCactarium at {} is too old to list providers.\n\
                  Add a provider first, or ask the package authors to declare the dependency",
                 lines.concat(),
                 finished.base
