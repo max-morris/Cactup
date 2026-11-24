@@ -207,7 +207,7 @@ enum Urls {
 }
 
 /// How a refusal words its fix, as the command it comes from would.
-pub(super) struct Fixes {
+pub(crate) struct Fixes {
     /// When the sources had uncommitted changes.
     pub when: &'static str,
     /// The fix for uncommitted changes.
@@ -226,7 +226,7 @@ pub(super) struct Fixes {
 }
 
 /// For `sim pack -I`: what [`Fixes::unlisted`] holds.
-pub(super) struct Unlisted {
+pub(crate) struct Unlisted {
     pub listed: std::collections::BTreeSet<String>,
     pub fix: String,
 }
@@ -332,7 +332,7 @@ fn check_and_pin(
 /// A line for each pin nobody else could reproduce: sources with
 /// uncommitted edits, and commits no remote has (`published` says which,
 /// pin by pin).
-fn state_problems(repos: &[RepoPin], published: &[bool], fixes: &Fixes) -> Vec<String> {
+pub(crate) fn state_problems(repos: &[RepoPin], published: &[bool], fixes: &Fixes) -> Vec<String> {
     let mut lines = Vec::new();
     for r in repos.iter().filter(|r| r.dirty) {
         lines.push(format!("{}: uncommitted changes {}; {}", shown_repo(&r.name), fixes.when, fixes.commit));
@@ -718,7 +718,7 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
 /// an installation — when it is a checkout of the very repo the list names.
 /// One pointing elsewhere (a fork) is left out, so it is not pinned to a
 /// commit of the wrong repo, and said so.
-fn installed_states(repos_dir: &Path, list: &thornlist::Thornlist) -> Res<std::collections::BTreeMap<String, String>> {
+pub(crate) fn installed_states(repos_dir: &Path, list: &thornlist::Thornlist) -> Res<std::collections::BTreeMap<String, String>> {
     let repos = git_repos(list);
     let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
     let item = progress.add_child("read installed repos");
@@ -871,7 +871,7 @@ fn frozen_config(inst: &Installation, sim: &Simulation) -> Res<ConfigMeta> {
 /// when that state saw local edits; a download by the SHA-256 the list
 /// already gives it, else the one `hash_of` finds for it; a repo with no
 /// state, or anything else, unpinned.
-fn repo_pins(
+pub(crate) fn repo_pins(
     list: &thornlist::Thornlist,
     state_of: impl Fn(&str) -> Option<String>,
     hash_of: impl Fn(&str) -> Option<String>,
@@ -944,7 +944,7 @@ fn single_download(list: &thornlist::Thornlist, c: &thornlist::Component) -> boo
 /// Per pin, whether its commit is on the remote (true for anything unpinned:
 /// there is nothing to check). The repos are walked in parallel, with
 /// progress: on a network filesystem, eighty history walks take a while.
-fn check_repos(repos_dir: &Path, pins: &[RepoPin], fetched: Option<&FetchState>) -> Res<Vec<bool>> {
+pub(crate) fn check_repos(repos_dir: &Path, pins: &[RepoPin], fetched: Option<&FetchState>) -> Res<Vec<bool>> {
     let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
     let item = progress.add_child("check commits are published");
     item.init(Some(pins.len()), Some(prodash::unit::label("repos")));

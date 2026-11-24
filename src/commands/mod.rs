@@ -24,6 +24,7 @@ pub mod reify;
 pub mod releases;
 pub mod show;
 pub mod sim;
+pub mod stack;
 pub mod test;
 pub mod update;
 pub mod use_cmd;

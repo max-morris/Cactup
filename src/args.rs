@@ -1353,6 +1353,18 @@ pub(crate) struct PackageInitArgs {
 // §8.10
 #[derive(Subcommand, Debug)]
 pub(crate) enum StackCommand {
+    /// Write a cactarium-stack.toml for the installation
+    ///
+    /// Writes a stack that extends the release the installation is on, pins
+    /// the base repos moved since, and adds the packages added with
+    /// `cactup add`: an override where one replaces a base repo, else a
+    /// pinned section of cactarium-stack.th. The dependencies the installed
+    /// packages declare follow, for information. Refused while a repo has
+    /// uncommitted or unpushed changes.
+    ///
+    /// With --publish --version, writes nothing: publishes the
+    /// cactarium-stack.toml found there as that release.
+    Init(StackInitArgs),
     /// Publish a stack release to Cactarium
     Publish {
         /// The stack definition, a cactarium-stack.toml.
@@ -1366,6 +1378,30 @@ pub(crate) enum StackCommand {
         #[clap(long, value_name = "PATH")]
         thornlist: Option<PathBuf>,
     },
+}
+
+/// `cactup stack init`.
+#[derive(clap::Args, Debug)]
+pub(crate) struct StackInitArgs {
+    /// Where to write it (default: the current directory).
+    pub dir: Option<PathBuf>,
+    /// The stack's name (default: the installation's alias, lowercased).
+    #[clap(long, conflicts_with = "publish")]
+    pub name: Option<String>,
+    /// The owner (default: your Cactarium user)
+    ///
+    /// With --publish: the stack's owner (default: the first in its owners).
+    #[clap(long, value_name = "OWNER")]
+    pub owner: Option<String>,
+    /// Overwrite existing files.
+    #[clap(short, long, conflicts_with = "publish")]
+    pub force: bool,
+    /// Publish the cactarium-stack.toml found there; write nothing.
+    #[clap(long, requires = "version")]
+    pub publish: bool,
+    /// The release's version, with --publish: X.Y.Z, or track:X.Y.Z.
+    #[clap(long, value_name = "VERSION", requires = "publish")]
+    pub version: Option<String>,
 }
 
 /// `cactup download`.

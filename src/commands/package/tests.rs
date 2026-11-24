@@ -1,10 +1,11 @@
-//! `cactup package init`, end to end: real upstream repos on disk, an
+//! `cactup package init` and `cactup stack init`, end to end: real upstream repos on disk, an
 //! installation fetched from them and built (a config record and its `ThornList`), and a fake
 //! Cactarium (`test_server`) answering `/lookup`, version lists, reads at a commit, `/whoami`,
-//! `/repos` and a refresh in the crate's shapes.
+//! `/repos`, a refresh and a stack release in the crate's shapes.
 // Plan §8 (integration tests), the P7 row of §7's reviewer checks.
 
 use super::*;
+use crate::args::StackInitArgs;
 use crate::installation::{AddedPackage, AddedThorn};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -20,6 +21,11 @@ fn version(v: &str, commit: &str, url: &str, thorns: &[(&str, &str)], claims: Va
     json!({"version": v, "track": null, "tag": format!("v{v}"), "commit": commit, "tree": null, "yanked": false,
         "yank-reason": null, "state": "ok", "curated": false, "published": 0, "url": url, "thorns": thorns,
         "claims": claims})
+}
+
+/// A dependency claim on `target` at `range`, needing `needs`.
+fn depends(target: &str, range: &str, needs: &[&str]) -> Value {
+    json!({"kind": "dependency", "target": target, "range": range, "needs": needs, "note": null})
 }
 
 /// The fake Cactarium.
@@ -152,7 +158,7 @@ fn section(url: &str, commit: &str, checkouts: &[&str]) -> String {
 /// An installation (alias `t`, active, on `stack` when given) of `base`, fetched, with
 /// Cactarium at `cactarium`.
 struct World {
-    _tmp: tempfile::TempDir,
+    tmp: tempfile::TempDir,
     ctx: Ctx,
     inst: Installation,
 }
@@ -212,7 +218,7 @@ impl World {
         let live = inst.live_thornlist().unwrap();
         std::fs::create_dir_all(live.parent().unwrap()).unwrap();
         std::fs::write(&live, &pristine).unwrap();
-        World { _tmp: tmp, ctx, inst }
+        World { tmp, ctx, inst }
     }
 
     fn cactus(&self) -> PathBuf {
@@ -260,6 +266,16 @@ impl World {
         let text = std::fs::read_to_string(self.repo(repo).join(PACKAGE_FILE)).unwrap();
         let parsed = Manifest::from_repo_file(PACKAGE_FILE, &text).unwrap_or_else(|e| panic!("{e}\n{text}"));
         (text, parsed)
+    }
+
+    fn out(&self) -> PathBuf {
+        self.tmp.path().join("out")
+    }
+
+    fn stack_init(&self, force: bool) -> Res<()> {
+        std::fs::create_dir_all(self.out()).unwrap();
+        let args = StackInitArgs { dir: Some(self.out()), name: None, owner: None, force, publish: false, version: None };
+        crate::commands::stack::init(&self.ctx, &args)
     }
 }
 
@@ -769,4 +785,140 @@ fn ranges_and_includes_read_as_meant() {
     assert_eq!(include_name("// #include \"x.h\""), None);
     assert_eq!(lexical("arrangements/A/T/src/../../../B/U/x.h").as_deref(), Some("arrangements/B/U/x.h"));
     assert_eq!(lexical("a/../../x"), None);
+}
+
+/// The stack installs: et/base@1.0.0 (carpetx, z4c), carpetx moved since; three packages added
+/// (one replacing z4c, one beside it, one at its branch tip), the one beside it depending on
+/// et/carpetx.
+struct Stacked {
+    world: World,
+    log: Log,
+    c2: String,
+    e: String,
+    t: String,
+}
+
+fn stacked(stack: &str) -> Stacked {
+    let tmp = tempfile::tempdir().unwrap();
+    let carpetx = [("CarpetX/interface.ccl", "IMPLEMENTS: carpetx\n"), ("Loop/interface.ccl", "IMPLEMENTS: loop\n")];
+    let (curl, c1) = upstream(tmp.path(), "carpetx", &carpetx);
+    let mut later = carpetx.to_vec();
+    later.push(("NEWS", "moved\n"));
+    let (_, c2) = upstream(tmp.path(), "carpetx", &later);
+    let (zurl, z) = upstream(tmp.path(), "z4c", &[("Z4c/interface.ccl", "IMPLEMENTS: z4c\n")]);
+    let (e, t, zm) = ("e".repeat(40), "f".repeat(40), "a".repeat(40));
+    let release_text =
+        format!("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{}{}", section(&curl, &c1, &["CarpetX/CarpetX", "CarpetX/Loop"]), section(&zurl, &z, &["Z4c/Z4c"]));
+    let frozen = json!({"format": 1, "stack": "et/base@1.0.0", "root": "Cactus",
+        "thornlist": {"filename": "base.th", "text": release_text},
+        "repo": [{"name": "carpetx", "url": curl, "ref": "main", "commit": c1}, {"name": "z4c", "url": zurl, "commit": z}]});
+    let mut fake = Fake::default()
+        .package("et/carpetx", vec![version("1.1.0", &c2, &curl, &[("CarpetX", "CarpetX"), ("CarpetX", "Loop")], json!([]))])
+        .package("max/z4c-mp", vec![version("1.0.0", &zm, "https://x/z4c-mp.git", &[("Z4c", "Z4c")], json!([]))])
+        .package(
+            "max/extra",
+            vec![version("2.0.0", &e, "https://x/extra.git", &[("Extra", "Extra")], json!([depends("et/carpetx", "^1.0", &["Loop"])]))],
+        )
+        .pin(&curl, "et/carpetx");
+    fake.stacks.push(("et/base".into(), frozen));
+    let (cactarium, log) = fake.serve();
+    // Installed at carpetx's newer commit.
+    let base = section(&curl, &c2, &["CarpetX/CarpetX", "CarpetX/Loop"]) + &section(&zurl, &z, &["Z4c/Z4c"]);
+    let w = World::new(tmp, &base, &cactarium, Some(stack));
+    let added = |package: &str, version: &str, tag: Option<&str>, commit: &str, repo: &str, thorn: &str, replaces: &[&str]| AddedPackage {
+        package: package.into(),
+        version: version.into(),
+        tag: tag.map(Into::into),
+        commit: commit.into(),
+        url: format!("https://x/{repo}.git"),
+        repo: repo.into(),
+        thorns: vec![AddedThorn { checkout: thorn.into(), repo_path: "$2".into() }],
+        replaces: replaces.iter().map(|r| (*r).to_owned()).collect(),
+        contact: None,
+        libraries: Vec::new(),
+        flesh: Vec::new(),
+    };
+    w.edit_meta(|m| {
+        m.added.push(added("max/z4c-mp", "1.0.0", Some("v1.0.0"), &zm, "z4c-mp", "Z4c/Z4c", &["z4c"]));
+        m.added.push(added("max/extra", "2.0.0", Some("v2.0.0"), &e, "extra", "Extra/Extra", &[]));
+        m.added.push(added("max/tipper", "head", Some("main"), &t, "tipper", "Tip/Tip", &[]));
+    });
+    Stacked { world: w, log, c2, e, t }
+}
+
+/// `stack init`: extends the release the installation is on, pins the base repo moved since,
+/// an override (at the exact version) for the package replacing a base repo, pinned sections of
+/// cactarium-stack.th for the others (the tip at its fetched commit, never a version), and the
+/// dependency an installed package declares, as information naming it. Both files parse.
+#[test]
+fn stack_init_extends_pins_overrides_and_writes_sections() {
+    let it = stacked("et/base@1.0.0");
+    let w = &it.world;
+    w.stack_init(false).unwrap_or_else(|e| panic!("{e:#}"));
+    let text = std::fs::read_to_string(w.out().join("cactarium-stack.toml")).unwrap();
+    let m = Manifest::from_repo_file(cactup_ecosystem_common::manifest::STACK_FILE, &text).unwrap_or_else(|e| panic!("{e}\n{text}"));
+    let s = m.stack.as_ref().unwrap();
+    assert_eq!(s.extends.iter().map(ToString::to_string).collect::<Vec<_>>(), ["et/base@1.0.0"], "{text}");
+    assert_eq!((s.name.as_str(), s.owners[0].as_str()), ("t", "max"));
+    assert_eq!(s.pins.len(), 1, "{text}");
+    assert_eq!((s.pins[0].name.as_str(), s.pins[0].commit.as_deref()), ("carpetx", Some(it.c2.as_str())), "{text}");
+    assert_eq!(s.overrides.len(), 1, "{text}");
+    assert_eq!(s.overrides[0].repo, "z4c");
+    assert_eq!(s.overrides[0].package.as_ref().unwrap().to_string(), "max/z4c-mp@=1.0.0");
+    assert_eq!(s.thornlist.as_deref(), Some("cactarium-stack.th"));
+    assert_eq!(m.dependencies.len(), 1, "{text}");
+    assert_eq!(m.dependencies[0].target.as_ref().unwrap().to_string(), "et/carpetx@^1.0");
+    assert_eq!(m.dependencies[0].needs.as_deref(), Some(&["Loop".to_owned()][..]));
+    assert!(text.contains("# Declared by max/extra@2.0.0.\n[[dependency]]"), "{text}");
+
+    let th = std::fs::read_to_string(w.out().join("cactarium-stack.th")).unwrap();
+    let list = thornlist::parse(&th).unwrap_or_else(|e| panic!("{e:#}\n{th}"));
+    let pinned = |checkout: &str| list.components().iter().find(|c| c.checkout == checkout).and_then(|c| c.commit.clone());
+    assert_eq!(pinned("Extra/Extra").as_deref(), Some(it.e.as_str()), "{th}");
+    assert_eq!(pinned("Tip/Tip").as_deref(), Some(it.t.as_str()), "a tip is pinned at its commit: {th}");
+    assert!(list.components().iter().all(|c| c.checkout != "Z4c/Z4c"), "the replacing package is an override: {th}");
+
+    let err = format!("{:#}", w.stack_init(false).unwrap_err());
+    assert!(err.contains("exists") && err.contains("-f"), "{err}");
+    w.stack_init(true).unwrap();
+}
+
+/// A base at a stack's branch tip has no release to extend: refused, naming the way onto one.
+#[test]
+fn stack_init_refuses_a_tip() {
+    let it = stacked("et/base@head");
+    let err = format!("{:#}", it.world.stack_init(false).unwrap_err());
+    assert!(err.contains("et/base@head, which is no release"), "{err}");
+    assert!(err.contains("`cactup inst refetch --release et/base@<version>`"), "{err}");
+    assert!(!it.world.out().join("cactarium-stack.toml").exists());
+}
+
+/// Uncommitted changes in a repo of the installation are refused, as export refuses them.
+#[test]
+fn stack_init_refuses_a_dirty_repo() {
+    let it = stacked("et/base@1.0.0");
+    let w = &it.world;
+    std::fs::write(w.repo("carpetx").join("CarpetX/interface.ccl"), "IMPLEMENTS: carpetx\n# edited\n").unwrap();
+    let err = format!("{:#}", w.stack_init(false).unwrap_err());
+    assert!(err.contains("These repos cannot go into a stack"), "{err}");
+    assert!(err.contains("carpetx: uncommitted changes in the installation; commit them"), "{err}");
+    assert!(!w.out().join("cactarium-stack.toml").exists());
+}
+
+/// `stack init --publish --version` writes nothing and uploads the definition and its thornlist.
+#[test]
+fn stack_publish_uploads_the_definition() {
+    let it = stacked("et/base@1.0.0");
+    let w = &it.world;
+    w.stack_init(false).unwrap();
+    let before = std::fs::read_to_string(w.out().join("cactarium-stack.toml")).unwrap();
+    let args = StackInitArgs { dir: Some(w.out()), name: None, owner: None, force: false, publish: true, version: Some("1.0.0".into()) };
+    crate::commands::stack::init(&w.ctx, &args).unwrap_or_else(|e| panic!("{e:#}"));
+    let asked = it.log.lock().unwrap().clone();
+    let (_, body) = asked.iter().find(|(p, _)| p == "/api/v1/stacks/max/t/releases").expect("published");
+    let request: cactup_ecosystem_common::api::ReleaseRequest = serde_json::from_str(body).unwrap();
+    assert_eq!(request.definition, before);
+    assert_eq!(request.version, "1.0.0");
+    assert_eq!(request.thornlist.as_deref(), Some(std::fs::read_to_string(w.out().join("cactarium-stack.th")).unwrap().as_str()));
+    assert_eq!(std::fs::read_to_string(w.out().join("cactarium-stack.toml")).unwrap(), before, "--publish writes nothing");
 }

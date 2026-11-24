@@ -234,6 +234,7 @@ fn run() -> Res<()> {
         }
         Commands::Claims(cmd) => commands::claims::dispatch(&ctx, cmd),
         Commands::Package(crate::args::PackageCommand::Init(args)) => commands::package::init(&ctx, &args),
+        Commands::Stack(crate::args::StackCommand::Init(args)) => commands::stack::init(&ctx, &args),
         Commands::Stack(crate::args::StackCommand::Publish { definition, target, version, thornlist }) => {
             commands::import::publish_stack(&ctx, &definition, &target, &version, thornlist.as_deref())
         }
