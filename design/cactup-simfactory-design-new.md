@@ -6163,9 +6163,11 @@ and start time beside it), so no caller can skip the checks.
   gone (`sim list`, `sim delete` take it so, and `sim show` with them, its
   header and rows from one answer). The MDB sets the
   key where the real tool's message is known: Slurm's `squeue -j`
-  (`slurm_load_jobs error: Invalid job id specified`, on stderr with
-  nothing on stdout and exit 1, once the job has aged out of the
-  controller), Torque's `qstat` (`Unknown Job Id`; qb, smic, thornyflat)
+  (`slurm_load_jobs error: Invalid job id specified|^ *JOBID `: the
+  error, on stderr with nothing on stdout and exit 1, once the job has
+  aged out of the controller; before that, within MinJobAge of its end,
+  the header line alone and exit 0, since squeue leaves out a job in a
+  finished state), Torque's `qstat` (`Unknown Job Id`; qb, smic, thornyflat)
   and PBS Pro's (crux: `Unknown Job Id`, or `Job has finished` with job
   history on). Not set: golub (Slurm's `qstat` compatibility wrapper, whose
   message is not established), sciama (an `squeue -u | awk` filter, which

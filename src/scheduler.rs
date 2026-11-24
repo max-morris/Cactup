@@ -2293,6 +2293,66 @@ mod tests {
         }
     }
 
+    /// A guard on the mdb itself (§10): every machine asking `squeue -j`
+    /// must read each thing squeue prints of a job it no longer lists as
+    /// the job gone, and nothing else. Just after a job ends (within the
+    /// controller's MinJobAge) squeue exits 0 with only its header line;
+    /// once the controller has forgotten the job, the error on stderr.
+    /// Reading the header as a failed query refused the next build submit
+    /// until `build stop`.
+    #[test]
+    fn every_squeue_machine_reads_a_job_it_no_longer_lists_as_gone() {
+        let mdb = crate::mdb::Mdb::with_roots(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"),
+            std::path::PathBuf::from("/nonexistent-user-mdb"),
+        );
+        let id = "3774765";
+        let header = "             JOBID PARTITION     NAME     USER ST       TIME  NODES NODELIST(REASON)";
+        let gone = [
+            format!("{header}\n"),
+            // A site's SQUEUE_FORMAT changes the columns, not the first one.
+            "JOBID PARTITION NAME USER STATE TIME NODES\n".to_owned(),
+            "slurm_load_jobs error: Invalid job id specified\n".to_owned(),
+        ];
+        let failed = ["", "slurm_load_jobs error: Socket timed out on send/recv operation\n"];
+        let listed = format!("{header}\n           {id}     workq   build-x      max  R       0:42      1 qbd123\n");
+        let mut asked = 0;
+        for (name, _layer) in mdb.machines().unwrap() {
+            let machine = mdb.load(&name).unwrap_or_else(|e| panic!("machine {name} failed to load: {e:#}"));
+            if machine.meta.scheduler.get_status.as_deref() != Some("squeue -j @JOB_ID@") {
+                continue;
+            }
+            asked += 1;
+            let sched = Scheduler::new(&machine.meta);
+            for output in &gone {
+                assert_eq!(classify_listed(output, id, &machine.meta).unwrap(), None, "{name}: {output:?}");
+                assert_eq!(sched.unknown_job(output, id).unwrap(), Some(true), "{name}: {output:?} is the job gone");
+            }
+            for output in failed {
+                assert_eq!(sched.unknown_job(output, id).unwrap(), Some(false), "{name}: {output:?} is a failed query");
+            }
+            assert_eq!(classify_listed(&listed, id, &machine.meta).unwrap(), Some(JobStatus::Running), "{name}");
+        }
+        assert!(asked > 0, "no machine asks squeue -j");
+
+        // End to end: the header alone, exit 0, is U; a timeout still fails.
+        let squeue = |script: &str| {
+            meta(&format!(
+                r#"
+                get-status = "{script}"
+                status-pattern = "@JOB_ID@ "
+                running-pattern = " R "
+                unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified|^ *JOBID '
+                "#
+            ))
+        };
+        let ended = squeue(&format!("echo '{header}'"));
+        assert_eq!(Scheduler::new(&ended).get_status(JobRef::bare(id)).unwrap(), JobStatus::Unknown);
+        let timeout = squeue("echo 'slurm_load_jobs error: Socket timed out on send/recv operation' >&2; exit 1");
+        let err = Scheduler::new(&timeout).get_status(JobRef::bare(id)).unwrap_err();
+        assert!(err.downcast_ref::<FailedQuery>().is_some(), "{err:#}");
+    }
+
     #[test]
     fn display_state_matrix() {
         use DisplayState as D;
