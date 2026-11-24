@@ -223,6 +223,7 @@ fn run() -> Res<()> {
         Commands::Import(import) => commands::import::dispatch(&ctx, import),
         Commands::Refresh { target } => commands::import::refresh(&ctx, &target),
         Commands::Login { token } => commands::import::login(&ctx, token),
+        Commands::Download(args::DownloadCommand::Submit { url, note }) => commands::download::submit(&ctx, &url, note),
         Commands::Add { packages, replace, force, upgrade, upgrade_all, no_deps, ignore_claim, yes, dry_run } => {
             let flags =
                 commands::add::AddFlags { replace, force, upgrade, upgrade_all, no_deps, ignore_claim, yes, dry_run };

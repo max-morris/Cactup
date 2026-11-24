@@ -178,6 +178,9 @@ pub(crate) mod fake {
         pub files: Vec<(String, Vec<u8>)>,
         /// How long a lookup takes to answer.
         pub delay: std::time::Duration,
+        /// Downloads submitted before: the end of the URL, review and the
+        /// 409's message.
+        pub submitted: Vec<(String, String, String)>,
     }
 
     impl Registry {
@@ -219,6 +222,16 @@ pub(crate) mod fake {
                     })
                     .collect();
                 return ok(serde_json::json!({"pins": pins, "downloads": downloads}).to_string());
+            }
+            if path == "/api/v1/downloads" {
+                let asked: cactup_ecosystem_common::api::DownloadSubmission = serde_json::from_slice(body).unwrap();
+                return match self.submitted.iter().find(|(end, _, _)| asked.url.ends_with(end.as_str())) {
+                    Some((_, review, message)) => {
+                        let body = serde_json::json!({"error": {"code": "conflict", "message": message}, "id": 7, "review": review});
+                        ("409 Conflict", "api-generation: 1\r\n".to_owned(), body.to_string().into_bytes())
+                    }
+                    None => ok(r#"{"id":8,"review":"pending"}"#.to_owned()),
+                };
             }
             if path.starts_with("/api/v1/sims/") {
                 return ok(r#"{"slug":"max/run@1.0.0","url":"u","visibility":"public","warnings":[]}"#.to_owned());

@@ -166,7 +166,7 @@ pub(crate) fn client() -> &'static reqwest::blocking::Client {
 pub(crate) fn download_to(
     client: &reqwest::blocking::Client,
     url: &str,
-    dest: &mut std::fs::File,
+    dest: &mut impl std::io::Write,
     progress: &mut impl prodash::Progress,
 ) -> crate::Res<u64> {
     download_to_limited(client, url, dest, progress, None)
@@ -178,7 +178,7 @@ pub(crate) fn download_to(
 pub(crate) fn download_to_limited(
     client: &reqwest::blocking::Client,
     url: &str,
-    dest: &mut std::fs::File,
+    dest: &mut impl std::io::Write,
     progress: &mut impl prodash::Progress,
     limit: Option<u64>,
 ) -> crate::Res<u64> {

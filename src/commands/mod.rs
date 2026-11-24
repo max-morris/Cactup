@@ -11,6 +11,7 @@ pub mod config;
 pub mod copy;
 pub mod delete;
 pub mod delta;
+pub mod download;
 pub mod import;
 pub mod install;
 pub mod installation;

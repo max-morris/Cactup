@@ -13,7 +13,7 @@ use crate::Res;
 use anyhow::{anyhow, bail, Context};
 use colored::Colorize;
 use cactup_ecosystem_common::api::{
-    DownloadQuery, ErrorBody, LookedUp, LookupRequest, PackageVersion, PackageVersions, PinInfo, PinQuery, Providers,
+    DownloadConflict, DownloadQuery, DownloadReview, DownloadSubmission, ErrorBody, LookedUp, LookupRequest, PackageVersion, PackageVersions, PinInfo, PinQuery, Providers,
     ProvidersQuery, Published, ReadAnswer, ReadRequest, Refreshed, Resolved, StackReleases, VersionInfo, API_GENERATION,
     API_GENERATION_HEADER, API_PREFIX, CONTACT_HEADER, MAX_LOOKUP_PINS, SHA256_HEADER, SIM_QUERY,
     UNPINNED_HEADER, UNTRUSTED_HEADER,
@@ -436,6 +436,30 @@ impl Client {
         self.send_change(request, "the publication")?.json()
     }
 
+    /// Submit a download (its URL and the sha256 of its content) for
+    /// Cactarium's review, with `token`. One submitted before answers with
+    /// the review it has (409), which is no error.
+    pub fn submit_download(&self, token: &str, submission: &DownloadSubmission) -> Res<Submitted> {
+        let body = serde_json::to_vec(submission).context("Failed to encode the submission")?;
+        let request = self.http()
+            .post(self.url("/downloads"))
+            .bearer_auth(token)
+            .header("content-type", "application/json")
+            .body(body);
+        let mut missing = MISSING_ROUTE.to_vec();
+        missing.push(reqwest::StatusCode::CONFLICT);
+        let answer = self.send_found(request, &missing).map_err(|e| change_failed(e, "the submission"))?;
+        match answer {
+            Ok(answer) => Ok(Submitted::New(answer.json()?)),
+            Err(m) if m.status == reqwest::StatusCode::CONFLICT => {
+                let known = serde_json::from_slice(&m.body)
+                    .context("Cactarium's answer for a download submitted before is not what cactup expects")?;
+                Ok(Submitted::Known(known))
+            }
+            Err(m) => Err(self.missing("/downloads", m)),
+        }
+    }
+
     /// Publish a stack release.
     pub fn publish_stack(
         &self,
@@ -491,18 +515,7 @@ impl Client {
     /// the change may have landed before it did (a proxy timing out on an
     /// upload, say).
     fn send_change(&self, request: reqwest::blocking::RequestBuilder, what: &str) -> Res<Answer> {
-        self.send(request).map_err(|e| {
-            if e.downcast_ref::<InFlight>().is_some() {
-                return anyhow!("Interrupted.\nCheck whether {what} reached Cactarium before trying again.");
-            }
-            match e.downcast_ref::<Refused>() {
-                Some(r) if r.status >= 500 => {
-                    let failed = r.message.strip_suffix("; try again").unwrap_or(&r.message);
-                    anyhow!("{failed}.\nCheck whether {what} reached Cactarium before trying again.")
-                }
-                _ => e,
-            }
-        })
+        self.send(request).map_err(|e| change_failed(e, what))
     }
 
     /// Send, then refuse a registry newer than this cactup speaks, and turn
@@ -570,7 +583,8 @@ impl Client {
             return Err(anyhow::Error::new(Refused { status: status.as_u16(), message, retry_after: None, code: None }));
         }
         if missing.contains(&status) {
-            return Ok(Err(Missing { status }));
+            let body = response.bytes().map(|b| b.to_vec()).unwrap_or_default();
+            return Ok(Err(Missing { status, body }));
         }
         // A rate limit says when it lifts, in whole seconds.
         let retry_after = (response.headers().get(reqwest::header::RETRY_AFTER))
@@ -620,6 +634,29 @@ impl Client {
     }
 }
 
+/// What a failed change (`what`, "the publication") says: whether it may
+/// have reached Cactarium when Ctrl-C or a server error cut it short.
+fn change_failed(e: anyhow::Error, what: &str) -> anyhow::Error {
+    if e.downcast_ref::<InFlight>().is_some() {
+        return anyhow!("Interrupted.\nCheck whether {what} reached Cactarium before trying again.");
+    }
+    match e.downcast_ref::<Refused>() {
+        Some(r) if r.status >= 500 => {
+            let failed = r.message.strip_suffix("; try again").unwrap_or(&r.message);
+            anyhow!("{failed}.\nCheck whether {what} reached Cactarium before trying again.")
+        }
+        _ => e,
+    }
+}
+
+/// What submitting a download got: a new review, or the one it already has.
+#[derive(Debug)]
+pub enum Submitted {
+    New(DownloadReview),
+    /// Submitted before: the 409's review and message.
+    Known(DownloadConflict),
+}
+
 /// The statuses that say a server has no such route, from a server that does
 /// not speak a Cactarium API: the address is no Cactarium's.
 const NO_ROUTE: &[reqwest::StatusCode] = &[
@@ -635,8 +672,9 @@ const MISSING_ROUTE: &[reqwest::StatusCode] = &[reqwest::StatusCode::NOT_FOUND, 
 /// An answer the server had nothing for.
 #[derive(Debug)]
 struct Missing {
-    #[allow(dead_code)]
     status: reqwest::StatusCode,
+    /// The answer's body, read whole.
+    body: Vec<u8>,
 }
 
 /// An error status the registry answered, with its message.

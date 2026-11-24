@@ -459,6 +459,10 @@ pub(crate) enum Commands {
         target: String,
     },
     // §8.10
+    /// Submit downloads to Cactarium for review
+    #[clap(subcommand)]
+    Download(DownloadCommand),
+    // §8.10
     /// Store a Cactarium API token
     ///
     /// Create a token on the Cactarium settings page.
@@ -1308,6 +1312,25 @@ pub(crate) enum StackCommand {
         /// The stack's own thornlist, when its definition is a flat list.
         #[clap(long, value_name = "PATH")]
         thornlist: Option<PathBuf>,
+    },
+}
+
+/// `cactup download`.
+// §8.10, plan §6 S9
+#[derive(Subcommand, Debug)]
+pub(crate) enum DownloadCommand {
+    /// Submit a download to Cactarium for review
+    ///
+    /// Downloads the file once, computes its SHA-256, and submits the URL
+    /// and the hash with your token (cactup login). Cactarium verifies the
+    /// file, then an admin reviews it. A shared .sim may pin a download only
+    /// once it is approved.
+    Submit {
+        /// The download's URL.
+        url: String,
+        /// For the reviewer: what the file is, and why it can be trusted.
+        #[clap(long, value_name = "TEXT")]
+        note: Option<String>,
     },
 }
 
