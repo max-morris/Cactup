@@ -165,8 +165,8 @@ commit = "3f2c9e1a00112233445566778899aabbccddeeff"
 | `ref` | The branch or tag the thornlist names. A label only: `commit` is what is fetched. |
 | `commit` | The full commit id (40 or 64 hex digits). |
 | `sha256` | For a downloaded file instead of a git repository: its SHA-256. At most one of `commit` and `sha256`. |
-| `cactarium` | The Cactarium package version this commit belongs to, if any. |
-| `dirty` | `true` when the source had uncommitted changes at export (only with `--allow-dirty`). |
+| `cactarium` | The Cactarium package of this git repo: `owner/pkg@version` when that version froze the commit, else `owner/pkg`. Written by export from Cactarium's answer; never on a download. |
+| `dirty` | `true` when the source had uncommitted changes at export (only with `--local`). |
 
 A file is **fully specified** when every repository has a `commit` or a
 `sha256`, none is dirty, and `[thornlist] untracked` is empty. Only a fully

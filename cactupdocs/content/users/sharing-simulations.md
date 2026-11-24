@@ -35,10 +35,22 @@ questions.
 Export refuses what nobody else could reproduce:
 
 - **Uncommitted changes** in a repository when the executable was built.
-  Commit them and rebuild, or pass `--allow-dirty` to export them marked
-  dirty.
-- **Commits that are on no remote branch or tag.** Push them and refetch, or
-  pass `--allow-unpushed`.
+  Commit them and rebuild.
+- **Commits that are on no remote branch or tag.** Push them, then run
+  `cactup inst refetch`.
+- **A repository that is no registered package's.** Every git repository
+  must be one of a package registered with Cactarium: push it and register
+  it (`cactup package init <repo> --publish`), or fork a registered package.
+- **A thorn nobody else can fetch**: a `!TYPE = ignore` component, which
+  exists only on this machine.
+- **A download Cactarium has not approved.** A download (a tarball the
+  thornlist fetches, or an input's file) passes once Cactarium has reviewed
+  that URL with that SHA-256. Submit one for review with
+  `cactup download submit <url>`; until an admin approves it, export says it
+  is awaiting review.
+- **A download with no hash**, which nothing could review: the build
+  recorded none (built before cactup recorded download hashes; rebuild the
+  config), or, for `sim pack`, the thornlist gives none.
 - **Repository URLs nobody else can fetch, or that carry credentials.** A
   local path or `file://` URL, a URL with a user name, password or token in
   it (`https://TOKEN@host/…`), a query string (`?private_token=…`), or a
@@ -61,7 +73,18 @@ Export refuses what nobody else could reproduce:
   names the https URL, in the thornlist too, and export says so.
 
 A URL written in quotes is refused too (cactup would take the quotes as
-part of it). Every URL refused is listed in one error.
+part of it). Everything refused, of every kind above, is listed in one
+error, a line each, with what to do about it.
+
+Export asks Cactarium once, at the same time as it asks the git remotes,
+which package each pinned repository belongs to and whether each download
+is approved; a URL already refused is never sent. The `.sim` then labels
+each repository of a registered package with it: `owner/pkg@1.2.0` when
+that version froze the commit, a bare `owner/pkg` for any other commit. An
+input's file is asked about once it is downloaded and hashed, after the
+questions. The claim overrides of the installation (`cactup claims`) are
+recorded in the `.sim`'s provenance, for information only: `import` never
+resolves dependencies.
 
 A user name, password or token in a line nothing fetches (a comment, an
 unused `!DEFINE`, an overridden `!URL`) is not refused but hidden: the
@@ -72,11 +95,15 @@ password. A download's URL, and an input's
 work), but not one that looks like a token or a signature, nor a user name
 or password; an ssh or local one is refused as well.
 
-A `.sim` meant only for this machine can keep every URL as it is:
+A `.sim` meant only for this machine can skip all of that:
 
 ```sh
-cactup sim export mysim --local   # nothing checked, nothing asked
+cactup sim export mysim --local   # nothing refused, nothing asked
 ```
+
+Such a file keeps every URL as it is, marks sources with uncommitted
+changes as dirty, and labels no repository. Cactarium refuses to publish
+exactly the files that needed `--local`.
 
 A parfile value that is an absolute path (`/scratch/me/initial-data`) gets a
 warning: whoever imports the simulation will not have that path. Use a knob
@@ -117,7 +144,10 @@ cactup sim pack bhns.th bhns.par                 # pinned to each branch's tip t
 cactup -I myinstall sim pack bhns.th bhns.par    # pinned to what an installation has
 ```
 
-`pack` checks the URLs exactly as `export` does, and takes `--local` too.
+`pack` checks the URLs, the repositories and the downloads exactly as
+`export` does, and takes `--local` too. Without an installation, an unpinned
+repository's branch tip is asked only after its URL passes; a URL refused
+then fails on its own, before the rest is checked.
 
 ## Unpacking a .sim file
 
@@ -221,7 +251,10 @@ cactup sim publish bbh.sim me/bbh
 ```
 
 Only a **fully specified** file can be published: every repository pinned,
-nothing dirty. Versions are semantic versions: `--version 1.2.0` chooses one,
+nothing dirty. Before uploading, cactup asks Cactarium about every pin, as
+export does: a repository that is no registered package's, or a download
+(an input's file included) that Cactarium has not approved, is refused, a
+line each, and nothing is uploaded. Versions are semantic versions: `--version 1.2.0` chooses one,
 and without it the next major version is used (`me/bbh@1.0.0`, `@2.0.0`, …).
 A new version may wait for an admin's review before anyone can import it;
 cactup says so when it does.
@@ -286,6 +319,12 @@ Cactarium may refuse to serve them at all; if it does serve one, cactup
 warns that it may fetch and build arbitrary code and asks you to type `yes`.
 `--risky-allow-untrusted-artifacts` skips the question (the warning still
 prints), and is the only way to take such a tip in a script.
+
+A stack release is installed as it was frozen: nothing is resolved. After
+`install` and `inst refetch --release` to a stack, cactup runs
+`cactup claims check` over the result and prints what it finds as warnings,
+each naming a way past (`cactup add --upgrade <pkg>`, or a
+`cactup claims override …`). They never fail the command.
 
 ### Adding a package
 

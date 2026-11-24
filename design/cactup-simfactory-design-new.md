@@ -4570,7 +4570,7 @@ flag either; internally cactup still tracks `chained-job-id` in `restart.toml`
 
 ```
 cactup sim export <sim> [file] [-f] [-y] [--name N] [--summary S] [--description D]
-                  [--author A]… [--license SPDX] [--allow-dirty] [--allow-unpushed] [--local]
+                  [--author A]… [--license SPDX] [--local]
 ```
 
 Writes a simulation as a `.sim` file (default `<sim>.sim`): the Cactup
@@ -4600,17 +4600,56 @@ the config's own record only while that still describes the same `build-id`.
   single-file downloads into the config record (`downloads`, beside
   `sources`), so a later refetch cannot change what a simulation of that
   build records. A config built before hashes were recorded has none to
-  give: export leaves such a download unpinned and says to rebuild, rather
-  than hash a file the binary may not have been built from. Any other
-  component is listed unpinned.
+  give: export leaves such a download unpinned, rather than hash a file the
+  binary may not have been built from, and refuses it unless `--local`
+  ("rebuild config X to pin it"): there is nothing Cactarium could review.
+  Any other component is listed unpinned.
+- **`--local`** is the one way past every refusal below (decision 3 of the
+  dependency plan, November 2026; `--allow-dirty` and `--allow-unpushed`
+  were removed with no shim). It needs no marker in the file: Cactarium
+  refuses exactly the files that needed it. Without it, every refusal of
+  every kind is collected into one error, a line each with its own fix,
+  ending "Pass --local to export for use here only."
 - **Dirty sources** (a state string with `+Nmod`, §7.4) are refused —
-  no commit reproduces that binary — unless `--allow-dirty`, which marks them
-  `dirty`.
-- **Unpublished commits** are refused unless `--allow-unpushed`: a pin passes
+  no commit reproduces that binary ("commit them and rebuild") — and with
+  `--local` marked `dirty`.
+- **Unpublished commits** are refused ("push it, then run `cactup inst
+  refetch`", which updates the remote-tracking refs): a pin passes
   when cactup's fetch record shows it fetched that very commit, or when it is
   the tip or in the history of a remote-tracking branch or tag in the
   installation's repo — read locally, so a commit pushed since the last fetch,
   or below a shallow boundary, reads as unpublished and errs toward asking.
+- **`ignore` components** (`!TYPE = ignore`: on this machine only) are
+  refused. The parser leaves them out of its components, so they are found
+  by parsing the text again with each such section read as git and taking
+  what that adds (`export::ignored_checkouts`).
+- **Registered packages and reviewed downloads** (`sim::registered`). One
+  `POST /lookup` (crate `api::LookupRequest`, chunked at
+  `MAX_LOOKUP_PINS` pins plus downloads, each request validated before it
+  is sent) asks about every git pin at a full commit and every download pin
+  (by URL and sha256), never about a URL refused offline (it may carry a
+  credential); a git remote probed is asked about as the URL it will be
+  published as. It runs at the same time as the probes, under one renderer,
+  with a line of its own, through the watcher (Ctrl-C fails at once). A git
+  pin whose `package` is null is refused ("push it and register it with
+  `cactup package init <repo> --publish`, or fork a registered package"),
+  unless its probe already refused its URL. A download passes only when its
+  `review` is `approved`; null (never submitted) names
+  `cactup download submit <url>`, `pending` says it awaits verification and
+  review, `rejected` says so. An `[[input]]` with a `url` and `sha256` goes
+  through the same review: its sha256 is known only once `finish` has
+  downloaded it, after the questions, so inputs are asked about in a second
+  lookup there. A lookup that fails fails the export, naming `--local`.
+  `commit-known = false` is not refused (the local published check decides).
+- **Pin labels.** Each git pin of a registered package gets
+  `RepoPin.cactarium` from the lookup: `owner/pkg@<version>` (a track's
+  `@track:X.Y.Z` too) when a version froze the commit, else a bare
+  `owner/pkg`; never a `#` stamp (the pin's `commit` names it), never on a
+  download, never with `--local` (nothing is asked). The labels are valid
+  at format 1, so `SimFile::required_format` (which looks only at the
+  `[sim]` stamp and the inputs) is unchanged: a labeled file still writes
+  the oldest format that holds it. Export still pins from what was built;
+  the lookup only labels and refuses.
 - **Shareable URLs** (`sim::shareable`; export and pack alike). A `.sim`
   leaves the machine, so every repo URL in it must be one anybody can fetch
   and nothing in it may carry credentials. The shared crate decides
@@ -4703,12 +4742,15 @@ the config's own record only while that still describes the same `build-id`.
     are never refused.
   - *An input's URL* (`--input-url`, or one typed at the prompt) is judged
     as a download's.
-  - The whole check, probes and rewrite included, runs before anything
-    else asks the network: `sim pack` then asks its tips of the rewritten
-    https URLs (never of an ssh URL, with the user's keys). A URL refused
-    fails with no tip asked; every refusal is collected into one error,
-    before any question is asked, ending "Pass --local to export for use
-    here only." Messages show URLs redacted (`url::Redacted`, also behind
+  - The whole check, probes, lookup and rewrite included, runs before any
+    question is asked. Offline first (URL forms, dirty, unpublished,
+    `ignore`, unhashed downloads), then the probes and the lookup at once.
+    `sim pack` without an installation, when a repo is unpinned, checks the
+    URLs (and the offline content refusals) first, alone, and then asks its
+    tips of the rewritten https URLs (never of an ssh URL, with the user's
+    keys): a URL refused fails with no tip asked. The lookup follows the
+    tips. With every repo pinned, no tip is asked, and it checks everything
+    at once like export. Messages show URLs redacted (`url::Redacted`, also behind
     `fetch::git::redacted`; `scrub` hides a URL's userinfo, password and
     query in a lower layer's words, as given, percent-decoded, and as
     `reqwest::Url` re-encodes them). `--local` writes every URL as it is,
@@ -4736,7 +4778,10 @@ the config's own record only while that still describes the same `build-id`.
   from the latest restart; machine-shaped settings stay out.
 - **Provenance**: exporter version and time, machine, flavor or optionlist,
   build universe, flags, and `machine-disabled` (thorns disabled in the list
-  Cactus was handed but not in the source list).
+  Cactus was handed but not in the source list). The installation's claim
+  overrides (`cactup claims`) go into `extra["claims-overrides"]`, their
+  canonical keys joined by `; ` (export and `pack -I`): informational, since
+  an import never resolves dependencies.
 - **Descriptive fields** default to the simulation's name, the parfile's
   leading comment block (its first line as the summary), the git `user.name`,
   and the `default-license` knob; on a terminal each one a flag did not give
@@ -4932,7 +4977,14 @@ What uses it, all on the login node (D11):
   warning; without a terminal and without the flag it refuses. Install and
   `refetch --release` reach stack tips through
   `cactarium::stack_release_text`, `add` reaches package tips through the
-  same `confirm_untrusted`.
+  same `confirm_untrusted`. A release is frozen, so nothing is resolved;
+  after a stack install, and after `refetch --release` to a stack once the
+  list is written, `claims::warn_problems` runs `claims check`'s check over
+  the result and prints each problem as a yellow warning ending in its way
+  past (`cactup add --upgrade <pkg>`, a `cactup claims override …`), plus
+  what it could not check. Neither problems nor a failed check (Cactarium
+  unreachable: one line naming `cactup claims check`) fail the command;
+  Ctrl-C does.
 - `cactup import owner/name[/sim][@range|=X.Y.Z]` downloads the published sim
   (versions are semver, like packages and stacks; the newest matching, or
   the newest at all) to `~/.cactup/simfiles/<owner>/<name>/<X.Y.Z>.sim`,
@@ -4975,7 +5027,11 @@ What uses it, all on the login node (D11):
   is something to ask about; a registry it cannot reach gets one dim note.
 - `cactup sim publish <file.sim> <owner/name> [--version X.Y.Z]` uploads a
   fully specified file (anything else is refused locally, naming what is
-  unspecified) as that version, else the next major version; the registry
+  unspecified) as that version, else the next major version. Before the
+  upload it runs export's registry check (§8.9, `sim::registered`): one
+  lookup of every git pin, download pin and input download, refusing a repo
+  no registered package has and a download not approved, a line each, with
+  nothing uploaded. The registry
   says whether it is public or pending review. A pending release (new releases of a public entry wait for an
   admin unless the entry, its owner or the publisher is trusted) is not
   served, listed or resolved until approved, and cactup says so.
