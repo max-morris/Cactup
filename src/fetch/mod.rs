@@ -1271,6 +1271,19 @@ pub fn source_heads(
         if seen.insert(repo.clone()) {
             repos.push(repo.clone());
         }
+        // The flesh named by the list, unused by the build: not this config's
+        // source, so not in its record either. A swap back to it is then a
+        // flesh from a repo the record lacks, as the swap away was.
+        if let Some(named) = out.flesh.take().filter(|named| *named != repo) {
+            let root = list.root().trim_end_matches('/');
+            let only_flesh = (list.components().iter())
+                .filter(|c| c.repo == named)
+                .all(|c| c.target.trim_end_matches('/') == root);
+            if only_flesh {
+                repos.retain(|r| *r != named);
+                out.missing.remove(&named);
+            }
+        }
         out.flesh = Some(repo);
     }
 

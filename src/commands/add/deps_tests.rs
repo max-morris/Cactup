@@ -3284,13 +3284,17 @@ fn a_config_s_own_thornlist_sees_the_flesh_swapped() {
     s.add(&["max/mp"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
     let now = probe();
     assert_eq!(now.flesh.as_deref(), Some("cactus-mp"));
+    // The list's own flesh, unused by the build, is not recorded.
+    assert!(!now.heads.contains_key("flesh"), "{:?}", now.heads);
     let (delta, change) = crate::build::source_delta(Some(&built.heads), Some(&now));
     assert_eq!((delta, change.swapped.as_deref()), (crate::build::SourceDelta::Flesh, Some("cactus-mp")));
 
+    // Back: the record of the build with the package (what `now` read) lacks
+    // the base's flesh, so this is a swap too.
     s.remove(&["max/mp"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
     let back = probe();
-    let mut with_mp = now.heads.clone();
-    with_mp.remove("flesh");
-    let (delta, change) = crate::build::source_delta(Some(&with_mp), Some(&back));
+    let (delta, change) = crate::build::source_delta(Some(&now.heads), Some(&back));
     assert_eq!((delta, change.swapped.as_deref()), (crate::build::SourceDelta::Flesh, Some("flesh")));
+    // And a build after that one is up to date.
+    assert_eq!(crate::build::source_delta(Some(&back.heads), Some(&probe())).0, crate::build::SourceDelta::Unchanged);
 }
