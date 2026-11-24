@@ -4619,6 +4619,16 @@ the config's own record only while that still describes the same `build-id`.
   the tip or in the history of a remote-tracking branch or tag in the
   installation's repo — read locally, so a commit pushed since the last fetch,
   or below a shallow boundary, reads as unpublished and errs toward asking.
+- **Repos nothing pins** are refused (Max's decision 5, artifacts fully
+  specified): a git repo with no commit (`export::unpinned_git`: "the
+  build recorded no commit; rebuild config X", or for `pack -I` "not
+  fetched by the installation; run `cactup inst refetch`"), an svn, cvs,
+  hg or darcs component, a section downloading several files.
+- **Downloads on a private address** (and inputs' URLs) are refused:
+  `fetch::anonymous::private_download` resolves the host and refuses when
+  any address fails `probe::is_public_address`, as the git probe does; a
+  host that does not resolve here passes to Cactarium. Tests' loopback
+  servers are listed in `PUBLIC_IN_TESTS`.
 - **`ignore` components** (`!TYPE = ignore`: on this machine only) are
   refused, as the crate's parser lists them (`crl::Thornlist::ignored`,
   crate PR #11; they are never in `components()`).
@@ -4643,7 +4653,12 @@ the config's own record only while that still describes the same `build-id`.
   keeps the wording above. An `[[input]]` with a `url` and `sha256` goes
   through the same review: its sha256 is known only once `finish` has
   downloaded it, after the questions, so inputs are asked about in a second
-  lookup there. A lookup that fails fails the export, naming `--local`.
+  lookup there. A lookup that fails is one line among the refusals
+  (`registered::lookup_failed`: the first line of why, the client's own
+  "Cannot ask Cactarium …" not wrapped twice), so nothing else refused is
+  lost; Ctrl-C in flight is "Interrupted" alone. For `sim pack` without an
+  installation (whose `!REPO_COMMIT`s no local check can place), a pin of a
+  registered package whose `commit-known` is false is refused.
   `commit-known = false` is not refused (the local published check decides).
 - **Pin labels.** Each git pin of a registered package gets
   `RepoPin.cactarium` from the lookup: `owner/pkg@<version>` (a track's
@@ -4982,13 +4997,22 @@ What uses it, all on the login node (D11):
   `refetch --release` reach stack tips through
   `cactarium::stack_release_text`, `add` reaches package tips through the
   same `confirm_untrusted`. A release is frozen, so nothing is resolved;
-  after a stack install, and after `refetch --release` to a stack once the
-  list is written, `claims::warn_problems` runs `claims check`'s check over
-  the result and prints each problem as a yellow warning ending in its way
-  past (`cactup add --upgrade <pkg>`, a `cactup claims override …`), plus
-  what it could not check. Neither problems nor a failed check (Cactarium
-  unreachable: one line naming `cactup claims check`) fail the command;
-  Ctrl-C does.
+  after a stack install (after its symlink and `cactup use` lines), and
+  after a refetch to a stack that wrote its list with no fetch failure (its
+  last output), `claims::warn_problems` runs `claims check`'s check over the
+  result and prints each problem as a yellow warning ending in its way past
+  (`cactup add --upgrade <pkg>`, a `cactup claims override …`), plus what it
+  could not check. It is bounded: each request 15 s (`with_timeout`), the
+  whole check 20 s of wall clock (it runs on a thread; at the deadline or a
+  Ctrl-C a stop flag, `Client::stopped_by`, ends its requests at once, and
+  it says "did not answer in time" or "interrupted"), and base packages at
+  commits no version froze are not read (`PresentOptions::no_unreleased_reads`;
+  they go on the "Not checked" line). Neither problems nor a check that did
+  not run fail the command, each said in one line. A Ctrl-C that arrives
+  while it runs ends the check only: it records that it took the interrupt
+  (`claims::interrupt_taken_by_warnings`), and `main` then does not turn the
+  finished command's Ok into "Interrupted". The flag itself stays set, and
+  a Ctrl-C from before the check began is not taken.
 - `cactup import owner/name[/sim][@range|=X.Y.Z]` downloads the published sim
   (versions are semver, like packages and stacks; the newest matching, or
   the newest at all) to `~/.cactup/simfiles/<owner>/<name>/<X.Y.Z>.sim`,
@@ -5032,10 +5056,14 @@ What uses it, all on the login node (D11):
 - `cactup sim publish <file.sim> <owner/name> [--version X.Y.Z]` uploads a
   fully specified file (anything else is refused locally, naming what is
   unspecified) as that version, else the next major version. Before the
-  upload it runs export's registry check (§8.9, `sim::registered`): one
-  lookup of every git pin, download pin and input download, refusing a repo
-  no registered package has and a download not approved, a line each, with
-  nothing uploaded. The registry
+  upload it runs export's checks (§8.9, `sim::registered::check_publish`):
+  offline first, sharing export's code (`classify` on the file's thornlist,
+  each pin's URL by `probe::start` or the download rule,
+  `export::content_problems` and `unpinned_git`, private input downloads,
+  dirty pins, untracked thorns), and nothing is sent while any is refused;
+  then the token (`token_for`, so a user without one is not kept waiting);
+  then one lookup of every git pin, download pin and input download. Every
+  problem is a line of one error, with nothing uploaded. The registry
   says whether it is public or pending review. A pending release (new releases of a public entry wait for an
   admin unless the entry, its owner or the publisher is trusted) is not
   served, listed or resolved until approved, and cactup says so.

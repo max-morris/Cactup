@@ -39,8 +39,10 @@ Export refuses what nobody else could reproduce:
 - **Commits that are on no remote branch or tag.** Push them, then run
   `cactup inst refetch`.
 - **A repository that is no registered package's.** Every git repository
-  must be one of a package registered with Cactarium: push it and register
-  it (`cactup package init <repo> --publish`), or fork a registered package.
+  must be one of a package registered with Cactarium: register it on
+  Cactarium's site, or fork a registered package. (The refusal names
+  `cactup package init <repo> --publish`, the registration from cactup
+  itself, which is not in this release yet.)
 - **A thorn nobody else can fetch**: a `!TYPE = ignore` component, which
   exists only on this machine.
 - **A download Cactarium has not approved.** A download (a tarball the
@@ -50,13 +52,21 @@ Export refuses what nobody else could reproduce:
   export says whether Cactarium is still verifying it or it awaits review;
   when Cactarium could not verify it (the file's hash differs, or its server
   failed), export says why, and submitting it again retries the check.
+  A download on a loopback, private or link-local address
+  (`http://127.0.0.1/…`, `http://10.0.0.5/…`) is refused outright: nobody
+  outside your network could fetch it. A host your machine cannot look up
+  is left to Cactarium to check.
 - **A download with no hash**, which nothing could review: the build
   recorded none (built before cactup recorded download hashes; rebuild the
   config), or, for `sim pack`, the thornlist gives none.
-- **A repository nothing pins**: an svn, cvs, hg or darcs component (no
-  commit pins it), or one section downloading several files (no single
-  hash pins them). Move it to git, or to downloads each pinned by a
-  `!CHECKSUM_SHA256` line.
+- **A repository nothing pins**: a git repository with no commit (the
+  build recorded none: rebuild the config; or, for `sim pack -I`, the
+  installation never fetched it: run `cactup inst refetch`), an svn, cvs,
+  hg or darcs component (no commit pins it), or one section downloading
+  several files (no single hash pins them). Move such a component to git,
+  or to downloads each pinned by a `!CHECKSUM_SHA256` line. For `sim pack`
+  without an installation, a `!REPO_COMMIT` that Cactarium says the
+  package's repository lacks is refused too.
 - **Repository URLs nobody else can fetch, or that carry credentials.** A
   local path or `file://` URL, a URL with a user name, password or token in
   it (`https://TOKEN@host/…`), a query string (`?private_token=…`), or a
@@ -88,7 +98,8 @@ is approved; a URL already refused is never sent. The `.sim` then labels
 each repository of a registered package with it: `owner/pkg@1.2.0` when
 that version froze the commit, a bare `owner/pkg` for any other commit. An
 input's file is asked about once it is downloaded and hashed, after the
-questions. The claim overrides of the installation (`cactup claims`) are
+questions. When Cactarium cannot be asked (it is down, or failing), that is
+one more line of the error, beside everything else refused. The claim overrides of the installation (`cactup claims`) are
 recorded in the `.sim`'s provenance, for information only: `import` never
 resolves dependencies.
 
@@ -108,8 +119,8 @@ cactup sim export mysim --local   # nothing refused, nothing asked
 ```
 
 Such a file keeps every URL as it is, marks sources with uncommitted
-changes as dirty, and labels no repository. Cactarium refuses to publish
-exactly the files that needed `--local`.
+changes as dirty, and labels no repository. Export lists, a line each, what
+keeps it from being published. `cactup sim publish` refuses such a file.
 
 A parfile value that is an absolute path (`/scratch/me/initial-data`) gets a
 warning: whoever imports the simulation will not have that path. Use a knob
@@ -257,10 +268,13 @@ cactup sim publish bbh.sim me/bbh
 ```
 
 Only a **fully specified** file can be published: every repository pinned,
-nothing dirty. Before uploading, cactup asks Cactarium about every pin, as
-export does: a repository that is no registered package's, or a download
-(an input's file included) that Cactarium has not approved, is refused, a
-line each, and nothing is uploaded. Versions are semantic versions: `--version 1.2.0` chooses one,
+nothing dirty. Before anything is sent, publish checks the file as export
+checks what it writes: URLs nobody else can fetch or that carry
+credentials, `ignore` components, repositories nothing pins, downloads on a
+private address. Then it checks that you have a token, then asks Cactarium
+about every pin: a repository that is no registered package's, or a
+download (an input's file included) that Cactarium has not approved, is
+refused. Every problem is a line of one error, and nothing is uploaded. Versions are semantic versions: `--version 1.2.0` chooses one,
 and without it the next major version is used (`me/bbh@1.0.0`, `@2.0.0`, …).
 A new version may wait for an admin's review before anyone can import it;
 cactup says so when it does.
@@ -280,7 +294,9 @@ Cactarium then fetches the file itself to verify the hash, and an admin
 reviews it. cactup then says where it stands: being verified, verified and
 awaiting review, approved, rejected, or not verified and why. A download
 submitted before is not an error: cactup says the same of it, and
-submitting one that could not be verified retries the check.
+submitting one that could not be verified makes Cactarium check it again.
+A URL with credentials, or on a private address, is refused before
+anything is downloaded.
 
 ### Importing from Cactarium
 
@@ -344,10 +360,15 @@ warns that it may fetch and build arbitrary code and asks you to type `yes`.
 prints), and is the only way to take such a tip in a script.
 
 A stack release is installed as it was frozen: nothing is resolved. After
-`install` and `inst refetch --release` to a stack, cactup runs
-`cactup claims check` over the result and prints what it finds as warnings,
-each naming a way past (`cactup add --upgrade <pkg>`, or a
-`cactup claims override …`). They never fail the command.
+`install` and `inst refetch --release` to a stack, once their own output is
+done, cactup runs `cactup claims check` over the result and prints what it
+finds as warnings, each naming a way past (`cactup add --upgrade <pkg>`, or
+a `cactup claims override …`). They never fail the command. The check is
+quick by design: it gives up after about 20 seconds, saying Cactarium did
+not answer in time, and does not read base packages at commits no version
+froze (it says how many it left unchecked). Ctrl-C ends the check alone:
+the install or refetch it followed stays a success. Run
+`cactup claims check` for the full check.
 
 ### Adding a package
 
