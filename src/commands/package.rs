@@ -786,25 +786,26 @@ fn own_thorns(dir: &Path, mine: &[&Component]) -> (Vec<Own>, Layout) {
 #[cfg(test)]
 static AFTER_SOURCE: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
 
-/// How many times the crate's source scan was started (tests).
+/// How many times the crate's source scan stopped at Ctrl-C (tests).
 #[cfg(test)]
-static CRATE_SCANS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static CRATE_STOPPED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// What reading a thorn's sources gives: the `USES INCLUDE` headers it cannot compile without
 /// (the crate's rule), and every `#include` it writes, with its file.
 type Scanned = (Vec<String>, Vec<(String, String)>);
 
-/// One thorn's sources read, on the Registry's pool: Ctrl-C stops the include scan between
-/// files, and the crate's scan (which takes no flag) is then not started.
+/// One thorn's sources read, on the Registry's pool: Ctrl-C stops both the include scan and the
+/// crate's scan between files (the Registry then fails the phase as interrupted).
 fn scan_one(dir: &Path, t: &Own) -> Scanned {
     let at = dir.join(&t.rel);
     let includes = includes_of(&at);
     let mut facts = t.facts.clone();
-    if !gix::interrupt::is_triggered() {
-        #[cfg(test)]
-        CRATE_SCANS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        facts.scan_sources(&at);
+    let finished = facts.scan_sources_until(&at, &gix::interrupt::IS_INTERRUPTED);
+    #[cfg(test)]
+    if !finished {
+        CRATE_STOPPED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
+    let _ = finished;
     (facts.needs_includes, includes)
 }
 

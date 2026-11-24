@@ -5752,8 +5752,6 @@ in DIR and calls `publish_stack` as `<owner>/<name>@V`.
   `.unreviewed.sim` files are never cleaned up.
 - A restoring remote that does not answer leaves the clone on the pinned label,
   said on its line.
-- `scan_sources` of the shared crate does not poll Ctrl-C, so a stop waits for
-  the thorns in flight.
 
 ---
 
