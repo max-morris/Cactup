@@ -1791,6 +1791,36 @@ pub fn is_published(repo_dir: &Path, commit: ObjectId) -> Res<bool> {
     Ok(false)
 }
 
+/// Whether each of `candidates` is `descendant` or in its history, as the repo at `repo_dir`
+/// has it, in one walk of that history (a package's every version is asked at once). `false`
+/// for a commit the repo does not have, and where a shallow boundary ends the walk first.
+/// Interrupt-aware.
+pub fn is_ancestor(repo_dir: &Path, candidates: &[ObjectId], descendant: ObjectId) -> Res<Vec<bool>> {
+    let repo = gix::open(repo_dir).with_context(|| format!("Failed to open '{}'", repo_dir.display()))?;
+    let mut found: Vec<bool> = candidates.iter().map(|c| *c == descendant).collect();
+    let mut left: std::collections::BTreeSet<ObjectId> =
+        candidates.iter().filter(|c| **c != descendant && repo.has_object(**c)).copied().collect();
+    if left.is_empty() || !repo.has_object(descendant) {
+        return Ok(found);
+    }
+    for info in repo.rev_walk(Some(descendant)).all().with_context(|| "Failed to walk history")? {
+        if gix::interrupt::is_triggered() {
+            bail!("Interrupted");
+        }
+        // A shallow boundary or a missing parent ends the walk.
+        let Ok(info) = info else { break };
+        if left.remove(&info.id) {
+            for (f, c) in found.iter_mut().zip(candidates) {
+                *f |= *c == info.id;
+            }
+            if left.is_empty() {
+                break;
+            }
+        }
+    }
+    Ok(found)
+}
+
 /// The commit `git_ref` (a branch or tag; `None`: the remote's default
 /// branch, its `HEAD`) names on the remote at `url` right now — `git
 /// ls-remote`, without fetching anything. An annotated tag yields the commit

@@ -454,6 +454,10 @@ pub(crate) enum Commands {
     /// installation, and applies to every add and remove in it.
     #[clap(subcommand)]
     Claims(ClaimsCommand),
+    // Plan §4.7
+    /// Write a package's cactarium.toml
+    #[clap(subcommand)]
+    Package(PackageCommand),
     // §8.10
     /// Work with Cactarium stacks
     #[clap(subcommand)]
@@ -1301,6 +1305,39 @@ pub(crate) enum OverrideAction {
         #[clap(value_name = "Y")]
         target: String,
     },
+}
+
+// Plan §4.7
+#[derive(Subcommand, Debug)]
+pub(crate) enum PackageCommand {
+    /// Write a cactarium.toml for a repo of the installation
+    ///
+    /// Reads the repo's thorns and the active config's build, and writes
+    /// cactarium.toml at the repo's root for you to review and commit: the
+    /// package's name and owners, and a dependency on each installed package
+    /// whose thorns meet what the repo's thorns require. What cactup cannot
+    /// decide is written as a TODO comment.
+    Init(PackageInitArgs),
+}
+
+/// `cactup package init`.
+#[derive(clap::Args, Debug)]
+pub(crate) struct PackageInitArgs {
+    /// The repo, by its name under repos/ (default: the one holding the
+    /// current directory).
+    pub repo: Option<String>,
+    /// The package's name (default: the repo's name, lowercased).
+    #[clap(long)]
+    pub name: Option<String>,
+    /// The owner (default: your Cactarium user).
+    #[clap(long, value_name = "OWNER")]
+    pub owner: Option<String>,
+    /// Depend on exactly the versions installed (=X.Y.Z, not ~X.Y.Z).
+    #[clap(long)]
+    pub exact: bool,
+    /// Overwrite an existing cactarium.toml.
+    #[clap(short, long)]
+    pub force: bool,
 }
 
 // §8.10

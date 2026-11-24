@@ -292,7 +292,7 @@ impl Registry {
 
     /// One request on a line of its own under the headline, `name` naming
     /// it and `phase` saying what it asks.
-    fn one<T: Send + 'static>(
+    pub(crate) fn one<T: Send + 'static>(
         &self,
         name: &str,
         phase: &str,
@@ -341,7 +341,7 @@ impl Registry {
 
     /// `work` for each of `items` on the local disk, in parallel, each on a
     /// line named by `name` under one headline, in the order given.
-    fn local<I: Sync, T: Send>(
+    pub(crate) fn local<I: Sync, T: Send>(
         &self,
         items: &[I],
         unit: &'static str,
@@ -1554,7 +1554,7 @@ pub(crate) fn read_stand_ins(
 /// `scan_tree`, it never reads the thorns' sources (thousands of files a
 /// thorn, on a network filesystem): only the thorns' names and CCL facts are
 /// wanted of a stand-in's tree.
-fn scan_thorns(root: &Path) -> Vec<cactup_ecosystem_common::ccl::ScannedThorn> {
+pub(crate) fn scan_thorns(root: &Path) -> Vec<cactup_ecosystem_common::ccl::ScannedThorn> {
     use std::path::PathBuf;
     fn subdirs(dir: &Path) -> Vec<PathBuf> {
         let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };

@@ -14,7 +14,7 @@ use anyhow::{anyhow, bail, Context};
 use colored::Colorize;
 use cactup_ecosystem_common::api::{
     DownloadConflict, DownloadQuery, DownloadReview, DownloadSubmission, ErrorBody, LookedUp, LookupRequest, PackageVersion, PackageVersions, PinInfo, PinQuery, Providers,
-    ProvidersQuery, Published, ReadAnswer, ReadRequest, Refreshed, Resolved, StackReleases, VersionInfo, API_GENERATION,
+    ProvidersQuery, Published, ReadAnswer, ReadRequest, Refreshed, Resolved, StackReleases, VersionInfo, WhoAmI, API_GENERATION,
     API_GENERATION_HEADER, API_PREFIX, CONTACT_HEADER, INCLUDE_UNREVIEWED_HEADER, MAX_LOOKUP_PINS, SHA256_HEADER,
     SIM_QUERY, UNPINNED_HEADER, UNREVIEWED_HEADER, UNTRUSTED_HEADER,
 };
@@ -552,6 +552,17 @@ impl Client {
             .post(self.url(&format!("/packages/{owner}/{name}/refresh")))
             .bearer_auth(token);
         self.send_change(request, "the refresh")?.json()
+    }
+
+    /// Who the stored token belongs to: the user, and the organizations the
+    /// user may publish under.
+    pub fn whoami(&self) -> Res<WhoAmI> {
+        let token = token_for(&self.base)?;
+        let request = self.http().get(self.url("/whoami")).bearer_auth(token);
+        match self.send_found(request, MISSING_ROUTE)? {
+            Ok(answer) => answer.json(),
+            Err(_) => bail!("Cactarium at {} is too old to say who you are (it has no /whoami)", self.base),
+        }
     }
 
     /// A request that never got an answer. A server that cannot be reached
