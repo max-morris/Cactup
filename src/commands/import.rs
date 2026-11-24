@@ -1419,7 +1419,7 @@ pub(crate) mod tests {
             }
 
             // Offline: an exact version finds no cached copy, since the one there is unreviewed.
-            let gone = crate::cactarium::Client::at(client.base());
+            let gone = nothing_listens();
             let err = format!("{:#}", fetch_published(&gone, tmp.path(), "max/bbh@=1.2.0").unwrap_err());
             assert!(err.contains("isn't reachable"), "{err}");
 
