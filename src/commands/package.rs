@@ -1154,7 +1154,10 @@ fn publish(client: &Client, live: &Thornlist, repo: &str, dir: &Path, namespace:
     let next = next_tag(&tags, package);
     // How to get the file on disk into a pushed release tag.
     let (_, head) = crate::fetch::git::head_of(dir)?;
-    let mut steps: Vec<String> = match crate::fetch::git::file_in_commit(dir, head, PACKAGE_FILE)? {
+    let committed = crate::fetch::git::file_in_commit(dir, head, PACKAGE_FILE)?;
+    // Committed as it is on disk: only the tag is missing.
+    let ready = committed.as_deref() == Some(text.as_bytes());
+    let mut steps: Vec<String> = match committed {
         None => vec![format!("{git} add {PACKAGE_FILE}"), format!("{git} commit -m \"Add {PACKAGE_FILE}\"")],
         Some(committed) if committed != text.as_bytes() => {
             vec![format!("{git} commit -m \"Update {PACKAGE_FILE}\" {PACKAGE_FILE}")]
@@ -1163,8 +1166,12 @@ fn publish(client: &Client, live: &Thornlist, repo: &str, dir: &Path, namespace:
     };
     steps.extend([format!("{git} tag {next}"), format!("{git} push"), format!("{git} push origin {next}")]);
     let steps: String = steps.iter().map(|s| format!("\n  {s}")).collect();
+    let how = match ready {
+        true => "Tag a release and push it:".to_owned(),
+        false => format!("Commit {PACKAGE_FILE}, tag a release and push both:"),
+    };
     if tags.is_empty() {
-        bail!("Repo {repo} has no release tag.\nCommit {PACKAGE_FILE}, tag a release and push both:{steps}");
+        bail!("Repo {repo} has no release tag.\n{how}{steps}");
     }
 
     // What anybody can fetch, and which of its release tags are there.
@@ -1181,9 +1188,9 @@ fn publish(client: &Client, live: &Thornlist, repo: &str, dir: &Path, namespace:
     };
     let (tag, _, commit) = &tags[at];
     match crate::fetch::git::file_in_commit(dir, *commit, PACKAGE_FILE)? {
-        None => bail!("Tag {tag} of repo {repo} has no {PACKAGE_FILE}.\nCommit it, tag a release and push both:{steps}"),
+        None => bail!("Tag {tag} of repo {repo} has no {PACKAGE_FILE}.\n{how}{steps}"),
         Some(tagged) if tagged != text.as_bytes() => bail!(
-            "{PACKAGE_FILE} in repo {repo} differs from the one at tag {tag}.\nCommit it, tag a release and push both:{steps}"
+            "{PACKAGE_FILE} in repo {repo} differs from the one at tag {tag}.\n{how}{steps}"
         ),
         Some(_) => {}
     }

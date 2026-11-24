@@ -850,8 +850,19 @@ fn publish_reads_the_newest_pushed_release_tag_then_registers() {
     tag(&it.up, "v1.0.0");
     std::fs::write(it.dir.join(PACKAGE_FILE), format!("{MANIFEST}# edited\n")).unwrap();
     let err = it.refused();
-    assert!(err.contains("cactarium.toml in repo z4c differs from the one at tag v1.0.0."), "{err}");
+    assert!(err.contains("cactarium.toml in repo z4c differs from the one at tag v1.0.0.\nCommit cactarium.toml, tag a release and push both:"), "{err}");
     assert!(err.contains("commit -m \"Update cactarium.toml\" cactarium.toml") && err.contains("tag v1.0.1"), "{err}");
+    // Committed already: only the tag is missing, and the header says so.
+    let mut tree = FILES.to_vec();
+    let edited = format!("{MANIFEST}# edited\n");
+    tree.push((PACKAGE_FILE, edited.as_str()));
+    crate::fetch::tests::commit_files(&it.dir, &tree);
+    let err = it.refused();
+    assert!(
+        err.contains(&format!("differs from the one at tag v1.0.0.\nTag a release and push it:\n  git -C {dir} tag v1.0.1\n")),
+        "{err}"
+    );
+    assert!(!err.contains("commit -m"), "{err}");
     assert!(it.asked("/api/v1/repos").is_empty(), "nothing asked before the tag holds the manifest");
 
     // Committed on top and tagged here only: the pushed tag is what counts.
@@ -1366,4 +1377,11 @@ fn stack_init_pins_committed_work_in_a_section() {
     let extra = th.components().iter().find(|c| c.checkout == "Extra/Extra").unwrap();
     assert_eq!((extra.commit.as_deref(), extra.branch.as_deref()), (Some(x.as_str()), None), "{text}");
     assert_ne!(x, it.e);
+}
+
+/// Counts in progress phases read as counts: `1 repo`, `2 repos`.
+#[test]
+fn counts_read_as_counts() {
+    use crate::commands::resolution::counted;
+    assert_eq!((counted(1, "repo"), counted(0, "repo"), counted(2, "package")), ("1 repo".into(), "0 repos".into(), "2 packages".into()));
 }

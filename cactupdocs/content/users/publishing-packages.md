@@ -19,6 +19,9 @@ cactup package init              # the repository holding the current directory
 reads the repository's thorns and the active config's build, so build the
 config first (`cactup build`). A config built with `--virtual-executable`
 has no `ThornList`, so `package init` needs a real build of it.
+`package init` maps to registered packages only the repositories whose URLs
+others can fetch, so a repository cloned from a local path is never matched
+to a registered package.
 
 ## What it writes
 

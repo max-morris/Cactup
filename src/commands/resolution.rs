@@ -403,7 +403,7 @@ impl Registry {
         if pins.is_empty() {
             return Ok(Vec::new());
         }
-        let phase = format!("looking up {} repos", pins.len());
+        let phase = format!("looking up {}", counted(pins.len(), "repo"));
         let pins = pins.to_vec();
         self.one("the installation's repos", &phase, move |c| c.lookup(&pins))
     }
@@ -544,7 +544,7 @@ impl Registry {
                     stopped = true;
                     break;
                 }
-                status.phase(format!("round {round}: reading {} packages", chunk.len()));
+                status.phase(format!("round {round}: reading {}", counted(chunk.len(), "package")));
                 let Some(answer) = self.read_batch(chunk, &status, deadline)? else {
                     stopped = true;
                     break;
@@ -763,6 +763,11 @@ impl Registry {
     }
 }
 
+/// `n` of `what`: `1 repo`, `2 repos`.
+pub(crate) fn counted(n: usize, what: &str) -> String {
+    if n == 1 { format!("1 {what}") } else { format!("{n} {what}s") }
+}
+
 /// How long one wait for the read limit lasts: `Retry-After` (whole
 /// seconds, at least one, at most [`MAX_WAIT`]), else until the window
 /// opened at `window_start` has passed; never past `left` of the budget.
@@ -925,7 +930,7 @@ impl Facts for Registry {
             self.search = Some(Line::over(self.progress.add_child(SEARCH), SEARCH, self.layout.clone()));
         }
         if let Some(line) = &self.search {
-            line.phase(format!("{steps} steps"));
+            line.phase(counted(steps, "step"));
         }
     }
 }
