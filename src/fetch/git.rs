@@ -1821,6 +1821,25 @@ pub fn is_ancestor(repo_dir: &Path, candidates: &[ObjectId], descendant: ObjectI
     Ok(found)
 }
 
+/// The bytes of `path` (relative to the worktree root) in HEAD's tree:
+/// `None` when HEAD has no such regular file.
+pub fn file_in_head(repo_dir: &Path, path: &str) -> Res<Option<Vec<u8>>> {
+    let repo = gix::open(repo_dir).with_context(|| format!("Failed to open '{}'", repo_dir.display()))?;
+    let tree = repo
+        .head_commit()
+        .with_context(|| "HEAD points at no commit")?
+        .tree()
+        .with_context(|| "Failed to read HEAD's tree")?;
+    let Some(entry) = tree.lookup_entry_by_path(path).with_context(|| format!("Failed to look up {path}"))? else {
+        return Ok(None);
+    };
+    if !entry.mode().is_blob() {
+        return Ok(None);
+    }
+    let blob = entry.object().with_context(|| format!("Failed to read {path} from HEAD"))?;
+    Ok(Some(blob.data.clone()))
+}
+
 /// The commit `git_ref` (a branch or tag; `None`: the remote's default
 /// branch, its `HEAD`) names on the remote at `url` right now — `git
 /// ls-remote`, without fetching anything. An annotated tag yields the commit

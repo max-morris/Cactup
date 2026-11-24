@@ -1,7 +1,7 @@
 //! `cactup package init`, end to end: real upstream repos on disk, an
 //! installation fetched from them and built (a config record and its `ThornList`), and a fake
-//! Cactarium (`test_server`) answering `/lookup`, version lists, reads at a commit, and `/whoami`
-//! in the crate's shapes.
+//! Cactarium (`test_server`) answering `/lookup`, version lists, reads at a commit, `/whoami`,
+//! `/repos` and a refresh in the crate's shapes.
 // Plan §8 (integration tests), the P7 row of §7's reviewer checks.
 
 use super::*;
@@ -29,6 +29,8 @@ struct Fake {
     packages: Vec<(String, Vec<Value>)>,
     /// URL → its package, the package's `fork-of` there, and whether it is a flesh.
     pins: Vec<(String, String, Vec<String>, bool)>,
+    /// The package is on Cactarium already: `/repos` answers `existing`.
+    registered: bool,
     /// `owner/name` → its release 1.0.0, frozen.
     stacks: Vec<(String, Value)>,
 }
@@ -83,6 +85,21 @@ impl Fake {
                     .collect();
                 return ok(json!({ "pins": pins }));
             }
+            "/repos" => {
+                let asked: RegisterRequest = serde_json::from_slice(body).unwrap();
+                let name = asked.only.first().cloned().unwrap_or_default();
+                let mut entry = json!({"slug": format!("max/{name}"), "kind": "package", "file": "cactarium.toml",
+                    "tag": "v1.0.0", "version": "1.0.0", "rule": "tags vX.Y.Z", "review": "pending",
+                    "status": if self.registered { "existing" } else { "new" }});
+                if !self.registered && !asked.dry_run {
+                    assert_eq!(asked.expect.as_deref(), Some("fingerprint"), "registers what the preview showed");
+                    entry["url"] = json!(format!("https://cactarium.test/max/{name}"));
+                    entry["new-versions"] = json!(1);
+                    entry["awaiting-review"] = json!(1);
+                }
+                let expect = asked.dry_run.then_some("fingerprint");
+                return ok(json!({"entries": [entry], "warnings": [], "expect": expect}));
+            }
             _ => {}
         }
         if let Some(id) = path.strip_prefix("/stacks/").and_then(|r| r.strip_suffix("/releases")) {
@@ -94,6 +111,9 @@ impl Fake {
                 Some((_, frozen)) => ok(frozen.clone()),
                 None => missing(),
             };
+        }
+        if let Some(id) = path.strip_prefix("/packages/").and_then(|r| r.strip_suffix("/refresh")) {
+            return ok(json!({"slug": id, "new-versions": 2, "awaiting-review": 0}));
         }
         if let Some(rest) = path.strip_prefix("/packages/") {
             let Some((id, at)) = rest.split_once("/versions") else { return missing() };
@@ -226,7 +246,12 @@ impl World {
     }
 
     fn init(&self, repo: &str, exact: bool, force: bool) -> Res<()> {
-        let args = PackageInitArgs { repo: Some(repo.into()), name: None, owner: None, exact, force };
+        let args = PackageInitArgs { repo: Some(repo.into()), name: None, owner: None, exact, force, publish: false };
+        init(&self.ctx, &args)
+    }
+
+    fn publish(&self, repo: &str) -> Res<()> {
+        let args = PackageInitArgs { repo: Some(repo.into()), name: None, owner: None, exact: false, force: false, publish: true };
         init(&self.ctx, &args)
     }
 
@@ -606,6 +631,89 @@ fn overrides_go_in_as_comments() {
     let (text, _) = it.world.manifest("z4c");
     assert!(text.contains("# Claim overrides of installation t:\n#   satisfies local:carpetx et/carpetx  (our fork)\n"), "{text}");
     assert!(claims_of(&text).iter().all(|l| !l.contains("satisfies")), "{text}");
+}
+
+/// Marks HEAD of the clone at `dir` as on its remote (as a push and fetch would).
+fn mark_pushed(dir: &Path) {
+    let mut repo = gix::open(dir).unwrap();
+    // CI runners have no git identity, and a ref's log needs one.
+    let _ = repo.committer_or_set_generic_fallback();
+    let head = repo.head_id().unwrap().detach();
+    repo.reference("refs/remotes/origin/main", head, gix::refs::transaction::PreviousValue::Any, "test").unwrap();
+}
+
+/// `--publish` writes nothing: it refuses an uncommitted manifest, one with uncommitted changes
+/// and an unpushed one, each naming the git commands; then registers it (a preview, then exactly
+/// what it showed, at the https URL anyone can fetch), or, when it is registered, refreshes it.
+#[test]
+fn publish_refuses_until_committed_and_pushed_then_registers_or_refreshes() {
+    use crate::fetch::anonymous::testserver::{serve, Mode};
+    serve("pkg.share.test", Mode::Public);
+    for registered in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let files = [("Z4c/interface.ccl", "IMPLEMENTS: z4c\n")];
+        let (zurl, z) = upstream(tmp.path(), "z4c", &files);
+        let (cactarium, log) = Fake { registered, ..Fake::default() }.serve();
+        let w = World::new(tmp, &section(&zurl, &z, &["Z4c/Z4c"]), &cactarium, None);
+        // Published under its https URL from here on.
+        let pristine = std::fs::read_to_string(w.inst.source_thornlist()).unwrap();
+        std::fs::write(w.inst.source_thornlist(), pristine.replace(&zurl, "https://pkg.share.test/max/z4c.git")).unwrap();
+        let dir = w.repo("z4c");
+        let err = format!("{:#}", w.publish("z4c").unwrap_err());
+        assert!(err.contains("has no cactarium.toml") && err.contains("`cactup package init z4c`"), "{err}");
+
+        let manifest = "format = 1\n[package]\nname = \"z4c\"\nowners = [\"max\"]\n";
+        std::fs::write(dir.join(PACKAGE_FILE), manifest).unwrap();
+        let err = format!("{:#}", w.publish("z4c").unwrap_err());
+        assert!(err.contains("cactarium.toml is not committed in repo z4c"), "{err}");
+        assert!(err.contains(&format!("git -C {} add cactarium.toml", dir.display())), "{err}");
+        assert!(err.contains(&format!("git -C {} push", dir.display())), "{err}");
+
+        let mut tree = files.to_vec();
+        tree.push((PACKAGE_FILE, manifest));
+        crate::fetch::tests::commit_files(&dir, &tree);
+        std::fs::write(dir.join(PACKAGE_FILE), format!("{manifest}# edited\n")).unwrap();
+        let err = format!("{:#}", w.publish("z4c").unwrap_err());
+        assert!(err.contains("has uncommitted changes") && err.contains("commit -m"), "{err}");
+        std::fs::write(dir.join(PACKAGE_FILE), manifest).unwrap();
+
+        let err = format!("{:#}", w.publish("z4c").unwrap_err());
+        assert!(err.contains("is on no remote branch") && err.contains(&format!("git -C {} push", dir.display())), "{err}");
+        assert!(!log.lock().unwrap().iter().any(|(p, _)| p.contains("/repos")), "nothing asked before it is pushed");
+
+        mark_pushed(&dir);
+        w.publish("z4c").unwrap_or_else(|e| panic!("{e:#}"));
+        let asked: Vec<(String, String)> = log.lock().unwrap().clone();
+        let repos: Vec<&(String, String)> = asked.iter().filter(|(p, _)| p == "/api/v1/repos").collect();
+        let refreshes = asked.iter().filter(|(p, _)| p == "/api/v1/packages/max/z4c/refresh").count();
+        assert!(repos[0].1.contains("\"url\":\"https://pkg.share.test/max/z4c.git\""), "{}", repos[0].1);
+        assert!(repos[0].1.contains("\"only\":[\"z4c\"]") && repos[0].1.contains("\"dry-run\":true"), "{}", repos[0].1);
+        if registered {
+            assert_eq!((repos.len(), refreshes), (1, 1), "a registered package is refreshed");
+        } else {
+            assert_eq!((repos.len(), refreshes), (2, 0), "a preview, then the registration");
+            assert!(repos[1].1.contains("\"expect\":\"fingerprint\"") && !repos[1].1.contains("dry-run"), "{}", repos[1].1);
+        }
+        assert_eq!(std::fs::read_to_string(dir.join(PACKAGE_FILE)).unwrap(), manifest, "--publish writes nothing");
+    }
+}
+
+/// A remote nobody else could fetch (a local path) is never registered.
+#[test]
+fn publish_refuses_a_local_remote() {
+    let tmp = tempfile::tempdir().unwrap();
+    let files = [("Z4c/interface.ccl", "IMPLEMENTS: z4c\n")];
+    let (zurl, z) = upstream(tmp.path(), "z4c", &files);
+    let (cactarium, log) = Fake::default().serve();
+    let w = World::new(tmp, &section(&zurl, &z, &["Z4c/Z4c"]), &cactarium, None);
+    let dir = w.repo("z4c");
+    let manifest = "format = 1\n[package]\nname = \"z4c\"\nowners = [\"max\"]\n";
+    let mut tree = files.to_vec();
+    tree.push((PACKAGE_FILE, manifest));
+    crate::fetch::tests::commit_files(&dir, &tree);
+    mark_pushed(&dir);
+    assert!(w.publish("z4c").is_err());
+    assert!(!log.lock().unwrap().iter().any(|(p, _)| p.contains("/repos")));
 }
 
 /// Ctrl-C while the repo's sources are read fails the command at once and writes nothing. The

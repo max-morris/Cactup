@@ -1,5 +1,6 @@
 //! `cactup package init` (D5): a `cactarium.toml` for a repo of the installation, written for
-//! review from what is installed and built.
+//! review from what is installed and built; and `--publish`, which writes nothing and registers
+//! the committed one (or has Cactarium check it for new releases when it is registered).
 //!
 //! Nothing a heuristic finds is ever written as a claim, only as a TODO comment. A dependency is
 //! written for a requirement of the repo's CCL that exactly one installed thorn meets (the one
@@ -15,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{anyhow, bail, Context};
-use cactup_ecosystem_common::api::{PinInfo, PinQuery};
+use cactup_ecosystem_common::api::{PinInfo, PinQuery, RegisterRequest, Registered};
 use cactup_ecosystem_common::ccl::{self, Need, ThornFacts};
 use cactup_ecosystem_common::manifest::{ForkOf, Manifest, PACKAGE_FILE};
 use cactup_ecosystem_common::name::{Name, Owner};
@@ -35,7 +36,7 @@ use crate::Res;
 /// The implementation every Cactus driver provides (Carpet, PUGH, CarpetX).
 const DRIVER: &str = "driver";
 
-/// `cactup package init [REPO]`.
+/// `cactup package init [REPO]`, or with `--publish` the registration of its committed manifest.
 pub fn init(ctx: &Ctx, args: &PackageInitArgs) -> Res<()> {
     let inst = Installation::resolve(ctx)?;
     let meta = inst.meta()?;
@@ -48,6 +49,9 @@ pub fn init(ctx: &Ctx, args: &PackageInitArgs) -> Res<()> {
     let dir = cactus.join("repos").join(&repo);
     // Anonymous: what a shared manifest rests on must be reviewed.
     let client = Client::new(&ctx.db.read()?);
+    if args.publish {
+        return publish(&client, &live, &repo, &dir, args.owner.as_deref());
+    }
     let file = dir.join(PACKAGE_FILE);
     if file.exists() && !args.force {
         bail!("'{}' exists.\nPass -f to overwrite it.", file.display());
@@ -81,7 +85,7 @@ pub fn init(ctx: &Ctx, args: &PackageInitArgs) -> Res<()> {
         1 => println!("{}", "Resolve the TODO in it.".yellow()),
         n => println!("{}", format!("Resolve the {n} TODOs in it.").yellow()),
     }
-    println!("Review it, then commit and push it.");
+    println!("Commit and push it, then register it with `cactup package init {repo} --publish`.");
     Ok(())
 }
 
@@ -962,6 +966,148 @@ fn flesh_fork(input: &Input, infos: &Pins, exact: bool) -> Option<String> {
         None => s.push_str(&format!("# If these thorns need it, depend on a released version of {package}.\n")),
     }
     Some(s)
+}
+
+/// `cactup package init <repo> --publish`: the repo's committed and pushed `cactarium.toml`
+/// registered with Cactarium (`POST /repos`: a preview, then exactly what it showed), or, when
+/// the package is registered already, checked for new releases. Writes nothing.
+fn publish(client: &Client, live: &Thornlist, repo: &str, dir: &Path, namespace: Option<&str>) -> Res<()> {
+    let file = dir.join(PACKAGE_FILE);
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(_) => bail!("Repo {repo} has no {PACKAGE_FILE}.\nWrite one with `cactup package init {repo}`."),
+    };
+    let manifest = Manifest::from_repo_file(PACKAGE_FILE, &text).map_err(|e| anyhow!("'{}': {e}", file.display()))?;
+    let name = manifest.package.as_ref().expect("a package file holds a [package]").name.to_string();
+    let git = format!("git -C {}", shell_word(&dir.display().to_string()));
+    match crate::fetch::git::file_in_head(dir, PACKAGE_FILE)? {
+        None => bail!(
+            "{PACKAGE_FILE} is not committed in repo {repo}.\nCommit and push it:\n  {git} add {PACKAGE_FILE}\n  \
+             {git} commit -m \"Add {PACKAGE_FILE}\"\n  {git} push"
+        ),
+        Some(committed) if committed != text.as_bytes() => bail!(
+            "{PACKAGE_FILE} in repo {repo} has uncommitted changes.\nCommit and push them:\n  \
+             {git} commit -m \"Update {PACKAGE_FILE}\" {PACKAGE_FILE}\n  {git} push"
+        ),
+        Some(_) => {}
+    }
+    let (_, head) = crate::fetch::git::head_of(dir)?;
+    if !crate::fetch::git::is_published(dir, head)? {
+        bail!("Commit {} of repo {repo} is on no remote branch.\nPush it:\n  {git} push", short(&head.to_string()));
+    }
+    let url = (live.components().iter())
+        .find(|c| c.repo == repo && c.ty == ComponentType::Git)
+        .and_then(|c| c.url.clone())
+        .or_else(|| crate::fetch::git::origin_url(dir))
+        .ok_or_else(|| anyhow!("Repo {repo} has no URL."))?;
+    let url = shareable(&url)?;
+    let request = RegisterRequest {
+        url,
+        tag: None,
+        owner: namespace.map(str::to_owned),
+        only: vec![name.clone()],
+        dry_run: true,
+        expect: None,
+    };
+    let reg = Registry::new(client, ["register", "refresh"]);
+    let answer = (|| -> Res<Done> {
+        let preview = reg.one("register", "previewing", {
+            let request = request.clone();
+            move |c| c.register(&request)
+        })?;
+        let entry = entry_of(&preview, &name)?;
+        match entry.status.as_str() {
+            "existing" => {
+                let slug = entry.slug.clone();
+                let (owner, pkg) = slug.split_once('/').ok_or_else(|| anyhow!("Cactarium named the package \"{slug}\""))?;
+                let (owner, pkg) = (owner.to_owned(), pkg.to_owned());
+                let refreshed = reg.one("refresh", "asking for new tags", move |c| c.refresh(&owner, &pkg))?;
+                Ok(Done::Refreshed(refreshed))
+            }
+            "new" => {
+                let real = RegisterRequest { dry_run: false, expect: preview.expect.clone(), ..request.clone() };
+                let registered = reg.one("register", "registering", move |c| c.register(&real))?;
+                Ok(Done::Registered(registered))
+            }
+            _ => Err(refused_entry(entry)),
+        }
+    })();
+    reg.finish();
+    match answer? {
+        Done::Refreshed(r) => super::import::print_refreshed(&r),
+        Done::Registered(r) => {
+            let entry = entry_of(&r, &name)?;
+            if entry.status != "new" {
+                return Err(refused_entry(entry));
+            }
+            match &entry.url {
+                Some(url) => println!("Registered {}: {url}", entry.slug.bold()),
+                None => println!("Registered {}.", entry.slug.bold()),
+            }
+            match (entry.new_versions, entry.awaiting_review) {
+                (0, _) => println!("{}", "No versions yet: tag a release and push the tag.".yellow()),
+                (n, 0) => println!("{n} {}.", if n == 1 { "version" } else { "versions" }),
+                (n, w) => println!("{}", format!("{n} {}, {w} awaiting admin review.", if n == 1 { "version" } else { "versions" }).yellow()),
+            }
+            for w in entry.warnings.iter().chain(&r.warnings) {
+                println!("{}", w.yellow());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What `--publish` did.
+enum Done {
+    Registered(Registered),
+    Refreshed(cactup_ecosystem_common::api::Refreshed),
+}
+
+/// The package entry named `name` in a registration's answer.
+fn entry_of<'r>(r: &'r Registered, name: &str) -> Res<&'r cactup_ecosystem_common::api::RegisteredEntry> {
+    (r.entries.iter())
+        .find(|e| e.kind == "package" && e.slug.rsplit('/').next() == Some(name))
+        .ok_or_else(|| anyhow!("Cactarium found no package {name} in the repo"))
+}
+
+/// A registration Cactarium will not make, with its reason.
+fn refused_entry(e: &cactup_ecosystem_common::api::RegisteredEntry) -> anyhow::Error {
+    let why = e.note.as_deref().unwrap_or("no reason given");
+    match e.status.as_str() {
+        "needs-tag" => anyhow!("Cactarium cannot register {}: {why}\nTag a release and push the tag.", e.slug),
+        _ => anyhow!("Cactarium cannot register {}: {why}", e.slug),
+    }
+}
+
+/// The URL to register `url` under, as the crate's rules decide for anything shared: refused
+/// with credentials, as a local path or git://, or when nobody could fetch it anonymously; an ssh
+/// remote goes as its https equivalent.
+fn shareable(url: &str) -> Res<String> {
+    let candidate = match cactup_ecosystem_common::probe::start(url) {
+        cactup_ecosystem_common::probe::Start::Refuse(why) => bail!("{why}"),
+        cactup_ecosystem_common::probe::Start::Probe { candidate } => candidate,
+    };
+    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+    let item = progress.add_child(format!("ask {} anonymously", crate::fetch::git::redacted(&candidate)));
+    item.init(Some(1), Some(prodash::unit::label("remotes")));
+    let verdict = crate::fetch::anonymous::check(url, &candidate, crate::fetch::git::AskWindow::now());
+    drop(item);
+    if let Some(renderer) = renderer {
+        renderer.shutdown_and_wait();
+    }
+    match verdict? {
+        crate::fetch::anonymous::Verdict::Publish(u) => Ok(u),
+        crate::fetch::anonymous::Verdict::Refuse(why) => bail!("{why}"),
+    }
+}
+
+/// `s` as one shell word: as it is when nothing in it is special, else single-quoted.
+fn shell_word(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+=:,@%".contains(c)) {
+        s.to_owned()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
 }
 
 #[cfg(test)]

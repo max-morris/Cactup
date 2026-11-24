@@ -455,7 +455,7 @@ pub(crate) enum Commands {
     #[clap(subcommand)]
     Claims(ClaimsCommand),
     // Plan §4.7
-    /// Write a package's cactarium.toml
+    /// Write or register a package's cactarium.toml
     #[clap(subcommand)]
     Package(PackageCommand),
     // §8.10
@@ -1317,6 +1317,10 @@ pub(crate) enum PackageCommand {
     /// package's name and owners, and a dependency on each installed package
     /// whose thorns meet what the repo's thorns require. What cactup cannot
     /// decide is written as a TODO comment.
+    ///
+    /// With --publish, writes nothing: registers the committed and pushed
+    /// cactarium.toml with Cactarium (cactup login), or checks it for new
+    /// releases if it is registered already.
     Init(PackageInitArgs),
 }
 
@@ -1327,17 +1331,23 @@ pub(crate) struct PackageInitArgs {
     /// current directory).
     pub repo: Option<String>,
     /// The package's name (default: the repo's name, lowercased).
-    #[clap(long)]
+    #[clap(long, conflicts_with = "publish")]
     pub name: Option<String>,
-    /// The owner (default: your Cactarium user).
+    /// The owner (default: your Cactarium user)
+    ///
+    /// With --publish: the namespace to register under, one of your
+    /// organizations (default: your own).
     #[clap(long, value_name = "OWNER")]
     pub owner: Option<String>,
     /// Depend on exactly the versions installed (=X.Y.Z, not ~X.Y.Z).
-    #[clap(long)]
+    #[clap(long, conflicts_with = "publish")]
     pub exact: bool,
     /// Overwrite an existing cactarium.toml.
-    #[clap(short, long)]
+    #[clap(short, long, conflicts_with = "publish")]
     pub force: bool,
+    /// Register the committed cactarium.toml with Cactarium; write nothing.
+    #[clap(long)]
+    pub publish: bool,
 }
 
 // §8.10

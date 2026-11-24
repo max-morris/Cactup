@@ -562,6 +562,12 @@ pub fn refresh(ctx: &Ctx, target: &str) -> Res<()> {
     let client = crate::cactarium::Client::new(&ctx.db.read()?);
     println!("Asking {} to check {} for new tags...", client.base(), slug.entry());
     let refreshed = client.refresh(slug.owner.as_str(), slug.name.as_str())?;
+    print_refreshed(&refreshed);
+    Ok(())
+}
+
+/// What a refresh found: new versions, and those awaiting review.
+pub(crate) fn print_refreshed(refreshed: &cactup_ecosystem_common::api::Refreshed) {
     match refreshed.new_versions {
         0 => println!("{}: no new versions.", refreshed.slug),
         1 => println!("{}: {}", refreshed.slug, "1 new version.".green()),
@@ -574,7 +580,6 @@ pub fn refresh(ctx: &Ctx, target: &str) -> Res<()> {
         1 => println!("{}", "1 version awaits admin review.".yellow()),
         n => println!("{}", format!("{n} versions await admin review.").yellow()),
     }
-    Ok(())
 }
 
 /// What a publish made, and whether anyone can have it yet: a release that

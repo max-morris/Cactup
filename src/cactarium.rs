@@ -14,7 +14,7 @@ use anyhow::{anyhow, bail, Context};
 use colored::Colorize;
 use cactup_ecosystem_common::api::{
     DownloadConflict, DownloadQuery, DownloadReview, DownloadSubmission, ErrorBody, LookedUp, LookupRequest, PackageVersion, PackageVersions, PinInfo, PinQuery, Providers,
-    ProvidersQuery, Published, ReadAnswer, ReadRequest, Refreshed, Resolved, StackReleases, VersionInfo, WhoAmI, API_GENERATION,
+    ProvidersQuery, Published, ReadAnswer, ReadRequest, Refreshed, RegisterRequest, Registered, Resolved, StackReleases, VersionInfo, WhoAmI, API_GENERATION,
     API_GENERATION_HEADER, API_PREFIX, CONTACT_HEADER, INCLUDE_UNREVIEWED_HEADER, MAX_LOOKUP_PINS, SHA256_HEADER,
     SIM_QUERY, UNPINNED_HEADER, UNREVIEWED_HEADER, UNTRUSTED_HEADER,
 };
@@ -562,6 +562,25 @@ impl Client {
         match self.send_found(request, MISSING_ROUTE)? {
             Ok(answer) => answer.json(),
             Err(_) => bail!("Cactarium at {} is too old to say who you are (it has no /whoami)", self.base),
+        }
+    }
+
+    /// Register the manifests of a repo as entries (`POST /repos`), with
+    /// the stored token. A dry run (`request.dry_run`) writes nothing and
+    /// answers with the fingerprint to register exactly what it showed.
+    pub fn register(&self, request: &RegisterRequest) -> Res<Registered> {
+        let token = token_for(&self.base)?;
+        let body = serde_json::to_vec(request).context("Failed to encode the registration")?;
+        let post = self.http()
+            .post(self.url("/repos"))
+            .bearer_auth(token)
+            .header("content-type", "application/json")
+            .body(body);
+        let answer = self.send_found(post, MISSING_ROUTE);
+        let answer = if request.dry_run { answer? } else { answer.map_err(|e| change_failed(e, "the registration"))? };
+        match answer {
+            Ok(answer) => answer.json(),
+            Err(_) => bail!("Cactarium at {} is too old to register repos (it has no /repos)", self.base),
         }
     }
 
