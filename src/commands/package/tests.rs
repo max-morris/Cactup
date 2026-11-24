@@ -623,6 +623,7 @@ fn carpet_fork(fork: bool, files: &[(&str, &str)]) -> (World, String) {
             contact: None,
             libraries: Vec::new(),
             flesh: Vec::new(),
+            pending: false,
         })
     });
     // Its clone, with the whole history.
@@ -1126,6 +1127,7 @@ fn added(package: &str, version: &str, tag: Option<&str>, commit: &str, repo: &s
         contact: None,
         libraries: Vec::new(),
         flesh: Vec::new(),
+        pending: false,
     }
 }
 

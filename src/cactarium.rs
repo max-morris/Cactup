@@ -176,6 +176,11 @@ impl Client {
         Client { unreviewed: yes, ..self }
     }
 
+    /// Whether this client asks for what awaits review (`--risky-allow-untrusted-artifacts`).
+    pub fn asks_for_unreviewed(&self) -> bool {
+        self.unreviewed
+    }
+
     /// This client, waiting as long as resolving dependencies may: a read of
     /// a package at a commit can make the server fetch its repository.
     pub fn patient(self) -> Client {

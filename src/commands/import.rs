@@ -461,6 +461,10 @@ fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) ->
         ),
         Some(_) => {}
     }
+    // A reviewed copy now stands for this version: one kept while it awaited review is stale.
+    if !unreviewed {
+        let _ = std::fs::remove_file(simfile_cache_path(root, owner, name, sim, &version, true));
+    }
     Ok(dest)
 }
 
@@ -1427,6 +1431,26 @@ pub(crate) mod tests {
             std::fs::write(tmp.path().join("max/bbh/1.2.0.sim"), stamped("max/bbh@1.2.0")).unwrap();
             assert_eq!(fetch_published(&gone, tmp.path(), "max/bbh@=1.2.0").unwrap(), tmp.path().join("max/bbh/1.2.0.sim"));
         }
+    }
+
+    /// Once a version is reviewed, its download takes the place of the copy kept while it awaited
+    /// review: that one is deleted. The copy of another version is not touched.
+    #[test]
+    fn a_reviewed_download_deletes_the_copy_kept_while_it_awaited_review() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("max/bbh");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("1.2.0.unreviewed.sim"), stamped("max/bbh@1.2.0")).unwrap();
+        std::fs::write(dir.join("1.3.0.unreviewed.sim"), stamped("max/bbh@1.3.0")).unwrap();
+        let (client, heads) = cactarium(
+            2,
+            |_| ("200 OK", resolved("max/bbh@1.2.0", "1.2.0", None, None)),
+            |_| stamped("max/bbh@1.2.0"),
+        );
+        assert_eq!(fetch_published(&client, tmp.path(), "max/bbh@=1.2.0").unwrap(), dir.join("1.2.0.sim"));
+        heads.join().unwrap();
+        assert!(!dir.join("1.2.0.unreviewed.sim").exists());
+        assert!(dir.join("1.3.0.unreviewed.sim").exists());
     }
 
     /// The inputs' repository is read from a version awaiting review with a warning, and a

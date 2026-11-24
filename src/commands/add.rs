@@ -1707,6 +1707,7 @@ fn record_of_release(release: &crate::deps::Release, thorns: &[String], plan: &c
         contact: release.contact.clone(),
         libraries,
         flesh: Vec::new(),
+        pending: release.pending,
     })
 }
 
@@ -2202,6 +2203,7 @@ mod tests {
         AddedPackage {
             libraries: Vec::new(),
             flesh: Vec::new(),
+            pending: false,
             package: format!("max/{repo}"),
             version: "mixed-precision:1.0.0".into(),
             tag: Some("mixed-precision/v1.0.0".into()),
@@ -2271,6 +2273,7 @@ mod tests {
             AddedPackage {
                 libraries: Vec::new(),
                 flesh: Vec::new(),
+                pending: false,
                 package: format!("et/{name}"),
                 version: "1.0.0".into(),
                 tag: None,
@@ -2582,6 +2585,7 @@ mod tests {
         let wanted = |version: &str, tag: &str, commit: &str| AddedPackage {
             libraries: Vec::new(),
             flesh: Vec::new(),
+            pending: false,
             package: "max/carpetx".into(),
             version: version.into(),
             tag: Some(tag.into()),
@@ -2685,6 +2689,7 @@ mod tests {
             contact: None,
             libraries,
             flesh: Vec::new(),
+            pending: false,
         }
     }
 

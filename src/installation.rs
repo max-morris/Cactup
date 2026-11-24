@@ -341,6 +341,11 @@ pub struct AddedPackage {
     /// of the base's flesh, whatever its name or URL. Empty: not the flesh.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub flesh: Vec<String>,
+    /// Added from a release awaiting review (under `--risky-allow-untrusted-artifacts`): a
+    /// command without the flag cannot read it, and says why. Additive: an older binary's rewrite
+    /// drops it (put-back never enters arrays), which only loses that explanation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
 }
 
 impl AddedPackage {
@@ -1117,6 +1122,7 @@ mod tests {
                     into: "src/lib".to_owned(),
                 }],
                 flesh: vec!["Makefile".to_owned(), "lib".to_owned(), "src".to_owned()],
+                pending: true,
             }],
             added_for: [(
                 "owner/pkg".to_owned(),
@@ -1286,6 +1292,7 @@ mod tests {
         plain.added[0].flesh.clear();
         // Additive, and not in the v1 fixture (see the test of `added-for`).
         plain.added_for.clear();
+        plain.added[0].pending = false;
         plain.linked_to = None;
 
         format::write(&path, &plain, &INSTALLATION).unwrap();
