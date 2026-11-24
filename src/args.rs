@@ -1216,11 +1216,17 @@ pub(crate) enum ConfigCommand {
 pub(crate) enum ClaimsCommand {
     /// Show the overrides and the any-of choices
     List,
+    #[clap(verbatim_doc_comment)]
     /// Check the installed packages against each other's claims
     ///
-    /// Reports clashing thorns, incompatibilities, forks installed beside
-    /// their upstream and CCL requirements that no installed thorn meets,
-    /// one line each. Changes nothing. Fails when it finds a problem.
+    /// Reports, one line each:
+    ///   clashing thorns
+    ///   incompatibilities
+    ///   forks installed beside their upstream
+    ///   unmet dependency claims
+    ///   CCL requirements no installed thorn meets
+    ///   `satisfies` overrides naming a missing repo
+    /// Changes nothing. Fails when it finds a problem.
     Check,
     /// Change or remove a claim override
     #[command(args_conflicts_with_subcommands = true, arg_required_else_help = true)]
