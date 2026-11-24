@@ -5724,7 +5724,10 @@ requirement met only by another clone of the repo's own package.
 writes `cactarium-stack.toml` (and `cactarium-stack.th` when a package needs
 one) for the installation. The release is the installation's current stack
 release; none, a tip or a `#commit` is refused naming `cactup inst refetch
---release`. Dirty and unpushed repos are refused through export's checks (§8.9).
+--release`. Dirty and unpushed repos are refused through export's checks (§8.9),
+and so is a thorn in an ignore section: the installation's own with export's way
+out, one of the release's named as the release's (Cactarium refuses a stack with
+one in its own thornlist or a base's; an empty `!CHECKOUT` is no thorn).
 The stack `extends` that release; `[[stack.pin]]` marks each release pin whose
 repo the installation has at another commit (replaced repos skipped); a package
 that takes the place of every checkout that the release has from the one repo
@@ -5751,8 +5754,6 @@ in DIR and calls `publish_stack` as `<owner>/<name>@V`.
   said on its line.
 - `scan_sources` of the shared crate does not poll Ctrl-C, so a stop waits for
   the thorns in flight.
-- The crate's refusal wording for an unreachable ssh remote ends "try again
-  later" even when its https equivalent will never answer.
 
 ---
 

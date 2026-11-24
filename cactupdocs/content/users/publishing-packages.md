@@ -154,7 +154,9 @@ cactup stack init stacks/mine     # in another directory
 The installation must be on a stack release (`cactup install
 owner/stack@version`, or `cactup inst refetch --release`); a branch tip
 (`@head`) or a bare commit has no release to extend. Like `sim export`, it
-refuses repositories with uncommitted changes or commits on no remote.
+refuses repositories with uncommitted changes or commits on no remote, and
+thorns in a `!TYPE = ignore` section, which nobody else can fetch. A release
+with such thorns can't be extended; Cactarium refuses the stack.
 `--name` sets the stack's name (default: the installation's alias, lowercased)
 and `--owner` its owner (default: your Cactarium user). The stack:
 
