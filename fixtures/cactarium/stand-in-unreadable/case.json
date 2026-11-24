@@ -1,0 +1,12 @@
+{
+  "about": "A base package the plan depends on that Cactarium does not read now refuses the plan, naming it and --no-deps; it never reads as lacking the thorn",
+  "packages": ["et--admbase", "max--needs-sc"],
+  "specs": ["max/needs-sc"],
+  "present": [
+    {"package": "et/admbase", "unknown": "abababababababababababababababababababab", "thorns": ["ADMBase", "ADMCoupling", "StaticConformal"], "base": "admbase", "enabled": ["ADMBase"], "stand_in": true}
+  ],
+  "expect": {
+    "refusal": "Unreadable",
+    "message": ["et/admbase#abababababab", "--no-deps"]
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "slug": "et/p12",
+  "at": "1212121212121212121212121212121212121212",
+  "untrusted": false,
+  "served": {
+    "version": "1212121212121212121212121212121212121212",
+    "track": null,
+    "tag": null,
+    "commit": "1212121212121212121212121212121212121212",
+    "tree": "0000000000000000000000000000000000000000",
+    "yanked": false,
+    "yank-reason": null,
+    "state": "ok",
+    "curated": false,
+    "published": 1793000000,
+    "url": "https://github.com/et/p12.git",
+    "thorns": [
+      {
+        "arrangement": "P12",
+        "thorn": "R0",
+        "repo-path": "$1/$2",
+        "facts": {
+          "implements": "R0",
+          "inherits": [],
+          "friends": [],
+          "requires-functions": [],
+          "uses-functions": [],
+          "provides-functions": [],
+          "uses-includes": [],
+          "requires": [],
+          "requires-thorns": [],
+          "optional": [],
+          "provides": []
+        }
+      },
+      {
+        "arrangement": "P12",
+        "thorn": "R",
+        "repo-path": "$1/$2",
+        "facts": {
+          "implements": "R",
+          "inherits": [],
+          "friends": [],
+          "requires-functions": [],
+          "uses-functions": [],
+          "provides-functions": [],
+          "uses-includes": [],
+          "requires": [],
+          "requires-thorns": [],
+          "optional": [],
+          "provides": []
+        }
+      }
+    ],
+    "claims": []
+  }
+}

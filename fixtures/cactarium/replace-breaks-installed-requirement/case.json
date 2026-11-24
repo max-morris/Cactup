@@ -1,0 +1,58 @@
+{
+  "about": "--replace taking over a base checkout that another installed thorn needed: the requirement it met is checked",
+  "packages": [
+    "max--carpetx-mp--arithx"
+  ],
+  "specs": [
+    "max/carpetx-mp"
+  ],
+  "present": [
+    {
+      "package": "local:carpetx",
+      "unknown": "2222222222222222222222222222222222222222",
+      "thorns": [
+        "CarpetX",
+        "Loop",
+        {
+          "thorn": "Arith",
+          "facts": {
+            "implements": "arith"
+          }
+        }
+      ],
+      "base": "carpetx",
+      "enabled": [
+        "Arith",
+        "CarpetX",
+        "Loop"
+      ]
+    },
+    {
+      "package": "local:other",
+      "unknown": "5555555555555555555555555555555555555555",
+      "thorns": [
+        {
+          "thorn": "Other",
+          "facts": {
+            "inherits": [
+              "arith"
+            ]
+          }
+        }
+      ],
+      "base": "other",
+      "enabled": [
+        "Other"
+      ]
+    }
+  ],
+  "options": {
+    "replace": true
+  },
+  "expect": {
+    "refusal": "Unclaimed",
+    "message": [
+      "Other (local:other) inherits or befriends arith"
+    ]
+  }
+}

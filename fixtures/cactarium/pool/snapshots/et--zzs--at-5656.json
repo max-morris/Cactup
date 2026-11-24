@@ -1,0 +1,57 @@
+{
+  "slug": "et/zzs",
+  "at": "5656565656565656565656565656565656565656",
+  "untrusted": false,
+  "served": {
+    "version": "5656565656565656565656565656565656565656",
+    "track": null,
+    "tag": null,
+    "commit": "5656565656565656565656565656565656565656",
+    "tree": "0000000000000000000000000000000000000000",
+    "yanked": false,
+    "yank-reason": null,
+    "state": "ok",
+    "curated": false,
+    "published": 1793000000,
+    "url": "https://github.com/et/zzs.git",
+    "thorns": [
+      {
+        "arrangement": "Zzs",
+        "thorn": "S1",
+        "repo-path": "$1/$2",
+        "facts": {
+          "implements": "S1",
+          "inherits": [],
+          "friends": [],
+          "requires-functions": [],
+          "uses-functions": [],
+          "provides-functions": [],
+          "uses-includes": [],
+          "requires": [],
+          "requires-thorns": [],
+          "optional": [],
+          "provides": []
+        }
+      },
+      {
+        "arrangement": "Zzs",
+        "thorn": "S2",
+        "repo-path": "$1/$2",
+        "facts": {
+          "implements": "S2",
+          "inherits": [],
+          "friends": [],
+          "requires-functions": [],
+          "uses-functions": [],
+          "provides-functions": [],
+          "uses-includes": [],
+          "requires": [],
+          "requires-thorns": [],
+          "optional": [],
+          "provides": []
+        }
+      }
+    ],
+    "claims": []
+  }
+}

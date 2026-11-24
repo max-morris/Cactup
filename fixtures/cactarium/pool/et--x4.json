@@ -1,0 +1,83 @@
+{
+  "slug": "et/x4",
+  "versions": [
+    {
+      "version": "2.0.0",
+      "track": null,
+      "tag": "v2.0.0",
+      "commit": "fff58be94b3951ea513e418c5643b0746e18f084",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/x4.git",
+      "thorns": [
+        {
+          "arrangement": "X4",
+          "thorn": "X",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "X",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    },
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "6403933da562280f7c4244da0b0ba5385679e87b",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/x4.git",
+      "thorns": [
+        {
+          "arrangement": "X4",
+          "thorn": "X",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "X",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/p4",
+          "range": "^2",
+          "needs": [
+            "PC"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

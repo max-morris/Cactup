@@ -1,0 +1,35 @@
+{
+  "about": "zz-b under --no-deps",
+  "packages": [
+    "max--zzf--forks-adm",
+    "et--admbase"
+  ],
+  "specs": [
+    "max/zzf"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "unknown": "abababababababababababababababababababab",
+      "thorns": [
+        "ADMBase",
+        "ADMCoupling",
+        "StaticConformal"
+      ],
+      "base": "admbase",
+      "enabled": [
+        "ADMBase"
+      ],
+      "stand_in": true
+    }
+  ],
+  "options": {
+    "no-deps": true
+  },
+  "expect": {
+    "plan": [
+      "add max/zzf@1.0.0 FX named"
+    ],
+    "reads": []
+  }
+}

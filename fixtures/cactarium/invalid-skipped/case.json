@@ -1,0 +1,16 @@
+{
+  "about": "An invalid release is never taken; a tag-moved one is",
+  "packages": [
+    "max--z4c--arith-1",
+    "et--arith--invalid"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named",
+      "add et/arith@1.2.0 Arith needed by max/z4c@1.2.0, ^1"
+    ]
+  }
+}

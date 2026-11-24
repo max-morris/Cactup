@@ -430,6 +430,9 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
         .into_iter()
         .flatten()
         .collect();
+    if let Some(repo) = &change.swapped {
+        println!("  {}: {}", repo.bold(), "the flesh now comes from this repo".yellow());
+    }
     for repo in &change.moved {
         println!("  {}: {}", repo.bold(), "now on a different commit".yellow());
         if let Some(diff) = details.get(repo) {
@@ -538,6 +541,9 @@ pub fn warn_if_sources_diverged(inst: &Installation, meta: &ConfigMeta, silent: 
         return Ok(());
     }
     let mut what = Vec::new();
+    if let Some(repo) = &change.swapped {
+        what.push(format!("the flesh now from repo {repo}"));
+    }
     if !change.moved.is_empty() {
         what.push(format!("{} on a different commit", change.moved.len()));
     }

@@ -1,0 +1,20 @@
+{
+  "about": "et/c was held at 1.9.0 for et/x 2.0.0; once et/y moves et/x to 1.0.0, et/c goes back to its newest",
+  "packages": [
+    "et--c",
+    "et--x--needs-c1",
+    "et--y--needs-x1"
+  ],
+  "specs": [
+    "et/c",
+    "et/x",
+    "et/y"
+  ],
+  "expect": {
+    "plan": [
+      "add et/c@2.0.0 C named",
+      "add et/x@1.0.0 X named",
+      "add et/y@1.0.0 Y named"
+    ]
+  }
+}

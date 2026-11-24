@@ -1,0 +1,23 @@
+{
+  "about": "An installed release is never pushed out for being yanked: naming the package re-adds it",
+  "packages": [
+    "et--arith--yanked"
+  ],
+  "specs": [
+    "et/arith"
+  ],
+  "present": [
+    {
+      "package": "et/arith",
+      "version": "1.3.0",
+      "enabled": [
+        "Arith"
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "re-add et/arith@1.3.0 Arith named"
+    ]
+  }
+}

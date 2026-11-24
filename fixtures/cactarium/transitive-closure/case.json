@@ -1,0 +1,23 @@
+{
+  "about": "A named package brings its dependency's needs, and that dependency's own, each at the newest release in range",
+  "packages": [
+    "max--z4c--carpetx-arith",
+    "et--carpetx--needs-arith",
+    "et--arith"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named",
+      "add et/carpetx@2026.5.1 CarpetX, Loop needed by max/z4c@1.2.0 (Z4c), ^2026.5",
+      "add et/arith@1.3.0 Arith needed by et/carpetx@2026.5.1 (CarpetX), ^1"
+    ],
+    "records": [
+      "max/z4c requested by []",
+      "et/carpetx brought in by [max/z4c@1.2.0]",
+      "et/arith brought in by [et/carpetx@2026.5.1]"
+    ]
+  }
+}

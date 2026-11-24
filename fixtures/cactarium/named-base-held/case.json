@@ -1,0 +1,13 @@
+{
+  "about": "A named thorn only a newer release of a base package has: the package stays where the base has it, and the refusal names --upgrade (no-deps: false)",
+  "packages": ["et--p5"],
+  "specs": ["et/p5/PC"],
+  "present": [
+    {"package": "et/p5", "version": "1.0.0", "base": "p5", "enabled": ["PA"]}
+  ],
+  "options": {"no-deps": false},
+  "expect": {
+    "refusal": "PresentLacksThorns",
+    "message": ["et/p5@1.0.0", "PC", "Pass --upgrade"]
+  }
+}

@@ -5,6 +5,7 @@ mod cactarium;
 mod commands;
 mod cow;
 mod database;
+mod deps;
 mod fetch;
 mod format;
 mod freeze;
@@ -78,6 +79,33 @@ fn compute_node_path(command: &Commands) -> bool {
 }
 
 fn main() -> Res<()> {
+    let result = run();
+    remove_leftover_tempfiles();
+    result
+}
+
+/// A command that came back `Ok` with the interrupt flag set fails as
+/// interrupted all the same (exit status 1, like any interrupted error): the
+/// first Ctrl-C promised "stopping", and a run that was cut into must not
+/// read as a clean success. An error stays the error it is.
+fn interrupted_unless_failed(result: Res<()>, interrupted: bool) -> Res<()> {
+    match result {
+        Ok(()) if interrupted => Err(anyhow::anyhow!("Interrupted")),
+        result => result,
+    }
+}
+
+/// On the way out, Ok or Err, interrupted or not: remove every gix lock and
+/// temp file this process still has registered. A fetch given up on (Ctrl-C,
+/// a remote gone quiet: `fetch::watch`) is abandoned on a thread still stuck
+/// in its read, holding what it took — a repo's `shallow.lock` above all,
+/// which would make every later fetch of that repo fail — and that thread
+/// never drops it. (The second Ctrl-C's abort cleans them up the same way.)
+pub(crate) fn remove_leftover_tempfiles() {
+    gix::tempfile::registry::cleanup_tempfiles();
+}
+
+fn run() -> Res<()> {
     // Before anything else: as the build cache's compiler wrapper (or its
     // probe) this process is not a cactup command at all. It runs once per
     // compile with `make` waiting on it, and must stay clear of everything
@@ -168,24 +196,22 @@ fn main() -> Res<()> {
         eprintln!("\n{}\n", notice.yellow().bold());
     }
 
-    // Skip the random post-command wisdom where it would be noise: the
-    // compute-node path must stay hermetic (D11), and the log-follow views
-    // end via Ctrl-C, where a trailing aphorism reads as clutter.
-    let suppress_wisdom = compute_node || match &args.command {
+    // The log-follow views end via Ctrl-C: for them it is how the command
+    // finishes, not an interrupt of it.
+    let ends_on_ctrl_c = match &args.command {
         Commands::Sim(SimCommand::Log { follow, follow_out, follow_err, .. })
-        | Commands::Test(TestCommand::Log { follow, follow_out, follow_err, .. })
-            if *follow || *follow_out || *follow_err =>
-        {
-            true
+        | Commands::Test(TestCommand::Log { follow, follow_out, follow_err, .. }) => {
+            *follow || *follow_out || *follow_err
         }
-        Commands::Build { command: Some(BuildCommand::Log { follow, follow_out, follow_err, .. }), .. }
-            if *follow || *follow_out || *follow_err =>
-        {
-            true
+        Commands::Build { command: Some(BuildCommand::Log { follow, follow_out, follow_err, .. }), .. } => {
+            *follow || *follow_out || *follow_err
         }
-        Commands::Wisdom => true, // no double dose
         _ => false,
     };
+    // Skip the random post-command wisdom where it would be noise: the
+    // compute-node path must stay hermetic (D11), and after a follow view's
+    // Ctrl-C a trailing aphorism reads as clutter.
+    let suppress_wisdom = compute_node || ends_on_ctrl_c || matches!(args.command, Commands::Wisdom); // no double dose
 
     let command_span = timing::span("command");
     let result = match args.command {
@@ -197,10 +223,18 @@ fn main() -> Res<()> {
         Commands::Import(import) => commands::import::dispatch(&ctx, import),
         Commands::Refresh { target } => commands::import::refresh(&ctx, &target),
         Commands::Login { token } => commands::import::login(&ctx, token),
-        Commands::Add { packages, replace, force } => commands::add::dispatch(&ctx, &packages, replace, force),
-        Commands::Remove { packages, force } => {
-            packages.iter().try_for_each(|package| commands::add::remove(&ctx, package, force))
+        Commands::Download(args::DownloadCommand::Submit { url, note }) => commands::download::submit(&ctx, &url, note),
+        Commands::Add { packages, replace, force, upgrade, upgrade_all, no_deps, ignore_claim, yes, dry_run } => {
+            let flags =
+                commands::add::AddFlags { replace, force, upgrade, upgrade_all, no_deps, ignore_claim, yes, dry_run };
+            commands::add::dispatch(&ctx, &packages, &flags)
         }
+        Commands::Remove { packages, force, no_deps, yes, dry_run } => {
+            commands::add::remove(&ctx, &packages, &commands::add::RemoveFlags { force, no_deps, yes, dry_run })
+        }
+        Commands::Claims(cmd) => commands::claims::dispatch(&ctx, cmd),
+        Commands::Package(crate::args::PackageCommand::Init(args)) => commands::package::init(&ctx, &args),
+        Commands::Stack(crate::args::StackCommand::Init(args)) => commands::stack::init(&ctx, &args),
         Commands::Stack(crate::args::StackCommand::Publish { definition, target, version, thornlist }) => {
             commands::import::publish_stack(&ctx, &definition, &target, &version, thornlist.as_deref())
         }
@@ -219,6 +253,12 @@ fn main() -> Res<()> {
         Commands::Cache(cmd) => commands::cache::dispatch(&ctx, cmd),
     };
     drop(command_span);
+    // A job's run ends as its run-script did, whatever signal the batch
+    // system sent it (D11); a follow view's Ctrl-C is its way out.
+    // The warnings after a stack install end on a Ctrl-C of their own, the
+    // install already done (`claims::warn_problems`).
+    let interrupted = gix::interrupt::is_triggered() && !commands::claims::interrupt_taken_by_warnings();
+    let result = interrupted_unless_failed(result, interrupted && !compute_node && !ends_on_ctrl_c);
 
     // Wisdom after failure would be flippant — and gating on Ok also keeps
     // anyhow's after-main `Error:` print from landing below decoration.
@@ -228,4 +268,19 @@ fn main() -> Res<()> {
     }
     timing::report();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    /// A command that came back `Ok` after the first Ctrl-C fails as
+    /// interrupted (the exit status of any error); without one it is left
+    /// alone, and an error stays its own.
+    #[test]
+    fn an_interrupted_success_fails() {
+        let e = super::interrupted_unless_failed(Ok(()), true).unwrap_err();
+        assert_eq!(format!("{e:#}"), "Interrupted");
+        assert!(super::interrupted_unless_failed(Ok(()), false).is_ok());
+        let e = super::interrupted_unless_failed(Err(anyhow::anyhow!("Lock held")), true).unwrap_err();
+        assert_eq!(format!("{e:#}"), "Lock held");
+    }
 }

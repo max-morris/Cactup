@@ -1,0 +1,59 @@
+{
+  "slug": "et/rs",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "b4c5a93f95c62beb64abb87855b28d064ea17929",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/rs.git",
+      "thorns": [
+        {
+          "arrangement": "RS",
+          "thorn": "RS",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "RS",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/rw",
+          "range": null,
+          "alternatives": [
+            {
+              "target": "et/rw",
+              "range": null,
+              "needs": []
+            },
+            {
+              "target": "max/rg",
+              "range": null,
+              "needs": []
+            }
+          ],
+          "needs": [],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

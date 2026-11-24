@@ -1,0 +1,33 @@
+{
+  "about": "Under --replace, n is incompatible with base et/bb; only zr 1.0.0 brings the fork that takes et/bb's place",
+  "packages": [
+    "max--n--incompatible-bb",
+    "et--zr",
+    "max--bbfork",
+    "et--bb"
+  ],
+  "specs": [
+    "max/n"
+  ],
+  "present": [
+    {
+      "package": "et/bb",
+      "version": "1.0.0",
+      "base": "bb",
+      "enabled": [
+        "BB"
+      ]
+    }
+  ],
+  "options": {
+    "replace": true
+  },
+  "expect": {
+    "plan": [
+      "add max/n@1.0.0 N named",
+      "add et/zr@1.0.0 Z needed by max/n@1.0.0",
+      "add max/bbfork@1.0.0 BB needed by et/zr@1.0.0",
+      "replace base repo bb with max/bbfork"
+    ]
+  }
+}

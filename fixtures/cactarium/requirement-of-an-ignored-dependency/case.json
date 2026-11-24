@@ -1,0 +1,31 @@
+{
+  "about": "With the dependency ignored, the requirement is unmet, and the refusal says the claim was ignored rather than that no manifest declares it",
+  "packages": [
+    "max--duser",
+    "max--fieldlib"
+  ],
+  "specs": [
+    "max/duser"
+  ],
+  "present": [
+    {
+      "package": "max/fieldlib",
+      "version": "1.0.0",
+      "enabled": [
+        "FieldA"
+      ]
+    }
+  ],
+  "ignore": [
+    "max/duser:dependency:max/fieldlib"
+  ],
+  "expect": {
+    "refusal": "Unclaimed",
+    "message": [
+      "--ignore-claim max/duser:dependency:max/fieldlib dropped a dependency that may declare it"
+    ],
+    "not_in_message": [
+      "no manifest declares"
+    ]
+  }
+}

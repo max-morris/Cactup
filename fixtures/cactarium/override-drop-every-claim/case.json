@@ -1,0 +1,21 @@
+{
+  "about": "A drop override naming only the package drops every claim of it, as --ignore-claim does",
+  "packages": [
+    "max--z4c--needed-by",
+    "et--carpetx",
+    "et--testlib"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "overrides": [
+    {
+      "drop": "max/z4c"
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named"
+    ]
+  }
+}

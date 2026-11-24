@@ -1,0 +1,27 @@
+{
+  "about": "A dependency on one commit is met by a fork of that same commit",
+  "packages": [
+    "max--z4c--carpetx-sha",
+    "et--carpetx",
+    "max--carpetx-mp--sha"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "present": [
+    {
+      "package": "max/carpetx-mp",
+      "version": "1.0.0",
+      "enabled": [
+        "CarpetX",
+        "Loop"
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named",
+      "keep max/carpetx-mp max/carpetx-mp@1.0.0 stands in for et/carpetx"
+    ]
+  }
+}

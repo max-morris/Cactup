@@ -1,0 +1,29 @@
+{
+  "about": "The same on another track",
+  "packages": [
+    "max--mpuser",
+    "max--fieldlib"
+  ],
+  "specs": [
+    "max/mpuser"
+  ],
+  "present": [
+    {
+      "package": "max/fieldlib",
+      "version": "1.0.0",
+      "enabled": [
+        "FieldA"
+      ]
+    }
+  ],
+  "expect": {
+    "refusal": "PresentOutsideRange",
+    "message": [
+      "The installation has max/fieldlib@1.0.0, outside mp:^1",
+      "Pass --upgrade to move it"
+    ],
+    "not_in_message": [
+      "no manifest declares"
+    ]
+  }
+}

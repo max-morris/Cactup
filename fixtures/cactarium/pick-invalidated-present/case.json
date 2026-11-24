@@ -1,0 +1,29 @@
+{
+  "about": "pick-invalidated with et/c present: it still ends at its newest",
+  "packages": [
+    "et--c--with-1",
+    "et--x--needs-c1",
+    "et--y--needs-x1"
+  ],
+  "specs": [
+    "et/c",
+    "et/x",
+    "et/y"
+  ],
+  "present": [
+    {
+      "package": "et/c",
+      "version": "1.0.0",
+      "enabled": [
+        "C"
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "upgrade et/c 1.0.0 -> 2.0.0 C named",
+      "add et/x@1.0.0 X named",
+      "add et/y@1.0.0 Y named"
+    ]
+  }
+}

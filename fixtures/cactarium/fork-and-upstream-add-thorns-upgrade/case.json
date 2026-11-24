@@ -1,0 +1,35 @@
+{
+  "about": "Thorns added to a present upstream while its fork is present, under --upgrade, are a conflict too",
+  "packages": [
+    "et--carpetx",
+    "max--carpetx-mp--covers-2026-5-1"
+  ],
+  "specs": [
+    "et/carpetx/Arith"
+  ],
+  "present": [
+    {
+      "package": "et/carpetx",
+      "version": "2026.5.1",
+      "enabled": [
+        "CarpetX"
+      ]
+    },
+    {
+      "package": "max/carpetx-mp",
+      "version": "1.0.0",
+      "enabled": [
+        "Loop"
+      ]
+    }
+  ],
+  "expect": {
+    "refusal": "ForkAndUpstream",
+    "message": [
+      "max/carpetx-mp@1.0.0 is a fork of et/carpetx"
+    ]
+  },
+  "options": {
+    "upgrade": true
+  }
+}

@@ -1,0 +1,88 @@
+{
+  "slug": "et/zzq",
+  "at": "3434343434343434343434343434343434343434",
+  "untrusted": false,
+  "served": {
+    "version": "3434343434343434343434343434343434343434",
+    "track": null,
+    "tag": null,
+    "commit": "3434343434343434343434343434343434343434",
+    "tree": "0000000000000000000000000000000000000000",
+    "yanked": false,
+    "yank-reason": null,
+    "state": "ok",
+    "curated": false,
+    "published": 1793000000,
+    "url": "https://github.com/et/zzq.git",
+    "thorns": [
+      {
+        "arrangement": "Zzq",
+        "thorn": "A1",
+        "repo-path": "$1/$2",
+        "facts": {
+          "implements": "A1",
+          "inherits": [],
+          "friends": [],
+          "requires-functions": [],
+          "uses-functions": [],
+          "provides-functions": [],
+          "uses-includes": [],
+          "requires": [],
+          "requires-thorns": [],
+          "optional": [],
+          "provides": []
+        }
+      },
+      {
+        "arrangement": "Zzq",
+        "thorn": "A2",
+        "repo-path": "$1/$2",
+        "facts": {
+          "implements": "A2",
+          "inherits": [],
+          "friends": [],
+          "requires-functions": [],
+          "uses-functions": [],
+          "provides-functions": [],
+          "uses-includes": [],
+          "requires": [],
+          "requires-thorns": [],
+          "optional": [],
+          "provides": []
+        }
+      },
+      {
+        "arrangement": "Zzq",
+        "thorn": "A3",
+        "repo-path": "$1/$2",
+        "facts": {
+          "implements": "A3",
+          "inherits": [],
+          "friends": [],
+          "requires-functions": [],
+          "uses-functions": [],
+          "provides-functions": [],
+          "uses-includes": [],
+          "requires": [],
+          "requires-thorns": [],
+          "optional": [],
+          "provides": []
+        }
+      }
+    ],
+    "claims": [
+      {
+        "kind": "dependency",
+        "target": "et/zzs",
+        "range": null,
+        "needs": [
+          "S2"
+        ],
+        "needed-by": [
+          "A3"
+        ],
+        "note": null
+      }
+    ]
+  }
+}

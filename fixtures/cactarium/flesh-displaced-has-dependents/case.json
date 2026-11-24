@@ -1,0 +1,33 @@
+{
+  "about": "A flesh coming in would take the place of an added flesh package another package needs: refused",
+  "packages": [
+    "et--cactus",
+    "max--cactus-mp--covers-2026-4",
+    "max--fleshuser--needs-cactus-mp"
+  ],
+  "specs": [
+    "et/cactus"
+  ],
+  "present": [
+    {
+      "package": "max/cactus-mp",
+      "version": "1.0.0",
+      "enabled": []
+    },
+    {
+      "package": "max/fleshuser",
+      "version": "1.0.0",
+      "enabled": [
+        "U"
+      ]
+    }
+  ],
+  "expect": {
+    "refusal": "FleshHasDependents",
+    "message": [
+      "et/cactus@2026.5.0 would take the place of the flesh max/cactus-mp@1.0.0, which other packages need:",
+      "installed max/fleshuser@1.0.0 (max/cactus-mp ^1.0)",
+      "Remove it first, or pass --no-deps to replace the flesh anyway."
+    ]
+  }
+}

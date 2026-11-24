@@ -1,0 +1,49 @@
+{
+  "slug": "et/lib-c-zz",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "f745972997a00de7db658b0edbc102559c61931e",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/lib-c-zz.git",
+      "thorns": [
+        {
+          "arrangement": "Lib-c-zz",
+          "thorn": "C",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "C",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/zz-d",
+          "range": null,
+          "needs": [
+            "D"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

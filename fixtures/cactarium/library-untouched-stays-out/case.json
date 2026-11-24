@@ -1,0 +1,33 @@
+{
+  "about": "Libraries of packages the plan does not touch are not in it",
+  "packages": [
+    "max--kadath",
+    "max--z4c",
+    "et--fuka"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "present": [
+    {
+      "package": "max/kadath",
+      "version": "1.0.0",
+      "enabled": [
+        "Kadath"
+      ],
+      "libraries": [
+        {
+          "package": "et/fuka",
+          "commit": "547817e775491964edcb9d9e2c8cde37b1742b80",
+          "into": "src/fuka"
+        }
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named"
+    ],
+    "libraries": []
+  }
+}

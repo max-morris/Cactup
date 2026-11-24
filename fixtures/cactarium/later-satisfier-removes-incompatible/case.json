@@ -1,0 +1,30 @@
+{
+  "about": "The same where z 1.0.0 brings a package an override says satisfies et/upstream",
+  "packages": [
+    "max--app--c1",
+    "et--b--c1",
+    "et--z--sat",
+    "et--upstream",
+    "et--sat"
+  ],
+  "specs": [
+    "max/app"
+  ],
+  "overrides": [
+    {
+      "satisfies": {
+        "by": "et/sat",
+        "target": "et/upstream"
+      }
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/app@1.0.0 App named",
+      "add et/b@1.0.0 B needed by max/app@1.0.0",
+      "add et/z@1.0.0 Z needed by max/app@1.0.0",
+      "add et/sat@1.0.0 Up needed by et/b@1.0.0",
+      "note: et/sat stands in for et/upstream (a claims override)"
+    ]
+  }
+}

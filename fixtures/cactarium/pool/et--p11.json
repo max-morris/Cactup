@@ -1,0 +1,57 @@
+{
+  "slug": "et/p11",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "8c66e62f8c29cb835a81b3cfc2ca795654ee09cb",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/p11.git",
+      "thorns": [
+        {
+          "arrangement": "P11",
+          "thorn": "Q0",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Q0",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        },
+        {
+          "arrangement": "P11",
+          "thorn": "Q",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Q",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    }
+  ]
+}

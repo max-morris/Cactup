@@ -1,0 +1,47 @@
+{
+  "slug": "et/x2",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "c3dfaff51f9599ab5439b8edb959cf3d3eeb3c6d",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/x2.git",
+      "thorns": [
+        {
+          "arrangement": "X2",
+          "thorn": "X2",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "X2",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/z2",
+          "range": null,
+          "needs": [],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

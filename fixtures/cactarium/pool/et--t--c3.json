@@ -1,0 +1,73 @@
+{
+  "slug": "et/t",
+  "versions": [
+    {
+      "version": "2.0.0",
+      "track": null,
+      "tag": "v2.0.0",
+      "commit": "2eab2d92bd170b72799d0c7e5f61db9efef5122a",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/t.git",
+      "thorns": [
+        {
+          "arrangement": "T",
+          "thorn": "T",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "T",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    },
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "6c2b7c4b425e4fb48c2830bb40193726d6bcab96",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/t.git",
+      "thorns": [
+        {
+          "arrangement": "T",
+          "thorn": "T",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "T",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    }
+  ]
+}

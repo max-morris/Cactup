@@ -354,7 +354,30 @@ pub fn write_replacing<T: Serialize + DeserializeOwned, D: Document>(
     f: &Format<D>,
     whole: &[&str],
 ) -> Res<()> {
-    write_over_replacing(path, value, f, &disk_state(path, f)?, whole)
+    let whole: Vec<Pattern> = whole.iter().map(|p| dotted(p)).collect();
+    write_over_replacing(path, value, f, &disk_state(path, f)?, &whole)
+}
+
+/// [`write_replacing`], with each sub-record named by its keys, one per
+/// level, taken literally: for keys a dotted pattern cannot spell (a key
+/// with a `.` in it, or one that is `*`).
+pub fn write_replacing_keys<T: Serialize + DeserializeOwned, D: Document>(
+    path: &Path,
+    value: &T,
+    f: &Format<D>,
+    whole: &[Vec<String>],
+) -> Res<()> {
+    let whole: Vec<Pattern> = whole.iter().map(|keys| keys.iter().cloned().map(Some).collect()).collect();
+    write_over_replacing(path, value, f, &disk_state(path, f)?, &whole)
+}
+
+/// A sub-record's path, one entry per level: `Some(key)`, or `None` for any
+/// one key.
+type Pattern = Vec<Option<String>>;
+
+/// A dotted pattern (`installations.*.unfetched-repos`) as a [`Pattern`].
+fn dotted(pattern: &str) -> Pattern {
+    pattern.split('.').map(|k| (k != "*").then(|| k.to_owned())).collect()
 }
 
 /// What a write finds at `path`: a newer file refuses it, one that does not
@@ -396,7 +419,7 @@ fn write_over_replacing<T: Serialize + DeserializeOwned, D: Document>(
     value: &T,
     f: &Format<D>,
     disk: &OnDisk<D>,
-    whole: &[&str],
+    whole: &[Pattern],
 ) -> Res<()> {
     write_atomic(path, &render_over(path, value, f, disk, whole)?)
 }
@@ -408,7 +431,7 @@ fn render_over<T: Serialize + DeserializeOwned, D: Document>(
     value: &T,
     f: &Format<D>,
     disk: &OnDisk<D>,
-    whole: &[&str],
+    whole: &[Pattern],
 ) -> Res<String> {
     let mut doc = D::from_typed(value).with_context(|| format!("Failed to serialize {}", f.name))?;
     // The helper owns the version key, whatever the struct says.
@@ -423,8 +446,9 @@ fn render_over<T: Serialize + DeserializeOwned, D: Document>(
             // comparison never mixes two versions' key names; a down-step
             // leaves keys it does not know alone.
             if let Some(known) = round_trip::<T, D>(on_disk, f) {
-                let whole = [f.replace_whole, whole].concat();
-                put_back(&mut doc, on_disk, &known, &whole, &mut Vec::new());
+                let mut all: Vec<Pattern> = f.replace_whole.iter().map(|p| dotted(p)).collect();
+                all.extend(whole.iter().cloned());
+                put_back(&mut doc, on_disk, &known, &all, &mut Vec::new());
             }
             *version
         }
@@ -444,8 +468,39 @@ pub(crate) fn write_atomic(path: &Path, text: &str) -> Res<()> {
     write_atomic_as(path, text, None)
 }
 
+/// [`write_atomic`] of several files: every one written and synced under a temporary name
+/// first, then each moved into place. When a move fails, those moved before it are put back as
+/// they were (or removed, when they did not exist), so none or all of them change.
+pub(crate) fn write_atomic_all(files: &[(&Path, &str)]) -> Res<()> {
+    let staged: Vec<tempfile::NamedTempFile> =
+        files.iter().map(|(path, text)| stage(path, text, None)).collect::<Res<_>>()?;
+    let before: Vec<Option<Vec<u8>>> = files.iter().map(|(path, _)| std::fs::read(path).ok()).collect();
+    for (i, temp) in staged.into_iter().enumerate() {
+        let path = files[i].0;
+        if let Err(e) = temp.persist(path) {
+            for ((done, _), old) in files[..i].iter().zip(&before) {
+                let _ = match old {
+                    Some(old) => write_atomic(done, &String::from_utf8_lossy(old)),
+                    None => std::fs::remove_file(done).map_err(Into::into),
+                };
+            }
+            return Err(anyhow::Error::new(e.error)).with_context(|| format!("Failed to move '{}' into place", path.display()));
+        }
+    }
+    Ok(())
+}
+
 /// [`write_atomic`], with `mode` (when given) the file's mode whatever it was.
 fn write_atomic_as(path: &Path, text: &str, mode: Option<u32>) -> Res<()> {
+    stage(path, text, mode)?
+        .persist(path)
+        .with_context(|| format!("Failed to move '{}' into place", path.display()))?;
+    Ok(())
+}
+
+/// `text` written and synced under a temporary name beside `path`, with the mode
+/// [`write_atomic_as`] gives it, ready to be moved into place.
+fn stage(path: &Path, text: &str, mode: Option<u32>) -> Res<tempfile::NamedTempFile> {
     use std::os::unix::fs::PermissionsExt;
     let dir = path.parent().expect("cactup record paths have parents");
     std::fs::create_dir_all(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
@@ -463,9 +518,7 @@ fn write_atomic_as(path: &Path, text: &str, mode: Option<u32>) -> Res<()> {
     temp.write_all(text.as_bytes())
         .and_then(|()| temp.as_file().sync_all())
         .with_context(|| format!("Failed to write '{}'", path.display()))?;
-    temp.persist(path)
-        .with_context(|| format!("Failed to move '{}' into place", path.display()))?;
-    Ok(())
+    Ok(temp)
 }
 
 /// This process's umask, from `/proc` (std has no call for it, and the
@@ -615,15 +668,14 @@ fn round_trip<T: Serialize + DeserializeOwned, D: Document>(on_disk: &D, f: &For
 /// disk and is present in `new`, so the file keeps its order. `path` is
 /// where `new` sits in the document; a sub-record `whole` names is left as
 /// the writer made it.
-/// Whether `path` is one of the `whole` patterns (dotted, `*` any one key).
-fn replaced_whole(whole: &[&str], path: &[String]) -> bool {
+/// Whether `path` is one of the `whole` patterns.
+fn replaced_whole(whole: &[Pattern], path: &[String]) -> bool {
     whole.iter().any(|pattern| {
-        let parts: Vec<&str> = pattern.split('.').collect();
-        parts.len() == path.len() && parts.iter().zip(path).all(|(p, k)| *p == "*" || *p == k)
+        pattern.len() == path.len() && pattern.iter().zip(path).all(|(p, k)| p.as_ref().is_none_or(|p| p == k))
     })
 }
 
-fn put_back<D: Document>(new: &mut D, on_disk: &D, known: &D, whole: &[&str], path: &mut Vec<String>) {
+fn put_back<D: Document>(new: &mut D, on_disk: &D, known: &D, whole: &[Pattern], path: &mut Vec<String>) {
     let mut anchor: Option<&str> = None;
     for (key, disk_value) in on_disk.iter() {
         match known.get(key) {
@@ -863,6 +915,25 @@ mod tests {
     use super::*;
     use serde_derive::{Deserialize, Serialize};
 
+    /// Several files move into place together, or none changes: one that cannot be moved there
+    /// (a directory in its way) puts back the ones moved before it, or removes those that were
+    /// new.
+    #[test]
+    fn several_files_change_together_or_not_at_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (old, new, blocked) = (tmp.path().join("old"), tmp.path().join("new"), tmp.path().join("blocked"));
+        std::fs::write(&old, "before").unwrap();
+        std::fs::create_dir_all(blocked.join("inside")).unwrap();
+        let files: [(&Path, &str); 3] = [(&old, "after"), (&new, "fresh"), (&blocked, "x")];
+        assert!(write_atomic_all(&files).is_err());
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "before");
+        assert!(!new.exists());
+        write_atomic_all(&files[..2]).unwrap();
+        assert_eq!((std::fs::read_to_string(&old).unwrap(), std::fs::read_to_string(&new).unwrap()), ("after".into(), "fresh".into()));
+        let leftovers = std::fs::read_dir(tmp.path()).unwrap().count();
+        assert_eq!(leftovers, 3, "no temporary file left behind");
+    }
+
     /// A toy record at version 2: v1 called `name` `title`, and v2 added
     /// `color`, which a v1 binary would get wrong by ignoring it.
     #[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1065,6 +1136,55 @@ mod tests {
         assert!(is_unparsable(&parse::<Toy, _>("name = ", path, &TOY).unwrap_err()));
         assert!(!is_unparsable(&parse::<Toy, _>("schema = 3\nname = 1\n", path, &TOY).unwrap_err()));
         assert!(!is_unparsable(&parse::<Toy, _>("name = 1\n", path, &TOY).unwrap_err()));
+    }
+
+    /// A sub-record named by its keys, literally: a key with a `.` in it is
+    /// one key, and only the record named is replaced whole; its sibling
+    /// keeps what a newer binary put in it.
+    #[test]
+    fn a_sub_record_is_named_by_its_keys() {
+        #[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+        struct Entries {
+            #[serde(default)]
+            e: std::collections::BTreeMap<String, Sub>,
+        }
+        static ENTRIES: Format<Toml> = Format {
+            name: "entries",
+            key: "schema",
+            current: 1,
+            upgrades: &[],
+            downgrades: &[],
+            down_floor: 1,
+            frozen_read: false,
+            replace_whole: &[],
+            legacy: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("e.toml");
+        let mut value = Entries::default();
+        value.e.insert("a.b".into(), Sub { n: 1 });
+        value.e.insert("a".into(), Sub { n: 2 });
+        write(&path, &value, &ENTRIES).unwrap();
+        let mut doc: Toml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for key in ["a.b", "a"] {
+            doc["e"][key].as_table_mut().unwrap().insert("future".into(), toml::Value::Integer(7));
+        }
+        std::fs::write(&path, toml::to_string(&doc).unwrap()).unwrap();
+        let future = |key: &str| {
+            let doc: Toml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            doc["e"][key].get("future").is_some()
+        };
+        write(&path, &value, &ENTRIES).unwrap();
+        assert!(future("a.b") && future("a"), "a plain write keeps both");
+        write_replacing_keys(&path, &value, &ENTRIES, &[vec!["e".into(), "a.b".into()]]).unwrap();
+        assert!(!future("a.b") && future("a"));
+        // The dotted form reads `a.b` as two levels: it names nothing here.
+        write(&path, &value, &ENTRIES).unwrap();
+        let mut doc: Toml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        doc["e"]["a.b"].as_table_mut().unwrap().insert("future".into(), toml::Value::Integer(7));
+        std::fs::write(&path, toml::to_string(&doc).unwrap()).unwrap();
+        write_replacing(&path, &value, &ENTRIES, &["e.a.b"]).unwrap();
+        assert!(future("a.b"));
     }
 
     /// Put-back recurses into maps only. A key inside an array element is

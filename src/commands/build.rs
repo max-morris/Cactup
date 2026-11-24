@@ -754,7 +754,7 @@ enum Watch {
 /// is no renderer at all.
 struct WaitLine {
     shown: std::sync::Arc<std::sync::Mutex<Shown>>,
-    renderer: Option<prodash::render::line::JoinHandle>,
+    renderer: Option<crate::manifest::JoinHandle>,
     // Owns the tree the line hangs from for as long as the line is drawn.
     _root: std::sync::Arc<prodash::tree::Root>,
 }
@@ -1759,6 +1759,7 @@ mod tests {
         use crate::installation::{AddedPackage, AddedThorn};
         let package = AddedPackage {
             libraries: Vec::new(),
+            flesh: Vec::new(),
             package: "max/carpetx".into(),
             version: "1.0.0".into(),
             tag: None,

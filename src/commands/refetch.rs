@@ -113,7 +113,18 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // old one are composed onto it (§8.11), and that is what is fetched and
     // becomes the live list. The live list itself already carries them.
     let composed = if source.is_explicit() {
-        super::add::compose(source.bytes(), &inst.meta()?.added)
+        let added = inst.meta()?.added;
+        // More thorns of a base clone the new base drops: said loudly, as
+        // they fall back to their own source.
+        if let (Ok(old), Ok(new)) = (
+            fs::read_to_string(inst.source_thornlist_to_read()).map_err(anyhow::Error::from).and_then(|t| thornlist::parse(&t)),
+            thornlist::parse(source.bytes()),
+        ) {
+            for warning in super::add::extensions_left_behind(&old, &new, &added) {
+                println!("{}", warning.yellow());
+            }
+        }
+        super::add::compose(source.bytes(), &added)
             .with_context(|| format!("Failed to add this installation's added packages to {}", source.describe()))?
     } else {
         source.bytes().to_owned()
@@ -242,9 +253,9 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             );
         }
         let moved = if overwrite_modified {
-            plan.force()
+            plan.force()?
         } else {
-            plan.force_where(|s| forced_repo_names.contains(&s.repo))
+            plan.force_where(|s| forced_repo_names.contains(&s.repo))?
         };
         // "local modifications" would be wrong for a repo forced for a
         // changed remote URL, a detached HEAD, or local commits — none of
@@ -281,7 +292,15 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     for note in &dropping.notes {
         println!("{note}");
     }
-    let report = fetch::execute(&plan, &inst.root)?;
+    // Ctrl-C stops the fetch with what it did get done: that is recorded all
+    // the same (below), and the refetch fails.
+    let (report, interrupted) = match fetch::execute(&plan, &inst.root) {
+        Ok(report) => (report, false),
+        Err(e) => match e.downcast::<fetch::Interrupted>() {
+            Ok(fetch::Interrupted(report)) => (report, true),
+            Err(e) => return Err(e),
+        },
+    };
     if let Some(undo) = undo.as_mut() {
         undo.made(&plan, &report);
     }
@@ -294,7 +313,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // Ctrl-C during the fetch: what completed is recorded above; everything
     // else (the summary, thornlist adoption, config reports) belongs to a
     // finished refetch, not an aborted one.
-    if gix::interrupt::is_triggered() {
+    if interrupted || gix::interrupt::is_triggered() {
         // A repo cut short mid-checkout now reads as modified, with nothing of
         // the user's in it; name the forced refetch that finishes it.
         let unfinished: Vec<&str> = report
@@ -337,14 +356,15 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     if !repointed.is_empty() {
         println!("{}", format!("{} repo(s) had their origin re-pointed:", repointed.len()).bold());
         for (repo, url) in &repointed {
-            println!("  {repo}: origin now points at {}", url.bold());
+            println!("  {repo}: origin now points at {}", fetch::git::redacted(url).bold());
         }
     }
     if ctx.globals.verbose {
         for r in &report.repos {
             let mark = if r.changed { "updated" } else { "up to date" };
             let forced = r.forced.as_deref().map(|f| format!(" (forced: {f})")).unwrap_or_default();
-            println!("  {} @ {}: {mark}{forced}", r.repo, r.branch.as_deref().unwrap_or("<default>"));
+            let warning = r.warning.as_deref().map(|w| format!("; {w}")).unwrap_or_default();
+            println!("  {} @ {}: {mark}{forced}{warning}", r.repo, r.branch.as_deref().unwrap_or("<default>"));
         }
     }
     let blocked: Vec<_> = report
@@ -368,7 +388,11 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
 
     // Thornlist writes. The pristine as-fetched copy always tracks what was
     // fetched; the live copy is only replaced by an explicit source (and the
-    // old live copy is snapshotted first).
+    // old live copy is snapshotted first). Ctrl-C since the fetch: nothing is
+    // adopted (the dropped placements are put back), as for one during it.
+    if gix::interrupt::is_triggered() {
+        bail!("Interrupted");
+    }
     let fetch_ok = report.failures.is_empty();
     let mut recorded = false;
     if fetch_ok || had_work {
@@ -498,7 +522,9 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // (§7.4) and each thorn's recorded provider, so `report_configs`'s claim
     // that a plain `cactup build` does the right thing holds even when the
     // refetched thornlist re-points a thorn *name* at a different provider.
-    if changed > 0 && !configs.is_empty() {
+    // Only a source that changed: a clone put on a branch at the commit it
+    // was at counts as updated, but no config has anything to pick up.
+    if report.repos.iter().any(|r| r.moved_commit) && !configs.is_empty() {
         report_configs(&inst, &configs, matches!(source, Source::Release { .. }));
     }
 
@@ -512,6 +538,13 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             if recorded { "was updated despite the failures" } else { "is unchanged" }
         );
         bail!("Refetch completed with {} failure(s)", report.failures.len());
+    }
+
+    // A stack release is frozen: what its packages claim of each other is
+    // checked, and said, but never resolved; last, once the refetch has
+    // said everything of its own. Plan §4.3.
+    if recorded && matches!(&source, Source::Release { described, .. } if described.starts_with("stack ")) {
+        super::claims::warn_problems(ctx, &inst);
     }
 
     Ok(())
@@ -567,7 +600,7 @@ fn resolve_source(ctx: &Ctx, inst: &Installation, args: &RefetchArgs) -> Res<Sou
         let db = ctx.db.read()?;
         let selector = stay_on_track(selector, db.installations.get(&inst.alias));
         let crate::cactarium::StackRelease { slug, text: bytes, unpinned, contact } =
-            crate::cactarium::stack_release_text(&db, &selector, ctx.globals.risky_allow_untrusted_artifacts)?;
+            crate::cactarium::stack_release_text(ctx, &selector)?;
         if unpinned {
             println!("{}", format!("{slug} is not a release: its repos follow their branches").yellow());
         }
@@ -1154,6 +1187,9 @@ fn print_dry_run(
             (GitAction::Pin, None) => "pin (no commit: a bug)".to_owned(),
         };
         println!("  {}: {target} ({} thorn(s))", item.repo.bold(), item.checkouts.len());
+        if let Some(note) = &item.note {
+            println!("    {}", note.yellow());
+        }
     }
     for c in &plan.downloads {
         println!("  {}: download", c.checkout.bold());
@@ -1761,6 +1797,7 @@ mod tests {
             reason: fetch::git::DirtyReason::WorktreeModified(vec!["src/foo.c".to_string()]),
             untracked: Vec::new(),
             checkouts: checkouts.iter().map(|s| s.to_string()).collect(),
+            record: None,
         }
     }
 
@@ -1775,6 +1812,8 @@ mod tests {
             checkouts: checkouts.iter().map(|s| s.to_string()).collect(),
             forced: None,
             retarget: None,
+            note: None,
+            unasked: None,
         }
     }
 

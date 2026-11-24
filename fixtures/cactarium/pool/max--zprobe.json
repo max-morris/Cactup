@@ -1,0 +1,58 @@
+{
+  "slug": "max/zprobe",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "2c17d4423c315852e0b65e28b11d4fcf606a3cd3",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/zprobe.git",
+      "thorns": [
+        {
+          "arrangement": "Zprobe",
+          "thorn": "ZProbe",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "ZProbe",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/carpetx",
+          "range": "^2026.5",
+          "needs": [
+            "CarpetX"
+          ],
+          "note": null
+        },
+        {
+          "kind": "dependency",
+          "target": "max/carpetx-mp",
+          "range": null,
+          "needs": [
+            "CarpetX"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

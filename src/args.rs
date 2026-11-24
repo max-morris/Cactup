@@ -327,12 +327,18 @@ pub(crate) struct GlobalOpts {
         action = ArgAction::Append
     )]
     pub knob: Vec<KnobOverride>,
-    /// Accept untrusted branch tips and commits without asking
+    /// Accept untrusted and unreviewed code without asking
     ///
     /// Covers a stack or package at a branch tip (@head, @master), or a
     /// package at an unpublished commit (#commit), from a source
-    /// not trusted by Cactarium. Nobody reviews these. They may fetch and
-    /// build arbitrary code. The warning is still printed.
+    /// not trusted by Cactarium. Also asks Cactarium for versions awaiting
+    /// review, and for entries awaiting their first review when your token
+    /// (cactup login) is an admin's. Your token (CACTARIUM_TOKEN, else the
+    /// one from cactup login) is sent by add, remove, claims, import,
+    /// install and inst refetch, to the Cactarium server named by
+    /// the cactarium-url knob, whatever it is. Without this option those
+    /// commands send no token. Nobody has reviewed such code. It may fetch
+    /// and build arbitrary code. The warning is still printed.
     #[clap(long, global = true)]
     pub risky_allow_untrusted_artifacts: bool,
 }
@@ -382,11 +388,42 @@ pub(crate) enum Commands {
         /// Add even if the thornlist has hand edits (they are overwritten).
         #[clap(short, long)]
         force: bool,
+        /// Move installed packages to the versions the plan needs
+        ///
+        /// Without it, a plan that needs an installed package at another
+        /// version is refused.
+        #[clap(long)]
+        upgrade: bool,
+        /// Move every installed package to its newest fitting version
+        #[clap(long)]
+        upgrade_all: bool,
+        /// Add only the packages named, without their dependencies
+        ///
+        /// Libraries are still placed.
+        #[clap(long)]
+        no_deps: bool,
+        /// Ignore a package's claims for this command (repeatable)
+        ///
+        /// OWNER/PKG ignores all of them. OWNER/PKG:KIND:TARGET ignores one;
+        /// KIND is dependency, incompatible-with or fork-of.
+        #[clap(long, value_name = "OWNER/PKG[:KIND:TARGET]", action = ArgAction::Append)]
+        ignore_claim: Vec<String>,
+        /// Do not ask for confirmation
+        ///
+        /// Without it, cactup asks when the plan goes beyond the packages
+        /// named.
+        #[clap(short, long)]
+        yes: bool,
+        /// Show the plan and change nothing.
+        #[clap(long)]
+        dry_run: bool,
     },
     // §8.11
     /// Remove packages added with `cactup add`
     ///
-    /// Any repo a package replaced is restored.
+    /// Any repo a package replaced is restored. Packages brought in only for
+    /// the ones named are removed too, after the plan is shown. Refused while
+    /// another package depends on one named.
     Remove {
         /// The packages: owner/name.
         #[clap(required = true, value_name = "PACKAGE")]
@@ -394,7 +431,33 @@ pub(crate) enum Commands {
         /// Remove even if the thornlist has hand edits (they are overwritten).
         #[clap(short, long)]
         force: bool,
+        /// Remove only the packages named, without checking dependents
+        ///
+        /// Packages brought in for them stay. No Cactarium is needed.
+        #[clap(long)]
+        no_deps: bool,
+        /// Do not ask for confirmation
+        ///
+        /// Without it, cactup asks when packages brought in for the ones named
+        /// would go too.
+        #[clap(short, long)]
+        yes: bool,
+        /// Show the plan and change nothing.
+        #[clap(long)]
+        dry_run: bool,
     },
+    // §4.4 of the dependency plan
+    /// Inspect and correct package claims
+    ///
+    /// A claim is what a package says about another: a dependency, an
+    /// incompatibility, a fork. An override changes a claim for this
+    /// installation, and applies to every add and remove in it.
+    #[clap(subcommand)]
+    Claims(ClaimsCommand),
+    // Plan §4.7
+    /// Write or register a package's cactarium.toml
+    #[clap(subcommand)]
+    Package(PackageCommand),
     // §8.10
     /// Work with Cactarium stacks
     #[clap(subcommand)]
@@ -405,6 +468,10 @@ pub(crate) enum Commands {
         /// The package or stack: owner/name.
         target: String,
     },
+    // §8.10
+    /// Submit downloads to Cactarium for review
+    #[clap(subcommand)]
+    Download(DownloadCommand),
     // §8.10
     /// Store a Cactarium API token
     ///
@@ -1155,9 +1222,156 @@ pub(crate) enum ConfigCommand {
     },
 }
 
+#[derive(Subcommand, Debug)]
+pub(crate) enum ClaimsCommand {
+    /// Show the overrides and the any-of choices
+    List,
+    #[clap(verbatim_doc_comment)]
+    /// Check the installed packages against each other's claims
+    ///
+    /// Reports, one line each:
+    ///   clashing thorns
+    ///   incompatibilities
+    ///   forks installed beside their upstream
+    ///   unmet dependency claims
+    ///   CCL requirements no installed thorn meets
+    ///   `satisfies` overrides naming a missing repo
+    /// Changes nothing. Fails when it finds a problem.
+    Check,
+    /// Change or remove a claim override
+    #[command(args_conflicts_with_subcommands = true, arg_required_else_help = true)]
+    Override {
+        /// Remove an override, named by its key as `claims list` shows it
+        #[clap(long, value_name = "KEY")]
+        remove: Option<String>,
+        #[clap(subcommand)]
+        action: Option<OverrideAction>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum OverrideAction {
+    /// Drop a claim: a dependency, incompatible-with or fork-of
+    ///
+    /// The claim is dropped from every version of the package.
+    ///
+    ///   cactup claims override drop max/foo:incompatible-with:et/bar
+    #[clap(verbatim_doc_comment)]
+    Drop {
+        /// The claim: OWNER/PKG:KIND:TARGET
+        #[clap(value_name = "OWNER/PKG:KIND:TARGET")]
+        claim: String,
+        /// Why, shown by `claims list`.
+        #[clap(long)]
+        note: Option<String>,
+    },
+    /// Add a dependency the package's manifest lacks
+    ///
+    ///   cactup claims override add max/foo --dependency et/carpet --needs CarpetSlab
+    #[clap(verbatim_doc_comment)]
+    Add {
+        /// The package that depends: OWNER/PKG
+        #[clap(value_name = "OWNER/PKG")]
+        package: String,
+        /// The package it depends on: OWNER/PKG, or OWNER/PKG@RANGE.
+        #[clap(long, value_name = "TARGET")]
+        dependency: String,
+        /// Thorns of the target it needs (comma separated).
+        #[clap(long, required = true, value_delimiter = ',', value_name = "A,B")]
+        needs: Vec<String>,
+        /// Thorns of the package that need it (default: all).
+        #[clap(long, value_delimiter = ',', value_name = "T,U")]
+        needed_by: Vec<String>,
+    },
+    /// Add thorns to a dependency's needs
+    ///
+    ///   cactup claims override needs max/foo:dependency:et/bar Loop
+    #[clap(verbatim_doc_comment)]
+    Needs {
+        /// The dependency: OWNER/PKG:dependency:TARGET
+        #[clap(value_name = "OWNER/PKG:dependency:TARGET")]
+        claim: String,
+        /// Thorns of the target to add.
+        #[clap(required = true, value_name = "THORN")]
+        thorns: Vec<String>,
+    },
+    /// Let one package stand in for another
+    ///
+    /// The first takes every need for the second, with no version check.
+    /// Name an unregistered repo of the installation as local:NAME.
+    ///
+    ///   cactup claims override satisfies max/carpet-mp et/carpet
+    ///   cactup claims override satisfies local:carpetx et/carpetx
+    #[clap(verbatim_doc_comment)]
+    Satisfies {
+        /// The package that stands in: OWNER/PKG or local:NAME
+        #[clap(value_name = "X")]
+        by: String,
+        /// The package it stands in for: OWNER/PKG
+        #[clap(value_name = "Y")]
+        target: String,
+    },
+}
+
+// Plan §4.7
+#[derive(Subcommand, Debug)]
+pub(crate) enum PackageCommand {
+    /// Write a cactarium.toml for a repo of the installation
+    ///
+    /// Reads the repo's thorns and the active config's build, and writes
+    /// cactarium.toml at the repo's root for you to review and commit: the
+    /// package's name and owners, and a dependency on each installed package
+    /// whose thorns meet the requirements of the repo's thorns. What cactup
+    /// cannot decide is written as a TODO comment.
+    ///
+    /// With --publish, writes nothing: registers the cactarium.toml held by
+    /// the repo's newest release tag on its remote with Cactarium (cactup
+    /// login), or checks the package for new releases if it is registered
+    /// already.
+    Init(PackageInitArgs),
+}
+
+/// `cactup package init`.
+#[derive(clap::Args, Debug)]
+pub(crate) struct PackageInitArgs {
+    /// The repo, by its name under repos/ (default: the one holding the
+    /// current directory).
+    pub repo: Option<String>,
+    /// The package's name (default: the repo's name, lowercased).
+    #[clap(long, conflicts_with = "publish")]
+    pub name: Option<String>,
+    /// The owner (default: your Cactarium user)
+    ///
+    /// With --publish: the namespace to register under, one of your
+    /// organizations (default: your own).
+    #[clap(long, value_name = "OWNER")]
+    pub owner: Option<String>,
+    /// Depend on exactly the version built with (=X.Y.Z, not ~X.Y.Z).
+    #[clap(long, conflicts_with = "publish")]
+    pub exact: bool,
+    /// Overwrite an existing cactarium.toml.
+    #[clap(short, long, conflicts_with = "publish")]
+    pub force: bool,
+    /// Register the cactarium.toml of the newest pushed release tag; write nothing.
+    #[clap(long)]
+    pub publish: bool,
+}
+
 // §8.10
 #[derive(Subcommand, Debug)]
 pub(crate) enum StackCommand {
+    /// Write a cactarium-stack.toml for the installation
+    ///
+    /// Writes a stack that extends the stack release in use by the
+    /// installation, pins the base repos moved since, and adds the packages
+    /// added with `cactup add`: an override where one replaces every checkout
+    /// of a base repo, else a pinned section of cactarium-stack.th. The
+    /// dependencies declared by the installed packages follow, for
+    /// information. Refused while a repo has uncommitted or unpushed changes.
+    ///
+    /// With --publish --version, writes nothing: publishes the
+    /// cactarium-stack.toml found there as that release.
+    Init(StackInitArgs),
     /// Publish a stack release to Cactarium
     Publish {
         /// The stack definition, a cactarium-stack.toml.
@@ -1170,6 +1384,49 @@ pub(crate) enum StackCommand {
         /// The stack's own thornlist, when its definition is a flat list.
         #[clap(long, value_name = "PATH")]
         thornlist: Option<PathBuf>,
+    },
+}
+
+/// `cactup stack init`.
+#[derive(clap::Args, Debug)]
+pub(crate) struct StackInitArgs {
+    /// Where to write it (default: the current directory).
+    pub dir: Option<PathBuf>,
+    /// The stack's name (default: the installation's alias, lowercased).
+    #[clap(long, conflicts_with = "publish")]
+    pub name: Option<String>,
+    /// The owner (default: your Cactarium user)
+    ///
+    /// With --publish: the stack's owner (default: the first in its owners).
+    #[clap(long, value_name = "OWNER")]
+    pub owner: Option<String>,
+    /// Overwrite existing files.
+    #[clap(short, long, conflicts_with = "publish")]
+    pub force: bool,
+    /// Publish the cactarium-stack.toml found there; write nothing.
+    #[clap(long, requires = "version")]
+    pub publish: bool,
+    /// The release's version, with --publish: X.Y.Z, or track:X.Y.Z.
+    #[clap(long, value_name = "VERSION", requires = "publish")]
+    pub version: Option<String>,
+}
+
+/// `cactup download`.
+// §8.10, plan §6 S9
+#[derive(Subcommand, Debug)]
+pub(crate) enum DownloadCommand {
+    /// Submit a download to Cactarium for review
+    ///
+    /// Downloads the file once, computes its SHA-256, and submits the URL
+    /// and the hash with your token (cactup login). Cactarium verifies the
+    /// file, then an admin reviews it. A shared .sim may pin a download only
+    /// once it is approved.
+    Submit {
+        /// The download's URL.
+        url: String,
+        /// For the reviewer: what the file is, and why it can be trusted.
+        #[clap(long, value_name = "TEXT")]
+        note: Option<String>,
     },
 }
 
@@ -1258,14 +1515,6 @@ pub(crate) struct SimExportArgs {
     /// rest become #DISABLED lines.
     #[clap(long)]
     pub trim: bool,
-    /// Export even if sources had uncommitted changes at build time (marked dirty).
-    #[clap(long)]
-    pub allow_dirty: bool,
-    /// Export even if some pinned commits are not pushed
-    ///
-    /// Nobody else can fetch a commit that is on no remote branch or tag.
-    #[clap(long)]
-    pub allow_unpushed: bool,
 }
 
 /// `cactup sim pack`: a .sim from a loose thornlist and parfile.
@@ -1286,14 +1535,6 @@ pub(crate) struct SimPackArgs {
     /// rest become #DISABLED lines.
     #[clap(long)]
     pub trim: bool,
-    /// Pack even if repos have uncommitted changes (marked dirty).
-    #[clap(long)]
-    pub allow_dirty: bool,
-    /// Pack even if some pinned commits are not pushed
-    ///
-    /// Nobody else can fetch a commit that is on no remote branch or tag.
-    #[clap(long)]
-    pub allow_unpushed: bool,
 }
 
 /// What a .sim says about itself, shared by `sim export` and `sim pack`.
@@ -1336,6 +1577,19 @@ pub(crate) struct SimDescribeArgs {
     /// Archive member an input knob points at (KNOB=MEMBER; repeatable).
     #[clap(long = "input-path", value_name = "KNOB=MEMBER")]
     pub input_paths: Vec<String>,
+    /// Skip the checks for sharing: a .sim for this machine only
+    ///
+    /// Without it, these are refused:
+    ///   uncommitted changes; commits on no remote branch or tag
+    ///   repos of no package registered with Cactarium
+    ///   repos nothing pins: svn, cvs, hg, darcs, git with no commit,
+    ///     several downloads in one section
+    ///   ignore components
+    ///   downloads with no hash, on a private address, or not approved
+    ///   URLs nobody else can fetch, or with credentials
+    /// Each git remote and Cactarium are asked once, without credentials.
+    #[clap(long, verbatim_doc_comment)]
+    pub local: bool,
 }
 
 #[derive(Subcommand, Debug)]

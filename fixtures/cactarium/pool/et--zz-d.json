@@ -1,0 +1,49 @@
+{
+  "slug": "et/zz-d",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "6adc82a4c6c8a03620c22a5e0926348ec740e8c6",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/zz-d.git",
+      "thorns": [
+        {
+          "arrangement": "Zz-d",
+          "thorn": "D",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "D",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "max/fork",
+          "range": null,
+          "needs": [
+            "Up"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

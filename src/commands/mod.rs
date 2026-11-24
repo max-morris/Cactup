@@ -3,23 +3,28 @@
 //! subcommand to it.
 
 pub mod add;
+pub(crate) mod resolution;
 pub mod build;
 pub mod cache;
+pub mod claims;
 pub mod config;
 pub mod copy;
 pub mod delete;
 pub mod delta;
+pub mod download;
 pub mod import;
 pub mod install;
 pub mod installation;
 pub mod knob;
 pub mod list;
 pub mod machine;
+pub mod package;
 pub mod refetch;
 pub mod reify;
 pub mod releases;
 pub mod show;
 pub mod sim;
+pub mod stack;
 pub mod test;
 pub mod update;
 pub mod use_cmd;

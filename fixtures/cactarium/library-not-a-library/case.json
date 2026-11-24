@@ -1,0 +1,18 @@
+{
+  "about": "A dependency placing a package with thorns as a library is refused as that, naming the claim",
+  "packages": [
+    "max--kadath--into-carpetx",
+    "et--carpetx"
+  ],
+  "specs": [
+    "max/kadath"
+  ],
+  "expect": {
+    "refusal": "NotALibrary",
+    "message": [
+      "max/kadath@1.0.0 places et/carpetx (into = \"src/carpetx\")",
+      "et/carpetx is not a library",
+      "Pass --ignore-claim max/kadath:dependency:et/carpetx"
+    ]
+  }
+}

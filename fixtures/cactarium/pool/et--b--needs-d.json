@@ -1,0 +1,93 @@
+{
+  "slug": "et/b",
+  "versions": [
+    {
+      "version": "2.0.0",
+      "track": null,
+      "tag": "v2.0.0",
+      "commit": "13905624b3f23bd2b4c0b753bb0bc9e29799c00f",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/b.git",
+      "thorns": [
+        {
+          "arrangement": "B",
+          "thorn": "B",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "B",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/d",
+          "range": "^2",
+          "needs": [
+            "D"
+          ],
+          "note": null
+        }
+      ]
+    },
+    {
+      "version": "1.9.0",
+      "track": null,
+      "tag": "v1.9.0",
+      "commit": "7d3250d499a930ef31097d31d5e55e03a55f19c4",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/b.git",
+      "thorns": [
+        {
+          "arrangement": "B",
+          "thorn": "B",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "B",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/d",
+          "range": "^1",
+          "needs": [
+            "D"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

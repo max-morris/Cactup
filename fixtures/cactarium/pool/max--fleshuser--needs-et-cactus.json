@@ -1,0 +1,47 @@
+{
+  "slug": "max/fleshuser",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "b1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/fleshuser.git",
+      "thorns": [
+        {
+          "arrangement": "U",
+          "thorn": "U",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "U",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/cactus",
+          "range": "^2026.4",
+          "needs": [],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

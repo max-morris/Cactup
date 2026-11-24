@@ -166,7 +166,7 @@ pub(crate) fn client() -> &'static reqwest::blocking::Client {
 pub(crate) fn download_to(
     client: &reqwest::blocking::Client,
     url: &str,
-    dest: &mut std::fs::File,
+    dest: &mut impl std::io::Write,
     progress: &mut impl prodash::Progress,
 ) -> crate::Res<u64> {
     download_to_limited(client, url, dest, progress, None)
@@ -178,7 +178,7 @@ pub(crate) fn download_to(
 pub(crate) fn download_to_limited(
     client: &reqwest::blocking::Client,
     url: &str,
-    dest: &mut std::fs::File,
+    dest: &mut impl std::io::Write,
     progress: &mut impl prodash::Progress,
     limit: Option<u64>,
 ) -> crate::Res<u64> {
@@ -472,6 +472,15 @@ pub(crate) mod test_server {
         requests: usize,
         reply: impl Fn(&str) -> (&'static str, String, Vec<u8>) + Send + 'static,
     ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        serve_with_body(requests, move |path, _| reply(path))
+    }
+
+    /// Like [`serve_with`], but `reply` also gets the request's body (read
+    /// to its `Content-Length`), for a POST.
+    pub(crate) fn serve_with_body(
+        requests: usize,
+        reply: impl Fn(&str, &[u8]) -> (&'static str, String, Vec<u8>) + Send + 'static,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let port = listener.local_addr().expect("local addr").port();
         let handle = std::thread::spawn(move || {
@@ -480,17 +489,32 @@ pub(crate) mod test_server {
                 let (mut stream, _) = listener.accept().expect("accept");
                 let mut head = Vec::new();
                 let mut buf = [0u8; 512];
-                // Read to the end of the request head; a GET has no body to
-                // wait for.
+                // Read to the end of the request head.
                 while !head.windows(4).any(|w| w == b"\r\n\r\n") {
                     match stream.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => head.extend_from_slice(&buf[..n]),
                     }
                 }
+                // Then the body, whatever of it came with the head first.
+                let end = head.windows(4).position(|w| w == b"\r\n\r\n").map_or(head.len(), |i| i + 4);
+                let mut body = head.split_off(end);
                 let head = String::from_utf8_lossy(&head).into_owned();
+                let length = head
+                    .lines()
+                    .find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-length").then(|| v.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                while body.len() < length {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => body.extend_from_slice(&buf[..n]),
+                    }
+                }
                 let path = head.split_whitespace().nth(1).unwrap_or("");
-                let (status, headers, body) = reply(path);
+                let (status, headers, body) = reply(path, &body);
                 let reply = format!(
                     "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()

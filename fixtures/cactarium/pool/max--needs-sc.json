@@ -1,0 +1,49 @@
+{
+  "slug": "max/needs-sc",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "aa179648b19b7121e07a6f1cef8a3d00841e05b4",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/needs-sc.git",
+      "thorns": [
+        {
+          "arrangement": "Needs-sc",
+          "thorn": "NeedsSC",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "NeedsSC",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/admbase",
+          "range": null,
+          "needs": [
+            "StaticConformal"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

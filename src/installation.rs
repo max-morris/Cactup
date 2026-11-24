@@ -21,11 +21,25 @@ use chrono::{DateTime, Utc};
 use colored::Colorize;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// `installation.toml`'s format. Only login binaries write it (D11), so it is
-/// not `frozen_read`. Every field is a scalar or an array (`added`, which
-/// put-back never enters), so nothing is replaced whole.
+/// not `frozen_read`. `added` is an array, which put-back never enters. An
+/// `added-for` entry that `add` or `remove` rebuilds (for the commit its
+/// package ends up at) is replaced whole by that write
+/// ([`LockedInstallation::set_meta_rebuilding`]): a key a newer binary put in
+/// it said something about the old entry. Every other write, and every entry
+/// those two leave alone, keeps such keys.
+///
+/// `added-for` (why each added package is there) is additive: a top-level map,
+/// so an older binary that does not model it puts it back on a rewrite, and an
+/// entry it could no longer vouch for reads as "named by the user", which is
+/// what its absence means. An entry is believed only beside an `[[added]]`
+/// entry at the commit it was written for (`for-commit`): an older binary that
+/// re-adds or upgrades the package leaves it stale, and one that removes the
+/// package leaves it without one; both read as named, so no orphan pass ever
+/// removes a package the user may have named.
 ///
 /// Version 2 added `[[added.libraries]]`. Inside an array element, an older
 /// writer would drop it, and losing it is not harmless: which links to
@@ -45,13 +59,27 @@ use std::path::{Path, PathBuf};
 /// installation's tree (a refetch, an add), so a symbolic copy's record is
 /// written as v3 and an older binary refuses it; every other record keeps
 /// the version it had (the down-step).
+///
+/// Version 4 added `flesh` to an `[[added]]` element: a flesh package, which
+/// takes the place of the base's flesh. An older binary would drop the key
+/// (put-back never enters arrays) and compose the package as one with no
+/// thorns, putting the base's flesh back beside it. So, as for libraries: a
+/// record with a flesh package is written as v4, sticky afterward, and an
+/// older binary refuses it; every other record keeps the version it had.
+///
+/// Version 5 added `claim-overrides`. A top-level map, so an older binary's
+/// rewrite would put it back, but that binary resolves without the overrides:
+/// `remove` sweeps as an orphan a package that only an added dependency holds,
+/// and a `satisfies` or `drop` no longer shapes a plan. So, as for libraries,
+/// a record with an override is written as v5, sticky afterward, and an older
+/// binary refuses it; every other record keeps the version it had.
 // Spec §2.5 matrix; the v1 shape is fixtures/formats/installation/v1.toml.
 pub static INSTALLATION: Format<Toml> = Format {
     name: "installation record",
     key: "schema",
-    current: 3,
-    upgrades: &[installation_up_1, installation_up_2],
-    downgrades: &[installation_down_2, installation_down_3],
+    current: 5,
+    upgrades: &[installation_up_1, installation_up_2, installation_up_3, installation_up_4],
+    downgrades: &[installation_down_2, installation_down_3, installation_down_4, installation_down_5],
     down_floor: 1,
     frozen_read: false,
     legacy: None,
@@ -66,6 +94,50 @@ fn installation_up_1(_doc: &mut Toml) -> Res<()> {
 /// v2 → v3: nothing to change (v2 has no `linked-to`).
 fn installation_up_2(_doc: &mut Toml) -> Res<()> {
     Ok(())
+}
+
+/// v3 → v4: nothing to change (v3 has no flesh package).
+fn installation_up_3(_doc: &mut Toml) -> Res<()> {
+    Ok(())
+}
+
+/// v4 → v5: nothing to change (v4 has no claim overrides).
+fn installation_up_4(_doc: &mut Toml) -> Res<()> {
+    Ok(())
+}
+
+/// v5 → v4: unchanged, unless some claim override is recorded.
+fn installation_down_5(doc: &mut Toml) -> Result<(), format::CannotExpress> {
+    let overrides = match doc.get("claim-overrides") {
+        None => false,
+        Some(toml::Value::Table(overrides)) => !overrides.is_empty(),
+        // Not a table: nothing v4 can hold either.
+        Some(_) => true,
+    };
+    match overrides {
+        true => Err(format::CannotExpress),
+        false => Ok(()),
+    }
+}
+
+/// v4 → v3: unchanged, unless some added package is a flesh package.
+fn installation_down_4(doc: &mut Toml) -> Result<(), format::CannotExpress> {
+    let uses_flesh = doc
+        .get("added")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_table)
+        .any(|package| match package.get("flesh") {
+            None => false,
+            Some(toml::Value::Array(items)) => !items.is_empty(),
+            // Not an array: nothing v3 can hold either.
+            Some(_) => true,
+        });
+    match uses_flesh {
+        true => Err(format::CannotExpress),
+        false => Ok(()),
+    }
 }
 
 /// v3 → v2: unchanged, unless the installation is a symbolic copy.
@@ -128,7 +200,7 @@ pub static TEST_REGISTRY: Format<Toml> = Format {
 };
 
 /// `installation.toml` (§8.1, §11.8).
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct InstallationMeta {
     /// The active config; absent = the §7.1 null-config state.
@@ -150,6 +222,17 @@ pub struct InstallationMeta {
     /// onto it, so a refetch of a new base (a stack upgrade) re-applies them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub added: Vec<AddedPackage>,
+    /// Why each added package is there, by `owner/name`: named on a command
+    /// line, or brought in as another's dependency. A map rather than a key
+    /// of each `[[added]]` element, so an older binary's rewrite keeps it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub added_for: BTreeMap<String, AddedFor>,
+    /// The claims the installation overrides (`cactup claims override`), by
+    /// the override's canonical text (`Override::key`). A map, so an older
+    /// binary's rewrite keeps it; see [`INSTALLATION`] for why it still needs
+    /// a version of its own.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub claim_overrides: BTreeMap<String, ClaimOverride>,
     /// For a symbolic copy (`installation cp --symbolic`, §3.1): the
     /// installation home its unchanged files are links into. Each file of the
     /// copy's tree is an absolute link to the same file there until cactup
@@ -159,6 +242,63 @@ pub struct InstallationMeta {
     /// it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linked_to: Option<PathBuf>,
+}
+
+/// One `added-for` entry. Believed only beside the package's `[[added]]`
+/// entry at `for-commit` (see [`INSTALLATION`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AddedFor {
+    /// Named on a command line (`true`), or brought in by another package's
+    /// dependency. Missing reads as named, the safe side.
+    #[serde(default = "named")]
+    pub requested: bool,
+    /// The dependents (`owner/name@version`) whose dependencies brought it
+    /// in. Informational: what depends on it is read from the current claims.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by: Vec<String>,
+    /// The `[[added]]` commit this entry was written for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub for_commit: Option<String>,
+    /// The any-of dependencies that chose it, each by its dependent and its
+    /// alternatives.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<AddedForChoice>,
+}
+
+fn named() -> bool {
+    true
+}
+
+/// One `claim-overrides` entry. What the override does is its key's text; `kind`
+/// repeats the key's first word, for a reader of the file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ClaimOverride {
+    /// `drop`, `add`, `needs` or `satisfies`.
+    pub kind: String,
+    /// Why the override is there, as the user said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// An any-of dependency, by the package declaring it and its alternatives in
+/// the order declared.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AddedForChoice {
+    pub dependent: String,
+    pub alternatives: Vec<String>,
+}
+
+impl InstallationMeta {
+    /// The `added-for` entries a reader may believe: only those of packages
+    /// that have an `[[added]]` entry (one an older binary's `remove` left
+    /// behind is no entry). Whether each still holds for the commit the
+    /// package is at is the reader's call (`for-commit`).
+    pub fn added_for_present(&self) -> impl Iterator<Item = (&AddedPackage, Option<&AddedFor>)> {
+        self.added.iter().map(|a| (a, self.added_for.get(&a.package)))
+    }
 }
 
 /// One package `cactup add` added (§8.11), frozen at the commit the registry
@@ -195,6 +335,19 @@ pub struct AddedPackage {
     /// library's own library, inside that library's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub libraries: Vec<AddedLibrary>,
+    /// For a flesh package (`flesh` on Cactarium): its items at the Cactus
+    /// root, those of the base's flesh when the package was added
+    /// (`Makefile`, `lib`, `src`, …). It takes the place of every component
+    /// of the base's flesh, whatever its name or URL. Empty: not the flesh.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flesh: Vec<String>,
+}
+
+impl AddedPackage {
+    /// Whether the package is the installation's flesh.
+    pub fn is_flesh(&self) -> bool {
+        !self.flesh.is_empty()
+    }
 }
 
 /// One library an added package builds against, frozen at the commit the
@@ -705,8 +858,27 @@ impl LockedInstallation<'_> {
         self.inst.meta()
     }
 
+    /// Writes the record. An `added-for` entry of a package with no
+    /// `[[added]]` entry (an older binary's `remove` left it) is dropped:
+    /// no reader believes it, and a package added again later must not
+    /// inherit it.
     pub fn set_meta(&self, meta: &InstallationMeta) -> Res<()> {
-        format::write(&self.inst.meta_path(), meta, &INSTALLATION)
+        self.set_meta_rebuilding(meta, &[])
+    }
+
+    /// [`LockedInstallation::set_meta`], where the `added-for` entries of
+    /// `rebuilt` (package names) were made anew by this command: they are
+    /// written whole, without what a newer binary had put in the old ones.
+    pub fn set_meta_rebuilding(&self, meta: &InstallationMeta, rebuilt: &[String]) -> Res<()> {
+        let stray = |name: &String| !meta.added.iter().any(|a| &a.package == name);
+        let whole: Vec<Vec<String>> = rebuilt.iter().map(|name| vec!["added-for".to_owned(), name.clone()]).collect();
+        let path = self.inst.meta_path();
+        if meta.added_for.keys().any(stray) {
+            let mut kept = meta.clone();
+            kept.added_for.retain(|name, _| !stray(name));
+            return format::write_replacing_keys(&path, &kept, &INSTALLATION, &whole);
+        }
+        format::write_replacing_keys(&path, meta, &INSTALLATION, &whole)
     }
 
     pub fn simulations(&self) -> Res<SimRegistry> {
@@ -944,9 +1116,33 @@ mod tests {
                     inside: "pkg".to_owned(),
                     into: "src/lib".to_owned(),
                 }],
+                flesh: vec!["Makefile".to_owned(), "lib".to_owned(), "src".to_owned()],
             }],
+            added_for: [(
+                "owner/pkg".to_owned(),
+                AddedFor {
+                    requested: false,
+                    by: vec!["owner/app@2.0.0".to_owned()],
+                    for_commit: Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
+                    choices: vec![AddedForChoice {
+                        dependent: "owner/app".to_owned(),
+                        alternatives: vec!["owner/pkg".to_owned(), "owner/other".to_owned()],
+                    }],
+                },
+            )]
+            .into(),
+            claim_overrides: [(
+                "drop owner/app:dependency:owner/other".to_owned(),
+                ClaimOverride { kind: "drop".to_owned(), note: Some("its thorns ship with the flesh".to_owned()) },
+            )]
+            .into(),
             linked_to: Some("/scratch/cacti/et".into()),
         }
+    }
+
+    /// [`exhaustive_meta`] as a record before claim overrides had it.
+    fn without_overrides() -> InstallationMeta {
+        InstallationMeta { claim_overrides: BTreeMap::new(), ..exhaustive_meta() }
     }
 
     fn exhaustive_sim_registry() -> SimRegistry {
@@ -1039,8 +1235,9 @@ mod tests {
             let doc: Toml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
             doc["schema"].as_integer().unwrap()
         };
-        let mut plain = exhaustive_meta();
+        let mut plain = without_overrides();
         plain.added[0].libraries.clear();
+        plain.added[0].flesh.clear();
         plain.linked_to = None;
 
         format::write(&path, &plain, &INSTALLATION).unwrap();
@@ -1048,7 +1245,8 @@ mod tests {
         let back: InstallationMeta = format::read(&path, &INSTALLATION).unwrap().unwrap();
         assert_eq!(back.added, plain.added);
 
-        let mut libraries = exhaustive_meta();
+        let mut libraries = without_overrides();
+        libraries.added[0].flesh.clear();
         libraries.linked_to = None;
         format::write(&path, &libraries, &INSTALLATION).unwrap();
         assert_eq!(schema(), 2);
@@ -1083,8 +1281,11 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("installation.toml");
-        let mut plain = exhaustive_meta();
+        let mut plain = without_overrides();
         plain.added[0].libraries.clear();
+        plain.added[0].flesh.clear();
+        // Additive, and not in the v1 fixture (see the test of `added-for`).
+        plain.added_for.clear();
         plain.linked_to = None;
 
         format::write(&path, &plain, &INSTALLATION).unwrap();
@@ -1097,7 +1298,8 @@ mod tests {
         let v1 = crate::format::testing::fixture_dir("installation").join("v1.toml");
         assert_eq!(parse(&path), parse(&v1));
 
-        let mut libraries = exhaustive_meta();
+        let mut libraries = without_overrides();
+        libraries.added[0].flesh.clear();
         libraries.linked_to = None;
         format::write(&path, &libraries, &INSTALLATION).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -1110,6 +1312,115 @@ mod tests {
         let fixture = crate::format::testing::fixture_dir("installation").join("v2.toml");
         let err = format::read::<InstallationMeta, _>(&fixture, &V1).unwrap_err();
         assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+    }
+
+    /// An older binary, which models no `added-for`, rewrites the record (a
+    /// `config use`, an `add` of its own): the map is put back whole, entries
+    /// and their `choices` arrays alike, and the version stays what it was.
+    #[test]
+    fn an_older_binary_s_rewrite_keeps_added_for() {
+        // `InstallationMeta` and `INSTALLATION` as they shipped at version
+        // 2, before `added-for`.
+        #[derive(Debug, Default, Serialize, Deserialize)]
+        #[serde(rename_all = "kebab-case")]
+        struct Before {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            active_config: Option<String>,
+            #[serde(default)]
+            sim_home: Option<PathBuf>,
+            #[serde(default)]
+            test_home: Option<PathBuf>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            root_dir: Option<String>,
+            #[serde(default, skip_serializing_if = "Vec::is_empty")]
+            added: Vec<AddedPackage>,
+        }
+        static V2: Format<Toml> = Format {
+            name: "installation record",
+            key: "schema",
+            current: 2,
+            upgrades: &[installation_up_1],
+            downgrades: &[installation_down_2],
+            down_floor: 1,
+            frozen_read: false,
+            legacy: None,
+            replace_whole: &[],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installation.toml");
+        let mut plain = without_overrides();
+        plain.added[0].libraries.clear();
+        plain.added[0].flesh.clear();
+        plain.linked_to = None;
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        let schema = || {
+            let doc: Toml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            doc["schema"].as_integer().unwrap()
+        };
+        assert_eq!(schema(), 1, "added-for alone needs no newer version");
+
+        let mut old: Before = format::read(&path, &V2).unwrap().unwrap();
+        old.active_config = Some("other".to_owned());
+        old.added[0].version = "1.2.4".to_owned();
+        format::write(&path, &old, &V2).unwrap();
+        assert_eq!(schema(), 1);
+        let back: InstallationMeta = format::read(&path, &INSTALLATION).unwrap().unwrap();
+        assert_eq!(back.added_for, plain.added_for, "kept whole, choices included");
+        assert_eq!(back.added[0].version, "1.2.4");
+    }
+
+    /// An unrelated write (`config use`, a build) keeps what a newer binary
+    /// put inside an `added-for` entry; a write that rebuilds an entry drops
+    /// it from that entry only, its name taken literally (a `.` included).
+    #[test]
+    fn only_the_entries_a_command_rebuilds_lose_unknown_keys() {
+        let (_dir, inst) = inst();
+        std::fs::create_dir_all(inst.cactup_dir()).unwrap();
+        let mut meta = without_overrides();
+        let mut dotted = meta.added[0].clone();
+        dotted.package = "owner/pkg.x".to_owned();
+        meta.added.push(dotted);
+        meta.added_for.insert("owner/pkg.x".to_owned(), meta.added_for["owner/pkg"].clone());
+        let locked = inst.locked().unwrap();
+        locked.set_meta(&meta).unwrap();
+        let path = inst.meta_path();
+        let mut doc: Toml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for name in ["owner/pkg", "owner/pkg.x"] {
+            let entry = doc["added-for"][name].as_table_mut().unwrap();
+            entry.insert("cactup-future".to_owned(), toml::Value::Integer(1));
+        }
+        std::fs::write(&path, toml::to_string(&doc).unwrap()).unwrap();
+        let future = |name: &str| {
+            let doc: Toml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            doc["added-for"][name].get("cactup-future").is_some()
+        };
+
+        let mut meta = locked.meta().unwrap();
+        meta.active_config = Some("other".to_owned());
+        locked.set_meta(&meta).unwrap();
+        assert!(future("owner/pkg") && future("owner/pkg.x"), "an unrelated write keeps them");
+
+        meta.added_for.get_mut("owner/pkg.x").unwrap().requested = true;
+        locked.set_meta_rebuilding(&meta, &["owner/pkg.x".to_owned()]).unwrap();
+        assert!(future("owner/pkg") && !future("owner/pkg.x"));
+        assert!(locked.meta().unwrap().added_for["owner/pkg.x"].requested);
+    }
+
+    /// `set_meta` drops an entry with no `[[added]]` entry beside it (an
+    /// older binary's `remove` left it), so a package added again later
+    /// never inherits it.
+    #[test]
+    fn set_meta_drops_added_for_entries_without_a_package() {
+        let (_dir, inst) = inst();
+        std::fs::create_dir_all(inst.cactup_dir()).unwrap();
+        let mut meta = without_overrides();
+        meta.added_for.insert("owner/gone".to_owned(), meta.added_for["owner/pkg"].clone());
+        let locked = inst.locked().unwrap();
+        locked.set_meta(&meta).unwrap();
+        let back = locked.meta().unwrap();
+        assert_eq!(back.added_for.keys().collect::<Vec<_>>(), ["owner/pkg"]);
+        let present: Vec<bool> = back.added_for_present().map(|(_, f)| f.is_some()).collect();
+        assert_eq!(present, [true]);
     }
 
     /// A version-2 binary must refuse a symbolic copy, which it would write
@@ -1132,7 +1443,8 @@ mod tests {
         let schema = |path: &Path| std::fs::read_to_string(path).unwrap().lines().next().unwrap().to_owned();
 
         let path = dir.path().join("libraries.toml");
-        let mut libraries = exhaustive_meta();
+        let mut libraries = without_overrides();
+        libraries.added[0].flesh.clear();
         libraries.linked_to = None;
         format::write(&path, &libraries, &INSTALLATION).unwrap();
         assert_eq!(schema(&path), "schema = 2");
@@ -1140,7 +1452,9 @@ mod tests {
         assert_eq!(old.added, libraries.added);
 
         let path = dir.path().join("symbolic.toml");
-        format::write(&path, &exhaustive_meta(), &INSTALLATION).unwrap();
+        let mut symbolic = without_overrides();
+        symbolic.added[0].flesh.clear();
+        format::write(&path, &symbolic, &INSTALLATION).unwrap();
         assert_eq!(schema(&path), "schema = 3");
         let err = format::read::<InstallationMeta, _>(&path, &V2).unwrap_err();
         assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
@@ -1148,6 +1462,102 @@ mod tests {
         // Reified: the key goes, the version stays.
         format::write(&path, &libraries, &INSTALLATION).unwrap();
         assert_eq!(schema(&path), "schema = 3");
+    }
+
+    /// A version-3 binary must refuse a record with a flesh package, which
+    /// it would compose as a package with no thorns beside the base's flesh,
+    /// and only that: a record without one is still written as v3 or older.
+    #[test]
+    fn an_older_binary_refuses_only_installations_with_a_flesh_package() {
+        // `INSTALLATION` as it shipped at version 3.
+        static V3: Format<Toml> = Format {
+            name: "installation record",
+            key: "schema",
+            current: 3,
+            upgrades: &[installation_up_1, installation_up_2],
+            downgrades: &[installation_down_2, installation_down_3],
+            down_floor: 1,
+            frozen_read: false,
+            legacy: None,
+            replace_whole: &[],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let schema = |path: &Path| std::fs::read_to_string(path).unwrap().lines().next().unwrap().to_owned();
+
+        // Everything else v3 holds (libraries, a symbolic copy): v3, read by it.
+        let path = dir.path().join("plain.toml");
+        let mut plain = without_overrides();
+        plain.added[0].flesh.clear();
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        assert_eq!(schema(&path), "schema = 3");
+        let old: InstallationMeta = format::read(&path, &V3).unwrap().unwrap();
+        assert_eq!(old.added, plain.added);
+
+        let path = dir.path().join("flesh.toml");
+        format::write(&path, &without_overrides(), &INSTALLATION).unwrap();
+        assert_eq!(schema(&path), "schema = 4");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let err = format::read::<InstallationMeta, _>(&path, &V3).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+        let err = format::write(&path, &plain, &V3).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "the flesh package survives");
+        let fixture = crate::format::testing::fixture_dir("installation").join("v4.toml");
+        let err = format::read::<InstallationMeta, _>(&fixture, &V3).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+
+        // The flesh package removed: the version stays (sticky).
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        assert_eq!(schema(&path), "schema = 4");
+    }
+
+    /// A version-4 binary must refuse a record with a claim override, which
+    /// it would resolve without (`remove` could sweep a package only an added
+    /// dependency holds), and only that: a record without one is still
+    /// written as v4 or older.
+    #[test]
+    fn an_older_binary_refuses_only_installations_with_a_claim_override() {
+        // `INSTALLATION` as it shipped at version 4.
+        static V4: Format<Toml> = Format {
+            name: "installation record",
+            key: "schema",
+            current: 4,
+            upgrades: &[installation_up_1, installation_up_2, installation_up_3],
+            downgrades: &[installation_down_2, installation_down_3, installation_down_4],
+            down_floor: 1,
+            frozen_read: false,
+            legacy: None,
+            replace_whole: &[],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let schema = |path: &Path| std::fs::read_to_string(path).unwrap().lines().next().unwrap().to_owned();
+
+        // Everything else v4 holds (a flesh package, libraries, a symbolic copy): v4, read by it.
+        let path = dir.path().join("plain.toml");
+        let plain = without_overrides();
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        assert_eq!(schema(&path), "schema = 4");
+        let old: InstallationMeta = format::read(&path, &V4).unwrap().unwrap();
+        assert_eq!(old.added, plain.added);
+
+        let path = dir.path().join("overrides.toml");
+        format::write(&path, &exhaustive_meta(), &INSTALLATION).unwrap();
+        assert_eq!(schema(&path), "schema = 5");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let err = format::read::<InstallationMeta, _>(&path, &V4).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+        let err = format::write(&path, &plain, &V4).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "the override survives");
+        let fixture = crate::format::testing::fixture_dir("installation").join("v5.toml");
+        let err = format::read::<InstallationMeta, _>(&fixture, &V4).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+
+        // The last override removed: the version stays (sticky), and an empty table counts as none.
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        assert_eq!(schema(&path), "schema = 5");
+        let mut doc: Toml = toml::from_str("schema = 5\n[claim-overrides]\n").unwrap();
+        assert!(installation_down_5(&mut doc).is_ok());
     }
 
     #[test]

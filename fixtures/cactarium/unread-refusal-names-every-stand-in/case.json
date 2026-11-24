@@ -1,0 +1,46 @@
+{
+  "about": "A named release that needs thorns of two unread base packages: the refusal names both, whichever comes first by id",
+  "packages": [
+    "max--zpapq",
+    "et--admbase"
+  ],
+  "specs": [
+    "max/zpapq@=2.0.0"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "unknown": "abababababababababababababababababababab",
+      "thorns": [
+        "ADMBase",
+        "ADMCoupling",
+        "StaticConformal"
+      ],
+      "base": "admbase",
+      "enabled": [
+        "ADMBase"
+      ],
+      "stand_in": true
+    },
+    {
+      "package": "et/cactusbase",
+      "unknown": "cacacacacacacacacacacacacacacacacacacaca",
+      "thorns": [
+        "Boundary",
+        "SymBase"
+      ],
+      "base": "cactusbase",
+      "enabled": [
+        "Boundary"
+      ],
+      "stand_in": true
+    }
+  ],
+  "expect": {
+    "refusal": "Unreadable",
+    "message": [
+      "max/zpapq@2.0.0 needs StaticConformal of et/admbase#abababababab",
+      "max/zpapq@2.0.0 needs SymBase of et/cactusbase#cacacacacaca"
+    ]
+  }
+}

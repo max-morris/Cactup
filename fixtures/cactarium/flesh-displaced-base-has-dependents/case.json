@@ -1,0 +1,33 @@
+{
+  "about": "A flesh coming in would take the place of the base's flesh, which an installed package needs: refused",
+  "packages": [
+    "et--cactus",
+    "max--cactus-other",
+    "max--fleshuser--needs-et-cactus"
+  ],
+  "specs": [
+    "max/cactus-other"
+  ],
+  "present": [
+    {
+      "package": "et/cactus",
+      "version": "2026.4.0",
+      "base": "flesh",
+      "enabled": []
+    },
+    {
+      "package": "max/fleshuser",
+      "version": "1.0.0",
+      "enabled": [
+        "U"
+      ]
+    }
+  ],
+  "expect": {
+    "refusal": "FleshHasDependents",
+    "message": [
+      "max/cactus-other@1.0.0 would take the place of the flesh et/cactus@2026.4.0",
+      "installed max/fleshuser@1.0.0 (et/cactus ^2026.4)"
+    ]
+  }
+}

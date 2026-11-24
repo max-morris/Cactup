@@ -1,0 +1,49 @@
+{
+  "slug": "max/d",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "f45bdfb9794c9ef800ee27f370bf2f86e61a3aac",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/d.git",
+      "thorns": [
+        {
+          "arrangement": "D",
+          "thorn": "D",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "D",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/carpet",
+          "range": "^2026.5",
+          "needs": [
+            "CarpetSlab"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "about": "An alternative present at a release outside the alternative's range does not count as present",
+  "packages": [
+    "max--z4c--anyof-carpet-2026-6",
+    "et--carpet",
+    "et--cactuspugh"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "present": [
+    {
+      "package": "et/carpet",
+      "version": "2026.5.0",
+      "enabled": [
+        "Carpet"
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named",
+      "add et/cactuspugh@2026.5.0 PUGHSlab max/z4c@1.2.0: any of et/carpet@^2026.6, et/cactuspugh (the first listed that conflicts with nothing)"
+    ],
+    "choices": [
+      "any of et/carpet@^2026.6, et/cactuspugh: the first listed that conflicts with nothing"
+    ]
+  }
+}

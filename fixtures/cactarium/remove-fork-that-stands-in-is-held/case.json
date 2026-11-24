@@ -1,0 +1,48 @@
+{
+  "about": "A fork that stands in for the dependency's range holds it: removing the fork is refused",
+  "packages": [
+    "max--z4c--carpetx-loop",
+    "et--carpetx",
+    "max--carpetx-mp--covers-2026-5-1"
+  ],
+  "present": [
+    {
+      "package": "max/z4c",
+      "version": "1.2.0",
+      "enabled": [
+        "Z4c",
+        "Z4cTest"
+      ]
+    },
+    {
+      "package": "max/carpetx-mp",
+      "version": "1.0.0",
+      "enabled": [
+        "CarpetX",
+        "Loop"
+      ]
+    }
+  ],
+  "remove": {
+    "targets": [
+      "max/carpetx-mp"
+    ],
+    "added-for": {
+      "max/z4c": {
+        "requested": true,
+        "for-commit": "current"
+      },
+      "max/carpetx-mp": {
+        "requested": true,
+        "for-commit": "current"
+      }
+    }
+  },
+  "expect": {
+    "refusal": "HasDependents",
+    "message": [
+      "Other packages depend on max/carpetx-mp",
+      "max/z4c@1.2.0 (et/carpetx@^2026.5)"
+    ]
+  }
+}

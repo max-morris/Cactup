@@ -1,0 +1,24 @@
+{
+  "about": "Naming one thorn of a present package re-resolves it to its newest release, keeping its other thorns",
+  "packages": [
+    "et--admbase"
+  ],
+  "specs": [
+    "et/admbase/ADMBase"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "version": "2026.4.0",
+      "enabled": [
+        "ADMBase",
+        "StaticConformal"
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "upgrade et/admbase 2026.4.0 -> 2026.5.1 ADMBase, StaticConformal named"
+    ]
+  }
+}

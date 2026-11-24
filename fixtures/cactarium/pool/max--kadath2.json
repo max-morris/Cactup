@@ -1,0 +1,47 @@
+{
+  "slug": "max/kadath2",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "efb47b3e23db98319be88cdabe484ed775b91a86",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/kadath2.git",
+      "thorns": [
+        {
+          "arrangement": "Kadath2",
+          "thorn": "Kadath2",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Kadath2",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/fuka",
+          "range": "^1",
+          "into": "src/fuka",
+          "note": null
+        }
+      ]
+    }
+  ]
+}

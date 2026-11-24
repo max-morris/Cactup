@@ -1866,10 +1866,10 @@ mod tests {
                 yes: true,
                 authors: vec!["A. Author".to_owned()],
                 license: Some("CC-BY-4.0".to_owned()),
+                // The upstreams here are local paths.
+                local: true,
                 ..Default::default()
             },
-            allow_dirty: false,
-            allow_unpushed: false,
             trim: false,
         }
     }
@@ -1928,9 +1928,15 @@ mod tests {
             crate::sim::create(&ctx, &machine, &inst, &req).unwrap();
         };
 
-        // Clean, published: exported, fully specified.
+        // Clean, published: exported, fully specified; but from a local
+        // path, which nobody else could fetch, only with --local.
         fs::write(&cfg_path, record(&built.to_string())).unwrap();
         create("bhns");
+        let mut shared = export_args("bhns", &out);
+        shared.describe.local = false;
+        let err = format!("{:#}", export("bhns", shared).unwrap_err());
+        assert!(err.contains("carpetx: ") && err.contains("is a local path") && err.contains("--local"), "{err}");
+        assert!(!out.exists(), "nothing written");
         export("bhns", export_args("bhns", &out)).unwrap();
         let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
         assert!(file.is_fully_specified(), "{:?}", file.unspecified());
@@ -1950,23 +1956,42 @@ mod tests {
         assert_eq!(provenance.flavor.as_deref(), Some("default"));
         assert_eq!(provenance.machine_disabled, ["Machine/Off"]);
 
-        // Built from edited sources: refused, or marked dirty when allowed.
+        // Built from edited sources: refused, in the same error as the
+        // local path, or marked dirty with --local.
+        let shared = |sim: &str| {
+            let mut args = export_args(sim, &out);
+            args.describe.local = false;
+            format!("{:#}", export(sim, args).unwrap_err())
+        };
         fs::write(&cfg_path, record(&format!("{built}+1mod@1700"))).unwrap();
         create("dirty");
-        let err = format!("{:#}", export("dirty", export_args("dirty", &out)).unwrap_err());
-        assert!(err.contains("--allow-dirty") && err.contains("carpetx"), "{err}");
-        export("dirty", crate::args::SimExportArgs { allow_dirty: true, ..export_args("dirty", &out) }).unwrap();
+        let err = shared("dirty");
+        assert!(err.starts_with("These cannot go into a shared .sim:\n  carpetx: "), "{err}");
+        assert!(err.contains("\n  carpetx: uncommitted changes when the binary was built; commit them and rebuild\n"), "{err}");
+        assert!(err.ends_with("\nPass --local to export for use here only."), "{err}");
+        export("dirty", export_args("dirty", &out)).unwrap();
         let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
         assert!(file.repos[0].dirty && !file.is_fully_specified());
 
-        // Built from a commit no remote has: refused unless allowed.
+        // Built from a commit no remote has: refused, but with --local.
         let local = crate::fetch::git::testrepo::commit(&repo_dir, "local only");
         fs::write(&cfg_path, record(&local.to_string())).unwrap();
         create("unpushed");
-        let err = format!("{:#}", export("unpushed", export_args("unpushed", &out)).unwrap_err());
-        assert!(err.contains("--allow-unpushed"), "{err}");
-        export("unpushed", crate::args::SimExportArgs { allow_unpushed: true, ..export_args("unpushed", &out) })
-            .unwrap();
+        let err = shared("unpushed");
+        let short = &local.to_string()[..12];
+        let line = format!(
+            "\n  carpetx ({short}): commit on no known remote branch or tag; push it, then run `cactup inst refetch`\n"
+        );
+        assert!(err.contains(&line) && !err.contains("uncommitted"), "{err}");
+        export("unpushed", export_args("unpushed", &out)).unwrap();
+
+        // A build that recorded no commit for the repo: refused once, for
+        // the URL already refused (a local path); and taken with --local.
+        fs::write(&cfg_path, record(&built.to_string()).replace("[sources]\ncarpetx", "[sources]\nother")).unwrap();
+        create("unpinned");
+        let err = shared("unpinned");
+        assert!(err.contains("is a local path") && !err.contains("recorded no commit"), "{err}");
+        export("unpinned", export_args("unpinned", &out)).unwrap();
 
         // Unpack: the thornlist comes back with its pin, the parfile verbatim.
         export("bhns", export_args("bhns", &out)).unwrap();
@@ -1976,6 +2001,24 @@ mod tests {
         assert_eq!(list.components()[0].commit.as_deref(), Some(built.to_string().as_str()));
         assert_eq!(fs::read_to_string(unpacked.join("bhns.par")).unwrap(), fs::read_to_string(&parfile).unwrap());
         assert!(crate::sim::export::unpack(&out, &unpacked, false).is_err(), "no silent overwrite");
+        assert!(file.provenance.unwrap().extra.is_empty(), "no overrides, no key");
+
+        // The installation's claim overrides go into the provenance, for
+        // information.
+        {
+            let locked = inst.locked().unwrap();
+            let mut meta = locked.meta().unwrap();
+            for (key, kind) in [("drop max/app:incompatible-with:max/solo", "drop"), ("satisfies local:carpetx et/carpetx", "satisfies")] {
+                meta.claim_overrides.insert(key.into(), crate::installation::ClaimOverride { kind: kind.into(), note: None });
+            }
+            locked.set_meta(&meta).unwrap();
+        }
+        export("bhns", export_args("bhns", &out)).unwrap();
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(
+            file.provenance.unwrap().extra.get("claims-overrides").map(String::as_str),
+            Some("drop max/app:incompatible-with:max/solo; satisfies local:carpetx et/carpetx")
+        );
     }
 
 
@@ -2020,9 +2063,7 @@ mod tests {
             thornlist: th.to_owned(),
             parfile: par.clone(),
             file: Some(out.clone()),
-            describe: crate::args::SimDescribeArgs { force: true, yes: true, ..Default::default() },
-            allow_dirty: false,
-            allow_unpushed: false,
+            describe: crate::args::SimDescribeArgs { force: true, yes: true, local: true, ..Default::default() },
             trim: false,
         };
         crate::sim::export::pack(&ctx, args(&th)).unwrap();
@@ -2057,6 +2098,729 @@ mod tests {
         assert!(err.contains("carpetx") && err.contains("no-such-branch"), "{err}");
     }
 
+
+    /// A loose thornlist of git repos, one section per `(url, checkout)`,
+    /// and a parfile with one input, packed with `describe` over the
+    /// defaults. When `pinned`, no remote is asked for a tip.
+    fn pack_urls(
+        tmp: &Path,
+        sections: &[(&str, &str)],
+        pinned: bool,
+        describe: crate::args::SimDescribeArgs,
+    ) -> (crate::Res<()>, PathBuf, String) {
+        let mut list = "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n".to_owned();
+        for (url, checkout) in sections {
+            list.push_str(&section(url, checkout, pinned));
+        }
+        pack_list(tmp, &list, describe)
+    }
+
+    /// A pinned (when `pinned`) git section of `url` checking out `checkout`.
+    fn section(url: &str, checkout: &str, pinned: bool) -> String {
+        format!(
+            "!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = {url}\n!REPO_BRANCH = main\n{}!CHECKOUT = {checkout}\n",
+            if pinned { format!("!REPO_COMMIT = {}\n", "a".repeat(40)) } else { String::new() }
+        )
+    }
+
+    /// The thornlist `list` and a parfile with one input, packed with no
+    /// installation and `describe` over the defaults; and the list back.
+    /// Cactarium answers that every repo is a registered package's.
+    fn pack_list(tmp: &Path, list: &str, describe: crate::args::SimDescribeArgs) -> (crate::Res<()>, PathBuf, String) {
+        let (cactarium, _) = crate::sim::registered::fake::Registry { all_registered: true, ..Default::default() }.serve();
+        pack_list_at(tmp, list, describe, &cactarium)
+    }
+
+    /// [`pack_list`], asking the Cactarium at `cactarium`.
+    fn pack_list_at(
+        tmp: &Path,
+        list: &str,
+        describe: crate::args::SimDescribeArgs,
+        cactarium: &str,
+    ) -> (crate::Res<()>, PathBuf, String) {
+        let mut ctx = fake_ctx(&tmp.join("db"));
+        ctx.globals.installation = None;
+        // No machine: an input's download goes under the inputs-home knob.
+        ctx.globals.machine = None;
+        let cactarium = cactarium.to_owned();
+        let inputs = tmp.join("inputs").display().to_string();
+        ctx.db.update(move |d| {
+            d.set_knob(crate::cactarium::URL_KNOB, cactarium);
+            d.set_knob("inputs-home", inputs);
+            Ok(())
+        })
+        .unwrap();
+        let list = list.to_owned();
+        let th = tmp.join("list.th");
+        fs::write(&th, &list).unwrap();
+        let par = tmp.join("run.par");
+        fs::write(&par, "# A test run\nK::f = \"@KNOB(data)@\"\n").unwrap();
+        let out = tmp.join("out.sim");
+        let args = crate::args::SimPackArgs {
+            thornlist: th,
+            parfile: par,
+            file: Some(out.clone()),
+            describe: crate::args::SimDescribeArgs { force: true, yes: true, ..describe },
+            trim: false,
+        };
+        (crate::sim::export::pack(&ctx, args), out, list)
+    }
+
+    /// §8.9: a .sim for others names no URL nobody else could fetch and no
+    /// credentials. A token URL, a local path, an ssh URL with no https
+    /// equivalent, one whose https asks for credentials (401), one whose
+    /// https moved (301), and an input URL with a password are all refused,
+    /// every one named in one error, no credential shown; an ssh URL whose
+    /// https answers anonymously is written as https, in the pins and the
+    /// thornlist alike, and said so.
+    #[test]
+    fn a_sim_for_others_names_only_urls_anyone_can_fetch() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use cactup_ecosystem_common::sim::SimFile;
+        let tmp = tempfile::tempdir().unwrap();
+        serve("private.share.test", Mode::Private);
+        let moved_to = "https://moved.share.test/new/e.git";
+        serve("moved.share.test", Mode::Moved(format!("{moved_to}/info/refs?service=git-upload-pack")));
+        let public = serve("public.share.test", Mode::Public);
+        let sections = [
+            ("https://TOKEN123@github.com/o/a.git", "A/One"),
+            ("file:///srv/b.git", "B/One"),
+            ("ssh://git@home.share.test/~max/c.git", "C/One"),
+            ("git@private.share.test:o/d.git", "D/One"),
+            ("git@moved.share.test:o/e.git", "E/One"),
+            ("git@public.share.test:o/f.git", "F/One"),
+        ];
+        let describe = crate::args::SimDescribeArgs {
+            input_urls: vec!["data=https://max:hunter2@example.org/f.h5?download=1".to_owned()],
+            ..Default::default()
+        };
+        let (packed, out, _) = pack_urls(tmp.path(), &sections, true, describe);
+        let err = format!("{:#}", packed.unwrap_err());
+        for said in [
+            "a: https://***@github.com/o/a.git carries a user name or token, which must never be published",
+            "b: file:///srv/b.git is a local path",
+            "c: ssh://git@home.share.test/~max/c.git is an ssh URL, which needs an account on the host, and has no https equivalent",
+            "d: git@private.share.test:o/d.git is an ssh URL, which needs an account on the host, and https://private.share.test/o/d.git doesn't answer",
+            "fetch (answered 401 Unauthorized)",
+            "e: git@moved.share.test:o/e.git is an ssh URL, and its https equivalent https://moved.share.test/o/e.git redirects to https://moved.share.test/new/e.git: the repo has moved",
+            "input data: https://***@example.org/f.h5?*** carries a user name and password, which must never be published",
+            "\nPass --local to export for use here only.",
+        ] {
+            assert!(err.contains(said), "{said:?} not in: {err}");
+        }
+        assert!(!err.contains("\n  f: ") && !err.contains("TOKEN123") && !err.contains("hunter2"), "{err}");
+        assert!(!out.exists(), "nothing written");
+        assert!(public.try_recv().is_ok(), "every https equivalent asked, for one error naming them all");
+
+        // The one that answers, beside an https URL: written as https.
+        let (packed, out, list) = pack_urls(
+            tmp.path(),
+            &[("git@public.share.test:o/f.git", "F/One"), ("https://public.share.test/o/g.git", "G/One")],
+            true,
+            Default::default(),
+        );
+        packed.unwrap();
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        let url = |repo: &str| file.repos.iter().find(|r| r.name == repo).unwrap().url.clone();
+        assert_eq!(url("f"), "https://public.share.test/o/f.git");
+        assert_eq!(url("g"), "https://public.share.test/o/g.git", "an https remote that answers is kept as written");
+        assert_eq!(file.thornlist.text, list.replace("git@public.share.test:o/f.git", "https://public.share.test/o/f.git"));
+    }
+
+    /// Every component's URL is judged, not one per repo name: a token in
+    /// the second component of a repo is refused, and two ssh URLs that
+    /// share a repo name are each written as https.
+    #[test]
+    fn every_url_of_a_repo_is_judged_and_rewritten() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use cactup_ecosystem_common::sim::SimFile;
+        let tmp = tempfile::tempdir().unwrap();
+        serve("twice.share.test", Mode::Public);
+        let sections = [("https://twice.share.test/a/x.git", "A/One"), ("https://TOKEN111@github.com/b/x.git", "B/One")];
+        let (packed, out, _) = pack_urls(tmp.path(), &sections, true, Default::default());
+        let err = format!("{:#}", packed.unwrap_err());
+        // Two sections name repo x: the one refused is told by its line.
+        assert_eq!(
+            err,
+            "These cannot go into a shared .sim:\n  x (thornlist line 11): https://***@github.com/b/x.git carries \
+             a user name or token, which must never be published; remove it from the URL\nPass --local to export for \
+             use here only."
+        );
+        assert!(!out.exists());
+
+        let sections = [("git@twice.share.test:a/x.git", "A/One"), ("git@twice.share.test:b/x.git", "B/One")];
+        let (packed, out, list) = pack_urls(tmp.path(), &sections, true, Default::default());
+        packed.unwrap();
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        let want = list
+            .replace("git@twice.share.test:a/x.git", "https://twice.share.test/a/x.git")
+            .replace("git@twice.share.test:b/x.git", "https://twice.share.test/b/x.git");
+        assert_eq!(file.thornlist.text, want);
+        assert_eq!(file.repos[0].url, "https://twice.share.test/a/x.git");
+    }
+
+    /// An ssh URL that answers as https but that no `!URL` line spells out
+    /// (built from a `!DEFINE`) cannot be rewritten: the parse-back check
+    /// refuses it, naming the checkout, rather than write a list that still
+    /// fetches over ssh.
+    #[test]
+    fn an_ssh_url_built_from_a_define_is_refused_not_left_as_ssh() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        let tmp = tempfile::tempdir().unwrap();
+        serve("defined.share.test", Mode::Public);
+        let list = format!(
+            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!DEFINE GH = git@defined.share.test:o\n{}",
+            section("$GH/y.git", "Y/One", true)
+        );
+        let (packed, out, _) = pack_list(tmp.path(), &list, Default::default());
+        let err = format!("{:#}", packed.unwrap_err());
+        assert!(err.starts_with("No !URL line to rewrite as https for these ssh URLs:\n"), "{err}");
+        assert!(err.contains("\n  Y/One: git@defined.share.test:o/y.git (as https://defined.share.test/o/y.git)\n"), "{err}");
+        assert!(!out.exists());
+
+        // A template whose host is a variable: the same refusal, not a
+        // rewrite that lowercases the variable out of existence.
+        let list = format!(
+            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!DEFINE GH = defined.share.test\n{}",
+            section("git@$GH:o/$1.git", "Y/One", true)
+        );
+        let (packed, out, _) = pack_list(tmp.path(), &list, Default::default());
+        let err = format!("{:#}", packed.unwrap_err());
+        assert!(err.contains("\n  Y/One: git@defined.share.test:o/Y.git (as https://defined.share.test/o/Y.git)\n"), "{err}");
+        assert!(!out.exists());
+    }
+
+    /// Credentials in what the thornlist fetches are refused, each named:
+    /// a `!AUTH_URL`, a quoted URL (refused for its quotes, as cactup would
+    /// fetch them as part of it), its token not shown. Those nothing fetches
+    /// (a comment, an unused `!DEFINE`, an overridden `!URL`) are hidden in
+    /// the .sim, which is written. The anonymous logins of
+    /// `!ANON_USER`/`!ANON_PASS` are neither.
+    #[test]
+    fn credentials_in_the_thornlist_are_refused_where_fetched_and_hidden_elsewhere() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use cactup_ecosystem_common::sim::SimFile;
+        let tmp = tempfile::tempdir().unwrap();
+        serve("clean.share.test", Mode::Public);
+        let unused = "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!DEFINE OLD = https://me:TOKEN2@example.org/x\n\
+                      # old: !URL = https://TOKEN3@github.com/o/a.git\n# or git:TOKEN7@github.com:o/a.git\n";
+        let svn = "!TARGET = $ROOT\n!TYPE = svn\n!URL = https://svn.example.org/d/trunk\n!ANON_USER = anonymous\n\
+                   !ANON_PASS = anonymous\n!CHECKOUT = D/One\n";
+        let fetched = format!(
+            "{unused}!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://clean.share.test/o/b.git\n\
+             !AUTH_URL = https://me:TOKEN5@github.com/o/b.git\n!REPO_COMMIT = {c}\n!CHECKOUT = B/One\n\
+             !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = \"https://TOKEN6@github.com/o/c.git\"\n\
+             !REPO_COMMIT = {c}\n!CHECKOUT = C/One\n{svn}",
+            c = "a".repeat(40)
+        );
+        let (packed, out, _) = pack_list(tmp.path(), &fetched, Default::default());
+        let err = format!("{:#}", packed.unwrap_err());
+        for said in [
+            "\n  b (its !AUTH_URL): https://***@github.com/o/b.git carries a user name and password",
+            // Named without the quote the parser leaves on the name.
+            "\n  c: https://***@github.com/o/c.git is written in quotes; remove them\n",
+        ] {
+            assert!(err.contains(said), "{said:?} not in: {err}");
+        }
+        assert!(!err.contains("TOKEN") && !err.contains("anonymous") && !err.contains("\n  d:"), "{err}");
+        assert!(!err.contains("example.org/x") && !err.contains("o/a.git"), "nothing fetches those: {err}");
+        assert!(!out.exists());
+
+        let overridden = format!(
+            "{unused}!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://TOKEN4@github.com/o/b.git\n\
+             !URL = https://clean.share.test/o/b.git\n!REPO_COMMIT = {c}\n!ANON_USER = anonymous\n\
+             !ANON_PASS = anonymous\n!CHECKOUT = B/One\n",
+            c = "a".repeat(40)
+        );
+        let (packed, out, list) = pack_list(tmp.path(), &overridden, Default::default());
+        packed.unwrap();
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        let want = list
+            .replace("me:TOKEN2", "***")
+            .replace("TOKEN3", "***")
+            .replace("git:TOKEN7", "git:***")
+            .replace("TOKEN4", "***");
+        assert_eq!(file.thornlist.text, want);
+        assert!(!fs::read_to_string(&out).unwrap().contains("TOKEN"));
+    }
+
+    /// `sim pack` without an installation asks the tips of the rewritten
+    /// https URL, never of the ssh one (which would use the user's keys),
+    /// and pins the tip it gets.
+    #[test]
+    fn pack_asks_tips_of_the_https_url_an_ssh_remote_is_written_as() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use cactup_ecosystem_common::sim::SimFile;
+        let tmp = tempfile::tempdir().unwrap();
+        serve("tipped.share.test", Mode::Public);
+        // The tips are asked of a local repo standing in for the https URL.
+        let upstream = tmp.path().join("upstream/r");
+        crate::fetch::git::testrepo::init(&upstream);
+        let tip = crate::fetch::git::testrepo::commit_tree(&upstream, &[("v", "1\n", false)]);
+        let (branch, _) = crate::fetch::git::head_of(&upstream).unwrap();
+        crate::fetch::git::ASK_ROUTES
+            .lock()
+            .unwrap()
+            .insert("https://tipped.share.test/o/r.git".to_owned(), upstream.to_string_lossy().into_owned());
+        let list = format!(
+            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!TARGET = $ROOT/arrangements\n!TYPE = git\n\
+             !URL = git@tipped.share.test:o/r.git\n!REPO_BRANCH = {branch}\n!CHECKOUT = R/One\n"
+        );
+        let (packed, out, _) = pack_list(tmp.path(), &list, Default::default());
+        packed.unwrap();
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(file.repos[0].url, "https://tipped.share.test/o/r.git");
+        assert_eq!(file.repos[0].commit.as_deref(), Some(tip.to_string().as_str()));
+        let asked = crate::fetch::git::ASKED.lock().unwrap().clone();
+        assert!(asked.iter().any(|u| u == "https://tipped.share.test/o/r.git"), "{asked:?}");
+        assert!(!asked.iter().any(|u| u.contains("git@tipped.share.test")), "{asked:?}");
+    }
+
+    /// A URL refused offline fails before any remote is asked for its tip:
+    /// a pack of unpinned repos, one with a token in its URL, asks nothing
+    /// but the https URL of its ssh remote (named in the same error when it
+    /// does not answer).
+    #[test]
+    fn a_url_refused_offline_fails_before_any_tip_is_asked() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        let tmp = tempfile::tempdir().unwrap();
+        serve("private.offline.test", Mode::Private);
+        serve("tips.offline.test", Mode::Public);
+        let sections = [
+            ("https://TOKEN123@tips.offline.test/o/a.git", "A/One"),
+            ("https://tips.offline.test/o/b.git", "B/One"),
+            ("git@private.offline.test:o/c.git", "C/One"),
+        ];
+        let (packed, out, _) = pack_urls(tmp.path(), &sections, false, Default::default());
+        let err = format!("{:#}", packed.unwrap_err());
+        assert!(err.contains("a: https://***@tips.offline.test/o/a.git carries a user name or token"), "{err}");
+        assert!(err.contains("c: git@private.offline.test:o/c.git is an ssh URL") && err.contains("401"), "{err}");
+        assert!(!err.contains("TOKEN123") && !out.exists(), "{err}");
+        let asked = crate::fetch::git::ASKED.lock().unwrap().clone();
+        assert!(!asked.iter().any(|u| u.contains(".offline.test")), "tips asked: {asked:?}");
+        let probed = crate::fetch::anonymous::PROBED.lock().unwrap().clone();
+        assert!(probed.iter().any(|u| u == "https://private.offline.test/o/c.git"), "{probed:?}");
+    }
+
+    /// With --local, the .sim is for use here: every URL goes in as it is,
+    /// and nothing is asked over the network.
+    #[test]
+    fn a_local_sim_keeps_every_url_and_asks_nothing() {
+        use cactup_ecosystem_common::sim::SimFile;
+        let tmp = tempfile::tempdir().unwrap();
+        let sections = [
+            ("https://TOKEN123@github.com/o/a.git", "A/One"),
+            ("file:///srv/b.git", "B/One"),
+            ("git@unasked.share.test:o/c.git", "C/One"),
+        ];
+        let describe = crate::args::SimDescribeArgs { local: true, ..Default::default() };
+        let (packed, out, list) = pack_urls(tmp.path(), &sections, true, describe);
+        packed.unwrap();
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(file.thornlist.text, list);
+        let urls: Vec<&str> = file.repos.iter().map(|r| r.url.as_str()).collect();
+        assert_eq!(urls, sections.map(|(url, _)| url));
+        let probed = crate::fetch::anonymous::PROBED.lock().unwrap().clone();
+        assert!(!probed.iter().any(|u| u.contains("unasked.share.test")), "{probed:?}");
+    }
+
+    /// A download section of `url` fetching `file`, pinned by `sha256` if given.
+    fn download(url: &str, file: &str, sha256: Option<&str>) -> String {
+        let pin = sha256.map(|h| format!("!CHECKSUM_SHA256 = {h}\n")).unwrap_or_default();
+        format!("!TARGET = $ROOT/dl\n!TYPE = https\n!URL = {url}\n{pin}!CHECKOUT = {file}\n")
+    }
+
+    /// The thornlist the registry tests pack: git repos on a host that
+    /// answers anonymously, each pinned, with `more` after them.
+    fn registry_list(repos: &[&str], more: &str) -> String {
+        let mut list = "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n".to_owned();
+        for repo in repos {
+            list.push_str(&section(&format!("https://reg.share.test/o/{repo}.git"), &format!("{}/One", repo.to_uppercase()), true));
+        }
+        list + more
+    }
+
+    /// §8.9: a .sim for others pins only what Cactarium vouches for. Its
+    /// URLs pass, but a repo no registered package has, downloads not
+    /// approved (never submitted, awaiting review, rejected), a download
+    /// with no hash and an ignore component are each refused, in one error
+    /// with the URL refused beside them, a line each. Cactarium is asked once,
+    /// never about a refused URL.
+    #[test]
+    fn a_shared_sim_pins_only_registered_packages_and_reviewed_downloads() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use crate::sim::registered::fake::{paths, Registry};
+        let tmp = tempfile::tempdir().unwrap();
+        serve("reg.share.test", Mode::Public);
+        let sha = "c".repeat(64);
+        let registry = Registry {
+            packages: vec![
+                ("https://reg.share.test/o/a.git".into(), "et/a".into(), Some("1.2.0".into())),
+                ("https://reg.share.test/o/b.git".into(), "et/b".into(), None),
+            ],
+            downloads: vec![
+                ("https://dl.share.test/d.tgz".into(), "approved".into()),
+                ("https://dl.share.test/e.tgz".into(), "pending".into()),
+                ("https://dl.share.test/r.tgz".into(), "rejected".into()),
+                ("https://dl.share.test/v.tgz".into(), "pending".into()),
+                ("https://dl.share.test/w.tgz".into(), "pending".into()),
+            ],
+            checks: vec![
+                ("/v.tgz".into(), "failed".into(), Some("the server answered 404 Not Found".into())),
+                ("/w.tgz".into(), "fetching".into(), None),
+            ],
+            ..Default::default()
+        };
+        let (cactarium, log) = registry.serve();
+        let bad = [
+            download("https://dl.share.test/e.tgz", "e.tgz", Some(&sha)),
+            download("https://dl.share.test/f.tgz", "f.tgz", Some(&sha)),
+            download("https://dl.share.test/r.tgz", "r.tgz", Some(&sha)),
+            download("https://dl.share.test/v.tgz", "v.tgz", Some(&sha)),
+            download("https://dl.share.test/w.tgz", "w.tgz", Some(&sha)),
+            download("https://dl.share.test/g.tgz", "g.tgz", None),
+            "!TARGET = $ROOT/arrangements\n!TYPE = ignore\n!CHECKOUT = Private/Thorn\n".to_owned(),
+            section("https://TOKEN9@reg.share.test/o/t.git", "T/One", true),
+            download("https://dl.share.test/s.tgz?token=TOKEN8", "s.tgz", Some(&sha)),
+        ]
+        .concat();
+        let good = download("https://dl.share.test/d.tgz", "d.tgz", Some(&sha));
+        let list = registry_list(&["a", "b", "c"], &format!("{good}{bad}"));
+        let (packed, out, _) = pack_list_at(tmp.path(), &list, Default::default(), &cactarium);
+        let err = format!("{:#}", packed.unwrap_err());
+        assert_eq!(
+            err,
+            "These cannot go into a shared .sim:\n  \
+             t: https://***@reg.share.test/o/t.git carries a user name or token, which must never be published; remove it from the URL\n  \
+             s.tgz: https://dl.share.test/s.tgz?*** carries `token` in its query, which must never be published; remove it from the URL\n  \
+             Private/Thorn: an ignore component, which nobody else can fetch; put it in a repo and register that with Cactarium\n  \
+             g.tgz: download with no hash; add !CHECKSUM_SHA256 to the thornlist\n  \
+             c: no registered package has this repo; register it with `cactup package init c --publish`\n  \
+             e.tgz: download awaiting verification and review by Cactarium\n  \
+             f.tgz: download not reviewed by Cactarium; submit it with `cactup download submit https://dl.share.test/f.tgz`\n  \
+             r.tgz: download rejected by Cactarium\n  \
+             v.tgz: Cactarium could not verify https://dl.share.test/v.tgz: the server answered 404 Not Found; resubmit it with \
+             `cactup download submit https://dl.share.test/v.tgz`\n  \
+             w.tgz: download being verified by Cactarium\n\
+             Pass --local to export for use here only."
+        );
+        assert!(!out.exists(), "nothing written");
+        assert_eq!(paths(&log), ["/api/v1/lookup"], "one lookup");
+        let asked = log.lock().unwrap()[0].1.clone();
+        assert!(!asked.contains("TOKEN") && !asked.contains("t.git") && !asked.contains("s.tgz"), "a refused URL never leaves: {asked}");
+        assert!(asked.contains("o/c.git") && asked.contains("e.tgz"), "{asked}");
+
+        // A repo whose URL its probe refuses is named for that alone.
+        serve("private.reg.test", Mode::Private);
+        let list = format!("{}{}", registry_list(&["a"], ""), section("git@private.reg.test:o/p.git", "P/One", true));
+        let (packed, _, _) = pack_list_at(tmp.path(), &list, Default::default(), &cactarium);
+        let err = format!("{:#}", packed.unwrap_err());
+        assert!(err.contains("\n  p: git@private.reg.test:o/p.git is an ssh URL"), "{err}");
+        assert_eq!(err.matches("\n  p: ").count(), 1, "{err}");
+    }
+
+    /// Artifacts are fully specified (Max's decision 5): an svn, cvs or hg
+    /// repo, which no commit pins, and several downloads from one URL,
+    /// which no hash pins, are refused in a shared .sim, each a line of the
+    /// one error; with --local they go in unpinned.
+    #[test]
+    fn a_shared_sim_refuses_repos_nothing_pins() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use crate::sim::registered::fake::Registry;
+        let tmp = tempfile::tempdir().unwrap();
+        serve("reg.share.test", Mode::Public);
+        let (cactarium, _) = Registry { all_registered: true, ..Default::default() }.serve();
+        let more = "!TARGET = $ROOT/arrangements\n!TYPE = svn\n!URL = https://svn.share.test/s/$2/trunk\n!CHECKOUT = S/One\n\
+                    !TARGET = $ROOT/arrangements\n!TYPE = cvs\n!URL = :pserver:anonymous@cvs.share.test:/cvsroot\n!CHECKOUT = V/One\n\
+                    !TARGET = $ROOT/arrangements\n!TYPE = hg\n!URL = https://hg.share.test/h\n!CHECKOUT = H/One\n\
+                    !TARGET = $ROOT/dl\n!TYPE = https\n!URL = https://dl.share.test/many\n!CHECKOUT = a.tgz b.tgz\n";
+        let list = registry_list(&["a"], more);
+        let (packed, out, _) = pack_list_at(tmp.path(), &list, Default::default(), &cactarium);
+        let err = format!("{:#}", packed.unwrap_err());
+        for said in [
+            "\n  trunk: svn repos cannot be pinned; move it to git, or to a download pinned by !CHECKSUM_SHA256\n",
+            "\n  cvsroot: cvs repos cannot be pinned; move it to git, or to a download pinned by !CHECKSUM_SHA256\n",
+            "\n  h: hg repos cannot be pinned; move it to git, or to a download pinned by !CHECKSUM_SHA256\n",
+            "\n  many: several downloads from one URL, which no hash can pin; give each its own section with !CHECKSUM_SHA256\n",
+        ] {
+            assert!(err.contains(said), "{said:?} not in: {err}");
+        }
+        assert!(err.ends_with("\nPass --local to export for use here only."), "{err}");
+        assert!(!out.exists());
+        let describe = crate::args::SimDescribeArgs { local: true, ..Default::default() };
+        let (packed, _, _) = pack_list_at(tmp.path(), &list, describe, &cactarium);
+        packed.unwrap_or_else(|e| panic!("{e:#}"));
+    }
+
+    /// A lookup that fails is one line of the error, beside everything else
+    /// refused: a Cactarium that cannot be reached, and one that answers 500.
+    #[test]
+    fn a_failed_lookup_keeps_the_other_refusals() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use crate::sim::registered::fake::Registry;
+        let tmp = tempfile::tempdir().unwrap();
+        serve("reg.share.test", Mode::Public);
+        let list = registry_list(&["a"], &section("https://TOKEN9@reg.share.test/o/t.git", "T/One", true));
+        let (failing, _) = Registry { fail_lookup: true, ..Default::default() }.serve();
+        for (cactarium, why) in [
+            ("http://127.0.0.1:9".to_owned(), "Cannot ask Cactarium what each pin is: "),
+            (failing, "Cannot ask Cactarium what each pin is: database is locked\n"),
+        ] {
+            let (packed, out, _) = pack_list_at(tmp.path(), &list, Default::default(), &cactarium);
+            let err = format!("{:#}", packed.unwrap_err());
+            assert!(err.contains("\n  t: https://***@reg.share.test/o/t.git carries a user name or token"), "{err}");
+            assert!(err.contains(&format!("\n  {why}")), "{why:?} not in: {err}");
+            assert!(err.ends_with("\nPass --local to export for use here only."), "{err}");
+            assert!(!out.exists());
+        }
+    }
+
+    /// A pack's `!REPO_COMMIT` that the package's repo lacks (no remote has
+    /// it, as Cactarium says) is refused, with the way past.
+    #[test]
+    fn a_pinned_commit_the_registered_repo_lacks_is_refused() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use crate::sim::registered::fake::Registry;
+        let tmp = tempfile::tempdir().unwrap();
+        serve("reg.share.test", Mode::Public);
+        let registry = Registry {
+            all_registered: true,
+            commit_unknown: vec!["https://reg.share.test/o/b.git".into()],
+            ..Default::default()
+        };
+        let (cactarium, _) = registry.serve();
+        let (packed, _, _) = pack_list_at(tmp.path(), &registry_list(&["a", "b"], ""), Default::default(), &cactarium);
+        let err = format!("{:#}", packed.unwrap_err());
+        assert_eq!(
+            err,
+            format!(
+                "These cannot go into a shared .sim:\n  b ({}): commit not in the repo of et/b; push it, or pin a pushed commit\n\
+                 Pass --local to export for use here only.",
+                "a".repeat(12)
+            )
+        );
+    }
+
+    /// A download, or an input's, on a private address is refused: nobody
+    /// outside could fetch it.
+    #[test]
+    fn a_download_on_a_private_address_is_refused() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use crate::sim::registered::fake::Registry;
+        let tmp = tempfile::tempdir().unwrap();
+        serve("reg.share.test", Mode::Public);
+        let (cactarium, log) = Registry { all_registered: true, ..Default::default() }.serve();
+        let list = registry_list(&["a"], &download("http://127.0.0.1:18777/data.bin", "data.bin", Some(&"c".repeat(64))));
+        let describe = crate::args::SimDescribeArgs {
+            input_urls: vec!["data=http://10.1.2.3/id.h5".to_owned()],
+            ..Default::default()
+        };
+        let (packed, _, _) = pack_list_at(tmp.path(), &list, describe, &cactarium);
+        let err = format!("{:#}", packed.unwrap_err());
+        for line in [
+            "\n  data.bin: http://127.0.0.1:18777/data.bin is on 127.0.0.1, which is not a public address, so nobody outside your network can fetch it; publish it on a public host\n",
+            "\n  input data: http://10.1.2.3/id.h5 is on 10.1.2.3, which is not a public address",
+        ] {
+            assert!(err.contains(line), "{line:?} not in: {err}");
+        }
+        // Refused, so never sent to Cactarium, and said once.
+        assert_eq!(err.matches("data.bin").count(), 2, "{err}");
+        let asked: Vec<String> = log.lock().unwrap().iter().map(|(_, body)| body.clone()).collect();
+        assert!(asked.iter().any(|b| b.contains("o/a.git")), "the rest is asked: {asked:?}");
+        assert!(!asked.iter().any(|b| b.contains("18777") || b.contains("10.1.2.3")), "{asked:?}");
+    }
+
+    /// RepoPin.cactarium: a git pin of a registered package is labeled
+    /// `owner/pkg@<version>` when a version froze its commit, else bare; a
+    /// download and a repo with no package are not. The labels need no newer
+    /// format: the .sim stays at format 1.
+    #[test]
+    fn a_shared_sim_labels_each_pin_with_its_package() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use crate::sim::registered::fake::Registry;
+        use cactup_ecosystem_common::sim::SimFile;
+        let tmp = tempfile::tempdir().unwrap();
+        serve("reg.share.test", Mode::Public);
+        let sha = "c".repeat(64);
+        let registry = Registry {
+            packages: vec![
+                ("https://reg.share.test/o/a.git".into(), "et/a".into(), Some("1.2.0".into())),
+                ("https://reg.share.test/o/b.git".into(), "et/b".into(), None),
+                ("https://reg.share.test/o/m.git".into(), "et/m".into(), Some("mp:2.0.0".into())),
+            ],
+            downloads: vec![("https://dl.share.test/d.tgz".into(), "approved".into())],
+            ..Default::default()
+        };
+        let (cactarium, _) = registry.serve();
+        let list = registry_list(&["a", "b", "m"], &download("https://dl.share.test/d.tgz", "d.tgz", Some(&sha)));
+        let (packed, out, _) = pack_list_at(tmp.path(), &list, Default::default(), &cactarium);
+        packed.unwrap_or_else(|e| panic!("{e:#}"));
+        let text = fs::read_to_string(&out).unwrap();
+        assert!(text.starts_with("format = 1\n"), "{text}");
+        let file = SimFile::from_toml(&text).unwrap();
+        let label = |repo: &str| file.repos.iter().find(|r| r.name == repo).unwrap().cactarium.as_ref().map(ToString::to_string);
+        assert_eq!(label("a").as_deref(), Some("et/a@1.2.0"));
+        assert_eq!(label("b").as_deref(), Some("et/b"));
+        assert_eq!(label("m").as_deref(), Some("et/m@mp:2.0.0"));
+        assert_eq!(label("d.tgz"), None);
+        assert!(file.is_fully_specified(), "{:?}", file.unspecified());
+    }
+
+    /// With --local, nothing of that is refused or asked: the .sim is for
+    /// use here, every pin unlabeled.
+    #[test]
+    fn a_local_sim_passes_every_check_and_asks_cactarium_nothing() {
+        use crate::sim::registered::fake::{paths, Registry};
+        use cactup_ecosystem_common::sim::SimFile;
+        let tmp = tempfile::tempdir().unwrap();
+        let (cactarium, log) = Registry::default().serve();
+        let more = [
+            download("https://dl.share.test/f.tgz", "f.tgz", Some(&"c".repeat(64))),
+            download("https://dl.share.test/g.tgz", "g.tgz", None),
+            "!TARGET = $ROOT/arrangements\n!TYPE = ignore\n!CHECKOUT = Private/Thorn\n".to_owned(),
+            section("https://TOKEN9@unasked.share.test/o/t.git", "T/One", true),
+        ]
+        .concat();
+        let list = registry_list(&["c"], &more);
+        let describe = crate::args::SimDescribeArgs { local: true, ..Default::default() };
+        let (packed, out, _) = pack_list_at(tmp.path(), &list, describe, &cactarium);
+        packed.unwrap_or_else(|e| panic!("{e:#}"));
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(file.repos.iter().all(|r| r.cactarium.is_none()));
+        assert!(paths(&log).is_empty(), "{:?}", paths(&log));
+    }
+
+    /// An input's download (given with --input-url) goes through the same
+    /// review once its sha256 is known: refused when Cactarium has not
+    /// approved it, written when it has.
+    #[test]
+    fn an_inputs_download_must_be_reviewed_too() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use crate::sim::registered::fake::Registry;
+        use cactup_ecosystem_common::sim::SimFile;
+        let tmp = tempfile::tempdir().unwrap();
+        serve("reg.share.test", Mode::Public);
+        let list = registry_list(&["a"], "");
+        let input = |review: Option<&str>| {
+            let registry = Registry {
+                all_registered: true,
+                files: vec![("/id.h5".into(), b"initial data\n".to_vec())],
+                ..Default::default()
+            };
+            let (cactarium, log) = registry.serve();
+            let url = format!("{cactarium}/id.h5");
+            // Approved downloads are matched by URL, so the review needs the port.
+            let (cactarium, log) = match review {
+                None => (cactarium, log),
+                Some(review) => {
+                    let registry = Registry {
+                        all_registered: true,
+                        downloads: vec![(url.clone(), review.to_owned())],
+                        ..Default::default()
+                    };
+                    let (lookup, log) = registry.serve();
+                    (lookup, log)
+                }
+            };
+            let describe = crate::args::SimDescribeArgs { input_urls: vec![format!("data={url}")], ..Default::default() };
+            let (packed, out, _) = pack_list_at(tmp.path(), &list, describe, &cactarium);
+            (packed, out, url, log)
+        };
+        let (packed, out, url, _) = input(None);
+        let err = format!("{:#}", packed.unwrap_err());
+        assert_eq!(
+            err,
+            format!(
+                "These cannot go into a shared .sim:\n  input data: download not reviewed by Cactarium; submit it with \
+                 `cactup download submit {url}`\nPass --local to export for use here only."
+            )
+        );
+        assert!(!out.exists());
+        let (packed, out, url, log) = input(Some("approved"));
+        packed.unwrap_or_else(|e| panic!("{e:#}"));
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(file.inputs[0].url.as_deref(), Some(url.as_str()));
+        let asked = log.lock().unwrap().last().unwrap().1.clone();
+        let copy = tmp.path().join("id.h5");
+        fs::write(&copy, "initial data\n").unwrap();
+        let sha = crate::update::sha256_hex(&copy).unwrap();
+        assert!(asked.contains(&format!("\"sha256\":\"{sha}\"")), "{asked}");
+    }
+
+    /// Ctrl-C while Cactarium is being asked (and never answers) fails the
+    /// export at once. The interrupt flag is the process's: run in a child
+    /// of its own.
+    #[test]
+    fn an_interrupt_while_asking_cactarium_fails_the_export_at_once() {
+        if std::env::var_os("CACTUP_TEST_LOOKUP_INTERRUPT").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["sim::start::tests::an_interrupt_while_asking_cactarium_fails_the_export_at_once", "--exact", "--test-threads=1"])
+                .env("CACTUP_TEST_LOOKUP_INTERRUPT", "1")
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && said.contains("1 passed"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+            return;
+        }
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use crate::sim::registered::fake::{paths, Registry};
+        let tmp = tempfile::tempdir().unwrap();
+        serve("reg.share.test", Mode::Public);
+        let (cactarium, log) =
+            Registry { all_registered: true, delay: std::time::Duration::from_secs(60), ..Default::default() }.serve();
+        let root = tmp.path().to_owned();
+        let packing = std::thread::spawn(move || {
+            let (packed, out, _) = pack_list_at(&root, &registry_list(&["a"], ""), Default::default(), &cactarium);
+            (packed, out, std::time::Instant::now())
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !paths(&log).iter().any(|p| p == "/api/v1/lookup") {
+            assert!(std::time::Instant::now() < deadline, "Cactarium was never asked");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        gix::interrupt::IS_INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let interrupted = std::time::Instant::now();
+        let (packed, out, returned) = packing.join().unwrap();
+        let err = format!("{:#}", packed.unwrap_err());
+        assert!(err.contains("Interrupted"), "{err}");
+        assert!(!out.exists());
+        let took = returned.duration_since(interrupted);
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    }
+
+    /// Ctrl-C while an ssh remote's https equivalent is being asked (and
+    /// never answers) fails the export at once. The interrupt flag is the
+    /// process's: run in a child of its own.
+    #[test]
+    fn an_interrupt_while_asking_https_fails_the_export_at_once() {
+        if std::env::var_os("CACTUP_TEST_SHARE_INTERRUPT").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["sim::start::tests::an_interrupt_while_asking_https_fails_the_export_at_once", "--exact", "--test-threads=1"])
+                .env("CACTUP_TEST_SHARE_INTERRUPT", "1")
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && said.contains("1 passed"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+            return;
+        }
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        let tmp = tempfile::tempdir().unwrap();
+        let asked = serve("silent.share.test", Mode::Silent);
+        let root = tmp.path().to_owned();
+        let packing = std::thread::spawn(move || {
+            let (packed, out, _) = pack_urls(&root, &[("git@silent.share.test:o/s.git", "S/One")], true, Default::default());
+            (packed, out, std::time::Instant::now())
+        });
+        asked.recv_timeout(std::time::Duration::from_secs(10)).expect("the https URL was asked");
+        gix::interrupt::IS_INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let interrupted = std::time::Instant::now();
+        let (packed, out, returned) = packing.join().unwrap();
+        let err = format!("{:#}", packed.unwrap_err());
+        assert!(err.contains("Interrupted"), "{err}");
+        assert!(!out.exists());
+        let took = returned.duration_since(interrupted);
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    }
 
     /// §5.1: a simulation's own knob values outrank the global ones in what
     /// its restarts freeze — the parfile's input is the simulation's, set by

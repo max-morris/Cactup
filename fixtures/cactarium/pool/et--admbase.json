@@ -1,0 +1,161 @@
+{
+  "slug": "et/admbase",
+  "versions": [
+    {
+      "version": "2026.5.1",
+      "track": null,
+      "tag": "v2026.5.1",
+      "commit": "7f62b50d7ab1815978f966507399cc4c9d4484c1",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/admbase.git",
+      "thorns": [
+        {
+          "arrangement": "Admbase",
+          "thorn": "ADMBase",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "ADMBase",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        },
+        {
+          "arrangement": "Admbase",
+          "thorn": "StaticConformal",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "StaticConformal",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    },
+    {
+      "version": "2026.5.0",
+      "track": null,
+      "tag": "v2026.5.0",
+      "commit": "88e07e532e4723eb3d5e05f9b14702a4b62e335f",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/admbase.git",
+      "thorns": [
+        {
+          "arrangement": "Admbase",
+          "thorn": "ADMBase",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "ADMBase",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        },
+        {
+          "arrangement": "Admbase",
+          "thorn": "StaticConformal",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "StaticConformal",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    },
+    {
+      "version": "2026.4.0",
+      "track": null,
+      "tag": "v2026.4.0",
+      "commit": "3dfe01f64e61b9720586554c733b69f8a1efc9a0",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/admbase.git",
+      "thorns": [
+        {
+          "arrangement": "Admbase",
+          "thorn": "ADMBase",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "ADMBase",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        },
+        {
+          "arrangement": "Admbase",
+          "thorn": "StaticConformal",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "StaticConformal",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "about": "A library is never named",
+  "packages": [
+    "et--fuka"
+  ],
+  "specs": [
+    "et/fuka"
+  ],
+  "expect": {
+    "refusal": "NamedLibrary",
+    "message": [
+      "et/fuka is a library",
+      "Add a package that builds against it"
+    ]
+  }
+}

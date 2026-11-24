@@ -1,0 +1,12 @@
+{
+  "about": "The same where Cactarium does not read it: what it has is unknown, so the plan refuses rather than enable nothing",
+  "packages": ["max--needs-adm-all", "et--admbase"],
+  "specs": ["max/needs-adm-all"],
+  "present": [
+    {"package": "et/admbase", "unknown": "efefefefefefefefefefefefefefefefefefefef", "thorns": ["ADMBase", "StaticConformal"], "base": "admbase", "enabled": ["ADMBase"], "stand_in": true}
+  ],
+  "expect": {
+    "refusal": "Unreadable",
+    "message": ["et/admbase#efefefefefef", "is it pushed?", "--upgrade", "--no-deps"]
+  }
+}

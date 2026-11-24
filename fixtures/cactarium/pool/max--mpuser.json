@@ -1,0 +1,54 @@
+{
+  "slug": "max/mpuser",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "eb6d3879e468824bb069c5b990a2f72aa8dbe797",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/mpuser.git",
+      "thorns": [
+        {
+          "arrangement": "Mpuser",
+          "thorn": "MPUser",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "MPUser",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [
+              "FieldMP"
+            ],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "max/fieldlib",
+          "range": "mp:^1",
+          "needs": [
+            "FieldMP"
+          ],
+          "needed-by": [
+            "MPUser"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

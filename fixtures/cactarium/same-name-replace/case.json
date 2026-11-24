@@ -1,0 +1,33 @@
+{
+  "about": "--replace takes over the colliding checkouts; with none left, the whole base repo",
+  "packages": [
+    "et--carpetx"
+  ],
+  "specs": [
+    "et/carpetx"
+  ],
+  "present": [
+    {
+      "package": "local:carpetx",
+      "unknown": "2222222222222222222222222222222222222222",
+      "thorns": [
+        "CarpetX",
+        "Loop"
+      ],
+      "base": "carpetx",
+      "enabled": [
+        "CarpetX",
+        "Loop"
+      ]
+    }
+  ],
+  "options": {
+    "replace": true
+  },
+  "expect": {
+    "plan": [
+      "add et/carpetx@2026.5.1 Arith, CarpetX, Loop named",
+      "replace base repo carpetx with et/carpetx"
+    ]
+  }
+}

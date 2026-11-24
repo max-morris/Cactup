@@ -1,0 +1,16 @@
+{
+  "about": "A commit need that a served version was frozen at takes that version",
+  "packages": [
+    "max--z4c--carpetx-sha",
+    "et--carpetx"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named",
+      "add et/carpetx@2026.5.1 CarpetX needed by max/z4c@1.2.0, #ba20bf7e830f"
+    ]
+  }
+}

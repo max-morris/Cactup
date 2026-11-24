@@ -1,0 +1,32 @@
+{
+  "about": "An add override supplies a dependency the manifest lacks",
+  "packages": [
+    "max--z4c",
+    "et--carpetx"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "overrides": [
+    {
+      "add": {
+        "package": "max/z4c",
+        "claim": {
+          "kind": "dependency",
+          "target": "et/carpetx",
+          "range": "^2026.5",
+          "needs": [
+            "CarpetX"
+          ],
+          "note": null
+        }
+      }
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named",
+      "add et/carpetx@2026.5.1 CarpetX needed by max/z4c@1.2.0, ^2026.5"
+    ]
+  }
+}

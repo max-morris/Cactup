@@ -802,11 +802,15 @@ pub struct SourceChange {
     /// dropped in place of the checkout). No state string exists to compare,
     /// which is precisely why this is a change and not a skip.
     pub vanished: Vec<String>,
+    /// The repo now supplying the flesh, when the build recorded none of
+    /// that name (a flesh package in place of the base's flesh, or the
+    /// base's flesh back): another repo, not another commit.
+    pub swapped: Option<String>,
 }
 
 impl SourceChange {
     fn is_empty(&self) -> bool {
-        self.moved.is_empty() && self.edited.is_empty() && self.vanished.is_empty()
+        self.moved.is_empty() && self.edited.is_empty() && self.vanished.is_empty() && self.swapped.is_none()
     }
 }
 
@@ -852,6 +856,18 @@ pub fn source_delta(
             change.vanished.push(repo.clone());
         }
     }
+    // The flesh now comes from a repo absent from the build's record (a
+    // flesh package added in place of the base's flesh, or removed again):
+    // nothing was compiled against it, as for a flesh whose commit moved. Only
+    // a flesh read now counts: one that cannot be probed was never recorded,
+    // and would otherwise rebuild everything every time.
+    if let Some(flesh) = &fresh.flesh
+        && !stored.is_empty()
+        && !stored.contains_key(flesh.as_str())
+        && fresh.heads.contains_key(flesh.as_str())
+    {
+        change.swapped = Some(flesh.clone());
+    }
     change.vanished.sort();
     if change.is_empty() {
         return (SourceDelta::Unchanged, change);
@@ -860,10 +876,11 @@ pub fn source_delta(
     // there now is provably not the commit that was compiled, and a flesh that
     // can no longer be identified invalidates every object just as a flesh
     // that moved does.
-    let flesh_gone = fresh
-        .flesh
-        .as_deref()
-        .is_some_and(|f| change.moved.iter().chain(change.vanished.iter()).any(|m| m == f));
+    let flesh_gone = change.swapped.is_some()
+        || fresh
+            .flesh
+            .as_deref()
+            .is_some_and(|f| change.moved.iter().chain(change.vanished.iter()).any(|m| m == f));
     let delta = if flesh_gone {
         SourceDelta::Flesh
     } else if !change.moved.is_empty() || !change.vanished.is_empty() {
@@ -2153,6 +2170,9 @@ fn prepare_with_cache(
     // Name the repos, so a source-driven rebuild is actionable rather than
     // mysterious — especially the edited ones, which are the user's own work.
     if decision != RebuildDecision::UpToDate {
+        if let Some(repo) = &source_change.swapped {
+            println!("  the flesh now comes from repo {repo}");
+        }
         if !source_change.moved.is_empty() {
             println!("  now on a different commit: {}", summarize(&source_change.moved));
         }
@@ -3560,6 +3580,19 @@ mod tests {
         // Incremental — is_flesh is what promotes it.
         let unnamed = heads(&[("cactusbase", "aaa"), ("flesh", "ggg")], None);
         assert_eq!(source_delta(Some(&stored), Some(&unnamed)).0, SourceDelta::Thorns);
+
+        // The flesh now from another repo (a flesh package in place of the
+        // base's flesh, or the base's back): a realclean, as for a moved one.
+        let swapped = heads(&[("cactusbase", "aaa"), ("cactus-mp", "mmm")], Some("cactus-mp"));
+        let (delta, change) = source_delta(Some(&stored), Some(&swapped));
+        assert_eq!(delta, SourceDelta::Flesh);
+        assert_eq!((change.swapped.as_deref(), change.moved.len()), (Some("cactus-mp"), 0));
+
+        // A flesh repo that cannot be probed was never recorded: no swap,
+        // or every build would rebuild from scratch.
+        let unreadable = heads_with_vanished(&[("cactusbase", "aaa")], Some("cactus-mp"), &["cactus-mp"]);
+        let (delta, change) = source_delta(Some(&stored), Some(&unreadable));
+        assert_eq!((delta, change.swapped), (SourceDelta::Unchanged, None));
     }
 
     /// The git → non-git transition: swapping a checkout for a hand-built

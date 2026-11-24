@@ -1,0 +1,39 @@
+{
+  "slug": "et/upstream",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "f62b2ec481c8db1faa5e6b83e537c1daca140a00",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/upstream.git",
+      "thorns": [
+        {
+          "arrangement": "Upstream",
+          "thorn": "Up",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Up",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    }
+  ]
+}

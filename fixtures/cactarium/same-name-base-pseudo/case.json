@@ -1,0 +1,34 @@
+{
+  "about": "A planned package's thorn has the name of a thorn in an unmapped base repo",
+  "packages": [
+    "et--carpetx"
+  ],
+  "specs": [
+    "et/carpetx"
+  ],
+  "present": [
+    {
+      "package": "local:carpetx",
+      "unknown": "2222222222222222222222222222222222222222",
+      "thorns": [
+        "CarpetX",
+        "Loop"
+      ],
+      "base": "carpetx",
+      "enabled": [
+        "CarpetX",
+        "Loop"
+      ]
+    }
+  ],
+  "expect": {
+    "refusal": "SameThorn",
+    "message": [
+      "both have a thorn CarpetX",
+      "Pass --replace to use et/carpetx in place of base repo carpetx"
+    ],
+    "not_in_message": [
+      "claims override"
+    ]
+  }
+}

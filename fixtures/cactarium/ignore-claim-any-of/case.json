@@ -1,0 +1,20 @@
+{
+  "about": "--ignore-claim naming any alternative of an any-of drops the dependency",
+  "packages": [
+    "max--z4c--anyof",
+    "et--carpet",
+    "et--cactuspugh"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "ignore": [
+    "max/z4c:dependency:et/cactuspugh"
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named"
+    ],
+    "choices": []
+  }
+}

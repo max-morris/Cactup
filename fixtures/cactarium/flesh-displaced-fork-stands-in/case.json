@@ -1,0 +1,33 @@
+{
+  "about": "A flesh fork standing in for the flesh it displaces meets what its dependents ask",
+  "packages": [
+    "et--cactus",
+    "max--cactus-mp--covers-2026-4",
+    "max--fleshuser--needs-et-cactus"
+  ],
+  "specs": [
+    "max/cactus-mp"
+  ],
+  "present": [
+    {
+      "package": "et/cactus",
+      "version": "2026.4.0",
+      "base": "flesh",
+      "enabled": []
+    },
+    {
+      "package": "max/fleshuser",
+      "version": "1.0.0",
+      "enabled": [
+        "U"
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/cactus-mp@1.0.0 named",
+      "replace base repo flesh with max/cactus-mp",
+      "The flesh changes; every config needs a rebuild"
+    ]
+  }
+}

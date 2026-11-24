@@ -1,0 +1,35 @@
+{
+  "about": "Under --no-deps a dependent of the displaced flesh does not hold it",
+  "packages": [
+    "et--cactus",
+    "max--cactus-mp--covers-2026-4",
+    "max--fleshuser--needs-cactus-mp"
+  ],
+  "specs": [
+    "et/cactus"
+  ],
+  "present": [
+    {
+      "package": "max/cactus-mp",
+      "version": "1.0.0",
+      "enabled": []
+    },
+    {
+      "package": "max/fleshuser",
+      "version": "1.0.0",
+      "enabled": [
+        "U"
+      ]
+    }
+  ],
+  "options": {
+    "no-deps": true
+  },
+  "expect": {
+    "plan": [
+      "add et/cactus@2026.5.0 named",
+      "replace max/cactus-mp with et/cactus",
+      "The flesh changes; every config needs a rebuild"
+    ]
+  }
+}

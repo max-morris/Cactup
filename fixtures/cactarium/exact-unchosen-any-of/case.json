@@ -1,0 +1,12 @@
+{
+  "about": "An any-of whose alternative the installation has (listed first) is held by it; the other alternative, a base package unread by Cactarium, decides nothing",
+  "packages": ["max--y--anyof-carpet-adm", "et--carpet", "et--admbase"],
+  "specs": ["max/y"],
+  "present": [
+    {"package": "et/carpet", "version": "2026.5.0", "base": "carpet", "enabled": ["Carpet", "CarpetSlab"]},
+    {"package": "et/admbase", "unknown": "abababababababababababababababababababab", "thorns": ["ADMBase", "ADMCoupling", "StaticConformal"], "base": "admbase", "enabled": ["ADMBase"], "stand_in": true}
+  ],
+  "expect": {
+    "plan": ["add max/y@1.0.0 Y named"]
+  }
+}

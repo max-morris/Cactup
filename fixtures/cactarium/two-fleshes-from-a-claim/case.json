@@ -1,0 +1,19 @@
+{
+  "about": "A second flesh a claim brings in names that claim",
+  "packages": [
+    "max--z4c--cactus",
+    "et--cactus",
+    "et--a-flesh"
+  ],
+  "specs": [
+    "max/z4c",
+    "et/a-flesh"
+  ],
+  "expect": {
+    "refusal": "TwoFleshes",
+    "message": [
+      "The plan needs two fleshes, et/a-flesh@1.0.0 and et/cactus@2026.5.0",
+      "Pass --ignore-claim max/z4c:dependency:et/cactus"
+    ]
+  }
+}

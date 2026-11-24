@@ -1,0 +1,41 @@
+{
+  "about": "A fork taking a base package's place must stand in for what present packages need of it too",
+  "packages": [
+    "et--carpetx",
+    "max--carpetx-mp--whole-2026-4",
+    "max--z4c--carpetx"
+  ],
+  "specs": [
+    "max/carpetx-mp"
+  ],
+  "present": [
+    {
+      "package": "et/carpetx",
+      "version": "2026.5.1",
+      "base": "carpetx",
+      "enabled": [
+        "Arith",
+        "CarpetX",
+        "Loop"
+      ]
+    },
+    {
+      "package": "max/z4c",
+      "version": "1.2.0",
+      "enabled": [
+        "Z4c",
+        "Z4cTest"
+      ]
+    }
+  ],
+  "options": {
+    "replace": true
+  },
+  "expect": {
+    "refusal": "ForkDoesNotStandIn",
+    "message": [
+      "installed max/z4c@1.2.0 needs et/carpetx ^2026.5, and the fork max/carpetx-mp@1.0.0 does not stand in",
+      "Pass --ignore-claim max/z4c:dependency:et/carpetx"
+    ]
+  }
+}

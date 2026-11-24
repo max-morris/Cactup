@@ -1,0 +1,30 @@
+{
+  "about": "n requires capability C, which only et/p4 2.0.0 provides, and x 1.0.0 moves et/p4 there: the prune must look at the other releases of a present package that may move",
+  "packages": [
+    "max--n--c4",
+    "et--x4",
+    "et--p4"
+  ],
+  "specs": [
+    "max/n"
+  ],
+  "present": [
+    {
+      "package": "et/p4",
+      "version": "1.0.0",
+      "enabled": [
+        "P"
+      ]
+    }
+  ],
+  "options": {
+    "upgrade": true
+  },
+  "expect": {
+    "plan": [
+      "add max/n@1.0.0 N named",
+      "add et/x4@1.0.0 X needed by max/n@1.0.0",
+      "upgrade et/p4 1.0.0 -> 2.0.0 P, PC needed by et/x4@1.0.0, ^2 (--upgrade)"
+    ]
+  }
+}
