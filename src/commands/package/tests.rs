@@ -1068,6 +1068,11 @@ struct Stacked {
 }
 
 fn stacked(stack: &str) -> Stacked {
+    stacked_with(stack, "")
+}
+
+/// [`stacked`], with `extra` appended to the release's thornlist.
+fn stacked_with(stack: &str, extra: &str) -> Stacked {
     let tmp = tempfile::tempdir().unwrap();
     let carpetx = [("CarpetX/interface.ccl", "IMPLEMENTS: carpetx\n"), ("Loop/interface.ccl", "IMPLEMENTS: loop\n")];
     let (curl, c1) = upstream(tmp.path(), "carpetx", &carpetx);
@@ -1077,7 +1082,8 @@ fn stacked(stack: &str) -> Stacked {
     let (zurl, z) = upstream(tmp.path(), "z4c", &[("Z4c/interface.ccl", "IMPLEMENTS: z4c\n")]);
     let (e, t, zm) = ("e".repeat(40), "f".repeat(40), "a".repeat(40));
     let release_text =
-        format!("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{}{}", section(&curl, &c1, &["CarpetX/CarpetX", "CarpetX/Loop"]), section(&zurl, &z, &["Z4c/Z4c"]));
+        format!("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{}{}", section(&curl, &c1, &["CarpetX/CarpetX", "CarpetX/Loop"]), section(&zurl, &z, &["Z4c/Z4c"]))
+            + extra;
     let frozen = json!({"format": 1, "stack": "et/base@1.0.0", "root": "Cactus",
         "thornlist": {"filename": "base.th", "text": release_text},
         "repo": [{"name": "carpetx", "url": curl, "ref": "main", "commit": c1}, {"name": "z4c", "url": zurl, "commit": "d".repeat(40)}]});
@@ -1175,6 +1181,37 @@ fn stack_init_refuses_a_dirty_repo() {
     let err = format!("{:#}", w.stack_init(false).unwrap_err());
     assert!(err.contains("These repos cannot go into a stack"), "{err}");
     assert!(err.contains("carpetx: uncommitted changes in the installation; commit them"), "{err}");
+    assert!(!w.out().join("cactarium-stack.toml").exists());
+}
+
+/// A thorn in an ignore section is refused, as export refuses it: the installation's own, with
+/// the way out; the release's, as what Cactarium refuses a stack extending. An empty
+/// `!CHECKOUT` (ET's placeholder for private thorns) is no thorn.
+#[test]
+fn stack_init_refuses_ignore_components() {
+    const IGNORE: &str = "\n!TARGET = $ROOT\n!TYPE = ignore\n!CHECKOUT = Private/Secret\n";
+    const EMPTY: &str = "\n!TARGET = $ROOT\n!TYPE = ignore\n!CHECKOUT =\n";
+    let it = stacked_with("et/base@1.0.0", EMPTY);
+    let w = &it.world;
+    let pristine = std::fs::read_to_string(w.inst.source_thornlist()).unwrap();
+    std::fs::write(w.inst.source_thornlist(), format!("{pristine}{EMPTY}")).unwrap();
+    w.stack_init(false).unwrap_or_else(|e| panic!("an empty !CHECKOUT is no thorn: {e:#}"));
+    std::fs::write(w.inst.source_thornlist(), format!("{pristine}{IGNORE}")).unwrap();
+    let err = format!("{:#}", w.stack_init(true).unwrap_err());
+    assert!(err.starts_with("These thorns cannot go into a stack:\n  Private/Secret: an ignore component, which nobody else can fetch; put it in a repo and register that with Cactarium"), "{err}");
+    assert!(!err.contains("et/base"), "{err}");
+
+    let it = stacked_with("et/base@1.0.0", IGNORE);
+    let w = &it.world;
+    let pristine = std::fs::read_to_string(w.inst.source_thornlist()).unwrap();
+    std::fs::write(w.inst.source_thornlist(), format!("{pristine}{IGNORE}")).unwrap();
+    let err = format!("{:#}", w.stack_init(false).unwrap_err());
+    assert_eq!(
+        err,
+        "These thorns cannot go into a stack:\n  Private/Secret: an ignore component of et/base@1.0.0, which nobody else can \
+         fetch; Cactarium refuses a stack extending it",
+        "said once, as the release's"
+    );
     assert!(!w.out().join("cactarium-stack.toml").exists());
 }
 

@@ -109,6 +109,20 @@ pub fn init(ctx: &Ctx, args: &StackInitArgs) -> Res<()> {
     // repo), else pinned sections, which take the place of only the checkouts they have, as
     // `compose` does in the installation.
     let release_list = thornlist::parse(&release.thornlist.text)?;
+
+    // Nor thorns this machine alone has: an ignore component is never fetched, and Cactarium
+    // refuses a stack with one in its own thornlist or a base's.
+    let unfetchable: Vec<String> = (live.ignored().iter().map(|c| (c, false)))
+        .chain(release_list.ignored().iter().map(|c| (c, true)))
+        .filter(|(c, theirs)| *theirs || !release_list.ignored().iter().any(|r| r.checkout == c.checkout))
+        .map(|(c, theirs)| match theirs {
+            true => format!("{}: an ignore component of {label}, which nobody else can fetch; Cactarium refuses a stack extending it", c.checkout),
+            false => format!("{}: an ignore component, which nobody else can fetch; put it in a repo and register that with Cactarium", c.checkout),
+        })
+        .collect();
+    if !unfetchable.is_empty() {
+        bail!("These thorns cannot go into a stack:\n  {}", unfetchable.join("\n  "));
+    }
     let mut overrides: Vec<String> = Vec::new();
     let mut overridden: BTreeSet<&str> = BTreeSet::new();
     let mut pin_lines: Vec<String> = Vec::new();
