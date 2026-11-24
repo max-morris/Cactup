@@ -491,8 +491,9 @@ pub fn login(ctx: &Ctx, token: Option<String>) -> Res<()> {
 }
 
 /// `cactup sim publish <file.sim> <owner/name>` (§8.10): only a fully
-/// specified file — every repo pinned, nothing dirty or untracked — since
-/// the registry's promise is that anyone can reproduce it.
+/// specified file — every repo pinned, nothing dirty or untracked, every git
+/// pin a registered package's and every download reviewed by Cactarium —
+/// since the registry's promise is that anyone can reproduce it.
 pub fn publish(ctx: &Ctx, file: &std::path::Path, target: &str, version: Option<&str>) -> Res<()> {
     use cactup_ecosystem_common::slug::Slug;
     let slug: Slug = target.parse().map_err(|e| anyhow!("\"{target}\" is not owner/name: {e}"))?;
@@ -507,6 +508,7 @@ pub fn publish(ctx: &Ctx, file: &std::path::Path, target: &str, version: Option<
         bail!("'{}' is not fully specified: {}", file.display(), what.join("; "));
     }
     let client = crate::cactarium::Client::new(&ctx.db.read()?);
+    crate::sim::registered::check_publish(&client.clone().patient(), file, &sim)?;
     let published = client.publish_sim(slug.owner.as_str(), slug.name.as_str(), text.into_bytes(), version)?;
     print_published(&published);
     for warning in &published.warnings {

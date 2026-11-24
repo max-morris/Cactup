@@ -1396,14 +1396,6 @@ pub(crate) struct SimExportArgs {
     /// rest become #DISABLED lines.
     #[clap(long)]
     pub trim: bool,
-    /// Export even if sources had uncommitted changes at build time (marked dirty).
-    #[clap(long)]
-    pub allow_dirty: bool,
-    /// Export even if some pinned commits are not pushed
-    ///
-    /// Nobody else can fetch a commit that is on no remote branch or tag.
-    #[clap(long)]
-    pub allow_unpushed: bool,
 }
 
 /// `cactup sim pack`: a .sim from a loose thornlist and parfile.
@@ -1424,14 +1416,6 @@ pub(crate) struct SimPackArgs {
     /// rest become #DISABLED lines.
     #[clap(long)]
     pub trim: bool,
-    /// Pack even if repos have uncommitted changes (marked dirty).
-    #[clap(long)]
-    pub allow_dirty: bool,
-    /// Pack even if some pinned commits are not pushed
-    ///
-    /// Nobody else can fetch a commit that is on no remote branch or tag.
-    #[clap(long)]
-    pub allow_unpushed: bool,
 }
 
 /// What a .sim says about itself, shared by `sim export` and `sim pack`.
@@ -1474,14 +1458,18 @@ pub(crate) struct SimDescribeArgs {
     /// Archive member an input knob points at (KNOB=MEMBER; repeatable).
     #[clap(long = "input-path", value_name = "KNOB=MEMBER")]
     pub input_paths: Vec<String>,
-    /// Keep repo and input URLs as they are, for use on this machine only
+    /// Skip the checks for sharing: a .sim for use on this machine only
     ///
-    /// Without it, every URL must be fetchable by anyone, without
-    /// credentials. Local paths, git:// URLs, and URLs with a user name,
-    /// password, token or query string are refused. Each git repo is asked
-    /// once over the network, without credentials. An ssh URL is written as
-    /// https when that answers, and refused otherwise. A credential on a line
-    /// that nothing fetches is written as ***.
+    /// Without it, the .sim must be one anybody can reproduce. Refused:
+    /// sources with uncommitted changes, commits on no remote branch or tag,
+    /// repos of no package registered with Cactarium, ignore components,
+    /// downloads with no hash or not reviewed by Cactarium, and URLs nobody
+    /// else can fetch: local paths, git:// URLs, and URLs with a user name,
+    /// password, token or query string. Each git repo is asked once over the
+    /// network, without credentials, and Cactarium is asked which package
+    /// holds each pin. An ssh URL is written as https when that answers, and
+    /// refused otherwise. A credential on a line that nothing fetches is
+    /// written as ***. Each pin of a registered package is labeled with it.
     #[clap(long)]
     pub local: bool,
 }

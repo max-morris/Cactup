@@ -1870,8 +1870,6 @@ mod tests {
                 local: true,
                 ..Default::default()
             },
-            allow_dirty: false,
-            allow_unpushed: false,
             trim: false,
         }
     }
@@ -1958,23 +1956,34 @@ mod tests {
         assert_eq!(provenance.flavor.as_deref(), Some("default"));
         assert_eq!(provenance.machine_disabled, ["Machine/Off"]);
 
-        // Built from edited sources: refused, or marked dirty when allowed.
+        // Built from edited sources: refused, in the same error as the
+        // local path, or marked dirty with --local.
+        let shared = |sim: &str| {
+            let mut args = export_args(sim, &out);
+            args.describe.local = false;
+            format!("{:#}", export(sim, args).unwrap_err())
+        };
         fs::write(&cfg_path, record(&format!("{built}+1mod@1700"))).unwrap();
         create("dirty");
-        let err = format!("{:#}", export("dirty", export_args("dirty", &out)).unwrap_err());
-        assert!(err.contains("--allow-dirty") && err.contains("carpetx"), "{err}");
-        export("dirty", crate::args::SimExportArgs { allow_dirty: true, ..export_args("dirty", &out) }).unwrap();
+        let err = shared("dirty");
+        assert!(err.starts_with("These cannot go into a shared .sim:\n  carpetx: "), "{err}");
+        assert!(err.contains("\n  carpetx: uncommitted changes when the binary was built; commit them and rebuild\n"), "{err}");
+        assert!(err.ends_with("\nPass --local to export for use here only."), "{err}");
+        export("dirty", export_args("dirty", &out)).unwrap();
         let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
         assert!(file.repos[0].dirty && !file.is_fully_specified());
 
-        // Built from a commit no remote has: refused unless allowed.
+        // Built from a commit no remote has: refused, but with --local.
         let local = crate::fetch::git::testrepo::commit(&repo_dir, "local only");
         fs::write(&cfg_path, record(&local.to_string())).unwrap();
         create("unpushed");
-        let err = format!("{:#}", export("unpushed", export_args("unpushed", &out)).unwrap_err());
-        assert!(err.contains("--allow-unpushed"), "{err}");
-        export("unpushed", crate::args::SimExportArgs { allow_unpushed: true, ..export_args("unpushed", &out) })
-            .unwrap();
+        let err = shared("unpushed");
+        let short = &local.to_string()[..12];
+        let line = format!(
+            "\n  carpetx ({short}): commit on no known remote branch or tag; push it, then run `cactup inst refetch`\n"
+        );
+        assert!(err.contains(&line) && !err.contains("uncommitted"), "{err}");
+        export("unpushed", export_args("unpushed", &out)).unwrap();
 
         // Unpack: the thornlist comes back with its pin, the parfile verbatim.
         export("bhns", export_args("bhns", &out)).unwrap();
@@ -1984,6 +1993,24 @@ mod tests {
         assert_eq!(list.components()[0].commit.as_deref(), Some(built.to_string().as_str()));
         assert_eq!(fs::read_to_string(unpacked.join("bhns.par")).unwrap(), fs::read_to_string(&parfile).unwrap());
         assert!(crate::sim::export::unpack(&out, &unpacked, false).is_err(), "no silent overwrite");
+        assert!(file.provenance.unwrap().extra.is_empty(), "no overrides, no key");
+
+        // The installation's claim overrides go into the provenance, for
+        // information.
+        {
+            let locked = inst.locked().unwrap();
+            let mut meta = locked.meta().unwrap();
+            for (key, kind) in [("drop max/app:incompatible-with:max/solo", "drop"), ("satisfies local:carpetx et/carpetx", "satisfies")] {
+                meta.claim_overrides.insert(key.into(), crate::installation::ClaimOverride { kind: kind.into(), note: None });
+            }
+            locked.set_meta(&meta).unwrap();
+        }
+        export("bhns", export_args("bhns", &out)).unwrap();
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(
+            file.provenance.unwrap().extra.get("claims-overrides").map(String::as_str),
+            Some("drop max/app:incompatible-with:max/solo; satisfies local:carpetx et/carpetx")
+        );
     }
 
 
@@ -2029,8 +2056,6 @@ mod tests {
             parfile: par.clone(),
             file: Some(out.clone()),
             describe: crate::args::SimDescribeArgs { force: true, yes: true, local: true, ..Default::default() },
-            allow_dirty: false,
-            allow_unpushed: false,
             trim: false,
         };
         crate::sim::export::pack(&ctx, args(&th)).unwrap();
@@ -2092,9 +2117,31 @@ mod tests {
 
     /// The thornlist `list` and a parfile with one input, packed with no
     /// installation and `describe` over the defaults; and the list back.
+    /// Cactarium answers that every repo is a registered package's.
     fn pack_list(tmp: &Path, list: &str, describe: crate::args::SimDescribeArgs) -> (crate::Res<()>, PathBuf, String) {
+        let (cactarium, _) = crate::sim::registered::fake::Registry { all_registered: true, ..Default::default() }.serve();
+        pack_list_at(tmp, list, describe, &cactarium)
+    }
+
+    /// [`pack_list`], asking the Cactarium at `cactarium`.
+    fn pack_list_at(
+        tmp: &Path,
+        list: &str,
+        describe: crate::args::SimDescribeArgs,
+        cactarium: &str,
+    ) -> (crate::Res<()>, PathBuf, String) {
         let mut ctx = fake_ctx(&tmp.join("db"));
         ctx.globals.installation = None;
+        // No machine: an input's download goes under the inputs-home knob.
+        ctx.globals.machine = None;
+        let cactarium = cactarium.to_owned();
+        let inputs = tmp.join("inputs").display().to_string();
+        ctx.db.update(move |d| {
+            d.set_knob(crate::cactarium::URL_KNOB, cactarium);
+            d.set_knob("inputs-home", inputs);
+            Ok(())
+        })
+        .unwrap();
         let list = list.to_owned();
         let th = tmp.join("list.th");
         fs::write(&th, &list).unwrap();
@@ -2106,8 +2153,6 @@ mod tests {
             parfile: par,
             file: Some(out.clone()),
             describe: crate::args::SimDescribeArgs { force: true, yes: true, ..describe },
-            allow_dirty: false,
-            allow_unpushed: false,
             trim: false,
         };
         (crate::sim::export::pack(&ctx, args), out, list)
@@ -2189,7 +2234,7 @@ mod tests {
         // Two sections name repo x: the one refused is told by its line.
         assert_eq!(
             err,
-            "These URLs cannot go into a shared .sim:\n  x (thornlist line 11): https://***@github.com/b/x.git carries \
+            "These cannot go into a shared .sim:\n  x (thornlist line 11): https://***@github.com/b/x.git carries \
              a user name or token, which must never be published; remove it from the URL\nPass --local to export for \
              use here only."
         );
@@ -2368,6 +2413,248 @@ mod tests {
         assert_eq!(urls, sections.map(|(url, _)| url));
         let probed = crate::fetch::anonymous::PROBED.lock().unwrap().clone();
         assert!(!probed.iter().any(|u| u.contains("unasked.share.test")), "{probed:?}");
+    }
+
+    /// A download section of `url` fetching `file`, pinned by `sha256` if given.
+    fn download(url: &str, file: &str, sha256: Option<&str>) -> String {
+        let pin = sha256.map(|h| format!("!CHECKSUM_SHA256 = {h}\n")).unwrap_or_default();
+        format!("!TARGET = $ROOT/dl\n!TYPE = https\n!URL = {url}\n{pin}!CHECKOUT = {file}\n")
+    }
+
+    /// The thornlist the registry tests pack: git repos on a host that
+    /// answers anonymously, each pinned, with `more` after them.
+    fn registry_list(repos: &[&str], more: &str) -> String {
+        let mut list = "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n".to_owned();
+        for repo in repos {
+            list.push_str(&section(&format!("https://reg.share.test/o/{repo}.git"), &format!("{}/One", repo.to_uppercase()), true));
+        }
+        list + more
+    }
+
+    /// §8.9: a .sim for others pins only what Cactarium vouches for. Its
+    /// URLs pass, but a repo no registered package has, downloads not
+    /// approved (never submitted, awaiting review, rejected), a download
+    /// with no hash and an ignore component are each refused, in one error
+    /// with the URL refused beside them, a line each. Cactarium is asked once,
+    /// never about a refused URL.
+    #[test]
+    fn a_shared_sim_pins_only_registered_packages_and_reviewed_downloads() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use crate::sim::registered::fake::{paths, Registry};
+        let tmp = tempfile::tempdir().unwrap();
+        serve("reg.share.test", Mode::Public);
+        let sha = "c".repeat(64);
+        let registry = Registry {
+            packages: vec![
+                ("https://reg.share.test/o/a.git".into(), "et/a".into(), Some("1.2.0".into())),
+                ("https://reg.share.test/o/b.git".into(), "et/b".into(), None),
+            ],
+            downloads: vec![
+                ("https://dl.share.test/d.tgz".into(), "approved".into()),
+                ("https://dl.share.test/e.tgz".into(), "pending".into()),
+                ("https://dl.share.test/r.tgz".into(), "rejected".into()),
+            ],
+            ..Default::default()
+        };
+        let (cactarium, log) = registry.serve();
+        let bad = [
+            download("https://dl.share.test/e.tgz", "e.tgz", Some(&sha)),
+            download("https://dl.share.test/f.tgz", "f.tgz", Some(&sha)),
+            download("https://dl.share.test/r.tgz", "r.tgz", Some(&sha)),
+            download("https://dl.share.test/g.tgz", "g.tgz", None),
+            "!TARGET = $ROOT/arrangements\n!TYPE = ignore\n!CHECKOUT = Private/Thorn\n".to_owned(),
+            section("https://TOKEN9@reg.share.test/o/t.git", "T/One", true),
+            download("https://dl.share.test/s.tgz?token=TOKEN8", "s.tgz", Some(&sha)),
+        ]
+        .concat();
+        let good = download("https://dl.share.test/d.tgz", "d.tgz", Some(&sha));
+        let list = registry_list(&["a", "b", "c"], &format!("{good}{bad}"));
+        let (packed, out, _) = pack_list_at(tmp.path(), &list, Default::default(), &cactarium);
+        let err = format!("{:#}", packed.unwrap_err());
+        assert_eq!(
+            err,
+            "These cannot go into a shared .sim:\n  \
+             t: https://***@reg.share.test/o/t.git carries a user name or token, which must never be published; remove it from the URL\n  \
+             s.tgz: https://dl.share.test/s.tgz?*** carries `token` in its query, which must never be published; remove it from the URL\n  \
+             Private/Thorn: an ignore component, which nobody else can fetch; put it in a repo and register that with Cactarium\n  \
+             g.tgz: download with no hash; add !CHECKSUM_SHA256 to the thornlist\n  \
+             c: no registered package has this repo; push it and register it with `cactup package init c --publish`, or fork a registered package\n  \
+             e.tgz: download awaiting verification and review by Cactarium\n  \
+             f.tgz: download not reviewed by Cactarium; submit it with `cactup download submit https://dl.share.test/f.tgz`\n  \
+             r.tgz: download rejected by Cactarium\n\
+             Pass --local to export for use here only."
+        );
+        assert!(!out.exists(), "nothing written");
+        assert_eq!(paths(&log), ["/api/v1/lookup"], "one lookup");
+        let asked = log.lock().unwrap()[0].1.clone();
+        assert!(!asked.contains("TOKEN") && !asked.contains("t.git") && !asked.contains("s.tgz"), "a refused URL never leaves: {asked}");
+        assert!(asked.contains("o/c.git") && asked.contains("e.tgz"), "{asked}");
+
+        // A repo whose URL its probe refuses is named for that alone.
+        serve("private.reg.test", Mode::Private);
+        let list = format!("{}{}", registry_list(&["a"], ""), section("git@private.reg.test:o/p.git", "P/One", true));
+        let (packed, _, _) = pack_list_at(tmp.path(), &list, Default::default(), &cactarium);
+        let err = format!("{:#}", packed.unwrap_err());
+        assert!(err.contains("\n  p: git@private.reg.test:o/p.git is an ssh URL"), "{err}");
+        assert_eq!(err.matches("\n  p: ").count(), 1, "{err}");
+    }
+
+    /// RepoPin.cactarium: a git pin of a registered package is labeled
+    /// `owner/pkg@<version>` when a version froze its commit, else bare; a
+    /// download and a repo with no package are not. The labels need no newer
+    /// format: the .sim stays at format 1.
+    #[test]
+    fn a_shared_sim_labels_each_pin_with_its_package() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use crate::sim::registered::fake::Registry;
+        use cactup_ecosystem_common::sim::SimFile;
+        let tmp = tempfile::tempdir().unwrap();
+        serve("reg.share.test", Mode::Public);
+        let sha = "c".repeat(64);
+        let registry = Registry {
+            packages: vec![
+                ("https://reg.share.test/o/a.git".into(), "et/a".into(), Some("1.2.0".into())),
+                ("https://reg.share.test/o/b.git".into(), "et/b".into(), None),
+                ("https://reg.share.test/o/m.git".into(), "et/m".into(), Some("mp:2.0.0".into())),
+            ],
+            downloads: vec![("https://dl.share.test/d.tgz".into(), "approved".into())],
+            ..Default::default()
+        };
+        let (cactarium, _) = registry.serve();
+        let list = registry_list(&["a", "b", "m"], &download("https://dl.share.test/d.tgz", "d.tgz", Some(&sha)));
+        let (packed, out, _) = pack_list_at(tmp.path(), &list, Default::default(), &cactarium);
+        packed.unwrap_or_else(|e| panic!("{e:#}"));
+        let text = fs::read_to_string(&out).unwrap();
+        assert!(text.starts_with("format = 1\n"), "{text}");
+        let file = SimFile::from_toml(&text).unwrap();
+        let label = |repo: &str| file.repos.iter().find(|r| r.name == repo).unwrap().cactarium.as_ref().map(ToString::to_string);
+        assert_eq!(label("a").as_deref(), Some("et/a@1.2.0"));
+        assert_eq!(label("b").as_deref(), Some("et/b"));
+        assert_eq!(label("m").as_deref(), Some("et/m@mp:2.0.0"));
+        assert_eq!(label("d.tgz"), None);
+        assert!(file.is_fully_specified(), "{:?}", file.unspecified());
+    }
+
+    /// With --local, nothing of that is refused or asked: the .sim is for
+    /// use here, every pin unlabeled.
+    #[test]
+    fn a_local_sim_passes_every_check_and_asks_cactarium_nothing() {
+        use crate::sim::registered::fake::{paths, Registry};
+        use cactup_ecosystem_common::sim::SimFile;
+        let tmp = tempfile::tempdir().unwrap();
+        let (cactarium, log) = Registry::default().serve();
+        let more = [
+            download("https://dl.share.test/f.tgz", "f.tgz", Some(&"c".repeat(64))),
+            download("https://dl.share.test/g.tgz", "g.tgz", None),
+            "!TARGET = $ROOT/arrangements\n!TYPE = ignore\n!CHECKOUT = Private/Thorn\n".to_owned(),
+            section("https://TOKEN9@unasked.share.test/o/t.git", "T/One", true),
+        ]
+        .concat();
+        let list = registry_list(&["c"], &more);
+        let describe = crate::args::SimDescribeArgs { local: true, ..Default::default() };
+        let (packed, out, _) = pack_list_at(tmp.path(), &list, describe, &cactarium);
+        packed.unwrap_or_else(|e| panic!("{e:#}"));
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(file.repos.iter().all(|r| r.cactarium.is_none()));
+        assert!(paths(&log).is_empty(), "{:?}", paths(&log));
+    }
+
+    /// An input's download (given with --input-url) goes through the same
+    /// review once its sha256 is known: refused when Cactarium has not
+    /// approved it, written when it has.
+    #[test]
+    fn an_inputs_download_must_be_reviewed_too() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use crate::sim::registered::fake::Registry;
+        use cactup_ecosystem_common::sim::SimFile;
+        let tmp = tempfile::tempdir().unwrap();
+        serve("reg.share.test", Mode::Public);
+        let list = registry_list(&["a"], "");
+        let input = |review: Option<&str>| {
+            let registry = Registry {
+                all_registered: true,
+                files: vec![("/id.h5".into(), b"initial data\n".to_vec())],
+                ..Default::default()
+            };
+            let (cactarium, log) = registry.serve();
+            let url = format!("{cactarium}/id.h5");
+            // Approved downloads are matched by URL, so the review needs the port.
+            let (cactarium, log) = match review {
+                None => (cactarium, log),
+                Some(review) => {
+                    let registry = Registry {
+                        all_registered: true,
+                        downloads: vec![(url.clone(), review.to_owned())],
+                        ..Default::default()
+                    };
+                    let (lookup, log) = registry.serve();
+                    (lookup, log)
+                }
+            };
+            let describe = crate::args::SimDescribeArgs { input_urls: vec![format!("data={url}")], ..Default::default() };
+            let (packed, out, _) = pack_list_at(tmp.path(), &list, describe, &cactarium);
+            (packed, out, url, log)
+        };
+        let (packed, out, url, _) = input(None);
+        let err = format!("{:#}", packed.unwrap_err());
+        assert_eq!(
+            err,
+            format!(
+                "These cannot go into a shared .sim:\n  input data: download not reviewed by Cactarium; submit it with \
+                 `cactup download submit {url}`\nPass --local to export for use here only."
+            )
+        );
+        assert!(!out.exists());
+        let (packed, out, url, log) = input(Some("approved"));
+        packed.unwrap_or_else(|e| panic!("{e:#}"));
+        let file = SimFile::from_toml(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(file.inputs[0].url.as_deref(), Some(url.as_str()));
+        let asked = log.lock().unwrap().last().unwrap().1.clone();
+        let copy = tmp.path().join("id.h5");
+        fs::write(&copy, "initial data\n").unwrap();
+        let sha = crate::update::sha256_hex(&copy).unwrap();
+        assert!(asked.contains(&format!("\"sha256\":\"{sha}\"")), "{asked}");
+    }
+
+    /// Ctrl-C while Cactarium is being asked (and never answers) fails the
+    /// export at once. The interrupt flag is the process's: run in a child
+    /// of its own.
+    #[test]
+    fn an_interrupt_while_asking_cactarium_fails_the_export_at_once() {
+        if std::env::var_os("CACTUP_TEST_LOOKUP_INTERRUPT").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["sim::start::tests::an_interrupt_while_asking_cactarium_fails_the_export_at_once", "--exact", "--test-threads=1"])
+                .env("CACTUP_TEST_LOOKUP_INTERRUPT", "1")
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && said.contains("1 passed"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+            return;
+        }
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use crate::sim::registered::fake::{paths, Registry};
+        let tmp = tempfile::tempdir().unwrap();
+        serve("reg.share.test", Mode::Public);
+        let (cactarium, log) =
+            Registry { all_registered: true, delay: std::time::Duration::from_secs(60), ..Default::default() }.serve();
+        let root = tmp.path().to_owned();
+        let packing = std::thread::spawn(move || {
+            let (packed, out, _) = pack_list_at(&root, &registry_list(&["a"], ""), Default::default(), &cactarium);
+            (packed, out, std::time::Instant::now())
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !paths(&log).iter().any(|p| p == "/api/v1/lookup") {
+            assert!(std::time::Instant::now() < deadline, "Cactarium was never asked");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        gix::interrupt::IS_INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let interrupted = std::time::Instant::now();
+        let (packed, out, returned) = packing.join().unwrap();
+        let err = format!("{:#}", packed.unwrap_err());
+        assert!(err.contains("Interrupted"), "{err}");
+        assert!(!out.exists());
+        let took = returned.duration_since(interrupted);
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
     }
 
     /// Ctrl-C while an ssh remote's https equivalent is being asked (and

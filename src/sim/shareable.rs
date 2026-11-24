@@ -3,11 +3,13 @@
 //! `sim export` and `sim pack` check the thornlist and every input URL
 //! before they write one, unless `--local` says the file is for use here
 //! only. The check comes in two halves: [`classify`], offline, and
-//! [`settle`], which probes every git remote anonymously and rewrites the
-//! ssh ones that answer as https. Both run before anything else asks the
-//! network (a pack's remote tips, which are then asked of the rewritten
-//! URLs); a URL refused offline still waits for the probes, so one error
-//! names every URL refused.
+//! [`settle_with`], which probes every git remote anonymously, at the same
+//! time as Cactarium is asked about the pins ([`super::registered`]), and
+//! [`Settled::apply`], which rewrites the ssh remotes that answer as https.
+//! They run before anything else asks the network (a pack's remote tips,
+//! which are then asked of the rewritten URLs); a URL refused offline still
+//! waits for the probes, so one error ([`refusal`]) names everything
+//! refused.
 //!
 //! The rules are the shared crate's (`cactup_ecosystem_common::url` and
 //! `::probe`), so Cactarium refuses exactly what export does. Every
@@ -42,11 +44,14 @@
 //! `!ANON_USER`/`!ANON_PASS` hold the public logins of anonymous svn and
 //! cvs access, never a URL, and are never refused.
 
+use super::registered;
+use crate::cactarium::Client;
 use crate::fetch::anonymous::{self, Verdict};
 use crate::fetch::git::{AskWindow, REMOTE_ASK_TIMEOUT};
 use crate::thornlist::{self, ComponentType};
 use crate::Res;
 use anyhow::{bail, Context};
+use cactup_ecosystem_common::api::LookedUp;
 use cactup_ecosystem_common::probe::{self, Start};
 use cactup_ecosystem_common::url::{download_shareability, shareability, unquote, Redacted, Shareability};
 use colored::Colorize;
@@ -55,17 +60,33 @@ use std::ops::Range;
 use std::sync::LazyLock;
 
 /// The line every refusal ends with.
-const LOCAL_HINT: &str = "Pass --local to export for use here only.";
+pub(crate) const LOCAL_HINT: &str = "Pass --local to export for use here only.";
 
 /// The offline half of the check: what [`classify`] found.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Checked {
     /// A line per URL refused: "<repo>: <why>", "input <knob>: <why>".
     refused: Vec<String>,
+    /// The repos (as the thornlist names them) with a URL refused.
+    refused_repos: BTreeSet<String>,
     /// The git remotes to probe.
     asks: Vec<Ask>,
     /// The credentials found where nothing fetches them, to hide.
     hidden: Vec<Spot>,
+}
+
+impl Checked {
+    /// Whether a URL of repo `repo` (as the thornlist names it) was refused.
+    pub fn refuses(&self, repo: &str) -> bool {
+        self.refused_repos.contains(repo)
+    }
+
+    /// The URL the git remote `url` is to be published as, if it is probed:
+    /// an ssh remote's https equivalent, any other remote itself. `None` for
+    /// one refused offline.
+    pub fn published_as(&self, url: &str) -> Option<&str> {
+        self.asks.iter().find(|a| a.url == url).map(|a| a.candidate.as_str())
+    }
 }
 
 /// A credential [`search_text`] found in the thornlist's text.
@@ -84,6 +105,8 @@ struct Ask {
     /// The repos whose components name it, in order, as a refusal names
     /// them ([`repo_label`]).
     repos: Vec<String>,
+    /// The same repos as the thornlist names them.
+    names: Vec<String>,
     /// The remote as written.
     url: String,
     /// What `probe::start` named to probe and publish.
@@ -97,6 +120,7 @@ struct Ask {
 /// whole text is searched for credentials (see the module docs).
 pub fn classify(list: &thornlist::Thornlist, text: &str, input_urls: &[(String, String)]) -> Checked {
     let mut refused = Vec::new();
+    let mut refused_repos = BTreeSet::new();
     let mut asks: Vec<Ask> = Vec::new();
     // The URLs judged, and of those the ones refused (the text search
     // leaves those to the refusal already said).
@@ -115,9 +139,15 @@ pub fn classify(list: &thornlist::Thornlist, text: &str, input_urls: &[(String, 
                 if !ask.repos.contains(&name) {
                     ask.repos.push(name.clone());
                 }
+                if !ask.names.contains(&c.repo) {
+                    ask.names.push(c.repo.clone());
+                }
                 continue;
             }
             if !judged.insert((auth, url.to_owned())) {
+                if refused_urls.contains(url) || refused_urls.contains(unquote(url)) {
+                    refused_repos.insert(c.repo.clone());
+                }
                 continue;
             }
             let why = if unquote(url) != url.trim() {
@@ -137,7 +167,8 @@ pub fn classify(list: &thornlist::Thornlist, text: &str, input_urls: &[(String, 
             } else {
                 match probe::start(url) {
                     Start::Probe { candidate } => {
-                        asks.push(Ask { repos: vec![name.clone()], url: url.to_owned(), candidate });
+                        let names = vec![c.repo.clone()];
+                        asks.push(Ask { repos: vec![name.clone()], names, url: url.to_owned(), candidate });
                         None
                     }
                     Start::Refuse(why) => Some(why),
@@ -145,6 +176,7 @@ pub fn classify(list: &thornlist::Thornlist, text: &str, input_urls: &[(String, 
             };
             if let Some(why) = why {
                 refused_urls.insert(url.to_owned());
+                refused_repos.insert(c.repo.clone());
                 refused.push(format!("{label}: {why}"));
             }
         }
@@ -155,7 +187,7 @@ pub fn classify(list: &thornlist::Thornlist, text: &str, input_urls: &[(String, 
             refused.push(format!("input {knob}: {why}"));
         }
     }
-    Checked { refused, asks, hidden }
+    Checked { refused, refused_repos, asks, hidden }
 }
 
 /// How a refusal names the repo `repo` (as the thornlist derives the name)
@@ -317,43 +349,108 @@ fn hide_spots(text: &str, hidden: &[Spot]) -> String {
 }
 
 /// Probe every git remote of `checked`, and fail with every refusal
-/// (offline, or by its probe) in one error; else `text` (what `checked` was
-/// classified from) with every remote published as another URL (an ssh
-/// remote as its https equivalent) rewritten to it and every credential of
-/// `checked`'s hidden ones hidden, a line said for each, or `None` when
-/// there were none. The new text is parsed back and must give the same
-/// components, but for the URLs rewritten. The probes run all at once
-/// within one [`REMOTE_ASK_TIMEOUT`], a line each; Ctrl-C fails the call
-/// ("Interrupted").
-pub fn settle(checked: Checked, text: &str) -> Res<Option<String>> {
-    let Checked { mut refused, asks, hidden } = checked;
-    let verdicts = probe_all(&asks, AskWindow::from(std::time::Instant::now(), REMOTE_ASK_TIMEOUT))?;
+/// (offline, or by its probe) and every line of `more` in one error; else
+/// `text` (what `checked` was classified from) as [`Settled::apply`] gives
+/// it. The probes run all at once within one [`REMOTE_ASK_TIMEOUT`], a
+/// line each; Ctrl-C fails the call ("Interrupted").
+pub fn settle(checked: Checked, text: &str, more: Vec<String>) -> Res<Option<String>> {
+    let settled = settle_with(checked, None)?;
+    let mut refused = settled.refused.clone();
+    refused.extend(more);
+    if !refused.is_empty() {
+        return Err(refusal(&refused));
+    }
+    settled.apply(text)
+}
+
+/// The one error for everything refused, a line each, ending with the way
+/// past.
+pub fn refusal(lines: &[String]) -> anyhow::Error {
+    anyhow::anyhow!("These cannot go into a shared .sim:\n  {}\n{LOCAL_HINT}", lines.join("\n  "))
+}
+
+/// What [`settle_with`] found.
+#[derive(Debug)]
+pub struct Settled {
+    /// A line per URL refused, offline or by its probe.
+    pub refused: Vec<String>,
+    /// The repos (as the thornlist names them) with a URL refused.
+    pub refused_repos: BTreeSet<String>,
+    /// The asks, and each one's URL to publish as, when another.
+    asks: Vec<Ask>,
+    rewrites: BTreeMap<String, String>,
+    hidden: Vec<Spot>,
+    /// Cactarium's answer to the lookup asked alongside, if one was.
+    pub looked_up: Option<Res<LookedUp>>,
+}
+
+impl Settled {
+    /// `text` (what the check was classified from), once nothing is
+    /// refused, with every remote published as another URL (an ssh remote
+    /// as its https equivalent) rewritten to it and every credential found
+    /// where nothing fetches it hidden, a line said for each, or `None` when
+    /// there were none. The new text is parsed back and must give the same
+    /// components, but for the URLs rewritten.
+    pub fn apply(&self, text: &str) -> Res<Option<String>> {
+        if self.rewrites.is_empty() && self.hidden.is_empty() {
+            return Ok(None);
+        }
+        let rewritten = rewrite(text, &self.hidden, &self.rewrites)?;
+        for note in hidden_notes(&rewritten, &self.hidden) {
+            println!("{}", note.yellow());
+        }
+        for ask in &self.asks {
+            if let Some(published) = self.rewrites.get(&ask.url) {
+                println!("{}: published as {published} (was {}).", ask.repos.join(", "), Redacted(&ask.url));
+            }
+        }
+        Ok(Some(rewritten))
+    }
+}
+
+/// Probe every git remote of `checked` and, at the same time, ask
+/// Cactarium `lookup` (one renderer, a line each): what was refused, and
+/// what the lookup answered. Refuses nothing itself. The probes run all at
+/// once within one [`REMOTE_ASK_TIMEOUT`]; Ctrl-C fails the call
+/// ("Interrupted") at once.
+pub fn settle_with(checked: Checked, lookup: Option<(&Client, &registered::Query)>) -> Res<Settled> {
+    let Checked { mut refused, mut refused_repos, asks, hidden } = checked;
+    let window = AskWindow::from(std::time::Instant::now(), REMOTE_ASK_TIMEOUT);
+    let lookup = lookup.filter(|(_, q)| !q.is_empty());
+    let (progress, renderer) = if asks.is_empty() && lookup.is_none() {
+        (prodash::tree::Root::new(), None)
+    } else {
+        crate::manifest::setup_prodash_if_tty()
+    };
+    let (verdicts, looked_up) = std::thread::scope(|scope| {
+        let asking = lookup.map(|(client, query)| {
+            let item = progress.add_child("ask Cactarium what each pin is");
+            scope.spawn(move || query.ask(client, item))
+        });
+        let verdicts = probe_all(&progress, &asks, window);
+        let looked_up = asking.map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("The lookup died"))));
+        (verdicts, looked_up)
+    });
+    if let Some(renderer) = renderer {
+        renderer.shutdown_and_wait();
+    }
+    if gix::interrupt::is_triggered() {
+        bail!("Interrupted");
+    }
     let mut rewrites = BTreeMap::new();
-    for (ask, verdict) in asks.iter().zip(verdicts) {
+    for (ask, verdict) in asks.iter().zip(verdicts?) {
         match verdict {
             Verdict::Publish(published) if published != ask.url => {
                 rewrites.insert(ask.url.clone(), published);
             }
             Verdict::Publish(_) => {}
-            Verdict::Refuse(why) => refused.push(format!("{}: {why}", ask.repos.join(", "))),
+            Verdict::Refuse(why) => {
+                refused.push(format!("{}: {why}", ask.repos.join(", ")));
+                refused_repos.extend(ask.names.iter().cloned());
+            }
         }
     }
-    if !refused.is_empty() {
-        bail!("These URLs cannot go into a shared .sim:\n  {}\n{LOCAL_HINT}", refused.join("\n  "));
-    }
-    if rewrites.is_empty() && hidden.is_empty() {
-        return Ok(None);
-    }
-    let rewritten = rewrite(text, &hidden, &rewrites)?;
-    for note in hidden_notes(&rewritten, &hidden) {
-        println!("{}", note.yellow());
-    }
-    for ask in &asks {
-        if let Some(published) = rewrites.get(&ask.url) {
-            println!("{}: published as {published} (was {}).", ask.repos.join(", "), Redacted(&ask.url));
-        }
-    }
-    Ok(Some(rewritten))
+    Ok(Settled { refused, refused_repos, asks, rewrites, hidden, looked_up })
 }
 
 /// `text` with the credentials of `hidden` hidden and each `!URL` of `map`
@@ -508,12 +605,11 @@ pub fn check_input_url(knob: &str, url: &str) -> Res<()> {
 
 /// Probe each of `asks` anonymously ([`anonymous::check`]), all at once (up
 /// to [`anonymous::PROBES_AT_ONCE`]) within `window`, with a progress line
-/// for each.
-fn probe_all(asks: &[Ask], window: AskWindow) -> Res<Vec<Verdict>> {
+/// for each under `progress`.
+fn probe_all(progress: &prodash::tree::Root, asks: &[Ask], window: AskWindow) -> Res<Vec<Verdict>> {
     if asks.is_empty() {
         return Ok(Vec::new());
     }
-    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
     let item = progress.add_child("ask git remotes without credentials");
     item.init(Some(asks.len()), Some(prodash::unit::label("repos")));
     let item = std::sync::Mutex::new(item);
@@ -524,10 +620,6 @@ fn probe_all(asks: &[Ask], window: AskWindow) -> Res<Vec<Verdict>> {
         item.lock().expect("probe progress poisoned").inc();
         verdict
     });
-    drop(item);
-    if let Some(renderer) = renderer {
-        renderer.shutdown_and_wait();
-    }
     verdicts?.into_iter().collect()
 }
 
@@ -769,11 +861,11 @@ mod tests {
         use crate::fetch::anonymous::testserver::{serve, Mode};
         serve("silent.many.test", Mode::Silent);
         serve("public.many.test", Mode::Public);
-        let ask = |url: String| Ask { repos: vec!["r".to_owned()], candidate: url.clone(), url };
+        let ask = |url: String| Ask { repos: vec!["r".to_owned()], names: vec!["r".to_owned()], candidate: url.clone(), url };
         let mut asks: Vec<Ask> = (0..40).map(|i| ask(format!("https://silent.many.test/o/r{i}"))).collect();
         asks.push(ask("https://public.many.test/o/r".to_owned()));
         let window = AskWindow::from(std::time::Instant::now(), std::time::Duration::from_millis(1500));
-        let verdicts = probe_all(&asks, window).unwrap();
+        let verdicts = probe_all(&prodash::tree::Root::new(), &asks, window).unwrap();
         assert_eq!(verdicts[40], Verdict::Publish("https://public.many.test/o/r".to_owned()));
         assert!(matches!(&verdicts[0], Verdict::Refuse(why) if why.contains("no answer within")), "{:?}", verdicts[0]);
     }

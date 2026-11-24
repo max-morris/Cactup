@@ -8,6 +8,7 @@
 
 pub mod cache;
 pub mod export;
+pub mod registered;
 pub mod shareable;
 pub mod trim;
 pub mod manage;
