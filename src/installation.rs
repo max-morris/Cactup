@@ -291,8 +291,8 @@ pub struct AddedPackage {
     /// library's own library, inside that library's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub libraries: Vec<AddedLibrary>,
-    /// For a flesh package (`flesh` on Cactarium): the items it checks out
-    /// into the Cactus root, as the base's flesh did when it was added
+    /// For a flesh package (`flesh` on Cactarium): its items at the Cactus
+    /// root, those of the base's flesh when the package was added
     /// (`Makefile`, `lib`, `src`, …). It takes the place of every component
     /// of the base's flesh, whatever its name or URL. Empty: not the flesh.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -570,7 +570,9 @@ thread_local! {
 /// What restoring the base repos did, one line each: back at the base's
 /// pin, or on the branch a base that follows one has.
 fn restored_lines(plan: &crate::fetch::Plan) -> Vec<String> {
+    // A clone made again says so on its own line.
     (plan.git.iter())
+        .filter(|g| !matches!(g.action, crate::fetch::GitAction::Clone))
         .map(|g| match (&g.commit, &g.branch) {
             (None, Some(branch)) => format!("Restored {} to the base's branch {branch}.", g.repo),
             _ => format!("Restored {} to the base's commit.", g.repo),
@@ -1115,8 +1117,8 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
     let mut notes: Vec<String> = Vec::new();
     let records = records_of(&plan, &present, &start.meta, &base)?;
     let added = place(&base, &start.meta, records, &plan, &mut notes, &heads)?;
-    // Added packages another takes the place of (a flesh in place of a
-    // flesh package): their records go.
+    // Added packages displaced by another (a flesh in place of a flesh
+    // package): their records go.
     let displaced = displaced_by(&plan);
     let gone: Vec<AddedPackage> =
         start.meta.added.iter().filter(|a| displaced.iter().any(|(id, _)| *id == a.package)).cloned().collect();
@@ -1233,7 +1235,8 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
             flesh.into_iter().chain(package.thorns.iter().map(|t| t.checkout.as_str())).collect();
         let instead: Vec<&str> =
             displaced.iter().filter(|(_, by)| *by == package.package).map(|(id, _)| id.as_str()).collect();
-        let instead = if instead.is_empty() { package.replaces.join(", ") } else { instead.join(", ") };
+        let repos: Vec<String> = package.replaces.iter().map(|r| format!("base repo {r}")).collect();
+        let instead = if instead.is_empty() { repos.join(", ") } else { instead.join(", ") };
         let short = &package.commit[..12.min(package.commit.len())];
         let at = if is_tip(&package.version) {
             format!(" following its default branch, now at {short}")
@@ -1267,13 +1270,34 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
     for note in &unplacing.notes {
         println!("{note}");
     }
-    let left = left_on_disk(&gone, &base);
-    if !left.is_empty() {
-        println!("Their repos {} stay on disk.", left.join(", "));
-        println!("Remove them with `cactup inst refetch --prune`.");
+    let replaced: Vec<&str> = gone.iter().map(|a| a.package.as_str()).collect();
+    for line in left_lines(&left_on_disk(&gone, &base), Some(&replaced)) {
+        println!("{line}");
     }
-    println!("{}", build_hint(plan.rebuild.then_some("the new flesh"), false));
+    // A package re-added as it was (a flesh, say) leaves nothing new to compile.
+    let compile = added.iter().any(|a| !a.thorns.is_empty() || !a.libraries.is_empty());
+    if plan.rebuild || compile {
+        println!("{}", build_hint(plan.rebuild.then_some("the new flesh"), false));
+    }
     Ok(())
+}
+
+/// What says that `left` (repos left on disk, unlisted) stay for a prune:
+/// those of the packages `replaced` by others (`add`), or of the packages
+/// removed (`remove`, `None`).
+fn left_lines(left: &[String], replaced: Option<&[&str]>) -> Vec<String> {
+    let (repos, them) = match left {
+        [] => return Vec::new(),
+        [one] => (format!("repo {one}"), "it"),
+        many => (format!("repos {}", many.join(", ")), "them"),
+    };
+    let stay = if left.len() == 1 { "stays" } else { "stay" };
+    let first = match replaced {
+        Some(replaced) => format!("The {repos} of the replaced {} {stay} on disk.", replaced.join(", ")),
+        None if left.len() == 1 => format!("Its {repos} stays on disk."),
+        None => format!("Their {repos} stay on disk."),
+    };
+    vec![first, format!("Remove {them} with `cactup inst refetch --prune`.")]
 }
 
 /// Every snapshot nobody vouches for that the plan takes (an untrusted
@@ -1291,8 +1315,8 @@ fn confirm_untrusted(plan: &crate::deps::Plan, allow: bool, interactive: bool) -
     Ok(())
 }
 
-/// The added packages a plan drops for another (a flesh package another
-/// flesh takes the place of), each with the package taking its place.
+/// The added packages dropped by a plan for another (a flesh package
+/// displaced by another flesh), each with the package taking its place.
 fn displaced_by(plan: &crate::deps::Plan) -> Vec<(String, String)> {
     use crate::deps::{Replaced, Step};
     (plan.steps.iter())
@@ -1326,7 +1350,7 @@ struct RootLinks {
 
 impl RootLinks {
     /// The links (or nothing) at the root checkouts of the `lists`; a real
-    /// file or directory there is no link a fetch moves.
+    /// file or directory there is no link moved by a fetch.
     fn save(install_root: &std::path::Path, lists: &[&str]) -> Res<RootLinks> {
         let mut saved: Vec<(std::path::PathBuf, Option<std::path::PathBuf>)> = Vec::new();
         for text in lists {
@@ -1356,32 +1380,43 @@ impl RootLinks {
         self.armed = false;
     }
 
-    fn put_back(&self) -> Res<()> {
+    /// Puts every link back that it can, and says why for each failure.
+    fn put_back(&self) -> Vec<String> {
+        let mut failed = Vec::new();
         for (path, was) in &self.saved {
             let now = std::fs::read_link(path).ok();
             if now == *was {
                 continue;
             }
-            if now.is_some() {
-                std::fs::remove_file(path).with_context(|| format!("Failed to remove '{}'", path.display()))?;
-            }
-            if let Some(to) = was {
-                std::os::unix::fs::symlink(to, path)
-                    .with_context(|| format!("Failed to link '{}' to '{}'", path.display(), to.display()))?;
+            let put = (|| -> Res<()> {
+                if now.is_some() {
+                    std::fs::remove_file(path).with_context(|| format!("Failed to remove '{}'", path.display()))?;
+                }
+                if let Some(to) = was {
+                    std::os::unix::fs::symlink(to, path)
+                        .with_context(|| format!("Failed to link '{}' to '{}'", path.display(), to.display()))?;
+                }
+                Ok(())
+            })();
+            if let Err(e) = put {
+                failed.push(format!("{e:#}"));
             }
         }
-        Ok(())
+        failed
     }
 }
 
 impl Drop for RootLinks {
     fn drop(&mut self) {
-        if self.armed
-            && let Err(e) = self.put_back()
-        {
-            eprintln!(
-                "Could not put the links at the Cactus root back: {e:#}.\nRun `cactup inst refetch` to repair them."
-            );
+        if !self.armed {
+            return;
+        }
+        let failed = self.put_back();
+        for why in &failed {
+            eprintln!("{why}");
+        }
+        if !failed.is_empty() {
+            eprintln!("Some links at the Cactus root were not put back.\nRun `cactup inst refetch` to repair them.");
         }
     }
 }
@@ -1419,8 +1454,7 @@ fn records_of(
                     }
                     if old.is_flesh() && !release.flesh {
                         bail!(
-                            "{} is no flesh, but {} is the installation's flesh.\nRemove it first with \
-                             `cactup remove {}`.",
+                            "{} is not a flesh.\n{} is the installation's flesh.\nRemove it first with `cactup remove {}`.",
                             release.label(),
                             old.package,
                             old.package
@@ -1428,7 +1462,11 @@ fn records_of(
                     }
                 }
                 if release.flesh {
-                    flesh_record(&mut package, release, base, meta)?;
+                    let why = match step {
+                        Step::Add { why, .. } | Step::Upgrade { why, .. } => Some(why),
+                        _ => None,
+                    };
+                    flesh_record(&mut package, release, why, base, meta)?;
                 }
                 out.push(package);
             }
@@ -1500,13 +1538,14 @@ fn records_of(
     Ok(out)
 }
 
-/// Makes `package` (of `release`, a flesh) a flesh package: it checks out what
-/// the base's flesh does into the root, and takes the place of the base's
-/// flesh repos. A base with no flesh leaves the items it had before, when it
-/// is added again; else it is refused.
+/// Makes `package` (of `release`, a flesh, brought in for `why`) a flesh
+/// package: its items at the root are those of the base's flesh, and it takes
+/// the place of the base's flesh repos. A base with no flesh leaves the items
+/// recorded before, when it is added again; else it is refused.
 fn flesh_record(
     package: &mut AddedPackage,
     release: &crate::deps::Release,
+    why: Option<&crate::deps::Why>,
     base: &thornlist::Thornlist,
     meta: &crate::installation::InstallationMeta,
 ) -> Res<()> {
@@ -1517,7 +1556,14 @@ fn flesh_record(
         package.flesh.clone_from(&old.flesh);
     }
     if package.flesh.is_empty() {
-        bail!("{} is a Cactus flesh, and the installation's thornlist has none to replace.", release.label());
+        let needed = match why {
+            Some(crate::deps::Why::Needed { by, .. }) => format!("\n{by} needs it."),
+            _ => String::new(),
+        };
+        bail!(
+            "{} is a Cactus flesh.{needed}\nThe installation's thornlist has no flesh to replace.",
+            release.label()
+        );
     }
     for repo in base_flesh_repos(base) {
         if !package.replaces.iter().any(|r| r == repo) {
@@ -1706,6 +1752,16 @@ fn place(
                     );
                 }
             }
+        }
+        // A flesh package from another repository in the clone of the base's
+        // flesh: the base's flesh comes back there on `remove`, and the fetch
+        // would have to move one clone between two repositories.
+        if package.is_flesh() && !reused && base_flesh_repos(base).contains(package.repo.as_str()) {
+            bail!(
+                "{slug} and the base's flesh have the same clone name, {}.\nA flesh package needs a clone name \
+                 of its own.",
+                package.repo
+            );
         }
         // A clone's name is one source: a base repo of the same name whose
         // checkouts stay would be a second.
@@ -1932,10 +1988,7 @@ pub fn remove(ctx: &Ctx, packages: &[String], flags: &RemoveFlags) -> Res<()> {
         touched.extend(base_flesh_repos(&base));
     }
     let restore = restore_plan(inst, &composed, &touched, &gone, &removed)?;
-    let mut lines = plan.lines(&command);
-    if flesh {
-        lines.push((crate::deps::LineKind::Rebuild, crate::deps::FLESH_REBUILD.to_owned()));
-    }
+    let lines = removal_lines(&plan, &command, flesh);
     if !super::resolution::show_and_confirm(&lines, plan.beyond_named(), how)? {
         return Ok(());
     }
@@ -1965,6 +2018,11 @@ pub fn remove(ctx: &Ctx, packages: &[String], flags: &RemoveFlags) -> Res<()> {
         }
         crate::fetch::FetchState::record(&inst.root, &report.records())?;
     }
+    // A base with no flesh (a refetch took it away) gets no flesh back: the
+    // root's links into the removed flesh's clone go, so the root is the
+    // base's. They are links only; the clone keeps the files.
+    let fleshless = flesh && base_flesh_repos(&base).is_empty();
+    let unlinked = if fleshless { unlink_flesh(&inst.cactus_root()?, &removed)? } else { Vec::new() };
     let live_path = &start.live_path;
     crate::cow::Cow::at(&inst.root)?.before_replace(live_path)?;
     std::fs::write(live_path, &composed).with_context(|| format!("Failed to write '{}'", live_path.display()))?;
@@ -1992,16 +2050,51 @@ pub fn remove(ctx: &Ctx, packages: &[String], flags: &RemoveFlags) -> Res<()> {
     for note in &unplacing.notes {
         println!("{note}");
     }
-    let left = left_on_disk(&removed, &base);
-    if !left.is_empty() {
-        println!("Their repos {} stay on disk.", left.join(", "));
-        println!("Remove them with `cactup inst refetch --prune`.");
+    if !unlinked.is_empty() {
+        println!("The base has no flesh.");
+        println!("Removed the links at the Cactus root into repos/{}.", unlinked.join(", repos/"));
+    }
+    for line in left_lines(&left_on_disk(&removed, &base), None) {
+        println!("{line}");
     }
     for line in &restored {
         println!("{line}");
     }
-    println!("{}", build_hint(flesh.then_some("the base's flesh"), true));
+    println!("{}", build_hint((flesh && !fleshless).then_some("the base's flesh"), true));
     Ok(())
+}
+
+/// What `remove` shows of its plan: a flesh package going changes the flesh,
+/// so every config needs a rebuild.
+fn removal_lines(plan: &crate::deps::RemovePlan, command: &str, flesh: bool) -> Vec<(crate::deps::LineKind, String)> {
+    let mut lines = plan.lines(command);
+    if flesh {
+        lines.push((crate::deps::LineKind::Rebuild, crate::deps::FLESH_REBUILD.to_owned()));
+    }
+    lines
+}
+
+/// Removes the links at the Cactus root (`cactus`) into the clones of the
+/// flesh packages among `removed`, each at one of its items: the clones
+/// whose links went.
+fn unlink_flesh(cactus: &std::path::Path, removed: &[AddedPackage]) -> Res<Vec<String>> {
+    let repos = cactus.join("repos");
+    let real = std::fs::canonicalize(&repos).ok();
+    let mut unlinked: Vec<String> = Vec::new();
+    for a in removed.iter().filter(|a| a.is_flesh()) {
+        for item in &a.flesh {
+            let path = cactus.join(item);
+            let linked = std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
+            if !linked || thornlist::repo_behind(&path, &repos, real.as_deref()).as_deref() != Some(a.repo.as_str()) {
+                continue;
+            }
+            std::fs::remove_file(&path).with_context(|| format!("Failed to remove the link '{}'", path.display()))?;
+            if !unlinked.contains(&a.repo) {
+                unlinked.push(a.repo.clone());
+            }
+        }
+    }
+    Ok(unlinked)
 }
 
 #[cfg(test)]
@@ -3304,6 +3397,56 @@ mod tests {
         assert!(live.contains("$ARR/Fuka/KadathThorn/src/fuka/../../../../repos/KadathThorn/src/fuka"), "{live}");
         assert!(!it.exclude().contains("/src/fuka"), "the dropped placement stays dropped: {}", it.exclude());
         assert!(it.kadath_dir().join("src/fuka/Cmake/CMakeLists.txt").is_file());
+    }
+
+    /// Putting the root's links back tries every one: a link that cannot be
+    /// made (its directory gone) is said, and the next is put back all the same.
+    #[test]
+    fn every_root_link_is_put_back_that_can_be() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (gone, kept) = (tmp.path().join("gone/Makefile"), tmp.path().join("lib"));
+        std::os::unix::fs::symlink("repos/cactus-mp/lib", &kept).unwrap();
+        let links = RootLinks {
+            saved: vec![(gone, Some("repos/flesh/Makefile".into())), (kept.clone(), Some("repos/flesh/lib".into()))],
+            armed: false,
+        };
+        let failed = links.put_back();
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].contains("gone/Makefile"), "{failed:?}");
+        assert_eq!(std::fs::read_link(&kept).unwrap(), std::path::Path::new("repos/flesh/lib"));
+    }
+
+    /// What `remove` and `add` say about a flesh package: the plan's rebuild
+    /// line and the last line, and the clone a flesh package leaves on disk
+    /// (one replacing a base repo still has a clone of its own), in the
+    /// singular for one repo.
+    #[test]
+    fn what_a_flesh_change_says() {
+        let plan = crate::deps::RemovePlan {
+            removed: vec![crate::deps::PkgId::parse("max/mp").unwrap()],
+            removed_labels: vec!["max/mp@1.0.0".into()],
+            orphans: Vec::new(),
+            took: Default::default(),
+        };
+        let lines = removal_lines(&plan, "cactup remove max/mp", true);
+        assert_eq!(lines.last().unwrap(), &(crate::deps::LineKind::Rebuild, crate::deps::FLESH_REBUILD.to_owned()));
+        assert!(!removal_lines(&plan, "cactup remove max/mp", false).iter().any(|(k, _)| *k == crate::deps::LineKind::Rebuild));
+        assert!(build_hint(Some("the base's flesh"), true).contains("Rebuild every config for the base's flesh, e.g."));
+
+        let base = thornlist::parse(BASE).unwrap();
+        let mut mp = package("cactus-mp", &[], &["flesh"]);
+        assert!(left_on_disk(std::slice::from_ref(&mp), &base).is_empty(), "a replacing package goes back");
+        mp.flesh = vec!["Makefile".into()];
+        assert_eq!(left_on_disk(std::slice::from_ref(&mp), &base), ["cactus-mp"]);
+        assert_eq!(
+            left_lines(&["cactus-mp".into()], Some(&["max/mp"])),
+            ["The repo cactus-mp of the replaced max/mp stays on disk.", "Remove it with `cactup inst refetch --prune`."]
+        );
+        assert_eq!(left_lines(&["a".into()], None)[0], "Its repo a stays on disk.");
+        assert_eq!(
+            left_lines(&["a".into(), "b".into()], None),
+            ["Their repos a, b stay on disk.", "Remove them with `cactup inst refetch --prune`."]
+        );
     }
 }
 

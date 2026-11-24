@@ -1707,7 +1707,8 @@ pub(crate) fn show_and_confirm(lines: &[(LineKind, String)], beyond_named: bool,
     let show_all = beyond_named || how.dry_run;
     for (kind, line) in lines {
         match kind {
-            LineKind::Header | LineKind::Step if !show_all => {}
+            // The plan unshown: the command's last line says what to rebuild.
+            LineKind::Header | LineKind::Step | LineKind::Rebuild if !show_all => {}
             LineKind::Header => println!("{}", line.bold()),
             LineKind::Pending => println!("{}", line.red()),
             LineKind::Rebuild => println!("{}", line.yellow()),

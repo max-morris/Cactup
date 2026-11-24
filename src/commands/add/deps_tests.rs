@@ -939,17 +939,22 @@ fn a_leftover_added_for_entry_is_not_inherited() {
     let _ = (&it.a2, &it.log);
 }
 
-/// A flesh package checks out what the base's flesh does: a base with no
-/// flesh has nothing for it to take the place of, and is refused before
-/// anything is shown or changed.
+/// A flesh package takes over the base flesh's items at the root: a base
+/// with no flesh has nothing for it to take the place of, and is refused
+/// before anything is shown or changed, naming what needs it when a
+/// dependency brings it in.
 #[test]
 fn a_flesh_package_needs_a_base_flesh_to_replace() {
     let flesh = version_with("1.0.0", &"a".repeat(40), "https://x/cactus.git", &[], "[]", true);
-    let (base, _) = Fake::new().package("et/cactus", vec![flesh]).serve();
+    let claims = format!("[{}]", depends("et/cactus", ">=1.0", &[]));
+    let user = version("1.0.0", &"b".repeat(40), "https://x/u.git", "U", &["U"], &claims);
+    let (base, _) = Fake::new().package("et/cactus", vec![flesh]).package("max/u", vec![user]).serve();
     let tmp = tempfile::tempdir().unwrap();
     let s = Setup::new(tmp, "", &base);
     let err = format!("{:#}", s.add(&["et/cactus"], yes()).unwrap_err());
-    assert!(err.contains("et/cactus@1.0.0 is a Cactus flesh") && err.contains("none to replace"), "{err}");
+    assert!(err.starts_with("et/cactus@1.0.0 is a Cactus flesh.\nThe installation's thornlist has no flesh to replace."), "{err}");
+    let err = format!("{:#}", s.add(&["max/u"], yes()).unwrap_err());
+    assert!(err.contains("et/cactus@1.0.0 is a Cactus flesh.\nmax/u@1.0.0 needs it.\nThe installation"), "{err}");
     assert!(s.meta().added.is_empty());
 }
 
@@ -2806,14 +2811,17 @@ fn remove_reads_an_unfrozen_base_package_cactup_gave_thorns() {
 /// A base whose flesh is et/cactus 1.0.0 at `f` (`repos/flesh`; its
 /// `Makefile`, `lib` and `src` linked into the root; 2.0.0 is at `f2`, a
 /// commit later), beside base repo tb (et/tb, thorn Base/T). max/mp and
-/// max/mx 1.0.0 are fleshes of their own
-/// (cloned as `repos/cactus-mp`, `repos/cactus-mx`), and max/z4c 1.0.0
-/// (thorn Z4c) needs the flesh max/mp.
+/// max/mx 1.0.0 are fleshes of their own (max/mf too, from a repository
+/// named like the base's flesh clone)
+/// (cloned as `repos/cactus-mp`, `repos/cactus-mx`). max/z4c 1.0.0 (thorn
+/// Z4c) needs the flesh max/mp at >=1.0, max/fu (FU) at ^1.0; max/fe (FE)
+/// needs et/cactus ^1.0.
 struct Flesh {
     setup: Setup,
     f: String,
     f2: String,
     mp: String,
+    fake: Shared,
 }
 
 fn flesh() -> Flesh {
@@ -2830,6 +2838,9 @@ fn flesh() -> Flesh {
     let (_, f2) = up("cactus", "base2");
     let (mpurl, mp) = up("cactus-mp", "mp");
     let (mxurl, mx) = up("cactus-mx", "mx");
+    let (mfurl, mf) = up("flesh", "mf");
+    let (fuurl, fu) = upstream(tmp.path(), "fu", &[("FU/interface.ccl", "IMPLEMENTS: fu\n")]);
+    let (feurl, fe) = upstream(tmp.path(), "fe", &[("FE/interface.ccl", "IMPLEMENTS: fe\n")]);
     let (zurl, z) = upstream(tmp.path(), "z4c", &[("Z4c/interface.ccl", "IMPLEMENTS: z4c\n")]);
     let (tburl, tb) = upstream(tmp.path(), "tb", &[("T/interface.ccl", "IMPLEMENTS: t\n")]);
     let claims = format!("[{}]", depends("max/mp", ">=1.0", &[]));
@@ -2840,17 +2851,20 @@ fn flesh() -> Flesh {
         )
         .package("max/mp", vec![version_with("1.0.0", &mp, &mpurl, &[], "[]", true)])
         .package("max/mx", vec![version_with("1.0.0", &mx, &mxurl, &[], "[]", true)])
+        .package("max/mf", vec![version_with("1.0.0", &mf, &mfurl, &[], "[]", true)])
+        .package("max/fu", vec![version("1.0.0", &fu, &fuurl, "FU", &["FU"], &format!("[{}]", depends("max/mp", "^1.0", &[])))])
+        .package("max/fe", vec![version("1.0.0", &fe, &feurl, "FE", &["FE"], &format!("[{}]", depends("et/cactus", "^1.0", &[])))])
         .package("max/z4c", vec![version("1.0.0", &z, &zurl, "Z4c", &["Z4c"], &claims)])
         .package("et/tb", vec![version("1.0.0", &tb, &tburl, "Base", &["T"], "[]")])
         .pin(&furl, "et/cactus", Some("1.0.0"))
         .pin(&tburl, "et/tb", Some("1.0.0"));
     fake.flesh.push(furl.clone());
-    let (cactarium, _) = fake.serve();
+    let (cactarium, _, fake) = fake.serve_shared();
     let base = format!(
         "\n!TARGET = $ROOT\n!TYPE = git\n!URL = {furl}\n!NAME = flesh\n!REPO_COMMIT = {f}\n!CHECKOUT = Makefile lib src\n{}",
         section(&tburl, &tb, &["Base/T"])
     );
-    Flesh { setup: Setup::new(tmp, &base, &cactarium), f, f2, mp }
+    Flesh { setup: Setup::new(tmp, &base, &cactarium), f, f2, mp, fake }
 }
 
 impl Flesh {
@@ -2973,7 +2987,7 @@ fn the_base_flesh_s_own_package_moves_in_place() {
     assert_eq!(it.live(), it.pristine());
 }
 
-/// A flesh another package depends on comes in as a dependency, in place of
+/// A flesh needed by another package comes in as a dependency, in place of
 /// the base's flesh; removing the dependent takes it along and gives the
 /// base's flesh back.
 #[test]
@@ -3131,4 +3145,115 @@ fn remove_gives_back_the_flesh_of_the_base_as_it_is_now() {
     s.remove(&["max/mp"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
     it.flesh_is("core", "base");
     assert_eq!(it.live(), pristine);
+}
+
+/// A flesh coming in never takes the place of a flesh that a package staying
+/// needs (an added flesh package, or the base's own): refused, naming the
+/// dependents, with `--no-deps` as the way past.
+#[test]
+fn a_flesh_with_dependents_is_not_displaced() {
+    let it = flesh();
+    let s = &it.setup;
+    s.add(&["max/fu"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let meta = s.meta();
+    let err = format!("{:#}", s.add(&["max/mx"], yes()).unwrap_err());
+    assert!(err.contains("max/mx@1.0.0 would take the place of the flesh max/mp@1.0.0"), "{err}");
+    assert!(err.contains("installed max/fu@1.0.0 (max/mp ^1.0)") && err.contains("pass --no-deps"), "{err}");
+    assert_eq!(s.meta().added, meta.added);
+    it.flesh_is("cactus-mp", "mp");
+    s.add(&["max/mx"], AddFlags { no_deps: true, ..yes() }).unwrap_or_else(|e| panic!("{e:#}"));
+    assert_eq!(s.added(), [("max/fu".to_owned(), vec!["FU/FU".to_owned()]), ("max/mx".to_owned(), vec![])]);
+    it.flesh_is("cactus-mx", "mx");
+
+    // The base's flesh, which max/fe needs.
+    let it = flesh();
+    let s = &it.setup;
+    s.add(&["max/fe"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let err = format!("{:#}", s.add(&["max/mx"], yes()).unwrap_err());
+    assert!(err.contains("the flesh et/cactus@1.0.0") && err.contains("installed max/fe@1.0.0"), "{err}");
+    it.flesh_is("flesh", "base");
+}
+
+/// A flesh package from another repository whose clone name is the base
+/// flesh's is refused, saying so.
+#[test]
+fn a_flesh_package_named_like_the_base_flesh_clone_is_refused() {
+    let it = flesh();
+    let s = &it.setup;
+    let err = format!("{:#}", s.add(&["max/mf"], yes()).unwrap_err());
+    assert!(err.contains("max/mf@1.0.0 and the base's flesh have the same clone name, flesh."), "{err}");
+    assert!(err.contains("A flesh package needs a clone name of its own."), "{err}");
+    assert!(s.meta().added.is_empty());
+    it.flesh_is("flesh", "base");
+}
+
+/// An added flesh package moved to a release that is no flesh is refused.
+#[test]
+fn a_flesh_package_never_moves_to_a_release_that_is_not_a_flesh() {
+    let it = flesh();
+    let s = &it.setup;
+    s.add(&["max/mp"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let up = s._tmp.path().join("up/cactus-mp");
+    let mp2 = crate::fetch::tests::commit_files(&up, &[("README", "2\n")]).to_string();
+    {
+        let mut f = it.fake.lock().unwrap();
+        let two = version_with("2.0.0", &mp2, &up.display().to_string(), &[], "[]", false);
+        f.packages.iter_mut().find(|(p, _)| p == "max/mp").unwrap().1.insert(0, two);
+    }
+    let err = format!("{:#}", s.add(&["max/mp@=2.0.0"], yes()).unwrap_err());
+    assert!(
+        err.starts_with("max/mp@2.0.0 is not a flesh.\nmax/mp is the installation's flesh.\nRemove it first with"),
+        "{err}"
+    );
+    assert_eq!(s.meta().added[0].commit, it.mp);
+}
+
+/// After a refetch to a base with no flesh, removing the flesh package takes
+/// the root's links into its clone away: the root is the base's again.
+#[test]
+fn remove_leaves_no_flesh_links_on_a_base_without_a_flesh() {
+    let it = flesh();
+    let s = &it.setup;
+    s.add(&["max/mp"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let pristine = it.pristine();
+    let start = pristine.find("\n!TARGET = $ROOT").unwrap();
+    let end = start + pristine[start..].find("Makefile lib src\n").unwrap() + "Makefile lib src\n".len();
+    let pristine = format!("{}{}", &pristine[..start], &pristine[end..]);
+    std::fs::write(s.inst.source_thornlist(), &pristine).unwrap();
+    std::fs::write(s.inst.live_thornlist().unwrap(), compose(&pristine, &s.meta().added).unwrap()).unwrap();
+    s.remove(&["max/mp"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    for item in ["Makefile", "lib", "src"] {
+        assert!(std::fs::symlink_metadata(it.cactus().join(item)).is_err(), "{item}");
+    }
+    assert!(it.cactus().join("repos/cactus-mp/Makefile").is_file(), "the clone keeps its files");
+    assert!(it.cactus().join("arrangements/Base/T/interface.ccl").is_file());
+    assert_eq!(it.live(), pristine);
+}
+
+/// A config built from a thornlist of its own (`--thornlist`), which keeps
+/// naming the base's flesh: the flesh used for its build is where the root's
+/// Makefile links, so a flesh package in place of the base's flesh, and the
+/// base's back, are a changed flesh to `build`, `config delta` and the
+/// submit warning alike (all read the sources this way).
+#[test]
+fn a_config_s_own_thornlist_sees_the_flesh_swapped() {
+    let it = flesh();
+    let s = &it.setup;
+    let own = it.pristine();
+    let cactus = it.cactus();
+    let probe = || crate::fetch::probe_sources(&s.inst.root, &cactus, &own).unwrap().unwrap();
+    let built = probe();
+    assert_eq!(built.flesh.as_deref(), Some("flesh"));
+    s.add(&["max/mp"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let now = probe();
+    assert_eq!(now.flesh.as_deref(), Some("cactus-mp"));
+    let (delta, change) = crate::build::source_delta(Some(&built.heads), Some(&now));
+    assert_eq!((delta, change.swapped.as_deref()), (crate::build::SourceDelta::Flesh, Some("cactus-mp")));
+
+    s.remove(&["max/mp"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let back = probe();
+    let mut with_mp = now.heads.clone();
+    with_mp.remove("flesh");
+    let (delta, change) = crate::build::source_delta(Some(&with_mp), Some(&back));
+    assert_eq!((delta, change.swapped.as_deref()), (crate::build::SourceDelta::Flesh, Some("flesh")));
 }

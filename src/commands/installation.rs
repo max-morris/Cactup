@@ -270,17 +270,7 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
         // problems with it.
         for (i, package) in meta.added.iter().enumerate() {
             let label = if i == 0 { "added:" } else { "" };
-            let flesh = package.is_flesh().then_some("the flesh");
-            let thorns: Vec<&str> =
-                flesh.into_iter().chain(package.thorns.iter().map(|t| t.checkout.as_str())).collect();
-            let replaces = if package.replaces.is_empty() {
-                String::new()
-            } else {
-                format!(", in place of {}", package.replaces.join(", "))
-            };
-            let follows = if crate::commands::add::is_tip(&package.version) { ", follows its default branch" } else { "" };
-            let what = crate::commands::add::describe(&package.package, &package.version);
-            println!("  {label:<13} {what} ({}){replaces}{follows}", thorns.join(", "));
+            println!("  {label:<13} {}", added_line(package));
             println!("  {:<13}   problems? {}", "", package.contact.as_deref().unwrap_or(&package.url));
             for library in &package.libraries {
                 let what = crate::commands::add::describe(&library.package, &library.version);
@@ -320,6 +310,22 @@ fn current_stack(entry: &CactusInstallation) -> Option<&str> {
 /// `: <reason>`, or nothing for a yank that gave none.
 fn reason(why: &str) -> String {
     if why.is_empty() { String::new() } else { format!(": {why}") }
+}
+
+/// One added package as `inst show` lists it: what it is, its thorns (or
+/// "the flesh"), what it replaces, and whether it follows a branch.
+fn added_line(package: &crate::installation::AddedPackage) -> String {
+    let flesh = package.is_flesh().then_some("the flesh");
+    let thorns: Vec<&str> = flesh.into_iter().chain(package.thorns.iter().map(|t| t.checkout.as_str())).collect();
+    let replaces = if package.replaces.is_empty() {
+        String::new()
+    } else {
+        let repos: Vec<String> = package.replaces.iter().map(|r| format!("base repo {r}")).collect();
+        format!(", in place of {}", repos.join(", "))
+    };
+    let follows = if crate::commands::add::is_tip(&package.version) { ", follows its default branch" } else { "" };
+    let what = crate::commands::add::describe(&package.package, &package.version);
+    format!("{what} ({}){replaces}{follows}", thorns.join(", "))
 }
 
 /// What Cactarium says is yanked now: the installation's stack
@@ -390,6 +396,33 @@ mod tests {
     use super::*;
     use crate::database::{CactusInstallation, UnfetchedReason, UnfetchedRepo};
     use indexmap::IndexMap;
+
+    /// `inst show` names a flesh package "the flesh", beside any thorns it
+    /// has, and what it replaces as base repos.
+    #[test]
+    fn a_flesh_package_is_listed_as_the_flesh() {
+        let package = crate::installation::AddedPackage {
+            package: "max/mp".into(),
+            version: "1.0.0".into(),
+            tag: None,
+            commit: "a".repeat(40),
+            url: "https://x/cactus-mp.git".into(),
+            repo: "cactus-mp".into(),
+            thorns: Vec::new(),
+            replaces: vec!["flesh".into()],
+            contact: None,
+            libraries: Vec::new(),
+            flesh: vec!["Makefile".into(), "lib".into(), "src".into()],
+        };
+        assert_eq!(added_line(&package), "max/mp@1.0.0 (the flesh), in place of base repo flesh");
+        let thorns = crate::installation::AddedPackage {
+            thorns: vec![crate::installation::AddedThorn { checkout: "A/T".into(), repo_path: String::new() }],
+            flesh: Vec::new(),
+            replaces: Vec::new(),
+            ..package
+        };
+        assert_eq!(added_line(&thorns), "max/mp@1.0.0 (A/T)");
+    }
 
     fn entry(unfetched_repos: IndexMap<String, UnfetchedRepo>) -> CactusInstallation {
         CactusInstallation {

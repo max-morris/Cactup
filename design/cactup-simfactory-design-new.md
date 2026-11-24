@@ -5059,21 +5059,26 @@ is recomposed without it, and only the base repos it replaced are fetched again
 — back to the base's pins. The package's own repo stays on disk, unlisted, for
 `inst refetch --prune` to remove.
 
-**Flesh packages.** A package Cactarium marks `flesh` takes the place of the
-base's flesh, keyed on the flesh (every base repo with a component that
-checks `Makefile`, `lib` or `src` into the root), whatever its name or URL.
-Its `[[added]]` entry records `flesh`, the items the base's flesh checked
-out into the root (`Makefile`, `lib`, `src`, …), and `replaces` names the
-base's flesh repos. `compose` drops every component of those repos and
-writes one `$ROOT` section checking those items out of the package's clone
-(`repos/<its name>`, pinned at its commit), so the root's links into
-`repos/` move to that clone. A plan has at most one flesh: two named or
-brought in at once are refused, and a flesh coming in takes the place of a
-flesh package already added (its entry goes). `remove` points the links
-back into the base's flesh clone (fetched again if it was pruned). The plan
-and the command's last line say every config needs a rebuild, and a build
-whose flesh now comes from another repo than its last build's rebuilds from
-scratch (§7.4). A record with a flesh package is written as schema 4 (§2.5).
+**Flesh packages.** A package marked `flesh` by Cactarium takes the place
+of the base's flesh, keyed on the flesh (every base repo with a component
+that checks `Makefile`, `lib` or `src` into the root), whatever its name or
+URL. Its `[[added]]` entry records `flesh`, the base flesh's items at the
+root when the package was added (`Makefile`, `lib`, `src`, …), and
+`replaces` names the base's flesh repos. `compose` drops every component of
+those repos and writes one `$ROOT` section checking those items out of the
+package's clone (`repos/<its name>`, pinned at its commit), so the root's
+links into `repos/` move to that clone. A flesh package needs a clone name
+of its own: one named like the base's flesh clone is refused. A plan has at
+most one flesh: two named or brought in at once are refused, and a flesh
+coming in takes the place of a flesh package already added (its entry goes),
+unless a package staying needs the flesh it would displace (`--no-deps` gets
+past). `remove` points the links back into the base's flesh clone (fetched
+again if it was pruned); a base with no flesh gets the links removed. The
+command's last line says every config needs a rebuild, and so does the plan
+when it is shown. The flesh used by a build is where the root's `Makefile`
+links into `repos/`, and a build whose flesh now comes from a repo absent
+from its last build's record rebuilds from scratch (§7.4). A record with a
+flesh package is written as schema 4 (§2.5).
 
 **Libraries.** A package can build against a library package (`[package]
 library = true` in the registry: no thorns, e.g. et/fuka, which KadathThorn
