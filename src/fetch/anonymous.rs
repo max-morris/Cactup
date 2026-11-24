@@ -551,8 +551,7 @@ mod tests {
         let silent = check_remote("https://silent.probe.test/org/r.git", short).unwrap();
         assert_eq!(
             refused(&silent),
-            "https://silent.probe.test/org/r.git can't be checked: its host couldn't be reached (no answer within 1 s); try \
-             again later"
+            "https://silent.probe.test/org/r.git can't be checked: its host couldn't be reached (no answer within 1 s)"
         );
         assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
         let before = PROBED.lock().unwrap().len();
@@ -583,7 +582,7 @@ mod tests {
         let nowhere = check_now("https://nowhere.invalid/o/r.git");
         assert_eq!(
             refused(&nowhere),
-            "https://nowhere.invalid/o/r.git can't be checked: its host couldn't be reached (dns lookup failed); try again later"
+            "https://nowhere.invalid/o/r.git can't be checked: its host couldn't be reached (dns lookup failed)"
         );
     }
 
@@ -622,7 +621,7 @@ mod tests {
         let url = format!("http://swapped.probe.test:{port}/o/r");
         assert_eq!(
             refused(&check_now(&url)),
-            format!("{url} can't be checked: its host couldn't be reached (dns lookup failed); try again later")
+            format!("{url} can't be checked: its host couldn't be reached (dns lookup failed)")
         );
     }
 
@@ -707,7 +706,7 @@ mod tests {
         ROUTES.lock().unwrap().insert("closed.probe.test".to_owned(), format!("http://127.0.0.1:{closed}"));
         assert_eq!(
             refused(&check_now("https://closed.probe.test/o/r")),
-            "https://closed.probe.test/o/r can't be checked: its host couldn't be reached (connection refused); try again later"
+            "https://closed.probe.test/o/r can't be checked: its host couldn't be reached (connection refused)"
         );
     }
 }
