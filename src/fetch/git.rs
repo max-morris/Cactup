@@ -592,12 +592,24 @@ pub fn clone(url: &str, branch: Option<&str>, dest: &Path, progress: &mut impl c
                 return Err(e);
             }
         };
-        let (_repo, _outcome) = checkout
+        #[cfg(test)]
+        BEFORE_CHECKOUT.with(|hook| hook.get().map(|hook| hook()));
+        let checked = checkout
             .main_worktree(&mut *progress, &gix::interrupt::IS_INTERRUPTED)
-            .with_context(|| format!("Failed to check out {} (branch {branch_desc})", redacted(url)))?;
+            .with_context(|| format!("Failed to check out {} (branch {branch_desc})", redacted(url)));
         // gix's checkout returns `Ok` when interrupted, with only part of the
-        // tree written: that clone must not be reported as done.
-        if gix::interrupt::is_triggered() {
+        // tree written: that clone must not be reported as done. One made in
+        // a directory that was empty goes, as after a failed fetch; a later
+        // fetch clones it again.
+        let interrupted = gix::interrupt::is_triggered();
+        if fresh && (interrupted || checked.is_err()) {
+            let _ = std::fs::remove_dir_all(dest);
+        }
+        checked?;
+        if interrupted {
+            if fresh {
+                bail!("Interrupted during the clone's checkout");
+            }
             let name = dest.file_name().unwrap_or(dest.as_os_str()).to_string_lossy();
             bail!(
                 "Interrupted during the clone's checkout: '{}' is incomplete; delete it, then fetch {name} again",
@@ -885,8 +897,9 @@ pub fn pin(
 /// Create `dest` as a repo pinned at `commit`: an empty repo whose `origin`
 /// is `url`, then [`pin`] — the clone a `!REPO_COMMIT` component gets, since
 /// a branch clone would fetch a tip that may not be the pin (or, for a tag,
-/// no branch at all). Like [`clone`], a failure before the checkout began
-/// leaves nothing behind; one during it leaves `dest` to be deleted.
+/// no branch at all). Like [`clone`], one made in a directory that was empty
+/// or absent leaves nothing behind when it fails, interrupted mid-checkout
+/// included; a directory that held anything is never deleted.
 pub fn clone_pinned(
     url: &str,
     git_ref: Option<&str>,
@@ -895,12 +908,22 @@ pub fn clone_pinned(
     progress: &mut impl crate::progress::Handoff,
 ) -> Res<ObjectId> {
     let _span = crate::timing::span("git clone");
+    // A clone made in a directory that was empty (or absent) is this fetch's
+    // own: whatever stops it, interrupted mid-checkout included, it goes.
+    let fresh = dest.read_dir().map_or(true, |mut entries| entries.next().is_none());
     std::fs::create_dir_all(dest).with_context(|| format!("Failed to create '{}'", dest.display()))?;
     let pinned = gix::init(dest)
         .with_context(|| format!("Failed to create a repository in '{}'", dest.display()))
         .and_then(|repo| set_origin(&repo, url))
         .and_then(|()| pin(dest, git_ref, commit, false, progress));
     let Err(e) = pinned else { return pinned };
+    if fresh {
+        let _ = std::fs::remove_dir_all(dest);
+        if gix::interrupt::is_triggered() {
+            bail!("Interrupted during the clone of {} at {commit}", redacted(url));
+        }
+        return Err(e.context(format!("Failed to clone {} at {commit}", redacted(url))));
+    }
     if dest.join(".git").join("cactup-align").exists() {
         let name = dest.file_name().unwrap_or(dest.as_os_str()).to_string_lossy();
         return Err(e.context(format!(
@@ -908,7 +931,6 @@ pub fn clone_pinned(
             dest.display()
         )));
     }
-    let _ = std::fs::remove_dir_all(dest);
     Err(e.context(format!("Failed to clone {} at {commit}", redacted(url))))
 }
 
@@ -1055,6 +1077,13 @@ pub const INTERRUPTED_CHECKOUT: &str = "Interrupted during checkout";
 /// HEAD that already moved it reads as staged changes, so the repo is plainly
 /// modified, and it still lists the old tree's paths — which the recovering
 /// refetch needs to delete the files the new tree dropped.
+#[cfg(test)]
+thread_local! {
+    /// What a test does just before a checkout starts (on the calling
+    /// thread): an interrupt in the middle of one.
+    pub(crate) static BEFORE_CHECKOUT: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+}
+
 fn check_out_tree(
     repo: &gix::Repository,
     tree_id: ObjectId,
@@ -1085,6 +1114,8 @@ fn check_out_tree(
     // unbounded byte count beside it is dropped.
     let files = progress.add_child("checkout");
     let bytes = progress.add_child("writing");
+    #[cfg(test)]
+    BEFORE_CHECKOUT.with(|hook| hook.get().map(|hook| hook()));
     gix::worktree::state::checkout(
         &mut index,
         &workdir,
@@ -2492,6 +2523,62 @@ mod align_tests {
 
     /// An upstream with `files`, cloned into `<tmp>/clone`; returns the
     /// upstream dir, the clone dir and the branch.
+    /// Ctrl-C in the middle of a clone's checkout: a clone made in a
+    /// directory that was absent goes (a later fetch clones it again, rather
+    /// than finding "local modifications"), a branch clone and a pinned one
+    /// alike; a directory that held anything stays. The flag is the
+    /// process's: run in a child.
+    #[test]
+    fn an_interrupted_checkout_takes_away_only_a_clone_it_made() {
+        let name = "fetch::git::align_tests::an_interrupted_checkout_takes_away_only_a_clone_it_made";
+        if std::env::var_os("CACTUP_TEST_INTERRUPT_CHILD").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([name, "--exact", "--test-threads=1"])
+                .env("CACTUP_TEST_INTERRUPT_CHILD", "1")
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && said.contains("1 passed"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+            return;
+        }
+        use std::sync::atomic::Ordering;
+        fn interrupt() {
+            gix::interrupt::IS_INTERRUPTED.store(true, Ordering::SeqCst);
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let upstream = tmp.path().join("upstream");
+        testrepo::init(&upstream);
+        testrepo::commit_tree(&upstream, &[("a", "alpha\n", false), ("b", "beta\n", false)]);
+        let (branch, commit) = head_of(&upstream).unwrap();
+        let url = upstream.to_string_lossy().into_owned();
+        let mut progress = prodash::tree::Root::new().add_child("test clone");
+        BEFORE_CHECKOUT.with(|hook| hook.set(Some(interrupt)));
+
+        let fresh = tmp.path().join("fresh");
+        let err = clone(&url, Some(&branch), &fresh, &mut progress).unwrap_err();
+        assert!(format!("{err:#}").contains("Interrupted"), "{err:#}");
+        assert!(!fresh.exists(), "a branch clone it made goes");
+
+        gix::interrupt::IS_INTERRUPTED.store(false, Ordering::SeqCst);
+        let pinned = tmp.path().join("pinned");
+        let err = clone_pinned(&url, None, commit, &pinned, &mut progress).unwrap_err();
+        assert!(format!("{err:#}").contains("Interrupted"), "{err:#}");
+        assert!(!pinned.exists(), "a pinned clone it made goes");
+
+        for clone_it in [true, false] {
+            gix::interrupt::IS_INTERRUPTED.store(false, Ordering::SeqCst);
+            let old = tmp.path().join(format!("old-{clone_it}"));
+            std::fs::create_dir_all(&old).unwrap();
+            std::fs::write(old.join("mine"), "x").unwrap();
+            let failed = match clone_it {
+                true => clone(&url, Some(&branch), &old, &mut progress).is_err(),
+                false => clone_pinned(&url, None, commit, &old, &mut progress).is_err(),
+            };
+            assert!(failed);
+            assert_eq!(std::fs::read_to_string(old.join("mine")).unwrap(), "x", "a directory with anything in it stays");
+        }
+    }
+
     fn upstream_and_clone(tmp: &Path, files: &[(&str, &str, bool)]) -> (PathBuf, PathBuf, String) {
         let upstream = tmp.join("upstream");
         testrepo::init(&upstream);
