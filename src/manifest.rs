@@ -147,7 +147,12 @@ impl JoinHandle {
             state.renderer.take()
         };
         match renderer {
-            Some(renderer) => renderer.shutdown_and_wait(),
+            Some(renderer) => {
+                renderer.shutdown_and_wait();
+                // It printed the messages: the drop that follows
+                // `shutdown_and_wait` must not print them again.
+                self.options = None;
+            }
             None => self.print_messages(),
         }
     }
@@ -541,6 +546,34 @@ mod renderer_tests {
             let seen: Vec<usize> = (0..100).filter_map(|i| drawn.find(&format!("message {i:03}"))).collect();
             assert_eq!(seen.len(), 100, "after start {after_start}: {drawn:?}");
             assert!(seen.windows(2).all(|w| w[0] < w[1]), "after start {after_start}: out of order");
+        }
+    }
+
+    /// Each message is printed once, whether it came before the renderer
+    /// started or while it ran (not a terminal, as in a job log); the drop
+    /// that follows a shutdown prints nothing more.
+    #[test]
+    fn a_message_is_printed_once() {
+        for after_start in [false, true] {
+            let progress = new_root();
+            let sink = Sink::default();
+            let renderer = renderer_on(&progress, &sink, false);
+            if after_start {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            let layout = crate::progress::Layout::for_names(["fetch", "repo"]);
+            let mut headline = crate::progress::Headline::over(progress.add_child("fetch"), "fetch", 1, "components", layout.clone());
+            let line = crate::progress::Line::counting(headline.add_child("repo"), "repo", layout);
+            line.succeeded("cloned it");
+            drop(line);
+            headline.inc();
+            if after_start {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+            drop(headline);
+            renderer.shutdown_and_wait();
+            let drawn = String::from_utf8_lossy(&sink.0.lock().unwrap()).into_owned();
+            assert_eq!(drawn.matches("cloned it").count(), 1, "after start {after_start}: {drawn:?}");
         }
     }
 
