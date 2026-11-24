@@ -22,7 +22,8 @@
   "expect": {
     "refusal": "ForkAndUpstream",
     "message": [
-      "Pass --replace to use max/carpetx-mp in place of base repo carpetx, or --ignore-claim max/carpetx-mp:fork-of:et/carpetx"
+      "Pass --replace to use max/carpetx-mp in place of base repo carpetx, or --ignore-claim max/carpetx-mp:fork-of:et/carpetx",
+      "`cactup claims override drop max/carpetx-mp:fork-of:et/carpetx` (for good)"
     ]
   }
 }

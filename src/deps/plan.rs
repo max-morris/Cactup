@@ -306,6 +306,10 @@ fn row(s: &Step) -> [String; 4] {
             };
             ["replace".into(), format!("{what} with {by}"), String::new(), String::new()]
         }
-        Step::Keep { id, note } => ["keep".into(), id.to_string(), String::new(), note.clone()],
+        // The note names the package that stays: not said twice.
+        Step::Keep { id, note } => {
+            let note = note.strip_prefix(&format!("{id} ")).unwrap_or(note);
+            ["keep".into(), id.to_string(), String::new(), note.to_owned()]
+        }
     }
 }

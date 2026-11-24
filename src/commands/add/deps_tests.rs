@@ -3333,6 +3333,11 @@ fn overrides(s: &Setup) -> Vec<String> {
 /// max/app (incompatible with max/solo), max/solo and max/plain. With `base`, the installation's
 /// base has a repo `basecx` (no registered package) with CarpetX and Loop thorns.
 fn overridable(base: bool) -> Setup {
+    overridable_with_fake(base).0
+}
+
+/// [`overridable`], and the fake Cactarium serving it.
+fn overridable_with_fake(base: bool) -> (Setup, Shared) {
     let tmp = tempfile::tempdir().unwrap();
     let one = |name: &str, thorns: &[&str]| {
         let files: Vec<(String, String)> =
@@ -3346,19 +3351,28 @@ fn overridable(base: bool) -> Setup {
     let (surl, so) = one("solo", &["Solo"]);
     let (purl, p) = one("plain", &["Plain"]);
     let (burl, b) = one("basecx", &["CarpetX", "Loop"]);
+    let (turl, t2) = one("two", &["Two"]);
+    let (_, t1) = upstream(tmp.path(), "two", &[("Two/interface.ccl", "IMPLEMENTS: two\n"), ("README", "1\n")]);
     let hates = r#"{"kind":"incompatible-with","target":"max/solo","range":null,"needs":[],"note":null}"#;
-    let (cactarium, _) = Fake::new()
+    let (cactarium, _, fake) = Fake::new()
+        .package(
+            "max/two",
+            vec![
+                version("2.0.0", &t2, &turl, "Two", &["Two"], &format!("[{}]", depends("et/carpetx", "^1.0", &["Arith"]))),
+                version("1.0.0", &t1, &turl, "Two", &["Two"], "[]"),
+            ],
+        )
         .package("max/z4c", vec![version("1.0.0", &z, &zurl, "Z4c", &["Z4c"], &format!("[{}]", depends("et/carpetx", "^1.0", &["CarpetX"])))])
         .package("et/carpetx", vec![version("1.0.0", &c, &curl, "CarpetX", &["CarpetX", "Loop", "Arith"], "[]")])
         .package("max/app", vec![version("1.0.0", &a, &aurl, "App", &["App"], &format!("[{hates}]"))])
         .package("max/solo", vec![version("1.0.0", &so, &surl, "Solo", &["Solo"], "[]")])
         .package("max/plain", vec![version("1.0.0", &p, &purl, "Plain", &["Plain"], "[]")])
-        .serve();
+        .serve_shared();
     let text = match base {
         true => section(&burl, &b, &["CarpetX/CarpetX", "CarpetX/Loop"]),
         false => String::new(),
     };
-    Setup::new(tmp, &text, &cactarium)
+    (Setup::new(tmp, &text, &cactarium), fake)
 }
 
 /// `satisfies` turns the refusal that names it into a plan, and removing the override brings the
@@ -3417,9 +3431,13 @@ fn a_drop_override_passes_an_incompatible_with_and_check_agrees() {
     assert_eq!(s.meta().claim_overrides["drop max/app:incompatible-with:max/solo"].note.as_deref(), Some("hand-built"));
     claims(&s, "claims check").unwrap();
     claims(&s, "claims list").unwrap();
-    // Set again, it keeps the note it has.
+    // Set again with another note, it takes it; with none, it keeps the one it has.
     claims(&s, "claims override drop max/app:incompatible-with:max/solo --note other").unwrap();
-    assert_eq!(s.meta().claim_overrides["drop max/app:incompatible-with:max/solo"].note.as_deref(), Some("hand-built"));
+    assert_eq!(s.meta().claim_overrides["drop max/app:incompatible-with:max/solo"].note.as_deref(), Some("other"));
+    claims(&s, "claims override drop max/app:incompatible-with:max/solo").unwrap();
+    assert_eq!(s.meta().claim_overrides["drop max/app:incompatible-with:max/solo"].note.as_deref(), Some("other"));
+    let err = format!("{:#}", claims_args(&s, &["claims", "override", "drop", "max/app:incompatible-with:max/solo", "--note", "a\nb"]).unwrap_err());
+    assert_eq!(err, "A note is one line.");
 }
 
 /// `needs` adds a thorn to a dependency's needs: `add` brings it in; `add` of a dependency the
@@ -3509,7 +3527,8 @@ fn a_record_that_does_not_read_refuses_and_a_change_under_the_prompt_is_caught()
     meta.claim_overrides.insert("prefer et/a".into(), crate::installation::ClaimOverride { kind: "drop".into(), note: None });
     s.write_meta(&meta);
     let err = format!("{:#}", s.add(&["max/plain"], yes()).unwrap_err());
-    assert!(err.contains("claim-overrides in installation.toml: \"prefer et/a\""), "{err}");
+    assert!(err.contains("installation.toml has a claim override that does not read: 'prefer et/a'.\nRemove it with `cactup claims override --remove 'prefer et/a'`."), "{err}");
+    assert_eq!(err.matches("prefer et/a").count(), 2, "{err}");
     assert!(claims(&s, "claims list").is_err());
     meta.claim_overrides.clear();
     s.write_meta(&meta);
@@ -3519,4 +3538,119 @@ fn a_record_that_does_not_read_refuses_and_a_change_under_the_prompt_is_caught()
     let locked = start.inst.locked().unwrap();
     let err = format!("{:#}", start.recheck(&locked).unwrap_err());
     assert!(err.contains("changed while"), "{err}");
+}
+
+/// A range with spaces or `||` is written as one word that reads back, so the installation stays
+/// usable; a track the target lacks, a range no version meets and a package depending on itself
+/// are refused, and so is a note over two lines.
+#[test]
+fn a_dependency_override_is_written_to_read_back_and_must_be_one_that_can_be_met() {
+    let s = overridable(false);
+    for (range, key) in [
+        ("et/carpetx@>=1.0, <2.0", "add max/plain dependency et/carpetx@>=1.0,<2.0 needs Arith"),
+        ("et/carpetx@1.x || 2.x", "add max/plain dependency et/carpetx@1.*||2.* needs Arith"),
+    ] {
+        claims_args(&s, &["claims", "override", "add", "max/plain", "--dependency", range, "--needs", "Arith"])
+            .unwrap_or_else(|e| panic!("{e:#}"));
+        assert!(overrides(&s).contains(&key.to_owned()), "{:?}", overrides(&s));
+        s.add(&["max/solo"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+        s.remove(&["max/solo"], remove_yes()).unwrap();
+        claims(&s, "claims list").unwrap();
+        claims_args(&s, &["claims", "override", "--remove", key]).unwrap();
+    }
+    let refused = |dependency: &str| {
+        let words = ["claims", "override", "add", "max/plain", "--dependency", dependency, "--needs", "Arith"];
+        format!("{:#}", claims_args(&s, &words).unwrap_err())
+    };
+    assert_eq!(refused("et/carpetx@bogus"), "et/carpetx has no version on the track bogus.");
+    assert_eq!(refused("et/carpetx@^9"), "No version of et/carpetx meets ^9.");
+    assert_eq!(refused("et/carpetx@:^1||mixed:^1"), "et/carpetx has no version on the track mixed.");
+    assert_eq!(refused("max/plain"), "max/plain cannot depend on itself.");
+    assert!(overrides(&s).is_empty());
+    // Declared in some versions of a package that is not installed: allowed; in the installed one: not.
+    s.add(&["max/two@1.0.0"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    claims(&s, "claims override add max/two --dependency et/carpetx --needs Arith").unwrap();
+    // Not installed: the versions that do not declare it leave room.
+    claims(&overridable(false), "claims override add max/two --dependency et/carpetx --needs Arith").unwrap();
+    let other = overridable(false);
+    other.add(&["max/two"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let err = format!("{:#}", claims(&other, "claims override add max/two --dependency et/carpetx --needs Loop").unwrap_err());
+    assert!(err.contains("max/two already depends on et/carpetx."), "{err}");
+}
+
+/// What `claims check` could not check is said, with why, and "No problems." is never said beside it.
+#[test]
+fn check_says_what_it_could_not_check() {
+    let (s, fake) = overridable_with_fake(true);
+    let meta = s.meta();
+    let found = crate::commands::claims::problems(&s.ctx, &s.inst, &meta).unwrap();
+    assert!(found.lines.is_empty() && found.not_checked().is_empty(), "{:?}", found.not_checked());
+
+    // An added package Cactarium can no longer give: its dependencies are unknown.
+    s.add(&["max/z4c"], AddFlags { yes: true, ..AddFlags::default() }).unwrap_err();
+    claims(&s, "claims override satisfies local:basecx et/carpetx").unwrap();
+    s.add(&["max/z4c"], yes()).unwrap();
+    fake.lock().unwrap().packages.retain(|(p, _)| p != "max/z4c");
+    let found = crate::commands::claims::problems(&s.ctx, &s.inst, &s.meta()).unwrap();
+    let said = found.not_checked();
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(said[0].starts_with("Not checked: the dependencies of these packages are unknown:\n  max/z4c@1.0.0: "), "{said:?}");
+
+    // No fetch record (an old installation): no base repo is mapped to a package.
+    std::fs::remove_file(s.inst.cactup_dir().join("fetch-state.toml")).unwrap();
+    let found = crate::commands::claims::problems(&s.ctx, &s.inst, &s.meta()).unwrap();
+    let said = found.not_checked();
+    assert!(said.iter().any(|l| l.starts_with("Not checked: no base repo is mapped to a package")), "{said:?}");
+}
+
+/// An unmet CCL requirement names the providers; on a Cactarium that cannot list them, it says so.
+#[test]
+fn check_says_when_cactarium_cannot_list_providers() {
+    let (s, fake) = overridable_with_fake(false);
+    s.add(&["max/plain"], yes()).unwrap();
+    let ccl = s.inst.root.join("Cactus/repos/plain/Plain/interface.ccl");
+    std::fs::write(&ccl, "IMPLEMENTS: plain\nINHERITS: grid\n").unwrap();
+    let lines = |s: &Setup| crate::commands::claims::problems(&s.ctx, &s.inst, &s.meta()).unwrap().lines;
+    assert_eq!(
+        lines(&s),
+        ["Plain (max/plain@1.0.0) inherits or befriends grid; no installed thorn provides it. No registered package provides it."]
+    );
+    fake.lock().unwrap().providers_endpoint = false;
+    assert_eq!(
+        lines(&s),
+        ["Plain (max/plain@1.0.0) inherits or befriends grid; no installed thorn provides it. Cactarium cannot list providers."]
+    );
+}
+
+/// `claims list` marks an override that does not read or names a repo the base lacks, and the
+/// record can be removed by its key.
+#[test]
+fn list_marks_what_is_wrong_with_an_override() {
+    let s = overridable(true);
+    let mut meta = s.meta();
+    let record = |kind: &str, note: Option<&str>| crate::installation::ClaimOverride { kind: kind.into(), note: note.map(Into::into) };
+    meta.claim_overrides.insert("satisfies local:basecx et/carpetx".into(), record("satisfies", Some("kept")));
+    meta.claim_overrides.insert("satisfies local:gone et/carpetx".into(), record("satisfies", None));
+    meta.claim_overrides.insert("prefer et/a".into(), record("prefer", None));
+    let repos: std::collections::BTreeSet<String> = ["basecx".to_owned()].into();
+    let (lines, bad) = crate::commands::claims::override_lines(&meta, Some(&repos));
+    assert_eq!(
+        lines,
+        [
+            "Claim overrides:",
+            "  prefer et/a  (does not read)",
+            "  satisfies local:basecx et/carpetx  (kept)",
+            "  satisfies local:gone et/carpetx  (the installation has no repo gone)",
+        ]
+    );
+    assert_eq!(bad.as_deref(), Some("prefer et/a"));
+    s.write_meta(&meta);
+    let err = format!("{:#}", claims(&s, "claims list").unwrap_err());
+    assert!(err.starts_with("installation.toml has a claim override that does not read: 'prefer et/a'."), "{err}");
+    // The check flags the stale one in the installation itself.
+    claims_args(&s, &["claims", "override", "--remove", "prefer et/a"]).unwrap();
+    claims(&s, "claims list").unwrap();
+    let found = crate::commands::claims::problems(&s.ctx, &s.inst, &s.meta()).unwrap();
+    assert_eq!(found.lines.len(), 1, "{:?}", found.lines);
+    assert!(found.lines[0].starts_with("The override 'satisfies local:gone et/carpetx' names a repo that is not installed."));
 }

@@ -38,8 +38,8 @@ use anyhow::{anyhow, bail};
 
 // The module's API, for P3 (re-exports, so nothing in this module uses them).
 #[allow(unused_imports)]
-pub use check::check;
-pub use overrides::{overrides_of, parse_ignores, ClaimKind, ClaimPattern, Override, Rules};
+pub use check::{check, NO_PROVIDER};
+pub use overrides::{parse_ignores, read_record, unreadable, ClaimKind, ClaimPattern, Override, Rules};
 #[allow(unused_imports)]
 pub use plan::{
     Choice, ChoiceKey, ChoiceRule, Library, LineKind, Placement, Plan, Record, Replaced, Step, Untrusted, FLESH_REBUILD,

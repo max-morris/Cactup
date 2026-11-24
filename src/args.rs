@@ -1233,7 +1233,7 @@ pub(crate) enum ClaimsCommand {
 pub(crate) enum OverrideAction {
     /// Drop a claim: a dependency, incompatible-with or fork-of
     ///
-    /// The claim goes in every version of the package.
+    /// The claim is dropped from every version of the package.
     ///
     ///   cactup claims override drop max/foo:incompatible-with:et/bar
     #[clap(verbatim_doc_comment)]
@@ -1260,7 +1260,7 @@ pub(crate) enum OverrideAction {
         #[clap(long, required = true, value_delimiter = ',', value_name = "A,B")]
         needs: Vec<String>,
         /// Thorns of the package that need it (default: all).
-        #[clap(long, value_delimiter = ',', value_name = "T")]
+        #[clap(long, value_delimiter = ',', value_name = "T,U")]
         needed_by: Vec<String>,
     },
     /// Add thorns to a dependency's needs

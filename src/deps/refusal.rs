@@ -210,18 +210,17 @@ impl Refusal {
                 (false, Some(ignore)) => format!("Pass --ignore-claim {ignore}"),
                 (false, None) => "Change what asks for it; --upgrade finds no plan either".to_owned(),
             },
-            Refusal::SameThorn { newcomer, other, base_repo: Some(repo), replace: true, needed, .. } => {
-                let stand_in = match *needed {
-                    true => format!(", or `cactup claims override satisfies {other} {newcomer}`"),
-                    false => String::new(),
-                };
-                format!("Pass --replace to use {newcomer} in place of base repo {repo}{stand_in}")
-            }
-            Refusal::SameThorn { ignore: Some(ignore), .. } => format!(
-                "Name single thorns (owner/pkg/Thorn) to leave one of them out, or pass --ignore-claim {ignore}"
-            ),
-            Refusal::SameThorn { .. } => {
-                "Name single thorns (owner/pkg/Thorn) to leave one of them out".to_owned()
+            Refusal::SameThorn { newcomer, other, base_repo, ignore, replace, needed, .. } => {
+                // Another package standing in for the newcomer only helps when a dependency brings it in.
+                let stand_in = needed.then(|| format!("`cactup claims override satisfies {other} {newcomer}`"));
+                let mut ways = Vec::new();
+                match (base_repo, replace) {
+                    (Some(repo), true) => ways.push(format!("Pass --replace to use {newcomer} in place of base repo {repo}")),
+                    _ => ways.push("Name single thorns (owner/pkg/Thorn) to leave one of them out".to_owned()),
+                }
+                ways.extend(ignore.iter().map(|i| format!("pass --ignore-claim {i}")));
+                ways.extend(stand_in);
+                ways.join(", or ")
             }
             Refusal::Incompatible { by, target, .. } => {
                 format!(
@@ -230,11 +229,13 @@ impl Refusal {
                 )
             }
             Refusal::ForkAndUpstream { fork, upstream, upstream_base_repo: Some(repo), replace: true, .. } => format!(
-                "Pass --replace to use {fork} in place of base repo {repo}, or --ignore-claim {fork}:fork-of:{upstream}"
+                "Pass --replace to use {fork} in place of base repo {repo}, or --ignore-claim {fork}:fork-of:{upstream} \
+                 (this command) or `cactup claims override drop {fork}:fork-of:{upstream}` (for good)"
             ),
-            Refusal::ForkAndUpstream { fork, upstream, .. } => {
-                format!("Remove one of them, or pass --ignore-claim {fork}:fork-of:{upstream}")
-            }
+            Refusal::ForkAndUpstream { fork, upstream, .. } => format!(
+                "Remove one of them, or pass --ignore-claim {fork}:fork-of:{upstream} (this command) or \
+                 `cactup claims override drop {fork}:fork-of:{upstream}` (for good)"
+            ),
             Refusal::ForkDoesNotStandIn { fork, live, .. } => match &live.ignore {
                 Some(ignore) => format!(
                     "Pass --ignore-claim {ignore}, or `cactup claims override satisfies {fork} {}`",

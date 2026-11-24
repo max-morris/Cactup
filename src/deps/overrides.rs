@@ -77,12 +77,12 @@ impl FromStr for ClaimPattern {
             (Some(kind), Some(target)) => {
                 let kind = ClaimKind::parse(kind).ok_or_else(|| {
                     anyhow!(
-                        "\"{s}\": the kind of claim is dependency, incompatible-with or fork-of, not \"{kind}\""
+                        "\"{s}\": the kind of claim is dependency, incompatible-with or fork-of, not \"{kind}\"."
                     )
                 })?;
                 Ok(ClaimPattern::new(package, kind, PkgId::parse(target)?))
             }
-            (Some(_), None) => bail!("\"{s}\" is not OWNER/PKG or OWNER/PKG:KIND:TARGET"),
+            (Some(_), None) => bail!("\"{s}\" is not OWNER/PKG or OWNER/PKG:KIND:TARGET."),
         }
     }
 }
@@ -117,7 +117,7 @@ impl Override {
     pub fn drop_claim(claim: &str) -> Res<Override> {
         let pattern: ClaimPattern = claim.parse()?;
         if pattern.kind.is_none() {
-            bail!("\"{claim}\" is not OWNER/PKG:KIND:TARGET");
+            bail!("\"{claim}\" is not OWNER/PKG:KIND:TARGET.");
         }
         Ok(Override::Drop(pattern))
     }
@@ -127,19 +127,22 @@ impl Override {
     pub fn add_dependency(package: &str, dependency: &str, needs: &[String], needed_by: &[String]) -> Res<Override> {
         let package = PkgId::parse(package)?;
         if package.is_repo() {
-            bail!("\"{package}\" has no manifest to add a dependency to");
+            bail!("{package} is not a registered package.");
         }
         let (target, range) = match dependency.split_once('@') {
-            Some((t, r)) => (t, Some(r.parse::<TrackedReq>().map_err(|e| anyhow!("\"{dependency}\": {e}"))?.to_string())),
+            Some((t, r)) => (t, Some(canonical_range(r).with_context(|| format!("\"{dependency}\""))?)),
             None => (dependency, None),
         };
         let target = PkgId::parse(target)?;
         if target.is_repo() {
-            bail!("\"{dependency}\" is not a registered package");
+            bail!("{target} is not a registered package.");
+        }
+        if target == package {
+            bail!("{package} cannot depend on itself.");
         }
         let needs = thorn_list(needs).context("--needs")?;
         if needs.is_empty() {
-            bail!("--needs names no thorn");
+            bail!("--needs names no thorn.");
         }
         let needed_by = thorn_list(needed_by).context("--needed-by")?;
         let claim = ClaimInfo {
@@ -160,11 +163,11 @@ impl Override {
     pub fn add_needs(claim: &str, thorns: &[String]) -> Res<Override> {
         let pattern: ClaimPattern = claim.parse()?;
         let Some((ClaimKind::Dependency, target)) = pattern.kind else {
-            bail!("\"{claim}\" is not OWNER/PKG:dependency:TARGET");
+            bail!("\"{claim}\" is not OWNER/PKG:dependency:TARGET.");
         };
         let thorns = thorn_list(thorns)?;
         if thorns.is_empty() {
-            bail!("No thorn named");
+            bail!("No thorn named.");
         }
         Ok(Override::Needs { package: pattern.package, target, thorns })
     }
@@ -173,10 +176,10 @@ impl Override {
     pub fn satisfies(by: &str, target: &str) -> Res<Override> {
         let (by, target) = (PkgId::parse(by)?, PkgId::parse(target)?);
         if target.is_repo() {
-            bail!("{target} is not a registered package, so nothing depends on it");
+            bail!("{target} is not a registered package.");
         }
         if by == target {
-            bail!("{by} cannot stand in for itself");
+            bail!("{by} cannot stand in for itself.");
         }
         Ok(Override::Satisfies { by, target })
     }
@@ -204,6 +207,12 @@ impl Override {
         }
     }
 
+    /// Whether the key reads back as this override: one that does not would make the installation
+    /// unusable once recorded.
+    pub fn reads_back(&self) -> bool {
+        Override::from_key(&self.key()).is_ok_and(|o| &o == self)
+    }
+
     /// The override a key names (the inverse of [`Override::key`]).
     pub fn from_key(key: &str) -> Res<Override> {
         let words: Vec<&str> = key.split_whitespace().collect();
@@ -218,7 +227,7 @@ impl Override {
             ["add", package, "dependency", target, "needs", needs, "needed-by", by] => {
                 Override::add_dependency(package, target, &list(needs), &list(by))
             }
-            _ => bail!("\"{key}\" is not the text of a claim override"),
+            _ => bail!("\"{key}\" is not the text of a claim override."),
         }
     }
 
@@ -233,13 +242,24 @@ impl Override {
     }
 }
 
+/// A version range as a key keeps it: as the range reads, with no whitespace (`>=1.0,<2.0`,
+/// `^1||:^2`), so the key is one word that reads back as the same range.
+fn canonical_range(text: &str) -> Res<String> {
+    let range: TrackedReq = text.parse()?;
+    let canonical: String = range.to_string().split_whitespace().collect();
+    if canonical.parse::<TrackedReq>().map(|r| r != range).unwrap_or(true) {
+        bail!("\"{text}\" cannot be written as one word.");
+    }
+    Ok(canonical)
+}
+
 /// Thorn names as an override keeps them: commas split, no empty or repeated name (case
 /// aside), in name order, each spelled as first given.
 fn thorn_list(given: &[String]) -> Res<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     for name in given.iter().flat_map(|g| g.split(',')).map(str::trim).filter(|n| !n.is_empty()) {
         if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            bail!("\"{name}\" is not a thorn name");
+            bail!("\"{name}\" is not a thorn name.");
         }
         if !out.iter().any(|o| o.eq_ignore_ascii_case(name)) {
             out.push(name.to_owned());
@@ -255,13 +275,23 @@ pub fn overrides_of(records: &BTreeMap<String, ClaimOverride>) -> Res<Vec<Overri
     records
         .iter()
         .map(|(key, record)| {
-            let o = Override::from_key(key).with_context(|| format!("claim-overrides in installation.toml: \"{key}\""))?;
-            if o.kind_name() != record.kind {
-                bail!("claim-overrides in installation.toml: \"{key}\" says kind \"{}\"", record.kind);
-            }
-            Ok(o)
+            read_record(key, record).map_err(|_| unreadable(key))
         })
         .collect()
+}
+
+/// The override a record is, or an error when its key does not read or its kind disagrees.
+pub fn read_record(key: &str, record: &ClaimOverride) -> Res<Override> {
+    let o = Override::from_key(key)?;
+    if o.kind_name() != record.kind {
+        bail!("\"{key}\" says kind \"{}\".", record.kind);
+    }
+    Ok(o)
+}
+
+/// What an override that does not read says: where it is, and how to be rid of it.
+pub fn unreadable(key: &str) -> anyhow::Error {
+    anyhow!("installation.toml has a claim override that does not read: '{key}'.\nRemove it with `cactup claims override --remove '{key}'`.")
 }
 
 /// `--ignore-claim` patterns, read as `claims override drop` reads its claim.
@@ -354,6 +384,10 @@ mod tests {
             Override::drop_claim("max/carpet-mp:fork-of:et/carpet").unwrap(),
             Override::add_dependency("max/foo", "et/bar", &strings(&["Loop", "CarpetX"]), &[]).unwrap(),
             Override::add_dependency("max/foo", "et/bar@^1.2", &strings(&["Loop"]), &strings(&["Zeta", "Alpha"])).unwrap(),
+            Override::add_dependency("max/foo", "et/bar@>=1.0, <2.0", &strings(&["Loop"]), &[]).unwrap(),
+            Override::add_dependency("max/foo", "et/bar@1.x || 2.x", &strings(&["Loop"]), &[]).unwrap(),
+            Override::add_dependency("max/foo", "et/bar@mp:>=1 <2 || :^3", &strings(&["Loop"]), &[]).unwrap(),
+            Override::add_dependency("max/foo", "et/bar@mixed:^1", &strings(&["Loop"]), &[]).unwrap(),
             Override::add_needs("max/foo:dependency:et/bar", &strings(&["Loop", "arith"])).unwrap(),
             Override::satisfies("max/carpet-mp", "et/carpet").unwrap(),
             Override::satisfies("local:carpetx", "et/carpetx").unwrap(),
@@ -373,6 +407,10 @@ mod tests {
                 "drop max/carpet-mp:fork-of:et/carpet",
                 "add max/foo dependency et/bar needs CarpetX,Loop",
                 "add max/foo dependency et/bar@^1.2 needs Loop needed-by Alpha,Zeta",
+                "add max/foo dependency et/bar@>=1.0,<2.0 needs Loop",
+                "add max/foo dependency et/bar@1.*||2.* needs Loop",
+                "add max/foo dependency et/bar@mp:>=1,<2||:^3 needs Loop",
+                "add max/foo dependency et/bar@mixed:^1 needs Loop",
                 "needs max/foo:dependency:et/bar arith,Loop",
                 "satisfies max/carpet-mp et/carpet",
                 "satisfies local:carpetx et/carpetx",
@@ -402,6 +440,18 @@ mod tests {
         assert_eq!(Override::from_key(&b.key()).unwrap(), b);
     }
 
+    /// An override whose key would not read back is told apart (the command refuses to record it).
+    #[test]
+    fn an_override_that_does_not_read_back_is_told_apart() {
+        assert!(samples().iter().all(Override::reads_back));
+        let Override::Add { package, mut claim } = Override::add_dependency("max/foo", "et/bar", &strings(&["A"]), &[]).unwrap()
+        else {
+            unreachable!()
+        };
+        claim.range = Some(">=1.0, <2.0".to_owned());
+        assert!(!Override::Add { package, claim }.reads_back());
+    }
+
     /// What the commands refuse to make.
     #[test]
     fn nonsense_overrides_are_refused() {
@@ -416,9 +466,10 @@ mod tests {
         assert!(err(Override::satisfies("et/a", "local:b")).contains("not a registered package"));
         assert!(err(Override::satisfies("local:", "et/a")).contains("local:<name>"));
         assert!(err(Override::add_dependency("max/foo", "et/bar", &[], &[])).contains("--needs"));
-        assert!(err(Override::add_dependency("local:foo", "et/bar", &strings(&["A"]), &[])).contains("no manifest"));
+        assert!(err(Override::add_dependency("local:foo", "et/bar", &strings(&["A"]), &[])).contains("not a registered package."));
         assert!(err(Override::add_dependency("max/foo", "local:bar", &strings(&["A"]), &[])).contains("not a registered"));
         assert!(err(Override::add_dependency("max/foo", "et/bar@not a range", &strings(&["A"]), &[])).contains("et/bar@not a range"));
+        assert!(err(Override::add_dependency("max/foo", "max/foo", &strings(&["A"]), &[])).contains("cannot depend on itself."));
         for key in ["", "drop", "drop a b", "needs max/foo:dependency:et/bar", "remove max/foo", "add max/foo et/bar needs A"] {
             assert!(Override::from_key(key).is_err(), "{key}");
         }
@@ -435,9 +486,14 @@ mod tests {
         let rules = Rules::of(&ok, Vec::new()).unwrap();
         assert_eq!(rules.overrides.iter().map(Override::kind_name).collect::<Vec<_>>(), ["drop", "satisfies"]);
         let wrong: BTreeMap<String, ClaimOverride> = [("drop max/foo:dependency:et/bar".to_owned(), record("needs"))].into();
-        assert!(format!("{:#}", overrides_of(&wrong).unwrap_err()).contains("says kind \"needs\""));
+        let one_line = |m: &BTreeMap<String, ClaimOverride>| format!("{:#}", overrides_of(m).unwrap_err());
+        assert_eq!(
+            one_line(&wrong),
+            "installation.toml has a claim override that does not read: 'drop max/foo:dependency:et/bar'.\n\
+             Remove it with `cactup claims override --remove 'drop max/foo:dependency:et/bar'`."
+        );
         let junk: BTreeMap<String, ClaimOverride> = [("prefer a/b".to_owned(), record("prefer"))].into();
-        assert!(format!("{:#}", overrides_of(&junk).unwrap_err()).contains("\"prefer a/b\""));
+        assert!(one_line(&junk).contains("does not read: 'prefer a/b'.\nRemove it with"), "{}", one_line(&junk));
     }
 
     /// `--ignore-claim` reads a pattern as `claims override drop` does, and says which flag was wrong.

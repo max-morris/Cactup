@@ -33,7 +33,7 @@
   "expect": {
     "plan": [
       "add max/z4c@1.2.0 Z4c, Z4cTest named",
-      "keep local:carpetx local:carpetx stands in for et/carpetx (a claims override)"
+      "keep local:carpetx stands in for et/carpetx (a claims override)"
     ]
   }
 }

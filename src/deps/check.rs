@@ -7,13 +7,21 @@ use std::collections::BTreeMap;
 use cactup_ecosystem_common::ccl::{self, ThornFacts};
 
 use super::conflict::{incompatible, needs_of};
-use super::{forks, Facts, Origin, PkgId, Present, Provider, Release, Requirement, Rules};
+use super::{
+    claim_target, fork_claims, forks, Facts, Fit, Origin, Override, PkgId, Present, Provider, Release, Req, Requirement,
+    Rules,
+};
 use crate::Res;
+
+/// What a line says when nothing provides a requirement.
+pub const NO_PROVIDER: &str = "No registered package provides it.";
 
 /// The problems among `present`, with `rules` applied to every release as the resolver loads it
 /// (an override that drops a claim drops its problem), one line each, in a fixed order: forks
 /// beside their upstream, incompatibilities, thorn names enabled twice, requirements that
-/// nothing meets. `facts` lists the providers of an unmet requirement. Nothing is read or written.
+/// nothing meets, dependencies not met by what is installed, overrides that no longer apply.
+/// `facts` lists the providers of an unmet requirement and the versions of an upstream a fork
+/// may stand in for. Nothing is written.
 pub fn check(present: &[Present], rules: &Rules, facts: &mut dyn Facts) -> Res<Vec<String>> {
     let mut ps: Vec<Present> = present.to_vec();
     for p in &mut ps {
@@ -29,7 +37,7 @@ pub fn check(present: &[Present], rules: &Rules, facts: &mut dyn Facts) -> Res<V
                 let (fork, upstream) = (&a.release.id, &b.release.id);
                 fork_pairs.push((fork, upstream));
                 out.push(format!(
-                    "{} is a fork of {}, also installed. Run `cactup claims override drop {fork}:fork-of:{upstream}`.",
+                    "{} is a fork of {}, also installed. Remove one of them, or run `cactup claims override drop {fork}:fork-of:{upstream}`.",
                     a.release.label(),
                     b.release.label()
                 ));
@@ -97,7 +105,138 @@ pub fn check(present: &[Present], rules: &Rules, facts: &mut dyn Facts) -> Res<V
             }
         }
     }
+    dependencies(&ps, rules, facts, &mut out)?;
+    for o in &rules.overrides {
+        if let Override::Satisfies { by, .. } = o
+            && by.is_repo()
+            && !ps.iter().any(|p| &p.release.id == by)
+        {
+            let key = o.key();
+            out.push(format!(
+                "The override '{key}' names a repo that is not installed. Remove it with `cactup claims override --remove '{key}'`."
+            ));
+        }
+    }
     Ok(out)
+}
+
+/// One way to meet a dependency: target, range, commit, thorns needed.
+type Alternative<'a> = (&'a str, Option<&'a str>, Option<&'a str>, &'a [String]);
+
+/// What stops an installed package's dependency from being met.
+enum Unmet {
+    NotInstalled,
+    /// The installed release is outside the range.
+    Outside(String),
+    /// Whoever takes it (its label, its id) lacks these thorns enabled.
+    Lacks(Box<(String, PkgId, Vec<String>)>),
+}
+
+/// The dependency claims of every installed package, each met by an installed release in range
+/// (a package an override says stands in, or a fork standing in, takes it without a version check)
+/// with the thorns it needs enabled; an any-of dependency by one of its alternatives.
+fn dependencies(ps: &[Present], rules: &Rules, facts: &mut dyn Facts, out: &mut Vec<String>) -> Res<()> {
+    let find = |id: &PkgId| ps.iter().find(|p| &p.release.id == id);
+    let lacks = |p: &Present, needs: &[String]| -> Vec<String> {
+        needs.iter().filter(|n| !p.enabled.iter().any(|e| e.eq_ignore_ascii_case(n))).cloned().collect()
+    };
+    for p in ps.iter().filter(|p| !p.stand_in) {
+        let active = |needed_by: &[String]| {
+            needed_by.is_empty() || needed_by.iter().any(|t| p.enabled.iter().any(|e| e.eq_ignore_ascii_case(t)))
+        };
+        for c in p.release.claims.iter().filter(|c| c.kind == "dependency" && c.into.is_none() && active(&c.needed_by)) {
+            let alternatives: Vec<Alternative> = match c.alternatives.is_empty() {
+                true => vec![(&c.target, c.range.as_deref(), c.sha.as_deref(), &c.needs)],
+                false => c.alternatives.iter().map(|a| (a.target.as_str(), a.range.as_deref(), a.sha.as_deref(), a.needs.as_slice())).collect(),
+            };
+            let mut why: Vec<(PkgId, Req, Unmet)> = Vec::new();
+            let mut met = false;
+            for (target, range, sha, needs) in alternatives {
+                let Ok((target, req)) = claim_target(target, range, sha) else { met = true; break };
+                let unmet: Option<Unmet>;
+                if let Some(t) = find(&target) {
+                    let missing = lacks(t, needs);
+                    unmet = match (req.fit(&t.release), missing.is_empty()) {
+                        (Fit::No, _) => Some(Unmet::Outside(t.release.label())),
+                        (_, false) => Some(Unmet::Lacks(Box::new((t.release.label(), target.clone(), missing)))),
+                        _ => None,
+                    };
+                } else if let Some(x) = rules.satisfiers(&target).find_map(find) {
+                    let missing = lacks(x, needs);
+                    unmet = (!missing.is_empty()).then(|| Unmet::Lacks(Box::new((x.release.label(), x.release.id.clone(), missing))));
+                } else {
+                    let forks_of: Vec<&Present> =
+                        ps.iter().filter(|f| f.release.id != target && forks(&f.release, &target)).collect();
+                    let mut found = Some(Unmet::NotInstalled);
+                    if !forks_of.is_empty() {
+                        facts.load(std::slice::from_ref(&target))?;
+                        let published: Vec<_> = (facts.releases(&target).unwrap_or_default().iter())
+                            .filter_map(|r| r.at.version().map(|v| (v.clone(), Some(r.commit.clone()))))
+                            .collect();
+                        let dep = target.slug(&req);
+                        let standing = forks_of.into_iter().find(|f| {
+                            fork_claims(&f.release, &target)
+                                .iter()
+                                .any(|k| dep.as_ref().is_some_and(|d| k.stands_in_for(d, &published)))
+                        });
+                        if let Some(f) = standing {
+                            let missing = lacks(f, needs);
+                            found = (!missing.is_empty()).then(|| Unmet::Lacks(Box::new((f.release.label(), f.release.id.clone(), missing))));
+                        }
+                    }
+                    unmet = found;
+                }
+                match unmet {
+                    None => {
+                        met = true;
+                        break;
+                    }
+                    Some(u) => why.push((target, req, u)),
+                }
+            }
+            if !met && let Some(line) = dependency_line(p, c.alternatives.is_empty(), &why) {
+                out.push(line);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One line for a dependency that nothing met: what is wrong and the ways past.
+fn dependency_line(p: &Present, single: bool, why: &[(PkgId, Req, Unmet)]) -> Option<String> {
+    let (id, label) = (&p.release.id, p.release.label());
+    let (first, req, unmet) = why.first()?;
+    let drop = format!("`cactup claims override drop {id}:dependency:{first}`");
+    if !single {
+        let names: Vec<String> = why.iter().map(|(t, _, _)| t.to_string()).collect();
+        return Some(format!(
+            "{label} needs one of {}, and none is met. Run `cactup add {}`, or {drop}.",
+            names.join(", "),
+            names[0]
+        ));
+    }
+    Some(match unmet {
+        Unmet::NotInstalled => {
+            format!("{label} needs {first} {req}, which is not installed. Run `cactup add {first}`, or {drop}.")
+        }
+        Unmet::Outside(installed) => format!(
+            "{label} needs {first} {req}, and {installed} is installed. Run `cactup add --upgrade {first}`, or {drop}."
+        ),
+        Unmet::Lacks(lacking) => {
+            let (taker, taker_id, thorns) = &**lacking;
+            let list = thorns.join(", ");
+            match taker_id.is_repo() {
+                true => format!("{label} needs {list} of {taker}, not enabled. Run {drop}."),
+                false => {
+                    let adds: Vec<String> = thorns.iter().map(|t| format!("{taker_id}/{t}")).collect();
+                    format!(
+                        "{label} needs {list} of {taker}, not enabled. Run `cactup add {}`, or {drop}.",
+                        adds.join(" ")
+                    )
+                }
+            }
+        }
+    })
 }
 
 /// `CarpetX (et/carpetx@1.0.0) inherits or befriends grid; no installed thorn provides it. …`
@@ -109,7 +248,7 @@ fn unmet_line(thorn: &str, release: &Release, need: &Requirement, providers: &[P
     let mut found: Vec<String> = providers.iter().map(add).collect();
     found.dedup();
     let way = match found.is_empty() {
-        true => "No registered package provides it.".to_owned(),
+        true => NO_PROVIDER.to_owned(),
         false => format!("Run {}.", found.join(" or ")),
     };
     format!("{thorn} ({}) {need}; no installed thorn provides it. {way}", release.label())

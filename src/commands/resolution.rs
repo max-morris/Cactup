@@ -264,6 +264,13 @@ impl Registry {
         }
     }
 
+    /// The same conversation, giving up on any request, its whole answer read, after `limit`
+    /// (for commands that only read version lists).
+    pub(crate) fn bounded(mut self, limit: std::time::Duration) -> Registry {
+        self.client = self.client.clone().with_timeout(limit);
+        self
+    }
+
     /// Stops the renderer: after this, the terminal is the caller's. Says
     /// whether Cactarium could not list providers.
     pub(crate) fn finish(mut self) -> Finished {

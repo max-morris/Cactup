@@ -21,7 +21,8 @@
     "refusal": "ForkAndUpstream",
     "message": [
       "max/carpetx-mp@1.0.0 is a fork of et/carpetx",
-      "Remove one of them, or pass --ignore-claim max/carpetx-mp:fork-of:et/carpetx"
+      "Remove one of them, or pass --ignore-claim max/carpetx-mp:fork-of:et/carpetx",
+      "`cactup claims override drop max/carpetx-mp:fork-of:et/carpetx` (for good)"
     ]
   }
 }

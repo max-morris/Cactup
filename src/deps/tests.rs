@@ -1577,7 +1577,7 @@ fn check_reports_each_problem_with_its_way_past() {
     let present = [clean[0].clone(), fork];
     assert_eq!(
         checked(&present, &none, &[]),
-        ["max/a-mp@1.0.0 is a fork of et/a@1.0.0, also installed. Run `cactup claims override drop max/a-mp:fork-of:et/a`."]
+        ["max/a-mp@1.0.0 is a fork of et/a@1.0.0, also installed. Remove one of them, or run `cactup claims override drop max/a-mp:fork-of:et/a`."]
     );
     let drop_it = Rules { overrides: vec![Override::drop_claim("max/a-mp:fork-of:et/a").unwrap()], ..Rules::default() };
     assert!(checked(&present, &drop_it, &[]).is_empty());
@@ -1624,4 +1624,95 @@ fn check_reports_each_problem_with_its_way_past() {
     assert!(lines.iter().all(|l| l.ends_with("Run `cactup add et/carpet/CarpetSlab`.")), "{lines:?}");
     let met = installed("et/grid", "1.0.0", &[("Grid", "IMPLEMENTS: grid\n")], vec![], base());
     assert!(checked(&[needy("et/n1"), met], &none, &[]).is_empty());
+}
+
+fn needing(id: &str, thorn: &str, claims: Vec<ClaimInfo>) -> Present {
+    installed(id, "1.0.0", &[(thorn, "IMPLEMENTS: x\n")], claims, Origin::Added)
+}
+
+fn depends_on(target: &str, range: &str, needs: &[&str]) -> ClaimInfo {
+    dependency(target, range, needs)
+}
+
+/// `claims check` meets each installed package's dependencies with what is installed: the package
+/// in range with the thorns enabled; a package an override says stands in, or a fork that does, with
+/// no version check; one alternative of an any-of. What is not met is one line with its ways past.
+#[test]
+fn check_meets_dependencies_with_what_is_installed() {
+    let none = Rules::default();
+    let dep = |needs: &[&str]| vec![depends_on("et/lib", "^1.0", needs)];
+    let user = |claims| needing("max/user", "User", claims);
+    let lib = |version: &str, thorns: &[(&str, &str)]| installed("et/lib", version, thorns, vec![], Origin::Added);
+    let drop = "`cactup claims override drop max/user:dependency:et/lib`";
+
+    // Met, with and without the thorns it needs.
+    let l = lib("1.2.0", &[("A", "IMPLEMENTS: a\n"), ("B", "IMPLEMENTS: b\n")]);
+    assert!(checked(&[user(dep(&["A", "b"])), l.clone()], &none, &[]).is_empty());
+    assert_eq!(
+        checked(&[user(dep(&["A"])), installed("et/lib", "1.2.0", &[("B", "IMPLEMENTS: b\n")], vec![], Origin::Added)], &none, &[]),
+        [format!("max/user@1.0.0 needs A of et/lib@1.2.0, not enabled. Run `cactup add et/lib/A`, or {drop}.")]
+    );
+    // Not installed, and outside the range.
+    assert_eq!(
+        checked(&[user(dep(&[]))], &none, &[]),
+        [format!("max/user@1.0.0 needs et/lib ^1.0, which is not installed. Run `cactup add et/lib`, or {drop}.")]
+    );
+    let old = lib("2.0.0", &[("A", "IMPLEMENTS: a\n")]);
+    assert_eq!(
+        checked(&[user(dep(&[])), old.clone()], &none, &[]),
+        [format!("max/user@1.0.0 needs et/lib ^1.0, and et/lib@2.0.0 is installed. Run `cactup add --upgrade et/lib`, or {drop}.")]
+    );
+    // Overrides: dropping the claim, and a package standing in (no version check).
+    let dropped = Rules { overrides: vec![Override::drop_claim("max/user:dependency:et/lib").unwrap()], ..Rules::default() };
+    assert!(checked(&[user(dep(&[]))], &dropped, &[]).is_empty());
+    let sat = Rules { overrides: vec![Override::satisfies("max/other", "et/lib").unwrap()], ..Rules::default() };
+    let other = installed("max/other", "9.0.0", &[("A", "IMPLEMENTS: o\n")], vec![], Origin::Added);
+    assert!(checked(&[user(dep(&["A"])), other.clone()], &sat, &[]).is_empty());
+    let lines = checked(&[user(dep(&["Z"])), other], &sat, &[]);
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].contains("needs Z of max/other@9.0.0, not enabled"), "{lines:?}");
+    // An override that adds a dependency, and one that adds a thorn to it.
+    let add = Rules {
+        overrides: vec![Override::add_dependency("max/user", "et/lib@^1.0", &["A".to_owned()], &[]).unwrap()],
+        ..Rules::default()
+    };
+    assert_eq!(checked(&[user(vec![])], &add, &[]).len(), 1);
+    assert!(checked(&[user(vec![]), l.clone()], &add, &[]).is_empty());
+    let needs = Rules { overrides: vec![Override::add_needs("max/user:dependency:et/lib", &["C".to_owned()]).unwrap()], ..Rules::default() };
+    assert_eq!(checked(&[user(dep(&["A"])), l.clone()], &needs, &[]).len(), 1);
+
+    // A fork standing in takes it (the upstream's versions are asked for); one that does not does not.
+    let fork_claim = |range: &str| vec![claim("fork-of", "et/lib", range)];
+    let fork = |range: &str| installed("max/lib-mp", "1.0.0", &[("A", "IMPLEMENTS: a\n")], fork_claim(range), Origin::Added);
+    let mut facts = FixtureFacts::default();
+    facts.releases.insert(PkgId::parse("et/lib").unwrap(), vec![synthetic_release("et/lib", "1.2.0", &[], vec![])]);
+    assert!(check(&[user(dep(&["A"])), fork("=1.2.0")], &Rules::default(), &mut facts).unwrap().is_empty());
+    assert_eq!(check(&[user(dep(&["A"])), fork("=0.5.0")], &Rules::default(), &mut facts).unwrap().len(), 1);
+
+    // Any-of: one alternative is enough; none says so.
+    let alt = |t: &str| cactup_ecosystem_common::api::AlternativeInfo { target: t.into(), range: None, sha: None, needs: vec![] };
+    let any = ClaimInfo { alternatives: vec![alt("et/a"), alt("et/b")], ..depends_on("et/a", "*", &[]) };
+    let b = installed("et/b", "1.0.0", &[("B", "IMPLEMENTS: b\n")], vec![], Origin::Added);
+    assert!(checked(&[user(vec![any.clone()]), b], &none, &[]).is_empty());
+    assert_eq!(
+        checked(&[user(vec![any])], &none, &[]),
+        ["max/user@1.0.0 needs one of et/a, et/b, and none is met. Run `cactup add et/a`, or `cactup claims override drop max/user:dependency:et/a`."]
+    );
+    // A dependency for a thorn that is not enabled is no need; a library is placement.
+    let for_other = ClaimInfo { needed_by: vec!["Else".into()], ..depends_on("et/lib", "^1.0", &[]) };
+    let library = ClaimInfo { into: Some("src/lib".into()), ..depends_on("et/lib", "^1.0", &[]) };
+    assert!(checked(&[user(vec![for_other, library])], &none, &[]).is_empty());
+}
+
+/// A `satisfies local:X` for a repo that is not installed says so, with the way to be rid of it.
+#[test]
+fn check_flags_a_satisfies_override_for_a_missing_repo() {
+    let rules = Rules { overrides: vec![Override::satisfies("local:gone", "et/lib").unwrap()], ..Rules::default() };
+    let here = installed("local:here", "1.0.0", &[("H", "IMPLEMENTS: h\n")], vec![], Origin::Base { repo: "here".into() });
+    assert_eq!(
+        checked(&[here.clone()], &rules, &[]),
+        ["The override 'satisfies local:gone et/lib' names a repo that is not installed. Remove it with `cactup claims override --remove 'satisfies local:gone et/lib'`."]
+    );
+    let gone = installed("local:gone", "1.0.0", &[("G", "IMPLEMENTS: g\n")], vec![], Origin::Base { repo: "gone".into() });
+    assert!(checked(&[here, gone], &rules, &[]).is_empty());
 }

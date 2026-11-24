@@ -369,7 +369,7 @@ twice, and CCL requirements that no installed thorn meets. It prints one line
 for each problem, with the way past, and changes nothing. It exits with an
 error when it finds one.
 
-An installation with an override is refused by a cactup that predates
+An installation that has had an override is refused by a cactup that predates
 `claims`: `cactup update` fixes that.
 
 ### Getting a new release noticed
