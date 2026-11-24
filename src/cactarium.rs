@@ -13,7 +13,7 @@ use crate::Res;
 use anyhow::{anyhow, bail, Context};
 use colored::Colorize;
 use cactup_ecosystem_common::api::{
-    ErrorBody, LookedUp, LookupRequest, PackageVersion, PackageVersions, PinInfo, PinQuery, Providers,
+    DownloadQuery, ErrorBody, LookedUp, LookupRequest, PackageVersion, PackageVersions, PinInfo, PinQuery, Providers,
     ProvidersQuery, Published, ReadAnswer, ReadRequest, Refreshed, Resolved, StackReleases, VersionInfo, API_GENERATION,
     API_GENERATION_HEADER, API_PREFIX, CONTACT_HEADER, MAX_LOOKUP_PINS, SHA256_HEADER, SIM_QUERY,
     UNPINNED_HEADER, UNTRUSTED_HEADER,
@@ -258,12 +258,25 @@ impl Client {
     /// in as few as its size limit allows; each request is checked as the
     /// server checks it before it is sent.
     pub fn lookup(&self, pins: &[PinQuery]) -> Res<Vec<PinInfo>> {
-        let mut out = Vec::with_capacity(pins.len());
-        for chunk in pins.chunks(MAX_LOOKUP_PINS) {
+        Ok(self.lookup_all(pins, &[], |_| {})?.pins)
+    }
+
+    /// [`Client::lookup`] of `pins` and of `downloads` (files pinned by
+    /// their sha256) together: each answer list in the order asked.
+    /// `done` is told how many entries each request answered.
+    pub fn lookup_all(&self, pins: &[PinQuery], downloads: &[DownloadQuery], mut done: impl FnMut(usize)) -> Res<LookedUp> {
+        let mut out = LookedUp { pins: Vec::with_capacity(pins.len()), downloads: Vec::with_capacity(downloads.len()) };
+        // Pins first, then downloads, at most MAX_LOOKUP_PINS of both in one request.
+        let total = pins.len() + downloads.len();
+        let mut at = 0;
+        while at < total {
             if gix::interrupt::is_triggered() {
                 bail!("Interrupted");
             }
-            let request = LookupRequest { pins: chunk.to_vec(), downloads: Vec::new() };
+            let end = (at + MAX_LOOKUP_PINS).min(total);
+            let chunk_pins = &pins[at.min(pins.len())..end.min(pins.len())];
+            let chunk_downloads = &downloads[at.saturating_sub(pins.len())..end.saturating_sub(pins.len())];
+            let request = LookupRequest { pins: chunk_pins.to_vec(), downloads: chunk_downloads.to_vec() };
             request.validate().map_err(|e| anyhow!("Cannot ask Cactarium about these repos: {e}"))?;
             let body = serde_json::to_vec(&request).context("Failed to encode the lookup request")?;
             let request = self.http()
@@ -272,14 +285,16 @@ impl Client {
                 .body(body);
             let response = self.send_found(request, MISSING_ROUTE)?.map_err(|m| self.missing("/lookup", m))?;
             let answer: LookedUp = response.json()?;
-            if answer.pins.len() != chunk.len() {
+            if answer.pins.len() != chunk_pins.len() || answer.downloads.len() != chunk_downloads.len() {
                 bail!(
-                    "Cactarium answered a lookup of {} repos with {} answers",
-                    chunk.len(),
-                    answer.pins.len()
+                    "Cactarium answered a lookup of {} repos and {} downloads with {} and {} answers",
+                    chunk_pins.len(),
+                    chunk_downloads.len(),
+                    answer.pins.len(),
+                    answer.downloads.len()
                 );
             }
-            for (asked, info) in chunk.iter().zip(&answer.pins) {
+            for (asked, info) in chunk_pins.iter().zip(&answer.pins) {
                 // The answer echoes each pin as asked; a server that spells
                 // the URL its own way still names the same repo, as the
                 // registry compares them.
@@ -294,7 +309,21 @@ impl Client {
                     );
                 }
             }
-            out.extend(answer.pins);
+            for (asked, info) in chunk_downloads.iter().zip(&answer.downloads) {
+                if info.url != asked.url || !info.sha256.eq_ignore_ascii_case(&asked.sha256) {
+                    bail!(
+                        "Cactarium answered a lookup of {} ({}) with {} ({}), out of order",
+                        cactup_ecosystem_common::url::Redacted(&asked.url),
+                        asked.sha256,
+                        cactup_ecosystem_common::url::Redacted(&info.url),
+                        info.sha256
+                    );
+                }
+            }
+            out.pins.extend(answer.pins);
+            out.downloads.extend(answer.downloads);
+            done(end - at);
+            at = end;
         }
         Ok(out)
     }
@@ -1226,6 +1255,38 @@ mod tests {
         let bad = [PinQuery { url: "https://x/r.git".into(), commit: "abc".into() }];
         let err = format!("{:#}", Client::at("http://127.0.0.1:9").lookup(&bad).unwrap_err());
         assert!(err.contains("not a full lowercase commit id"), "{err}");
+    }
+
+    /// Downloads go in the same requests as pins, filling each up to the
+    /// size limit after the pins, and their answers come back in order.
+    #[test]
+    fn a_lookup_asks_downloads_beside_pins() {
+        use crate::fetch::download::test_server::serve_with_body;
+        let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = bodies.clone();
+        let (base, _) = serve_with_body(2, move |_, body| {
+            let asked: LookupRequest = serde_json::from_slice(body).unwrap();
+            seen.lock().unwrap().push((asked.pins.len(), asked.downloads.len()));
+            let pins: Vec<serde_json::Value> = (asked.pins.iter())
+                .map(|p| serde_json::json!({"url": p.url, "commit": p.commit, "package": null, "version": null, "commit-known": null}))
+                .collect();
+            let downloads: Vec<serde_json::Value> = (asked.downloads.iter())
+                .map(|d| serde_json::json!({"url": d.url, "sha256": d.sha256, "review": "approved"}))
+                .collect();
+            let body = serde_json::json!({"pins": pins, "downloads": downloads}).to_string();
+            ("200 OK", "api-generation: 1\r\n".into(), body.into_bytes())
+        });
+        let pins: Vec<PinQuery> =
+            (0..MAX_LOOKUP_PINS - 1).map(|i| PinQuery { url: format!("https://x/r{i}.git"), commit: format!("{i:040x}") }).collect();
+        let downloads: Vec<DownloadQuery> =
+            (0..3).map(|i| DownloadQuery { url: format!("https://x/f{i}.tgz"), sha256: format!("{i:064x}") }).collect();
+        let mut done = Vec::new();
+        let answer = Client::at(&base).lookup_all(&pins, &downloads, |n| done.push(n)).unwrap_or_else(|e| panic!("{e:#}"));
+        assert_eq!(answer.pins.len(), pins.len());
+        let urls: Vec<&str> = answer.downloads.iter().map(|d| d.url.as_str()).collect();
+        assert_eq!(urls, ["https://x/f0.tgz", "https://x/f1.tgz", "https://x/f2.tgz"]);
+        assert_eq!(*bodies.lock().unwrap(), [(MAX_LOOKUP_PINS - 1, 1), (0, 2)]);
+        assert_eq!(done, [MAX_LOOKUP_PINS, 2]);
     }
 
     /// `/providers` is asked with the one parameter the requirement maps to;
