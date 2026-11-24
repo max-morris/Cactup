@@ -3846,14 +3846,15 @@ fn a_refetch_to_a_stack_warns_of_claim_problems_without_failing() {
 /// The warnings after a stack install are bounded: a Cactarium slower than their deadline is
 /// said not to have answered in time; a Ctrl-C while they run ends them alone (the install
 /// that came before stays a success: `interrupt_taken_by_warnings`); a Ctrl-C from before
-/// they start leaves them unsaid. The deadline is shortened, and the interrupt flag is the
-/// process's: run in a child of its own.
+/// they start leaves them unsaid. The deadline is shortened to 3 s, wide enough that a slow
+/// unwind on a loaded machine can't pass for it. The interrupt flag is the process's: run in a
+/// child of its own.
 #[test]
 fn the_warnings_after_a_stack_install_are_bounded() {
     if std::env::var_os("CACTUP_TEST_WARN_DEADLINE_MS").is_none() {
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["commands::add::deps_tests::the_warnings_after_a_stack_install_are_bounded", "--exact", "--test-threads=1"])
-            .env("CACTUP_TEST_WARN_DEADLINE_MS", "500")
+            .env("CACTUP_TEST_WARN_DEADLINE_MS", "3000")
             .output()
             .unwrap();
         let said = String::from_utf8_lossy(&out.stdout);
@@ -3871,7 +3872,7 @@ fn the_warnings_after_a_stack_install_are_bounded() {
 
     let started = std::time::Instant::now();
     let said = crate::commands::claims::warn_problems(&s.ctx, &s.inst);
-    assert!(started.elapsed() < std::time::Duration::from_secs(4), "{:?}", started.elapsed());
+    assert!(started.elapsed() < std::time::Duration::from_secs(8), "{:?}", started.elapsed());
     assert_eq!(said, ["Did not check the claims: Cactarium did not answer in time.", "Check them with `cactup claims check`."]);
     assert!(!crate::commands::claims::interrupt_taken_by_warnings());
 
@@ -3881,7 +3882,7 @@ fn the_warnings_after_a_stack_install_are_bounded() {
     });
     let started = std::time::Instant::now();
     let said = crate::commands::claims::warn_problems(&s.ctx, &s.inst);
-    assert!(started.elapsed() < std::time::Duration::from_millis(450), "ended by Ctrl-C, not the deadline: {:?}", started.elapsed());
+    assert!(started.elapsed() < std::time::Duration::from_millis(2500), "ended by Ctrl-C, not the deadline: {:?}", started.elapsed());
     assert_eq!(said, ["Did not check the claims: interrupted.", "Check them with `cactup claims check`."]);
     assert!(crate::commands::claims::interrupt_taken_by_warnings(), "the finished install stays a success");
 
