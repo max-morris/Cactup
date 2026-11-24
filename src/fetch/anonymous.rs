@@ -282,6 +282,38 @@ fn public_addresses(url: &reqwest::Url) -> Result<Pin, Unchecked> {
     Ok(pin)
 }
 
+/// Why the download at `url` cannot be shared, if its host resolves to an
+/// address that is not public ([`probe::is_public_address`], as for a git
+/// remote): nobody outside this network could fetch it. A host that does
+/// not resolve here passes (Cactarium checks it again), as for a git
+/// remote; so does a URL with no host, which other checks refuse.
+pub fn private_download(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    #[cfg(test)]
+    if PUBLIC_IN_TESTS.lock().expect("test hosts poisoned").contains(&format!("{host}:{port}")) {
+        return None;
+    }
+    let ips: Vec<std::net::IpAddr> = match host.trim_start_matches('[').trim_end_matches(']').parse() {
+        Ok(ip) => vec![ip],
+        Err(_) => resolve(host, port).ok()?.into_iter().map(|a| a.ip()).collect(),
+    };
+    ips.iter().any(|ip| !probe::is_public_address(*ip)).then(|| {
+        format!(
+            "{} is on {host}, which is not a public address, so nobody outside your network can fetch it; \
+             publish it on a public host",
+            cactup_ecosystem_common::url::Redacted(url)
+        )
+    })
+}
+
+/// `host:port` pairs of local test servers taken as public by
+/// [`private_download`] (tests only: their stand-ins listen on loopback).
+#[cfg(test)]
+pub static PUBLIC_IN_TESTS: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
 /// `host`'s addresses, as the system resolver gives them; in tests, a
 /// routed host ([`ROUTES`]) resolves to a public address (its stand-in is
 /// local), one in [`RESOLVES`] to its addresses, and one in [`UNRESOLVED`]

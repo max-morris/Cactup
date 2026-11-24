@@ -78,8 +78,7 @@ impl Query {
         for ((repo, _), info) in self.pins.iter().zip(&answer.pins) {
             if info.package.is_none() && !skip(repo) {
                 out.push(format!(
-                    "{repo}: no registered package has this repo; push it and register it with \
-                     `cactup package init {repo} --publish`, or fork a registered package"
+                    "{repo}: no registered package has this repo; register it with `cactup package init {repo} --publish`"
                 ));
             }
         }
@@ -89,6 +88,21 @@ impl Query {
             }
         }
         out
+    }
+
+    /// One line for each git pin of a registered package at a commit that
+    /// Cactarium says the package's repo does not have (`commit-known` is
+    /// false; unknown is no refusal).
+    pub fn unknown_commits(&self, answer: &LookedUp) -> Vec<String> {
+        let pairs = self.pins.iter().zip(&answer.pins);
+        pairs
+            .filter(|(_, info)| info.package.is_some() && info.commit_known == Some(false))
+            .map(|((repo, q), info)| {
+                let package = info.package.as_deref().unwrap_or_default();
+                let short = &q.commit[..12.min(q.commit.len())];
+                format!("{repo} ({short}): commit not in the repo of {package}; push it, or pin a pushed commit")
+            })
+            .collect()
     }
 
     /// The label of each git pin of a registered package, by repo as a line
@@ -122,14 +136,19 @@ fn download_problem(what: &str, url: &str, info: &DownloadInfo) -> Option<String
 }
 
 /// Where a submitted download stands, one line each, as `download submit`
-/// says it: its review, and how far Cactarium's check of it got.
-pub fn download_status(info: &DownloadInfo) -> Vec<String> {
+/// says it: its review, and how far Cactarium's check of it got. `again`:
+/// it was just submitted again, which retries a check that failed.
+pub fn download_status(info: &DownloadInfo, again: bool) -> Vec<String> {
     match (info.review.as_deref(), info.verification.as_deref()) {
         (Some("approved"), _) => vec!["Approved by Cactarium.".to_owned()],
         (Some("rejected"), _) => vec!["Rejected by Cactarium.".to_owned()],
         (_, Some("failed")) => {
             let why = info.reason.as_deref().map(|r| format!(": {r}")).unwrap_or_default();
-            vec![format!("Cactarium could not verify it{why}."), "Submitting it again retries the check.".to_owned()]
+            let next = match again {
+                true => "Cactarium is checking it again.",
+                false => "Submitting it again retries the check.",
+            };
+            vec![format!("Cactarium could not verify {}{why}.", Redacted(&info.url)), next.to_owned()]
         }
         (_, Some("fetching")) => vec!["Being verified by Cactarium.".to_owned()],
         (_, Some("ok" | "vouched")) => vec!["Verified by Cactarium; awaiting review by an admin.".to_owned()],
@@ -165,19 +184,100 @@ pub fn ask_alone(client: &Client, query: &Query) -> Res<LookedUp> {
     answer
 }
 
-/// `sim publish`'s check (spec §8.10), before anything is uploaded: every
-/// git pin of `sim` a registered package's, every download (pins and
-/// inputs) approved by Cactarium, asked in one lookup with a line of
-/// progress. Fails naming each that is not.
+/// The line for a lookup that failed, among the other refusals; Ctrl-C is
+/// "Interrupted" alone.
+pub fn lookup_failed(e: &anyhow::Error) -> Res<String> {
+    if gix::interrupt::is_triggered() || e.downcast_ref::<crate::cactarium::InFlight>().is_some() {
+        anyhow::bail!("Interrupted");
+    }
+    let said = format!("{e:#}");
+    let first = said.lines().next().unwrap_or_default();
+    Ok(match first.starts_with("Cannot ask Cactarium") {
+        true => first.to_owned(),
+        false => format!("Cannot ask Cactarium what each pin is: {first}"),
+    })
+}
+
+/// How `sim publish` words the fixes of what its file holds.
+fn publish_fixes() -> super::export::Fixes {
+    super::export::Fixes {
+        when: "at export",
+        commit: "commit them, rebuild, and export it again",
+        unhashed: "download with no hash; pin it with !CHECKSUM_SHA256 and export it again".to_owned(),
+        unpinned: "no commit pins it; export it again from a build that pinned it".to_owned(),
+        unknown_commits: false,
+    }
+}
+
+/// `sim publish`'s check (spec §8.10), before anything is uploaded. Offline
+/// first, as export checks what it writes: URLs nobody else can fetch or
+/// that carry credentials (the thornlist's, each pin's, each input's),
+/// `ignore` components, repos and downloads nothing pins, downloads on a
+/// private address, sources dirty at export. Then the token, so that a user
+/// without one is not kept waiting. Then one lookup, with a line of
+/// progress: every git pin a registered package's, every download (pins and
+/// inputs) approved by Cactarium. Fails naming each problem, a line each;
+/// nothing is sent while anything offline is refused.
 pub fn check_publish(client: &Client, file: &std::path::Path, sim: &SimFile) -> Res<()> {
+    use cactup_ecosystem_common::probe::{self, Start};
+    use cactup_ecosystem_common::url::download_shareability;
+    let refuse = |lines: Vec<String>| anyhow::anyhow!("'{}' cannot be published:\n  {}", file.display(), lines.join("\n  "));
+    let list = crate::thornlist::parse(&sim.thornlist.text)
+        .map_err(|e| anyhow::anyhow!("'{}': its thornlist does not parse: {e:#}", file.display()))?;
+    let inputs: Vec<(String, String)> =
+        sim.inputs.iter().filter_map(|i| Some((i.knob.clone(), i.url.clone()?))).collect();
+    let checked = super::shareable::classify(&list, &sim.thornlist.text, &inputs);
+    let mut lines = checked.refused().to_vec();
+    for pin in sim.repos.iter().filter(|p| !checked.refuses(&p.name)) {
+        let why = match (&pin.commit, &pin.sha256) {
+            (Some(_), _) => match probe::start(&pin.url) {
+                Start::Refuse(why) => Some(why),
+                Start::Probe { .. } => None,
+            },
+            (None, Some(_)) => download_shareability(&pin.url).download_refusal(&pin.url),
+            (None, None) => None,
+        };
+        if let Some(why) = why {
+            lines.push(format!("{}: {why}", super::shareable::shown_repo(&pin.name)));
+        }
+    }
+    lines.extend(super::export::content_problems(&list, &sim.repos, &publish_fixes()));
+    lines.extend(super::export::unpinned_git(&list, &sim.repos, &publish_fixes()));
+    for (knob, url) in &inputs {
+        if download_shareability(url).download_refusal(url).is_none()
+            && let Some(why) = crate::fetch::anonymous::private_download(url)
+        {
+            lines.push(format!("input {knob}: {why}"));
+        }
+    }
+    for pin in sim.repos.iter().filter(|p| p.dirty) {
+        lines.push(format!("{}: uncommitted changes at export; commit them, rebuild, and export it again", pin.name));
+    }
+    for thorn in &sim.thornlist.untracked {
+        lines.push(format!("{thorn}: not backed by any repo; put it in a repo and register that with Cactarium"));
+    }
+    // Pins the thornlist does not name (a file edited by hand).
+    for pin in sim.repos.iter().filter(|p| p.commit.is_none() && p.sha256.is_none()) {
+        if !list.components().iter().any(|c| c.repo == pin.name) {
+            lines.push(format!("{}: no commit or sha256 pins it", pin.name));
+        }
+    }
+    if !lines.is_empty() {
+        return Err(refuse(lines));
+    }
+    crate::cactarium::token_for(client.base())?;
     let mut query = Query::of(&sim.repos, |pin| Some(pin.url.clone()));
     query.add_inputs(&sim.inputs);
     if query.is_empty() {
         return Ok(());
     }
-    let lines = query.problems(&ask_alone(client, &query)?, |_| false);
+    let answer = ask_alone(client, &query).map_err(|e| match lookup_failed(&e) {
+        Ok(line) => refuse(vec![line]),
+        Err(interrupted) => interrupted,
+    })?;
+    let lines = query.problems(&answer, |_| false);
     if !lines.is_empty() {
-        anyhow::bail!("'{}' cannot be published:\n  {}", file.display(), lines.join("\n  "));
+        return Err(refuse(lines));
     }
     Ok(())
 }
@@ -205,6 +305,10 @@ pub(crate) mod fake {
         pub checks: Vec<(String, String, Option<String>)>,
         /// URLs submitted while it serves: pending from then on.
         pub fresh: Arc<Mutex<Vec<String>>>,
+        /// A lookup answers 500, as a failing server does.
+        pub fail_lookup: bool,
+        /// Repos (by URL) whose commits the package's repo lacks.
+        pub commit_unknown: Vec<String>,
         /// Path → the bytes a GET of it answers.
         pub files: Vec<(String, Vec<u8>)>,
         /// How long a lookup takes to answer.
@@ -223,6 +327,9 @@ pub(crate) mod fake {
                 seen.lock().unwrap().push((path.to_owned(), String::from_utf8_lossy(body).into_owned()));
                 self.answer(path, body)
             });
+            // Its files stand in for downloads on a public host.
+            let at = base.trim_start_matches("http://").to_owned();
+            crate::fetch::anonymous::PUBLIC_IN_TESTS.lock().unwrap().insert(at);
             (base, log)
         }
 
@@ -233,6 +340,10 @@ pub(crate) mod fake {
             }
             if path == "/api/v1/lookup" {
                 std::thread::sleep(self.delay);
+                if self.fail_lookup {
+                    let body = br#"{"error":{"code":"internal","message":"database is locked"}}"#.to_vec();
+                    return ("500 Internal Server Error", "api-generation: 1\r\n".to_owned(), body);
+                }
                 let asked: cactup_ecosystem_common::api::LookupRequest = serde_json::from_slice(body).unwrap();
                 let pins: Vec<serde_json::Value> = (asked.pins.iter())
                     .map(|p| {
@@ -242,8 +353,9 @@ pub(crate) mod fake {
                             None if self.all_registered => (Some(format!("et/{repo}")), None),
                             None => (None, None),
                         };
+                        let known = self.commit_unknown.contains(&p.url).then_some(false);
                         serde_json::json!({"url": p.url, "commit": p.commit, "package": package, "version": version,
-                            "flesh": false, "fork-of": [], "commit-known": null})
+                            "flesh": false, "fork-of": [], "commit-known": known})
                     })
                     .collect();
                 let downloads: Vec<serde_json::Value> = (asked.downloads.iter())
@@ -356,8 +468,11 @@ mod tests {
         };
         let file = tmp.path().join("run.sim");
         std::fs::write(&file, sim.to_toml().unwrap()).unwrap();
-        let publish = |registry: Registry| {
+        let publish = |registry: Registry, token: bool| {
             let (base, log) = registry.serve();
+            if token {
+                crate::cactarium::TEST_TOKENS.lock().unwrap().insert(base.clone(), "tok".into());
+            }
             let db = crate::database::Db::in_dir(&tmp.path().join("db"));
             db.update(move |d| {
                 d.set_knob(crate::cactarium::URL_KNOB, base);
@@ -385,13 +500,21 @@ mod tests {
             downloads: vec![("https://example.org/o/z.tgz".into(), "pending".into())],
             ..Default::default()
         };
-        let (published, asked) = publish(registry);
+        let (published, asked) = publish(registry, false);
+        assert!(format!("{:#}", published.unwrap_err()).starts_with("No token for Cactarium"));
+        assert!(asked.is_empty(), "no token, nothing asked: {asked:?}");
+        let registry = Registry {
+            packages: vec![("https://example.org/o/a".into(), "et/a".into(), Some("1.0.0".into()))],
+            downloads: vec![("https://example.org/o/z.tgz".into(), "pending".into())],
+            ..Default::default()
+        };
+        let (published, asked) = publish(registry, true);
         let err = format!("{:#}", published.unwrap_err());
         assert_eq!(
             err,
             format!(
                 "'{}' cannot be published:\n  \
-                 c: no registered package has this repo; push it and register it with `cactup package init c --publish`, or fork a registered package\n  \
+                 c: no registered package has this repo; register it with `cactup package init c --publish`\n  \
                  z.tgz: download awaiting verification and review by Cactarium\n  \
                  input data: download not reviewed by Cactarium; submit it with `cactup download submit https://example.org/id.h5`",
                 file.display()
@@ -407,12 +530,54 @@ mod tests {
             ],
             ..Default::default()
         };
-        let (published, asked) = publish(registry);
-        // Uploaded, or stopped for want of a token: either way past the check.
-        match published {
-            Ok(()) => assert_eq!(asked, ["/api/v1/lookup", "/api/v1/sims/max/run"]),
-            Err(e) => assert!(format!("{e:#}").starts_with("No token for Cactarium"), "{e:#}"),
+        let (published, asked) = publish(registry, true);
+        published.unwrap_or_else(|e| panic!("{e:#}"));
+        assert_eq!(asked, ["/api/v1/lookup", "/api/v1/sims/max/run"]);
+
+        // What export refuses offline is refused before anything is asked: an
+        // ignore component, a URL with a token (in the thornlist and in a
+        // pin), an svn repo nothing pins, a git pin with none, a dirty one.
+        let text = "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\
+                    !TARGET = $ROOT/arrangements\n!TYPE = ignore\n!CHECKOUT = Private/Thorn\n\
+                    !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://TOKEN1@github.com/o/t.git\n!CHECKOUT = T/One\n\
+                    !TARGET = $ROOT/arrangements\n!TYPE = svn\n!URL = https://svn.example.org/s/trunk\n!CHECKOUT = S/One\n";
+        let mut bad = sim.clone();
+        bad.thornlist.text = text.into();
+        bad.inputs.clear();
+        bad.repos = vec![
+            RepoPin { url: "https://TOKEN1@github.com/o/t.git".into(), ..pin("t", Some("a".repeat(40)), None) },
+            RepoPin { url: "https://TOKEN2@github.com/o/u.git".into(), ..pin("u", Some("b".repeat(40)), None) },
+            pin("trunk", None, None),
+            RepoPin { dirty: true, ..pin("d", Some("d".repeat(40)), None) },
+        ];
+        let toml = toml::to_string(&bad).unwrap();
+        std::fs::write(&file, toml).unwrap();
+        let (published, asked) = publish(Registry { all_registered: true, ..Default::default() }, true);
+        let err = format!("{:#}", published.unwrap_err());
+        for line in [
+            "\n  t: https://***@github.com/o/t.git carries a user name or token",
+            "\n  u: https://***@github.com/o/u.git carries a user name or token",
+            "\n  Private/Thorn: an ignore component",
+            "\n  trunk: svn repos cannot be pinned",
+            "\n  d: uncommitted changes at export",
+        ] {
+            assert!(err.contains(line), "{line:?} not in: {err}");
         }
+        assert!(!err.contains("TOKEN"), "{err}");
+        assert!(asked.is_empty(), "nothing asked, no token sent: {asked:?}");
+    }
+
+    /// A failed lookup is one line, said once: the client's own "Cannot ask
+    /// Cactarium …" is not wrapped again; Ctrl-C in flight is "Interrupted"
+    /// alone, never a line among the refusals.
+    #[test]
+    fn a_failed_lookup_is_one_line() {
+        let e = anyhow::anyhow!("Cannot ask Cactarium about these repos: a pin's url is 3000 bytes long");
+        assert_eq!(lookup_failed(&e).unwrap(), "Cannot ask Cactarium about these repos: a pin's url is 3000 bytes long");
+        let e = anyhow::anyhow!("Cactarium at http://x did not answer in time.\nTo use another server, set it.");
+        assert_eq!(lookup_failed(&e).unwrap(), "Cannot ask Cactarium what each pin is: Cactarium at http://x did not answer in time.");
+        let e = anyhow::Error::new(crate::cactarium::InFlight);
+        assert_eq!(format!("{:#}", lookup_failed(&e).unwrap_err()), "Interrupted");
     }
 
     /// A pin is labeled with its version when one froze its commit (a track's

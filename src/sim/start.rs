@@ -1985,6 +1985,13 @@ mod tests {
         assert!(err.contains(&line) && !err.contains("uncommitted"), "{err}");
         export("unpushed", export_args("unpushed", &out)).unwrap();
 
+        // A build that recorded no commit for the repo: refused, but with --local.
+        fs::write(&cfg_path, record(&built.to_string()).replace("[sources]\ncarpetx", "[sources]\nother")).unwrap();
+        create("unpinned");
+        let err = shared("unpinned");
+        assert!(err.contains("\n  carpetx: the build recorded no commit; rebuild config sim to pin it\n"), "{err}");
+        export("unpinned", export_args("unpinned", &out)).unwrap();
+
         // Unpack: the thornlist comes back with its pin, the parfile verbatim.
         export("bhns", export_args("bhns", &out)).unwrap();
         let unpacked = tmp.path().join("unpacked");
@@ -2487,7 +2494,7 @@ mod tests {
              s.tgz: https://dl.share.test/s.tgz?*** carries `token` in its query, which must never be published; remove it from the URL\n  \
              Private/Thorn: an ignore component, which nobody else can fetch; put it in a repo and register that with Cactarium\n  \
              g.tgz: download with no hash; add !CHECKSUM_SHA256 to the thornlist\n  \
-             c: no registered package has this repo; push it and register it with `cactup package init c --publish`, or fork a registered package\n  \
+             c: no registered package has this repo; register it with `cactup package init c --publish`\n  \
              e.tgz: download awaiting verification and review by Cactarium\n  \
              f.tgz: download not reviewed by Cactarium; submit it with `cactup download submit https://dl.share.test/f.tgz`\n  \
              r.tgz: download rejected by Cactarium\n  \
@@ -2542,6 +2549,79 @@ mod tests {
         let describe = crate::args::SimDescribeArgs { local: true, ..Default::default() };
         let (packed, _, _) = pack_list_at(tmp.path(), &list, describe, &cactarium);
         packed.unwrap_or_else(|e| panic!("{e:#}"));
+    }
+
+    /// A lookup that fails is one line of the error, beside everything else
+    /// refused: a Cactarium that cannot be reached, and one that answers 500.
+    #[test]
+    fn a_failed_lookup_keeps_the_other_refusals() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use crate::sim::registered::fake::Registry;
+        let tmp = tempfile::tempdir().unwrap();
+        serve("reg.share.test", Mode::Public);
+        let list = registry_list(&["a"], &section("https://TOKEN9@reg.share.test/o/t.git", "T/One", true));
+        let (failing, _) = Registry { fail_lookup: true, ..Default::default() }.serve();
+        for (cactarium, why) in [
+            ("http://127.0.0.1:9".to_owned(), "Cannot ask Cactarium what each pin is: "),
+            (failing, "Cannot ask Cactarium what each pin is: database is locked\n"),
+        ] {
+            let (packed, out, _) = pack_list_at(tmp.path(), &list, Default::default(), &cactarium);
+            let err = format!("{:#}", packed.unwrap_err());
+            assert!(err.contains("\n  t: https://***@reg.share.test/o/t.git carries a user name or token"), "{err}");
+            assert!(err.contains(&format!("\n  {why}")), "{why:?} not in: {err}");
+            assert!(err.ends_with("\nPass --local to export for use here only."), "{err}");
+            assert!(!out.exists());
+        }
+    }
+
+    /// A pack's `!REPO_COMMIT` that the package's repo lacks (no remote has
+    /// it, as Cactarium says) is refused, with the way past.
+    #[test]
+    fn a_pinned_commit_the_registered_repo_lacks_is_refused() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use crate::sim::registered::fake::Registry;
+        let tmp = tempfile::tempdir().unwrap();
+        serve("reg.share.test", Mode::Public);
+        let registry = Registry {
+            all_registered: true,
+            commit_unknown: vec!["https://reg.share.test/o/b.git".into()],
+            ..Default::default()
+        };
+        let (cactarium, _) = registry.serve();
+        let (packed, _, _) = pack_list_at(tmp.path(), &registry_list(&["a", "b"], ""), Default::default(), &cactarium);
+        let err = format!("{:#}", packed.unwrap_err());
+        assert_eq!(
+            err,
+            format!(
+                "These cannot go into a shared .sim:\n  b ({}): commit not in the repo of et/b; push it, or pin a pushed commit\n\
+                 Pass --local to export for use here only.",
+                "a".repeat(12)
+            )
+        );
+    }
+
+    /// A download, or an input's, on a private address is refused: nobody
+    /// outside could fetch it.
+    #[test]
+    fn a_download_on_a_private_address_is_refused() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use crate::sim::registered::fake::Registry;
+        let tmp = tempfile::tempdir().unwrap();
+        serve("reg.share.test", Mode::Public);
+        let (cactarium, _) = Registry { all_registered: true, ..Default::default() }.serve();
+        let list = registry_list(&["a"], &download("http://127.0.0.1:18777/data.bin", "data.bin", Some(&"c".repeat(64))));
+        let describe = crate::args::SimDescribeArgs {
+            input_urls: vec!["data=http://10.1.2.3/id.h5".to_owned()],
+            ..Default::default()
+        };
+        let (packed, _, _) = pack_list_at(tmp.path(), &list, describe, &cactarium);
+        let err = format!("{:#}", packed.unwrap_err());
+        for line in [
+            "\n  data.bin: http://127.0.0.1:18777/data.bin is on 127.0.0.1, which is not a public address, so nobody outside your network can fetch it; publish it on a public host\n",
+            "\n  input data: http://10.1.2.3/id.h5 is on 10.1.2.3, which is not a public address",
+        ] {
+            assert!(err.contains(line), "{line:?} not in: {err}");
+        }
     }
 
     /// RepoPin.cactarium: a git pin of a registered package is labeled

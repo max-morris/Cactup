@@ -75,6 +75,8 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
         when: "when the binary was built",
         commit: "commit them and rebuild",
         unhashed: format!("the build recorded no hash; rebuild config {} to pin it", sim.meta.configuration),
+        unpinned: format!("the build recorded no commit; rebuild config {} to pin it", sim.meta.configuration),
+        unknown_commits: false,
     };
     let (source_text, list, repos) = check_and_pin(
         ctx,
@@ -88,7 +90,7 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
 
     let processed = std::fs::read_to_string(cfg_dir.join(build::THORNLIST_PROCESSED)).unwrap_or_default();
     let mut provenance = provenance(&sim, &config, &list, &processed);
-    add_overrides(&mut provenance, inst)?;
+    add_overrides(&mut provenance, inst);
     let fallback_summary = format!("{} on {}", super::parfile_stem(&parfile.filename), sim.meta.machine);
     finish(
         ctx,
@@ -204,13 +206,19 @@ enum Urls {
 }
 
 /// How a refusal words its fix, as the command it comes from would.
-struct Fixes {
+pub(super) struct Fixes {
     /// When the sources had uncommitted changes.
-    when: &'static str,
+    pub when: &'static str,
     /// The fix for uncommitted changes.
-    commit: &'static str,
+    pub commit: &'static str,
     /// Why a download has no hash, and the fix.
-    unhashed: String,
+    pub unhashed: String,
+    /// Why a git repo has no commit, and the fix.
+    pub unpinned: String,
+    /// No local check places the command's commits (a pack's
+    /// `!REPO_COMMIT`s): one that Cactarium says the package's repo lacks
+    /// is refused.
+    pub unknown_commits: bool,
 }
 
 /// The §8.9 check that a `.sim` for others holds nothing nobody else could
@@ -218,7 +226,7 @@ struct Fixes {
 /// which takes the list and its pins as they are, asking nothing). The
 /// thornlist `text` (parsed as `list`) and the input URLs given as flags;
 /// `pins_of` pins a list, `published` says which of those pins' commits a
-/// remote has.
+/// remote has (see [`Fixes::unknown_commits`] for what it cannot tell).
 ///
 /// Offline first: URLs refused by their form ([`super::shareable::classify`]),
 /// uncommitted changes, commits on no remote, components nobody else can
@@ -253,6 +261,14 @@ fn check_and_pin(
     let repos = pins_of(&list);
     let mut lines = state_problems(&repos, &published(&repos)?, fixes);
     lines.extend(content_problems(&list, &repos, fixes));
+    lines.extend(unpinned_git(&list, &repos, fixes));
+    for (knob, url) in input_urls(describe) {
+        if cactup_ecosystem_common::url::download_shareability(&url).download_refusal(&url).is_none()
+            && let Some(why) = fetch::anonymous::private_download(&url)
+        {
+            lines.push(format!("input {knob}: {why}"));
+        }
+    }
     let query = registered::Query::of(&repos, |pin| match pin.commit {
         _ if checked.refuses(&pin.name) => None,
         Some(_) if urls == Urls::Unchecked => checked.published_as(&pin.url).map(str::to_owned),
@@ -265,11 +281,18 @@ fn check_and_pin(
     let answer = match settled.looked_up.as_ref() {
         None => None,
         Some(Ok(answer)) => Some(answer),
-        Some(Err(e)) => bail!("Cannot ask Cactarium what each pin is: {e:#}\n{}", super::shareable::LOCAL_HINT),
+        // One line among the rest: everything else refused is still said.
+        Some(Err(e)) => {
+            refused.push(registered::lookup_failed(e)?);
+            None
+        }
     };
     if let Some(answer) = answer {
         let refused_url = |repo: &str| settled.refused_repos.iter().any(|r| shown_repo(r) == repo);
         refused.extend(query.problems(answer, refused_url));
+        if fixes.unknown_commits {
+            refused.extend(query.unknown_commits(answer));
+        }
     }
     if !refused.is_empty() {
         return Err(super::shareable::refusal(&refused));
@@ -310,11 +333,12 @@ fn state_problems(repos: &[RepoPin], published: &[bool], fixes: &Fixes) -> Vec<S
 }
 
 /// A line for each component of `list` (pinned as `repos`) nobody else can
-/// fetch or reproduce: an `ignore` component (on
-/// this machine only), a download with no hash to pin it by (nothing
-/// Cactarium could review), and a repo of another kind than git that
-/// nothing pins (svn, cvs, hg, darcs; several downloads from one URL).
-fn content_problems(list: &thornlist::Thornlist, repos: &[RepoPin], fixes: &Fixes) -> Vec<String> {
+/// fetch or reproduce: an `ignore` component (on this machine only), a
+/// download with no hash to pin it by (nothing Cactarium could review) or
+/// on a private address, and a repo of another kind than git that nothing
+/// pins (svn, cvs, hg, darcs; several downloads from one
+/// URL).
+pub(super) fn content_problems(list: &thornlist::Thornlist, repos: &[RepoPin], fixes: &Fixes) -> Vec<String> {
     let mut lines = Vec::new();
     for c in list.ignored() {
         lines.push(format!(
@@ -327,9 +351,19 @@ fn content_problems(list: &thornlist::Thornlist, repos: &[RepoPin], fixes: &Fixe
             lines.push(format!("{}: {}", c.checkout, fixes.unhashed));
         }
     }
-    // Every other repo that nothing pins, but git (a commit pins it, or
-    // nothing recorded one): a .sim for others is fully specified.
-    // Max's decision 5 (plan §10).
+    // A download on a private address (a URL refused for its form is said
+    // already, by the URL check).
+    let mut asked = std::collections::BTreeSet::new();
+    for c in list.components().iter().filter(|c| matches!(c.ty, ComponentType::Http | ComponentType::Https | ComponentType::Ftp)) {
+        let Some(url) = c.url.as_deref().filter(|u| asked.insert(u.to_owned())) else { continue };
+        if cactup_ecosystem_common::url::download_shareability(url).download_refusal(url).is_none()
+            && let Some(why) = fetch::anonymous::private_download(url)
+        {
+            lines.push(format!("{}: {why}", c.checkout));
+        }
+    }
+    // Every other repo that nothing pins: a .sim for others is fully
+    // specified. Max's decision 5 (plan §10).
     for r in repos.iter().filter(|r| r.commit.is_none() && r.sha256.is_none()) {
         let Some(c) = list.components().iter().find(|c| c.repo == r.name) else { continue };
         let line = match c.ty {
@@ -350,17 +384,35 @@ fn content_problems(list: &thornlist::Thornlist, repos: &[RepoPin], fixes: &Fixe
     lines
 }
 
+/// A line for each git repo of `list` (pinned as `repos`) that no commit
+/// pins: a .sim for others is fully specified (Max's decision 5).
+pub(super) fn unpinned_git(list: &thornlist::Thornlist, repos: &[RepoPin], fixes: &Fixes) -> Vec<String> {
+    let git = |r: &RepoPin| list.components().iter().any(|c| c.repo == r.name && c.ty == ComponentType::Git);
+    repos
+        .iter()
+        .filter(|r| r.commit.is_none() && r.sha256.is_none() && git(r))
+        .map(|r| format!("{}: {}", shown_repo(&r.name), fixes.unpinned))
+        .collect()
+}
+
 /// Record the installation's claim overrides in `provenance`, for whoever
 /// reads the `.sim`: informational, since an import never resolves
 /// dependencies.
 // Plan misfit 4.
-fn add_overrides(provenance: &mut Provenance, inst: &Installation) -> Res<()> {
-    let meta = inst.meta()?;
+fn add_overrides(provenance: &mut Provenance, inst: &Installation) {
+    // Best effort: information only, never worth failing an export over.
+    let meta = match inst.meta() {
+        Ok(meta) => meta,
+        Err(e) => {
+            let why = format!("{e:#}");
+            println!("{}", format!("Claim overrides not recorded: {}", why.lines().next().unwrap_or("")).yellow());
+            return;
+        }
+    };
     if !meta.claim_overrides.is_empty() {
         let keys: Vec<&str> = meta.claim_overrides.keys().map(String::as_str).collect();
         provenance.extra.insert("claims-overrides".to_owned(), keys.join("; "));
     }
-    Ok(())
 }
 
 fn refuse_overwrite(file: &Path, describe: &SimDescribeArgs) -> Res<()> {
@@ -469,10 +521,10 @@ fn finish(ctx: &Ctx, describe: &SimDescribeArgs, file: &Path, parts: Parts) -> R
     query.add_inputs(&inputs);
     if !describe.local && !query.is_empty() {
         let client = crate::cactarium::Client::new(&ctx.db.read()?).patient();
-        let answer = registered::ask_alone(&client, &query).map_err(|e| {
-            anyhow!("Cannot ask Cactarium what each pin is: {e:#}\n{}", super::shareable::LOCAL_HINT)
-        })?;
-        let lines = query.problems(&answer, |_| false);
+        let lines = match registered::ask_alone(&client, &query) {
+            Ok(answer) => query.problems(&answer, |_| false),
+            Err(e) => vec![registered::lookup_failed(&e)?],
+        };
         if !lines.is_empty() {
             return Err(super::shareable::refusal(&lines));
         }
@@ -509,11 +561,10 @@ fn finish(ctx: &Ctx, describe: &SimDescribeArgs, file: &Path, parts: Parts) -> R
     );
     let missing = sim_file.unspecified();
     if !missing.is_empty() {
-        let what: Vec<String> = missing.iter().map(ToString::to_string).collect();
-        println!(
-            "{}",
-            format!("Cannot be published to Cactarium: {}", what.join("; ")).yellow()
-        );
+        println!("{}", "Cannot be published to Cactarium:".yellow());
+        for what in &missing {
+            println!("{}", format!("  {what}").yellow());
+        }
     }
     Ok(())
 }
@@ -541,6 +592,8 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
         when: "in the installation",
         commit: "commit them",
         unhashed: "download with no hash; add !CHECKSUM_SHA256 to the thornlist".to_owned(),
+        unpinned: "not fetched by the installation; run `cactup inst refetch`".to_owned(),
+        unknown_commits: false,
     };
     let (text, list, repos, provenance) = if ctx.globals.installation.is_some() {
         let inst = Installation::resolve(ctx)?;
@@ -557,7 +610,7 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
         let (text, list, repos) =
             check_and_pin(ctx, &args.describe, Urls::Unchecked, (text, list), &pins_of, &published, &fixes)?;
         let mut provenance = exporter();
-        add_overrides(&mut provenance, &inst)?;
+        add_overrides(&mut provenance, &inst);
         (text, list, repos, provenance)
     } else {
         // Before any tip is asked: a refused URL fails without asking one,
@@ -577,7 +630,7 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
         // Each commit is a remote tip by construction.
         let published = |repos: &[RepoPin]| Ok(vec![true; repos.len()]);
         let (text, list, repos) =
-            check_and_pin(ctx, &args.describe, urls, (text, list), &pins_of, &published, &fixes)?;
+            check_and_pin(ctx, &args.describe, urls, (text, list), &pins_of, &published, &Fixes { unknown_commits: true, ..fixes })?;
         println!(
             "{}",
             "Pinned each repo to the tip of its branch or tag (-I pins an installation's checkouts instead)."
@@ -1028,6 +1081,19 @@ fn short(commit: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The claim overrides are information: an installation.toml that does
+    /// not read records none and fails nothing.
+    #[test]
+    fn overrides_are_recorded_at_best() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inst = Installation::new("x", tmp.path());
+        std::fs::create_dir_all(inst.cactup_dir()).unwrap();
+        std::fs::write(inst.cactup_dir().join("installation.toml"), "schema = 5\n[claim-overrides\n").unwrap();
+        let mut provenance = exporter();
+        add_overrides(&mut provenance, &inst);
+        assert!(provenance.extra.is_empty());
+    }
 
     /// A download is pinned by the checksum its list gives, else by the hash
     /// the fetch record kept for it (what a build freezes); a repo of several

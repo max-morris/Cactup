@@ -253,7 +253,10 @@ fn run() -> Res<()> {
     drop(command_span);
     // A job's run ends as its run-script did, whatever signal the batch
     // system sent it (D11); a follow view's Ctrl-C is its way out.
-    let result = interrupted_unless_failed(result, gix::interrupt::is_triggered() && !compute_node && !ends_on_ctrl_c);
+    // The warnings after a stack install end on a Ctrl-C of their own, the
+    // install already done (`claims::warn_problems`).
+    let interrupted = gix::interrupt::is_triggered() && !commands::claims::interrupt_taken_by_warnings();
+    let result = interrupted_unless_failed(result, interrupted && !compute_node && !ends_on_ctrl_c);
 
     // Wisdom after failure would be flippant — and gating on Ok also keeps
     // anyhow's after-main `Error:` print from landing below decoration.

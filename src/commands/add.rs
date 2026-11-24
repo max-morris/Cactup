@@ -914,6 +914,7 @@ fn plan_add(
         full: flags.upgrade || flags.upgrade_all,
         without_lookup: flags.no_deps,
         no_base_reads: flags.no_deps,
+        no_unreleased_reads: false,
     };
     let set = match super::resolution::present(&mut reg, install_root, base, &meta.added, local, &options) {
         Ok(set) => set,

@@ -152,8 +152,8 @@ impl Client {
         Client { patient: true, ..self }
     }
 
-    /// This client, stopped by `stop` rather than Ctrl-C (tests).
-    #[cfg(test)]
+    /// This client, stopped by `stop` rather than Ctrl-C (a check with a
+    /// deadline of its own; tests).
     pub fn stopped_by(self, stop: &'static std::sync::atomic::AtomicBool) -> Client {
         Client { stop, ..self }
     }
@@ -302,9 +302,9 @@ impl Client {
                 if !same || !info.commit.eq_ignore_ascii_case(&asked.commit) {
                     bail!(
                         "Cactarium answered a lookup of {} at {} with {} at {}, out of order",
-                        asked.url,
+                        cactup_ecosystem_common::url::Redacted(&asked.url),
                         asked.commit,
-                        info.url,
+                        cactup_ecosystem_common::url::Redacted(&info.url),
                         info.commit
                     );
                 }
@@ -1004,8 +1004,18 @@ fn read_credentials(path: &Path) -> Res<Credentials> {
     }
 }
 
+/// Tokens for tests' local registries, by base URL (never the
+/// environment, which every test shares).
+#[cfg(test)]
+pub static TEST_TOKENS: std::sync::Mutex<std::collections::BTreeMap<String, String>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
 /// The token for `base`: `CACTARIUM_TOKEN`, else the credentials file.
 pub fn token_for(base: &str) -> Res<String> {
+    #[cfg(test)]
+    if let Some(token) = TEST_TOKENS.lock().expect("test tokens poisoned").get(base) {
+        return Ok(token.clone());
+    }
     if let Ok(token) = std::env::var("CACTARIUM_TOKEN")
         && !token.is_empty()
     {
@@ -1325,6 +1335,28 @@ mod tests {
         assert_eq!(urls, ["https://x/f0.tgz", "https://x/f1.tgz", "https://x/f2.tgz"]);
         assert_eq!(*bodies.lock().unwrap(), [(MAX_LOOKUP_PINS - 1, 1), (0, 2)]);
         assert_eq!(done, [MAX_LOOKUP_PINS, 2]);
+
+        // Answers out of order, or about something else, are refused, URLs redacted.
+        let (base, _) = serve_with_body(2, move |_, body| {
+            let asked: LookupRequest = serde_json::from_slice(body).unwrap();
+            let mut downloads: Vec<serde_json::Value> = (asked.downloads.iter())
+                .map(|d| serde_json::json!({"url": d.url, "sha256": d.sha256, "review": null}))
+                .collect();
+            downloads.reverse();
+            let pins: Vec<serde_json::Value> = (asked.pins.iter())
+                .map(|p| serde_json::json!({"url": "https://x/other.git", "commit": p.commit, "package": null, "version": null, "commit-known": null}))
+                .collect();
+            let body = serde_json::json!({"pins": pins, "downloads": downloads}).to_string();
+            ("200 OK", "api-generation: 1\r\n".into(), body.into_bytes())
+        });
+        let two: Vec<DownloadQuery> = (0..2)
+            .map(|i| DownloadQuery { url: format!("https://x/f{i}.tgz?download=1#t=SECRET"), sha256: format!("{i:064x}") })
+            .collect();
+        let err = format!("{:#}", Client::at(&base).lookup_all(&[], &two, |_| {}).unwrap_err());
+        assert!(err.starts_with("Cactarium answered a lookup of https://x/f0.tgz?*** (") && !err.contains("SECRET") && err.ends_with("out of order"), "{err}");
+        let pin = [PinQuery { url: "https://TOKEN@x/r.git".into(), commit: "a".repeat(40) }];
+        let err = format!("{:#}", Client::at(&base).lookup_all(&pin, &[], |_| {}).unwrap_err());
+        assert!(err.contains("https://***@x/r.git") && !err.contains("TOKEN"), "{err}");
     }
 
     /// `/providers` is asked with the one parameter the requirement maps to;

@@ -76,6 +76,11 @@ pub struct Checked {
 }
 
 impl Checked {
+    /// A line per URL refused.
+    pub fn refused(&self) -> &[String] {
+        &self.refused
+    }
+
     /// Whether a URL of repo `repo` (as the thornlist names it) was refused.
     pub fn refuses(&self, repo: &str) -> bool {
         self.refused_repos.contains(repo)
@@ -597,7 +602,7 @@ fn cvs_secrets(root: &str) -> Vec<Range<usize>> {
 /// [`download_refusal`] for an input's URL given at a prompt: the error,
 /// or nothing.
 pub fn check_input_url(knob: &str, url: &str) -> Res<()> {
-    match download_refusal(url) {
+    match download_refusal(url).or_else(|| anonymous::private_download(url)) {
         Some(why) => bail!("Input {knob}: {why}.\n{LOCAL_HINT}"),
         None => Ok(()),
     }

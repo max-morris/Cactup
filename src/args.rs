@@ -1481,19 +1481,18 @@ pub(crate) struct SimDescribeArgs {
     /// Archive member an input knob points at (KNOB=MEMBER; repeatable).
     #[clap(long = "input-path", value_name = "KNOB=MEMBER")]
     pub input_paths: Vec<String>,
-    /// Skip the checks for sharing: a .sim for use on this machine only
+    /// Skip the checks for sharing: a .sim for this machine only
     ///
-    /// Without it, the .sim must be one anybody can reproduce. Refused:
-    /// sources with uncommitted changes, commits on no remote branch or tag,
-    /// repos of no package registered with Cactarium, ignore components,
-    /// downloads with no hash or not reviewed by Cactarium, and URLs nobody
-    /// else can fetch: local paths, git:// URLs, and URLs with a user name,
-    /// password, token or query string. Each git repo is asked once over the
-    /// network, without credentials, and Cactarium is asked which package
-    /// holds each pin. An ssh URL is written as https when that answers, and
-    /// refused otherwise. A credential on a line that nothing fetches is
-    /// written as ***. Each pin of a registered package is labeled with it.
-    #[clap(long)]
+    /// Without it, these are refused:
+    ///   uncommitted changes; commits on no remote branch or tag
+    ///   repos of no package registered with Cactarium
+    ///   repos nothing pins: svn, cvs, hg, darcs, git with no commit,
+    ///     several downloads in one section
+    ///   ignore components
+    ///   downloads with no hash, on a private address, or not approved
+    ///   URLs nobody else can fetch, or with credentials
+    /// Each git remote and Cactarium are asked once, without credentials.
+    #[clap(long, verbatim_doc_comment)]
     pub local: bool,
 }
 

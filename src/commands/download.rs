@@ -11,6 +11,7 @@ use anyhow::{anyhow, bail};
 use super::Ctx;
 use crate::cactarium::{Client, Submitted};
 use crate::Res;
+use crate::fetch::anonymous::private_download;
 use crate::sim::registered::download_status;
 use cactup_ecosystem_common::api::{DownloadInfo, DownloadQuery, DownloadSubmission};
 use cactup_ecosystem_common::url::{download_shareability, Redacted};
@@ -24,46 +25,47 @@ pub fn submit(ctx: &Ctx, url: &str, note: Option<String>) -> Res<()> {
     Ok(())
 }
 
-/// [`submit`] to `client` with `token`: the lines it printed.
+/// [`submit`] to `client` with `token`: the lines it printed, each printed
+/// as soon as it is known (a Ctrl-C during the last lookup still leaves
+/// "Submitted …" said).
 pub(crate) fn submit_with(client: &Client, token: &str, url: &str, note: Option<String>) -> Res<Vec<String>> {
-    if let Some(why) = download_shareability(url).download_refusal(url) {
+    if let Some(why) = download_shareability(url).download_refusal(url).or_else(|| private_download(url)) {
         bail!("Not submitted: {why}.");
     }
     if note.as_deref().is_some_and(|n| n.contains(['\n', '\r'])) {
         bail!("A note is one line.");
     }
+    let mut said = Vec::new();
+    let mut say = |line: String| {
+        println!("{line}");
+        said.push(line);
+    };
     let (sha256, size) = hash_download(url)?;
     let shown = Redacted(url).to_string();
-    let mut said = vec![format!("Downloaded {shown}: {}, sha256 {sha256}.", crate::progress::bytes(size as usize))];
+    say(format!("Downloaded {shown}: {}, sha256 {sha256}.", crate::progress::bytes(size as usize)));
     let submission = DownloadSubmission { url: url.to_owned(), sha256: sha256.clone(), note };
     let submitted = client.submit_download(token, &submission)?;
+    let again = matches!(submitted, Submitted::Known(_));
+    match &submitted {
+        Submitted::New(_) => say(format!("Submitted it to {} for review.", client.base())),
+        Submitted::Known(_) => say("Already submitted.".to_owned()),
+    }
     // Where its check stands: the submission's answer gives only the review.
-    let status = status_of(client, &submission);
+    let status = status_of(client, &submission, again);
     if gix::interrupt::is_triggered() {
         bail!("Interrupted");
     }
-    match submitted {
-        Submitted::New(review) => {
-            said.push(format!("Submitted it to {} for review.", client.base()));
-            said.extend(status.unwrap_or_else(|| review_line(&review.review)));
+    match (status, submitted) {
+        (Some(status), _) => status.into_iter().for_each(&mut say),
+        (None, Submitted::New(review)) => review_line(&review.review).into_iter().for_each(&mut say),
+        // An older Cactarium says no more than the 409 does.
+        (None, Submitted::Known(known)) => {
+            say(format!("Currently {}.", known.known.review));
+            let message = known.error.message.trim();
+            if !message.is_empty() && message != "already submitted" {
+                say(message.to_owned());
+            }
         }
-        Submitted::Known(known) => match status {
-            Some(status) => {
-                said.push("Already submitted.".to_owned());
-                said.extend(status);
-            }
-            // An older Cactarium says no more than the 409 does.
-            None => {
-                said.push(format!("Already submitted, currently {}.", known.known.review));
-                let message = known.error.message.trim();
-                if !message.is_empty() && message != "already submitted" {
-                    said.push(message.to_owned());
-                }
-            }
-        },
-    }
-    for line in &said {
-        println!("{line}");
     }
     Ok(said)
 }
@@ -71,17 +73,17 @@ pub(crate) fn submit_with(client: &Client, token: &str, url: &str, note: Option<
 /// What a review state means for the download, when nothing says more.
 fn review_line(review: &str) -> Vec<String> {
     let info = DownloadInfo { url: String::new(), sha256: String::new(), review: Some(review.to_owned()), verification: None, reason: None };
-    download_status(&info)
+    download_status(&info, false)
 }
 
 /// Where the submitted download stands, as one lookup gives it: `None` when
 /// that cannot be told (the lookup failed, or the server says nothing of
 /// its check, as an older one does).
-fn status_of(client: &Client, submission: &DownloadSubmission) -> Option<Vec<String>> {
+fn status_of(client: &Client, submission: &DownloadSubmission, again: bool) -> Option<Vec<String>> {
     let query = DownloadQuery { url: submission.url.clone(), sha256: submission.sha256.clone() };
     let answer = client.lookup_all(&[], &[query], |_| {}).ok()?;
     let info = answer.downloads.into_iter().next()?;
-    info.verification.is_some().then(|| download_status(&info))
+    info.verification.is_some().then(|| download_status(&info, again))
 }
 
 /// The sha256 of what `url` serves, and its size: streamed through the
@@ -172,6 +174,23 @@ mod tests {
         let (base, _) = registry.serve();
         let said = submit_with(&Client::at(&base), "tok", &format!("{base}/id.tar.gz"), None).unwrap_or_else(|e| panic!("{e:#}"));
         assert_eq!(said[1..], [format!("Submitted it to {base} for review."), "Being verified by Cactarium.".to_owned()]);
+
+        // A check that failed at once says to submit again.
+        let registry = Registry {
+            files: vec![("/id.tar.gz".into(), DATA.to_vec())],
+            checks: vec![("/id.tar.gz".into(), "failed".into(), Some("the server answered 404 Not Found".into()))],
+            ..Default::default()
+        };
+        let (base, _) = registry.serve();
+        let url = format!("{base}/id.tar.gz");
+        let said = submit_with(&Client::at(&base), "tok", &url, None).unwrap_or_else(|e| panic!("{e:#}"));
+        assert_eq!(
+            said[2..],
+            [
+                format!("Cactarium could not verify {url}: the server answered 404 Not Found."),
+                "Submitting it again retries the check.".to_owned()
+            ]
+        );
     }
 
     /// A download submitted before is answered 409 with the review it has:
@@ -195,10 +214,10 @@ mod tests {
         };
         assert_eq!(
             said("p.tgz")[1..],
-            ["Already submitted, currently pending.", "the server couldn't verify it: the file's sha256 is abc, not def"]
+            ["Already submitted.", "Currently pending.", "the server couldn't verify it: the file's sha256 is abc, not def"]
         );
-        assert_eq!(said("a.tgz")[1..], ["Already submitted, currently approved."]);
-        assert_eq!(said("r.tgz")[1..], ["Already submitted, currently rejected."]);
+        assert_eq!(said("a.tgz")[1..], ["Already submitted.", "Currently approved."]);
+        assert_eq!(said("r.tgz")[1..], ["Already submitted.", "Currently rejected."]);
         assert_eq!(paths(&log).iter().filter(|p| *p == "/api/v1/downloads").count(), 3);
 
         // A Cactarium that says where its check stands: that, not the 409's words.
@@ -223,9 +242,9 @@ mod tests {
         assert_eq!(
             said("f.tgz")[1..],
             [
-                "Already submitted.",
-                "Cactarium could not verify it: the server answered 404 Not Found.",
-                "Submitting it again retries the check."
+                "Already submitted.".to_owned(),
+                format!("Cactarium could not verify {base}/f.tgz: the server answered 404 Not Found."),
+                "Cactarium is checking it again.".to_owned(),
             ]
         );
         assert_eq!(said("o.tgz")[1..], ["Already submitted.", "Verified by Cactarium; awaiting review by an admin."]);
@@ -238,6 +257,12 @@ mod tests {
     #[test]
     fn failures_submit_nothing() {
         let (base, log) = Registry::default().serve();
+        // A download on a private address is refused before it is fetched.
+        for url in ["http://127.0.0.1:18777/data.bin", "http://10.1.2.3/data.bin", "http://[::1]:18777/d", "http://169.254.1.1/d"] {
+            let err = format!("{:#}", submit_with(&Client::at(&base), "tok", url, None).unwrap_err());
+            assert!(err.starts_with("Not submitted: ") && err.contains("which is not a public address"), "{err}");
+        }
+        crate::fetch::anonymous::PUBLIC_IN_TESTS.lock().unwrap().insert("127.0.0.1:9".into());
         // Nothing listens on port 9.
         let err = format!("{:#}", submit_with(&Client::at(&base), "tok", "http://127.0.0.1:9/f.tgz", None).unwrap_err());
         assert!(err.starts_with("Failed to download http://127.0.0.1:9/f.tgz"), "{err}");
@@ -273,6 +298,7 @@ mod tests {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        crate::fetch::anonymous::PUBLIC_IN_TESTS.lock().unwrap().insert(format!("127.0.0.1:{port}"));
         let (asked, asked_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();

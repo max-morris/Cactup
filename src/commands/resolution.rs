@@ -942,6 +942,11 @@ pub(crate) struct PresentOptions {
     /// Read no base package's release (`--no-deps`: nothing beyond what was
     /// named): base packages are present with their dependencies unknown.
     pub no_base_reads: bool,
+    /// Read no base package at a commit no version froze (a read the server
+    /// may have to fetch the repository for): such a package is present with
+    /// its claims unknown, counted as unchecked. For checks that must be
+    /// quick (the warnings after a stack install).
+    pub no_unreleased_reads: bool,
 }
 
 /// An added package whose release Cactarium cannot give: what it
@@ -1161,7 +1166,7 @@ pub(crate) fn present(
         for (i, (r, id)) in repos.iter().zip(&mapped).enumerate() {
             let (Some(id), Some(commit)) = (id, &r.commit) else { continue };
             let frozen = info_of(i).is_some_and(|info| info.version.is_some());
-            if first_of.insert(id) && !frozen && !added_ids.contains(id) {
+            if first_of.insert(id) && !frozen && !added_ids.contains(id) && !options.no_unreleased_reads {
                 batch.push((id.clone(), commit.clone()));
             }
         }

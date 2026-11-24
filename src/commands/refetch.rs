@@ -528,13 +528,6 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
         report_configs(&inst, &configs, matches!(source, Source::Release { .. }));
     }
 
-    // A stack release is frozen: what its packages claim of each other is
-    // checked, and said, but never resolved.
-    // Plan §4.3.
-    if recorded && matches!(&source, Source::Release { described, .. } if described.starts_with("stack ")) {
-        super::claims::warn_problems(ctx, &inst)?;
-    }
-
     if !report.failures.is_empty() {
         println!("{}", format!("{} fetch failure(s):", report.failures.len()).bright_red().bold());
         for f in &report.failures {
@@ -545,6 +538,13 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             if recorded { "was updated despite the failures" } else { "is unchanged" }
         );
         bail!("Refetch completed with {} failure(s)", report.failures.len());
+    }
+
+    // A stack release is frozen: what its packages claim of each other is
+    // checked, and said, but never resolved; last, once the refetch has
+    // said everything of its own. Plan §4.3.
+    if recorded && matches!(&source, Source::Release { described, .. } if described.starts_with("stack ")) {
+        super::claims::warn_problems(ctx, &inst);
     }
 
     Ok(())

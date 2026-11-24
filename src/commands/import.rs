@@ -502,11 +502,6 @@ pub fn publish(ctx: &Ctx, file: &std::path::Path, target: &str, version: Option<
     }
     let text = std::fs::read_to_string(file).with_context(|| format!("Failed to read '{}'", file.display()))?;
     let sim = SimFile::from_toml(&text).map_err(|e| anyhow!("'{}': {e}", file.display()))?;
-    let missing = sim.unspecified();
-    if !missing.is_empty() {
-        let what: Vec<String> = missing.iter().map(ToString::to_string).collect();
-        bail!("'{}' is not fully specified: {}", file.display(), what.join("; "));
-    }
     let client = crate::cactarium::Client::new(&ctx.db.read()?);
     crate::sim::registered::check_publish(&client.clone().patient(), file, &sim)?;
     let published = client.publish_sim(slug.owner.as_str(), slug.name.as_str(), text.into_bytes(), version)?;

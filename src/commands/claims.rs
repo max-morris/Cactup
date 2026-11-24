@@ -316,23 +316,27 @@ impl Checked {
 /// resolver over everything installed, with the installation's overrides applied). Changes
 /// nothing; fails when Cactarium cannot be asked.
 pub(crate) fn problems(ctx: &Ctx, inst: &Installation, meta: &InstallationMeta) -> Res<Checked> {
+    problems_with(&Client::new(&ctx.db.read()?), inst, meta, &PresentOptions::default())
+}
+
+/// [`problems`], asking `client`, reading the installation with `options`.
+fn problems_with(client: &Client, inst: &Installation, meta: &InstallationMeta, options: &PresentOptions) -> Res<Checked> {
     let pristine = std::fs::read_to_string(inst.source_thornlist_to_read())
         .map_err(|e| anyhow!("This installation has no pristine thornlist: {e}"))?;
     let base = thornlist::parse(&pristine)?;
     let live = thornlist::parse(&super::add::compose(&pristine, &meta.added)?)?;
     let local = resolution::local_facts(&live, &inst.cactus_root()?)?;
     let rules = Rules::of(&meta.claim_overrides, Vec::new())?;
-    let client = Client::new(&ctx.db.read()?);
     let names: Vec<&str> = (meta.added.iter().map(|a| a.package.as_str()))
         .chain(base.components().iter().map(|c| c.repo.as_str()))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let mut reg = Registry::new(&client, names);
+    let mut reg = Registry::new(client, names);
     let unmapped = !base.components().is_empty()
         && crate::fetch::FetchState::read(&inst.root)?.is_none_or(|f| f.repos.is_empty());
     let answer = (|| -> Res<Checked> {
-        let set = resolution::present(&mut reg, &inst.root, &base, &meta.added, Some(&local), &PresentOptions::default())?;
+        let set = resolution::present(&mut reg, &inst.root, &base, &meta.added, Some(&local), options)?;
         let lines = deps::check(&set.present, &rules, &mut reg)?;
         let unread = set.unread.iter().map(resolution::Unread::line).collect();
         Ok(Checked { lines, unchecked: set.unchecked.len(), unread, unmapped })
@@ -348,33 +352,130 @@ pub(crate) fn problems(ctx: &Ctx, inst: &Installation, meta: &InstallationMeta) 
     Ok(found)
 }
 
-/// The check `claims check` makes, run after a stack install or a refetch to a stack: each problem
-/// printed as a warning, ending in its way past, and returned. It never fails the command (a
-/// release is frozen and installed as it is), but Ctrl-C does.
+/// How long each request of the warnings after a stack install may take.
+const WARN_REQUEST: std::time::Duration = std::time::Duration::from_secs(15);
+/// How long those warnings may take in all.
+const WARN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Stops the requests of the warnings ([`warn_problems`]) at their deadline
+/// or at Ctrl-C.
+static WARN_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Set when a Ctrl-C arrived while the warnings ran, and they took it.
+static WARN_TOOK_INTERRUPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the Ctrl-C now set arrived during [`warn_problems`], which ended
+/// on it: the command it followed had finished, so it is no failure.
+pub(crate) fn interrupt_taken_by_warnings() -> bool {
+    WARN_TOOK_INTERRUPT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The check `claims check` makes, run after a stack install or a refetch to a stack, once the
+/// command's own output is complete: each problem printed as a warning, ending in its way past,
+/// and returned. It never fails the command (a release is frozen and installed as it is).
+///
+/// Bounded: each request may take [`WARN_REQUEST`], and the whole check [`WARN_DEADLINE`]; base
+/// packages at commits no version froze are not read (they go on the "Not checked" line). A
+/// Ctrl-C while it runs ends the check only. It is the one exception to "a command that comes
+/// back Ok after Ctrl-C fails": the command had finished. Narrowly: the interrupt flag stays set
+/// (nothing after this may run as if there were none), and only a Ctrl-C that arrived after the
+/// check began is taken ([`interrupt_taken_by_warnings`], which `main` consults).
 // Plan §4.3, misfit 7.
-pub(crate) fn warn_problems(ctx: &Ctx, inst: &Installation) -> Res<Vec<String>> {
-    let found = inst.meta().and_then(|meta| problems(ctx, inst, &meta));
+pub(crate) fn warn_problems(ctx: &Ctx, inst: &Installation) -> Vec<String> {
+    use std::sync::atomic::Ordering;
     if gix::interrupt::is_triggered() {
-        bail!("Interrupted");
+        return Vec::new();
     }
+    let said = match ctx.db.read().map(|db| Client::new(&db)).and_then(|c| Ok((c, inst.meta()?))) {
+        Ok((client, meta)) => {
+            let client = client.stopped_by(&WARN_STOP).with_timeout(WARN_REQUEST);
+            warn_lines(bounded_check(client, Installation::new(inst.alias.clone(), inst.root.clone()), meta))
+        }
+        Err(e) => vec![did_not_check(&e)],
+    };
+    for line in &said {
+        println!("{}", line.yellow());
+    }
+    if gix::interrupt::is_triggered() {
+        WARN_TOOK_INTERRUPT.store(true, Ordering::SeqCst);
+    }
+    said
+}
+
+/// How the check after a stack install ended.
+enum Bounded {
+    Done(Res<Checked>),
+    TimedOut,
+    Interrupted,
+}
+
+/// The check, on a thread of its own, waited for until [`WARN_DEADLINE`] or Ctrl-C, whichever
+/// comes first; either stops its requests ([`WARN_STOP`]) and leaves the thread to unwind.
+fn bounded_check(client: Client, inst: Installation, meta: InstallationMeta) -> Bounded {
+    use std::sync::atomic::Ordering;
+    WARN_STOP.store(false, Ordering::SeqCst);
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let options = PresentOptions { no_unreleased_reads: true, ..PresentOptions::default() };
+        let _ = send.send(problems_with(&client, &inst, &meta, &options));
+    });
+    let deadline = std::time::Instant::now() + warn_deadline();
+    let ended = loop {
+        if gix::interrupt::is_triggered() {
+            break Bounded::Interrupted;
+        }
+        if std::time::Instant::now() >= deadline {
+            break Bounded::TimedOut;
+        }
+        match receive.recv_timeout(std::time::Duration::from_millis(50)) {
+            Ok(found) => break Bounded::Done(found),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                break Bounded::Done(Err(anyhow!("The check died")));
+            }
+        }
+    };
+    WARN_STOP.store(true, Ordering::SeqCst);
+    // Unwound by the stop: its renderer is shut down before anything else is printed.
+    let _ = receive.recv_timeout(std::time::Duration::from_secs(2));
+    ended
+}
+
+/// [`WARN_DEADLINE`], shortened by `CACTUP_TEST_WARN_DEADLINE_MS` in tests.
+fn warn_deadline() -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(ms) = std::env::var("CACTUP_TEST_WARN_DEADLINE_MS").ok().and_then(|v| v.parse().ok()) {
+        return std::time::Duration::from_millis(ms);
+    }
+    WARN_DEADLINE
+}
+
+/// The lines the warnings say for how the check ended.
+fn warn_lines(ended: Bounded) -> Vec<String> {
     let mut said = Vec::new();
-    match found {
-        Ok(found) => {
+    match ended {
+        Bounded::Done(Ok(found)) => {
             if !found.lines.is_empty() {
                 said.push("Claim problems:".to_owned());
                 said.extend(found.lines.iter().map(|l| format!("  {l}")));
             }
             said.extend(found.not_checked());
         }
-        Err(e) => {
-            said.push(format!("Did not check the claims: {e:#}"));
-            said.push("Check them with `cactup claims check`.".to_owned());
-        }
+        Bounded::Done(Err(e)) => said.push(did_not_check(&e)),
+        Bounded::TimedOut => said.push("Did not check the claims: Cactarium did not answer in time.".to_owned()),
+        Bounded::Interrupted => said.push("Did not check the claims: interrupted.".to_owned()),
     }
-    for line in &said {
-        println!("{}", line.yellow());
+    if !matches!(said.first(), Some(l) if l.starts_with("Did not check")) {
+        return said;
     }
-    Ok(said)
+    said.push("Check them with `cactup claims check`.".to_owned());
+    said
+}
+
+/// One line for a check that could not run: the first line of why.
+fn did_not_check(e: &anyhow::Error) -> String {
+    let why = format!("{e:#}");
+    format!("Did not check the claims: {}", why.lines().next().unwrap_or_default().trim_end_matches('.'))
+        + "."
 }
 
 /// `claims check`: prints the problems, one line each, and fails when there are any.

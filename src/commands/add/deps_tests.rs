@@ -114,6 +114,8 @@ struct Fake {
     snapshots: Vec<(String, String, String)>,
     /// Stacks: their id and their one release, 1.0.0, as frozen.
     stacks: Vec<(String, String)>,
+    /// How long a lookup takes to answer.
+    lookup_delay: std::time::Duration,
 }
 
 /// A fake Cactarium's state, changeable while it serves.
@@ -185,6 +187,7 @@ impl Fake {
             batch_fetches: 0,
             snapshots: Vec::new(),
             stacks: Vec::new(),
+            lookup_delay: std::time::Duration::ZERO,
         }
     }
 
@@ -254,6 +257,7 @@ impl Fake {
             };
         }
         if path == "/lookup" {
+            std::thread::sleep(self.lookup_delay);
             if !self.lookup {
                 return no_route();
             }
@@ -3711,7 +3715,7 @@ fn a_refetch_to_a_stack_warns_of_claim_problems_without_failing() {
     let asked: Vec<String> = log.lock().unwrap().iter().map(|(p, _)| p.clone()).collect();
     let at = asked.iter().position(|p| p.contains("/stacks/max/stack/releases/1.0.0")).unwrap();
     assert!(asked[at..].iter().any(|p| p == "/api/v1/lookup"), "checked after the fetch: {asked:?}");
-    let said = crate::commands::claims::warn_problems(&s.ctx, &s.inst).unwrap();
+    let said = crate::commands::claims::warn_problems(&s.ctx, &s.inst);
     assert_eq!(
         said,
         [
@@ -3722,7 +3726,88 @@ fn a_refetch_to_a_stack_warns_of_claim_problems_without_failing() {
 
     fake.lock().unwrap().lookup = false;
     refetch(&s).unwrap_or_else(|e| panic!("{e:#}"));
-    let said = crate::commands::claims::warn_problems(&s.ctx, &s.inst).unwrap();
+    let said = crate::commands::claims::warn_problems(&s.ctx, &s.inst);
     assert!(said[0].starts_with("Did not check the claims: "), "{said:?}");
     assert_eq!(said.last().unwrap(), "Check them with `cactup claims check`.");
+}
+
+/// The warnings after a stack install are bounded: a Cactarium slower than their deadline is
+/// said not to have answered in time; a Ctrl-C while they run ends them alone (the install
+/// that came before stays a success: `interrupt_taken_by_warnings`); a Ctrl-C from before
+/// they start leaves them unsaid. The deadline is shortened, and the interrupt flag is the
+/// process's: run in a child of its own.
+#[test]
+fn the_warnings_after_a_stack_install_are_bounded() {
+    if std::env::var_os("CACTUP_TEST_WARN_DEADLINE_MS").is_none() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["commands::add::deps_tests::the_warnings_after_a_stack_install_are_bounded", "--exact", "--test-threads=1"])
+            .env("CACTUP_TEST_WARN_DEADLINE_MS", "500")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success() && said.contains("1 passed"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (aurl, a) = upstream(tmp.path(), "app", &[("App/interface.ccl", "IMPLEMENTS: app\n")]);
+    let mut fake = Fake::new()
+        .package("max/app", vec![version("1.0.0", &a, &aurl, "App", &["App"], "[]")])
+        .pin(&aurl, "max/app", None);
+    fake.lookup_delay = std::time::Duration::from_secs(30);
+    let (cactarium, _, _) = fake.serve_shared();
+    let s = Setup::new(tmp, &section(&aurl, &a, &["App/App"]), &cactarium);
+
+    let started = std::time::Instant::now();
+    let said = crate::commands::claims::warn_problems(&s.ctx, &s.inst);
+    assert!(started.elapsed() < std::time::Duration::from_secs(4), "{:?}", started.elapsed());
+    assert_eq!(said, ["Did not check the claims: Cactarium did not answer in time.", "Check them with `cactup claims check`."]);
+    assert!(!crate::commands::claims::interrupt_taken_by_warnings());
+
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        gix::interrupt::IS_INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    let started = std::time::Instant::now();
+    let said = crate::commands::claims::warn_problems(&s.ctx, &s.inst);
+    assert!(started.elapsed() < std::time::Duration::from_millis(450), "ended by Ctrl-C, not the deadline: {:?}", started.elapsed());
+    assert_eq!(said, ["Did not check the claims: interrupted.", "Check them with `cactup claims check`."]);
+    assert!(crate::commands::claims::interrupt_taken_by_warnings(), "the finished install stays a success");
+
+    // A Ctrl-C from before: nothing is checked or said.
+    assert!(crate::commands::claims::warn_problems(&s.ctx, &s.inst).is_empty());
+}
+
+/// `sim pack -I` of a thornlist with a repo the installation never fetched: refused for it,
+/// naming `cactup inst refetch`, rather than written unpinned.
+#[test]
+fn pack_of_a_repo_the_installation_never_fetched_is_refused() {
+    use crate::fetch::anonymous::testserver::{serve, Mode};
+    let tmp = tempfile::tempdir().unwrap();
+    serve("unfetched.pack.test", Mode::Public);
+    let (aurl, a) = upstream(tmp.path(), "app", &[("App/interface.ccl", "IMPLEMENTS: app\n")]);
+    let (cactarium, _, _) = Fake::new().package("max/app", vec![version("1.0.0", &a, &aurl, "App", &["App"], "[]")]).serve_shared();
+    let s = Setup::new(tmp, &section(&aurl, &a, &["App/App"]), &cactarium);
+    let list = format!(
+        "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{}\n!TARGET = $ROOT/arrangements\n!TYPE = git\n\
+         !URL = https://unfetched.pack.test/o/nofetch.git\n!REPO_PATH = $2\n!CHECKOUT = Nofetch/One\n",
+        section(&aurl, &a, &["App/App"])
+    );
+    let th = s.inst.root.join("pack.th");
+    std::fs::write(&th, &list).unwrap();
+    let par = s.inst.root.join("run.par");
+    std::fs::write(&par, "ActiveThorns = \"App\"\n").unwrap();
+    let ctx = Ctx {
+        globals: crate::args::GlobalOpts { installation: Some("t".into()), ..s.ctx.globals.clone() },
+        db: s.ctx.db.clone(),
+    };
+    let args = crate::args::SimPackArgs {
+        thornlist: th,
+        parfile: par,
+        file: Some(s.inst.root.join("out.sim")),
+        describe: crate::args::SimDescribeArgs { force: true, yes: true, ..Default::default() },
+        trim: false,
+    };
+    let err = format!("{:#}", crate::sim::export::pack(&ctx, args).unwrap_err());
+    assert!(err.contains("\n  nofetch: not fetched by the installation; run `cactup inst refetch`\n"), "{err}");
+    assert!(!s.inst.root.join("out.sim").exists());
 }
