@@ -1064,8 +1064,16 @@ fn followed_file(path: &Path, hash_kind: gix::hash::Kind) -> Option<(ObjectId, g
 
 /// How an [`align`] cut short by Ctrl-C mid-checkout begins its error, for
 /// callers that want to add advice about such repos (a forced refetch finishes
-/// it). An interrupted [`clone`] says something else: it is to be deleted.
+/// it). An interrupted [`clone`] says something else: one made in an empty
+/// directory is deleted, any other is to be deleted.
 pub const INTERRUPTED_CHECKOUT: &str = "Interrupted during checkout";
+
+#[cfg(test)]
+thread_local! {
+    /// What a test does just before a checkout starts (on the calling
+    /// thread): an interrupt in the middle of one.
+    pub(crate) static BEFORE_CHECKOUT: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+}
 
 /// Check `tree_id` out over `repo`'s worktree and write its index, keeping the
 /// entries of `old` that are already right on disk (`None`: rewrite all), and
@@ -1077,13 +1085,6 @@ pub const INTERRUPTED_CHECKOUT: &str = "Interrupted during checkout";
 /// HEAD that already moved it reads as staged changes, so the repo is plainly
 /// modified, and it still lists the old tree's paths — which the recovering
 /// refetch needs to delete the files the new tree dropped.
-#[cfg(test)]
-thread_local! {
-    /// What a test does just before a checkout starts (on the calling
-    /// thread): an interrupt in the middle of one.
-    pub(crate) static BEFORE_CHECKOUT: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
-}
-
 fn check_out_tree(
     repo: &gix::Repository,
     tree_id: ObjectId,
