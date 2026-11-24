@@ -374,9 +374,9 @@ request of those commands carries `x-cactarium-include-unreviewed: true` and
 your token (`CACTARIUM_TOKEN`, else the one stored by `cactup login`), if
 there is one, to the Cactarium server named by the `cactarium-url` knob,
 whatever server that is. The other commands never send the header, so a
-shared `.sim` rests on approved versions only. Those that publish
-(`sim publish`, `download submit`, `package init --publish`, `stack init
---publish`, `refresh`) send your token to do so, as they always did. Cactarium then
+shared `.sim` rests on approved versions only. Those that need your token
+(`sim publish`, `download submit`, `package init`, `stack init`, `refresh`,
+`login`) send it to authenticate. Cactarium then
 serves versions awaiting review as its settings allow: to an admin's token
 always, to anyone only when the site serves unreviewed code. An answer that
 includes one is warned about, and `cactup add` lists each such release in red
@@ -457,7 +457,7 @@ same address.
 ### Dependencies
 
 A package declares what it needs from other packages: a **dependency** names
-the package, the versions it accepts and the thorns of it that are needed.
+the package, the versions that it accepts and the thorns of it that are needed.
 `cactup add` reads these claims and brings in whatever is missing, so one
 command gives a working set:
 
@@ -468,7 +468,7 @@ cactup add max/z4c
 ```
 Plan for cactup add max/z4c:
   add  max/z4c@1.2.0        Z4c, Z4cTest   named
-  add  et/carpetx@2026.5.1  CarpetX, Loop  needed by max/z4c (Z4c), ^2026.5
+  add  et/carpetx@2026.5.1  CarpetX, Loop  needed by max/z4c@1.2.0 (Z4c), ^2026.5
 Proceed? [Y/n]
 ```
 
@@ -486,10 +486,11 @@ What the plan decides:
 
 - **Installed packages stay put.** A dependency that an installed package
   does not meet is refused, naming the way past. `--upgrade` moves the
-  installed packages the plan touches to the versions it needs;
+  installed packages that the plan touches to the versions that it needs;
   `--upgrade-all` moves every installed package to its newest version that
-  fits. A package you name that is installed already is moved to its
-  newest version that fits, as `add` always did.
+  fits. An added package that you name again is moved to its newest version
+  that fits. A named base package stays put unless `--upgrade`,
+  `--upgrade-all` or `--replace`.
 - **The base counts as packages.** The repositories of the installation's
   base thornlist are matched to registered packages by URL and commit, in
   one request to Cactarium. A repository matched to none is treated as
@@ -497,7 +498,7 @@ What the plan decides:
 - **Any-of.** A dependency may list alternatives (Carpet or PUGH). cactup
   takes one already installed, else one already in the plan, else the first
   listed that conflicts with nothing. The plan names the rule
-  (`max/z4c: any of et/carpet, et/cactuspugh (the first listed)`), and
+  (`max/z4c@1.2.0: any of et/carpet, et/cactuspugh (the first listed)`), and
   `cactup claims list` shows the choice later.
 - **Clashes are refused.** Two enabled thorns of one name from different
   packages, a package that says it is incompatible with another, and a fork
@@ -506,7 +507,7 @@ What the plan decides:
   (a package that declares `fork-of`) takes the place of its upstream for
   every dependency on it that the declared range covers.
 - **Requirements nobody declared are refused.** After the plan, every CCL
-  requirement of a thorn it enables must be met by the final set. cactup
+  requirement of a thorn that it enables must be met by the final set. cactup
   never adds a package that nobody declared as a dependency; it lists the
   registered providers as `cactup add` lines, or says that none provides it.
 - **Libraries** are placed as above, also under `--no-deps`.
@@ -514,19 +515,23 @@ What the plan decides:
   exactly or when no approved version fits (see the flag above). The plan
   lists each in red.
 
-`--no-deps` adds only the packages named, with no dependencies and no check
-against the installed packages (libraries are still placed). `--ignore-claim
+`--no-deps` adds only the packages named, with no dependencies (libraries are
+still placed). The dependency claims of installed packages stop binding, and
+the plan notes each one left unmet. Thorn clashes, incompatibilities, a fork
+beside its upstream and the CCL check still refuse. `--ignore-claim
 OWNER/PKG[:KIND:TARGET]` ignores a package's claims for one command; KIND is
 `dependency`, `incompatible-with` or `fork-of`.
 
 A **flesh package** is a package that replaces the base's Cactus flesh (the
 `Makefile`, `lib` and `src` at the root of the tree). It takes the place of
 the base's flesh, or of another added flesh package, and `remove` puts the
-base's flesh back. The plan says `The flesh changes; every config needs a
-rebuild`: rebuild each config, which compiles from scratch.
+base's flesh back. When the plan is shown it says `The flesh changes; every
+config needs a rebuild`, and the command ends with `Rebuild every config for
+the new flesh, e.g. cactup build <config>`. Each config then compiles from
+scratch.
 
 A base package at a commit that Cactarium has not read (unpushed work in a
-base clone, say) has dependencies cactup cannot know. It says so in a note and
+base clone, say) has dependencies that cactup cannot know. It says so in a note and
 goes on. An added package that Cactarium cannot give for its installed version
 hides what it depends on: `remove` refuses beside one, and `add` refuses to
 move packages beside one. `--no-deps` gets past both.
@@ -548,10 +553,14 @@ Plan for cactup remove max/z4c:
 
 `remove` takes out the packages named, and the packages that only they
 needed: those brought in as dependencies, never named by you, that no
-remaining package depends on, down the chain. A package you named at any
+remaining package depends on, down the chain. A package that you named at any
 time is never removed this way, nor is one added by a cactup that did not
-record why. Any base repository a removed package replaced is restored at the
-commit the base names, and what a returning base package needs counts too.
+record why. Any base repository that a removed package replaced is restored at
+the commit that the base names, and what a returning base package needs counts
+too. When Cactarium cannot read a returning base repo, `remove` prints
+`Not checked (unreadable): what these returning base repos need:` and a list,
+and each package that it would sweep says `unless a returning base repo needs
+it` in the plan, so the confirmation covers that risk.
 
 `remove` is refused while another package, added or in the base, depends on one
 named, and says which. `--no-deps` removes exactly the packages named, with no
@@ -583,7 +592,8 @@ Name a repo of the base list that no registered package stands for as
 `local:NAME`.
 
 `cactup claims list` shows the overrides, and the any-of choices made when
-packages were added. The overrides go into a `.sim` exported from the
+packages were added; it fails, after printing, when an override does not
+read. The overrides go into a `.sim` exported from the
 installation, as information only. `cactup inst show` lists the overrides too.
 
 `cactup claims check` looks at the installed packages as they are: forks
@@ -591,12 +601,14 @@ installed beside their upstream, incompatible packages, a thorn name enabled
 twice, CCL requirements that no installed thorn meets, dependencies that
 nothing installed meets (a release outside the range, thorns not enabled),
 and `satisfies` overrides naming a repo that is not installed. It prints one
-line for each problem, with the way past, and changes nothing. A base package
-at a commit that no version froze, which Cactarium cannot read, is counted on
-a "Not checked" line. It exits with an error ("2 problems.") when it finds
+line for each problem, with the way past, and changes nothing. What it could
+not check goes on "Not checked" lines: base packages at commits that no
+version froze, added packages that Cactarium cannot give, and a base with no
+fetch record. With no problem it says "No problems.", or "No problems in what
+was checked." when something was left unchecked. It exits with an error ("2 problems.") when it finds
 some.
 
-An installation that has had an override, or has a flesh package, is refused
+An installation that has had an override, or has had a flesh package, is refused
 by a cactup that predates them: `cactup update` fixes that.
 
 ### Getting a new release noticed

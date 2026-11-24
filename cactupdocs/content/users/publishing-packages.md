@@ -9,7 +9,7 @@ A **package** is a repository of thorns registered with Cactarium. What it
 is and what it needs is written in a `cactarium.toml` at the root of the
 repository, read by Cactarium at every release tag. Others add it with
 `cactup add`, which brings in what it needs (see
-[Sharing Simulations](sharing-simulations.html#dependencies)). A `.sim` can
+[Sharing Simulations](sharing-simulations.html#dependencies)). A shared `.sim` can
 pin only repositories of registered packages. cactup writes a first version
 of the file from your installation, for you to review:
 

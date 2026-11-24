@@ -5148,7 +5148,7 @@ cactup says which package the thorn came from and where to report it.
 ### 8.11 `cactup add`: Cactarium packages on top of a base
 
 `cactup add owner/name[/Thorn][@version|@track:range]… [--replace] [-f]
-[--upgrade|--upgrade-all] [--no-deps] [--ignore-claim C]… [-y] [--dry-run]`
+[--upgrade] [--upgrade-all] [--no-deps] [--ignore-claim C]… [-y] [--dry-run]`
 (the last five are §8.12) puts
 packages' thorns into the active installation at the commit the registry froze
 for each resolved version (a tag is only a label; a moved tag never moves an
@@ -5319,8 +5319,8 @@ sources can never silently claim one checkout.
 Packages declare **claims** about each other (a dependency, an
 incompatibility, a fork), and `cactup add` and `cactup remove` act on them.
 This section describes the system as built (decisions 1-10 of the dependency
-plan, November 2026); §8.11 is the base it sits on (`[[added]]`, `compose`,
-libraries, flesh), §8.9 the sharing checks that use the same lookup, §8.10
+plan, November 2026); §8.11 is the base under it (`[[added]]`, `compose`,
+libraries, flesh), §8.9 the sharing checks, which use the same lookup, §8.10
 the registry transport, §2.5 the record formats. Code: `src/deps/` (the
 resolver, pure), `src/commands/{add,resolution,claims,package,stack}.rs`
 (the commands and the registry reads), `src/sim/registered.rs` (the lookup
@@ -5346,12 +5346,9 @@ knob. Requests that resolve dependencies (`Client::patient`) wait up to 120 s
 for an answer's head; every client request gives way to Ctrl-C within 50 ms.
 
 **The unreviewed flag.** `--risky-allow-untrusted-artifacts` has a second
-meaning (§8.10): under it every request of `add`, `remove`, `claims`,
-`import`, `install` and `inst refetch` carries `x-cactarium-include-unreviewed:
-true` and the stored token, and a release with `review = pending` may be
-chosen. Without it a client drops pending releases from every answer and
-sends neither header nor token, so a path that forgets the flag fails
-closed. Export, publish and `inst show` never send the header.
+meaning, described in §8.10 (the header, the token, and which commands follow
+the flag). Here it matters in one way: a release with `review = pending` may be
+chosen only under it.
 
 #### 8.12.1 The model
 
@@ -5367,7 +5364,7 @@ or confirm what comes back.
 - A **release** is a package at a version, a branch tip or a commit, with its
   thorns, claims, `flesh` and `pending` flags. A **present** package is a
   release plus the thorns enabled and where it comes from: the base, an
-  `[[added]]` entry, or the plan. A base repo at a commit no version froze is
+  `[[added]]` entry, or the plan. A base repo at a commit that no version froze is
   a **stand-in**: its thorns are read from the clone, its claims from an exact
   read at that commit (`versions/{commit}`), made before the search, in
   batches. What cannot be read stays unknown, and only the decisions that need
@@ -5376,7 +5373,7 @@ or confirm what comes back.
   thorns, the dependent that wants it. A single-target dependency is a need; an
   any-of is a decision. A library dependency (`into`) is placement, never a
   need (§8.11), and its version constraint still enters the search.
-- **Overrides** (§8.12.5) and `--ignore-claim`s are applied to every release as
+- **Overrides** (§8.12.7) and `--ignore-claim`s are applied to every release as
   it is loaded, before anything else sees its claims.
 
 #### 8.12.2 The resolver
@@ -5391,22 +5388,24 @@ is ordered, so the same inputs give the same plan whatever order the server
 listed them in.
 
 - **Order of decisions:** present packages something touched, then the
-  packages the plan brings in (named first, each group by id), then any-of
+  packages that the plan brings in (named first, each group by id), then any-of
   dependencies (by dependent, then declaration order).
 - **Candidates.** A present package that may stay tries its present release
   first; otherwise newest first, approved before awaiting review, never
   `invalid` or `upstream-missing`, yanked only for an exact constraint (an
   installed release is never pushed out for being yanked), and a candidate
-  older than the present release after all others (`downgrade` is a step
-  only when an exact older version was named). A named spec for a present
-  package targets the newest release that fits; an unnamed present package is
+  older than the present release after all others. Such a candidate stays a
+  candidate, so any constraint that excludes the newer releases (a named `@^1`,
+  a dependency's range under `--upgrade`) gives a `downgrade` step. A named spec for an added
+  package targets the newest release that fits (a named base package stays put
+  unless `--upgrade`, `--upgrade-all` or `--replace`); an unnamed present package is
   fixed unless `--upgrade` (only what the plan touches) or `--upgrade-all`
   (every package starts as a need for its newest fitting release). A named
   spec never moves a base package without `--upgrade`, `--upgrade-all` or
   `--replace`. An upgrade, a replacement or a fork standing in carries the
   present enabled thorns plus the new needs, never the needs alone.
 - **Taking a need.** A need is taken by its target when present or named; by a
-  package an override says satisfies it (no version check); by a fork in play
+  package that an override says satisfies it (no version check); by a fork in play
   whose `fork-of` stands in for it (`ForkOf::stands_in_for`: the declared range
   or `#sha` against the upstream's published versions); else the target is
   decided. A `#sha` need goes through the snapshot read; `At::Unknown` (a
@@ -5414,7 +5413,10 @@ listed them in.
 - **Transitive needs.** Enabling a thorn pushes the dependencies whose
   `needed-by` contains it, and those with an empty `needed-by` when the package
   first enters. `--no-deps` pushes nothing beyond the named specs (libraries
-  excepted).
+  excepted), and the dependency claims of installed packages stop binding: the
+  plan notes each one left unmet ("--no-deps leaves it unmet"). Clashes,
+  incompatibilities, forks beside their upstream and the CCL check still
+  refuse.
 - **Any-of.** An alternative present at a release that fits, else one already
   in play, else the first listed that conflicts with nothing ("conflicts with
   nothing" being "the rest of the search succeeds"). The choice and its rule
@@ -5450,18 +5452,20 @@ listed them in.
   `--upgrade-all`), in waves on `par::parallel_map` under one headline, then the
   snapshots those versions name, then the reads a stand-in needs (batches of
   200, waiting out 429s, ending at a 5-minute batch deadline or 30 rounds; what
-  is left is read singly). A read during the search is a debug assertion. A
-  snapshot of an untrusted package (`#sha` or a tip) is confirmed (§8.10's
-  `confirm_untrusted`) after the wave's renderer ends, before the next wave.
+  is left is read singly). A read during the search is a debug assertion. The
+  resolver collects the snapshots of untrusted packages (`#sha` or a tip) that
+  the plan chose or placed in `Plan::untrusted`; `add` asks about them (§8.10's
+  `confirm_untrusted`) after the plan is confirmed and the yank warnings print,
+  before the lock and the fetch.
 - **Unread stand-ins.** A branch fails for want of a stand-in's claims only
   when deciding needs them: enabling a thorn of it that is not enabled, a
   dependency naming no thorns that would enable more, or bringing in a package
   that shares a thorn name with it, where being a fork would make it stand in.
   Notes are worked out from the plan and the facts, never from the branches the
-  search explored (naming each release not considered and what it needed that
-  Cactarium did not read), and a plan with such a note is always shown and
+  search explored (naming each release not considered and what it needed and Cactarium did not
+  read), and a plan with such a note is always shown and
   confirmed. No plan, and a branch failed that way: `Refusal::Unreadable`.
-- **Bounds.** A step budget (1,000,000 divided by the number of packages in play, at
+- **Bounds.** A step budget (1,000,000 divided by the present packages plus the named specs plus one, at
   least 2,000 steps) binds before a 30 s wall-time net,
   so the result never depends on the machine. Past either, the refusal is the
   most specific one found, else "no consistent set" listing the live
@@ -5477,10 +5481,11 @@ listed them in.
 #### 8.12.3 Showing and confirming a plan
 
 A plan is one line per step (`add`, `re-add`, `upgrade`, `downgrade`,
-`replace`, `keep`) with why: `named`, `needed by max/z4c (Z4c), ^2026.5`,
-`--upgrade-all`, or an any-of choice with its rule; then the pending releases,
+`replace`, `keep`) with why: `named`, `needed by max/z4c@1.2.0 (Z4c), ^2026.5`,
+`--upgrade-all`, or an any-of choice with its rule (`max/z4c@1.2.0: any of et/carpet,
+et/cactuspugh (the first listed)`); then the pending releases,
 the flesh-rebuild line, and notes. It is shown and confirmed only when it goes
-beyond the packages named (or passed over releases it could not check); on a
+beyond the packages named (or passed over releases that it could not check); on a
 terminal `Proceed? [Y/n]`, without one a refusal naming `--yes` and `--dry-run`.
 `--dry-run` shows the plan and changes nothing; `--yes` skips the question.
 The plan's steps turn into the `Wanted` entries of §8.11's machinery
@@ -5496,7 +5501,7 @@ so an older binary's rewrite puts them back (put-back never enters arrays):
 [added-for."et/carpet"]         # one per [[added]] package
 requested = false               # named on a command line, or brought in
 by = ["max/z4c@1.2.0"]          # dependents that brought it in (informational)
-for-commit = "<the [[added]] commit this entry was written for>"
+for-commit = "<the [[added]] commit that this entry was written for>"
 [[added-for."et/carpet".choices]]   # one per any-of it was chosen for
 dependent = "max/z4c"
 alternatives = ["et/carpet", "et/cactuspugh"]
@@ -5506,43 +5511,42 @@ kind = "drop"                   # drop | add | needs | satisfies
 note = "why"                    # drop only, optional
 ```
 
-- **`added-for`** is additive at schema 2 (no bump). An entry is believed only
+- **`added-for`** is additive: it came while the format was at 2, with no
+  version of its own, so a record holding only it is written at schema 1. An entry is believed only
   beside an `[[added]]` entry at its `for-commit`: one that is missing (every
   installation written before this work), or whose `for-commit` differs (an
   older binary re-added or upgraded the package), reads as `requested = true`,
-  so no orphan sweep ever removes a package the user may have named. An entry
+  so no orphan sweep ever removes a package that the user may have named. An entry
   without an `[[added]]` entry (an older binary's `remove`) is dropped on the
   next write, and never inherited by a later add. `by` is informational (dependents
   and orphans are always computed from current claims). A choice is keyed by
   the dependent and its alternatives' ids, so it stops matching when the
   dependent's author edits the alternatives; `remove` then takes the first
-  present alternative as the holder, which is safe. `add` and `remove` replace only the
-  entries they write for a new commit (`format::write_replacing_keys`); every
+  present alternative as the holder, which is safe. `add` replaces only the
+  entries it writes for a new commit (`format::write_replacing_keys`), and
+  `remove` deletes the entries of the packages it removes; every
   other write keeps keys a newer binary put inside an entry. Known gap: an
   older binary that removes a brought-in package and re-adds it by name at the
   same commit leaves an entry that still reads `requested = false`.
 - **`claim-overrides`** is keyed by the override's canonical text
   (`Override::key`), which is all there is to it; `kind` repeats the key's first
   word, for a reader. A record that does not read, or whose kind disagrees with
-  its key, fails every command naming it (running without an override would
-  change what resolution does). It needs a schema of its own: an older binary
+  its key, fails every command that reads the overrides, naming the record (running
+  without an override would change what resolution does). It needs a schema of its own: an older binary
   would resolve without overrides, and `remove` could sweep a package that only
   an added dependency holds.
-- **Schemas.** 2 `[[added.libraries]]`, 3 `linked-to` (symbolic copies), 4
-  `flesh` in an `[[added]]` element, 5 `claim-overrides`. Each bump follows one
-  model (§2.5): the down-step answers `CannotExpress` only when the record uses
-  the feature, so a record is written at the oldest schema that holds it,
-  sticky afterward, and an older binary refuses a newer one with "upgrade"
-  instead of corrupting it. The shape pins are `fixtures/formats/installation/`
-  (`v2-1`, `v3-1`, `v4`, `v5`, `current`).
+- **Schemas.** 2 `[[added.libraries]]`, 3 `linked-to`, 4 `flesh`, 5
+  `claim-overrides`; the matrix and the down-step rules are §2.5's. The shape
+  pins are `fixtures/formats/installation/` (`v1`, `v1-noschema`, `v2`, `v2-1`,
+  `v3`, `v3-1`, `v4`, `v5`, `current`).
 - **`[[added]]` fields of this work.** `flesh`: the base flesh's items at the
   root when the package was added (`Makefile`, `lib`, `src`, …; frozen at that
   time, so a refetch to a base with more items does not pick them up);
   empty means no flesh package. `replaces` names the base's flesh repos too.
 - **Base extensions.** An `[[added]]` entry that only gives a base clone more
   thorns (it replaces nothing, and the base has that clone under the same name
-  from the same repository: `add::base_clone_of`) lives in that clone at
-  whatever commit the base has it: `compose` writes its sections with the
+  from the same repository: `add::base_clone_of`) lives in that clone, at the
+  commit at which the base has it: `compose` writes its sections with the
   base's URL, branch and pin, `add` only links its thorns, and a refetch that
   moves the base moves them. In the resolver it merges into the base package;
   in `remove` it is a node of its own, held only by dependencies that need one
@@ -5563,7 +5567,7 @@ with overrides and any-of choices applied.
 - **Orphan sweep.** Packages that were brought in (`requested = false`), never
   named, with no remaining dependent, join the plan as `remove` steps, each with
   its reason ("brought in by max/z4c@1.2.0, no longer needed"), to a fixpoint,
-  cycles included. A package nothing reached before (left by an earlier
+  cycles included. A package that nothing reached before (left by an earlier
   `--no-deps`) counts as named and is never swept. The plan is shown and
   confirmed as in §8.12.3.
 - **Returning bases.** A removed package (or orphan) that replaced base repos
@@ -5571,10 +5575,10 @@ with overrides and any-of choices applied.
   release fits the range or sha and has the needed thorns enabled; what it
   meets is no dependent after the removal, what it does not still refuses
   ("(the base's, after the removal)"). The returning bases are read where the
-  base has them (the pin, or the tip of the branch the restore will put the
+  base has them (the pin, or the tip of the branch that the restore will put the
   clone on, asked of the remote in one listing; upstream moving between that
   read and the restore is an accepted race). Only the bases of the targets and
-  of every added package the user did not name are read (`deps::may_bring_back`):
+  of every added package that the user did not name are read (`deps::may_bring_back`):
   a returning base can take a dependency over, leaving more to sweep, whose
   bases come back in turn, so the sweep repeats until the set going settles. A
   base that cannot be read is said on a "Not checked" line, and every orphan's
@@ -5582,7 +5586,7 @@ with overrides and any-of choices applied.
 - **What cannot be read.** An added package whose release Cactarium cannot give
   hides what it depends on: `remove` refuses beside one (`--no-deps` gets
   past). Base packages with unknown dependencies are normal: one short line.
-- **Restoring clones.** A base clone cactup detached for a replacement goes
+- **Restoring clones.** A base clone that cactup detached for a replacement goes
   back on a branch, never kept as a user's detached checkout
   (`fetch::branch_to_follow`: the thornlist's `!REPO_BRANCH`, the recorded
   branch if the last fetch was not pinned, the clone's default branch, the
@@ -5625,11 +5629,11 @@ key as `claims list` prints it. **Validation** is read-only and asks Cactarium
 before anything is written: the package is served; `drop` and `needs` name a
 claim that some served version makes; `needs` and `add` name thorns that some
 version of the target (and, for `--needed-by`, of the package) has; `add`
-refuses a dependency the package already declares (`needs` is the way);
+refuses a dependency that the package already declares (`needs` is the way);
 `satisfies X Y` needs Y served and X served or a `local:NAME` for a base repo no
 registered package stands for. Setting an override twice says so and keeps one.
 `claims list` prints the overrides and the any-of choices (with the package
-chosen); `inst show` prints the overrides too. The overrides go into an
+chosen), and fails after printing when an override does not read; `inst show` prints the overrides too. The overrides go into an
 exported `.sim` as `provenance.extra["claims-overrides"]`, informational (§8.9).
 
 `claims check` (`deps::check`, not `resolve`: the resolver looks only at what a
@@ -5641,11 +5645,14 @@ unmet CCL requirements of enabled thorns (with providers from `GET
 /providers`); dependency claims of installed packages not met by what is
 installed (a release outside the range, needed thorns not enabled, an any-of
 with no alternative met; a fork standing in meets one); and `satisfies`
-overrides naming a `local:` repo that is not installed. Base packages at
-commits Cactarium cannot read go on a "Not checked" line. Problems and those
-lines go to stdout, then the command fails with "1 problem." or "N problems." (the one command
-that reports findings by exit status), or prints "No problems." when it found
-none and checked everything.
+overrides naming a `local:` repo that is not installed. What was left
+unchecked goes on "Not checked" lines: base packages at commits that Cactarium
+cannot read, added packages that Cactarium cannot give (their dependencies are
+unknown), and a base with no fetch record (no repo is mapped to a package).
+Problems and those lines go to stdout, then the command fails with "1 problem."
+or "N problems." (the one command that reports findings by exit status). With
+no problem it prints "No problems.", or "No problems in what was checked." when
+something was left unchecked.
 
 #### 8.12.8 Checks at stack install and refetch
 
@@ -5664,24 +5671,24 @@ Both render a file from a template and refuse to write unless
 `Manifest::from_repo_file` reads it back (stack init also parses its
 thornlist); they write through `format::write_atomic` (`write_atomic_all` for
 two files), check Ctrl-C right before, and never write a heuristic as a claim:
-everything cactup cannot decide is a `# TODO:` comment, and every value written
+everything that cactup cannot decide is a `# TODO:` comment, and every value written
 into a comment has its control characters replaced, so a newline from a server
 can never start a claim.
 
 **`package init [REPO] [--name N] [--owner O] [--exact] [-f] [--publish]`**
 writes `cactarium.toml` at the root of a repo of the active installation. The
 active config must be built: its `ThornList` says what is built and its
-`sources` give the commit each repo was built at (a repo with no source is
+`sources` give the commit at which each repo was built (a repo with no source is
 read at its clone's HEAD). `[package]` has the lowercased repo name, the owners
 (whoami; the token's user), and `root`/`arrangement` where the thorns are not
 at the default layout. A `[[dependency]]` is written for each `ccl::needs_of`
 requirement of a repo thorn that no repo thorn meets, when exactly one
-installed thorn meets it (built thorns first), in a package the lookup maps at
+installed thorn meets it (built thorns first), in a package that the lookup maps at
 a frozen version; edges are grouped by package and version and by the set of
 repo thorns needing them, with `needed-by` always written. Ranges are
 `~X.Y.Z` (`track:~X.Y.Z` on a track), floored at the version built with;
 `--exact` writes `=X.Y.Z`. Every other case is a TODO: nothing meets it, an
-unregistered repo, a commit no version froze, several thorns of one package,
+unregistered repo, a commit that no version froze, several thorns of one package,
 several packages (a commented `any-of` listing each released candidate), a
 requirement met only by another clone of the repo's own package.
 - **Forks.** Packages of the lookup that share a thorn name with the repo (flesh
@@ -5700,10 +5707,11 @@ requirement met only by another clone of the repo's own package.
   claim overrides follow as comments.
 - **`--publish`** writes nothing. Cactarium reads a package at its newest
   release tag, so it compares the file on disk with the one at the newest
-  release tag the remote has (`tag-pattern`, else `[track/]vX.Y.Z`; asked of the
+  release tag that the remote has (`tag-pattern`, else `[track/]vX.Y.Z`; asked of the
   remote, `fetch::git::ask_remote_tags`), and refuses a repo with no release
-  tag, a tag not pushed, a tag without the file, or a file that differs,
-  printing the git commands. The URL (the live list's, else origin's) passes
+  tag on the remote, a tag without the file, or a file that differs, printing
+  the git commands. A newer tag that is not pushed is said ("Tag … is not on
+  the remote."), and the newest pushed one is used. The URL (the live list's, else origin's) passes
   the anonymous probe, so an ssh remote registers as its https form and a local
   path or credential is refused. Then `POST /repos` with `dry-run` previews
   (`only = [<name>]`, `owner`): `existing` is refreshed (as `cactup refresh`),
@@ -5719,8 +5727,8 @@ release; none, a tip or a `#commit` is refused naming `cactup inst refetch
 --release`. Dirty and unpushed repos are refused through export's checks (§8.9).
 The stack `extends` that release; `[[stack.pin]]` marks each release pin whose
 repo the installation has at another commit (replaced repos skipped); a package
-that takes the place of every checkout the release has from the one repo it
-replaces is a `[[stack.override]]` at its exact version (`<pkg>@=<v>`; at a tip
+that takes the place of every checkout that the release has from the one repo
+that it replaces is a `[[stack.override]]` at its exact version (`<pkg>@=<v>`; at a tip
 or an unfrozen commit, `url`/`ref` plus a pin at the installed commit);
 every other added package is a section of `cactarium-stack.th`, composed onto
 the release's own text, pinned at the installed commit when it is a tip, an
@@ -5734,7 +5742,7 @@ in DIR and calls `publish_stack` as `<owner>/<name>@V`.
 #### 8.12.10 Limits
 
 - An override redirects every checkout of a base repo; `compose` drops only the
-  checkouts a package claims, so `stack init` overrides only when the package
+  checkouts that a package claims, so `stack init` overrides only when the package
   takes all of them.
 - Nothing records that an installed package was pending, so commands run
   without the flag cannot say so beyond what the server answers; old
