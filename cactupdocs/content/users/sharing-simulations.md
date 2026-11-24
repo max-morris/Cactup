@@ -338,6 +338,40 @@ installation of a stack, the same for the stack. If a build
 fails in a thorn you added, cactup says which package it came from and the
 same address.
 
+### When a claim is wrong
+
+Packages declare **claims** about each other: a dependency, an
+incompatibility, a fork. When a claim is wrong for your installation, `add`
+refuses and names the way past. `--ignore-claim OWNER/PKG[:KIND:TARGET]`
+ignores claims for one command. `cactup claims override` keeps the change in
+the installation, for every later `add` and `remove`:
+
+```sh
+cactup claims override drop max/foo:incompatible-with:et/bar      # forget a claim
+cactup claims override needs max/foo:dependency:et/bar Loop       # more thorns it needs
+cactup claims override add max/foo --dependency et/bar --needs Loop   # a dependency it lacks
+cactup claims override satisfies max/carpet-mp et/carpet          # one package stands in for another
+cactup claims override satisfies local:carpetx et/carpetx         # so does a repo of the base list
+cactup claims override --remove 'drop max/foo:incompatible-with:et/bar'
+```
+
+`drop` and `needs` name a claim that Cactarium serves for the package in some
+version. `satisfies X Y` lets X take every need for Y without a version check.
+Name a repo of the base list that no registered package stands for as
+`local:NAME`.
+
+`cactup claims list` shows the overrides, and the any-of choices made when
+packages were added. `cactup inst show` lists the overrides too.
+
+`cactup claims check` looks at the installed packages as they are: forks
+installed beside their upstream, incompatible packages, a thorn name enabled
+twice, and CCL requirements that no installed thorn meets. It prints one line
+for each problem, with the way past, and changes nothing. It exits with an
+error when it finds one.
+
+An installation with an override is refused by a cactup that predates
+`claims`: `cactup update` fixes that.
+
 ### Getting a new release noticed
 
 Cactarium checks each package's repository for new release tags every few
