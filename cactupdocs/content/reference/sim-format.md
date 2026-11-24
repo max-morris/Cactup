@@ -198,4 +198,4 @@ Where the file came from. Informational: `import` needs none of it.
 | `flags` | Build flags. |
 | `machine-disabled` | Thorns that machine's configuration turned off. |
 | `base` | The Cactarium stack the installation was based on, if any. |
-| `extra` | Anything else, as strings. |
+| `extra` | Anything else, as strings. Export writes `claims-overrides` here: the installation's claim overrides, joined by `; `. |

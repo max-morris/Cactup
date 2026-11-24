@@ -7,8 +7,11 @@ description = "Write a cactarium.toml for a repository with cactup package init,
 
 A **package** is a repository of thorns registered with Cactarium. What it
 is and what it needs is written in a `cactarium.toml` at the root of the
-repository, read by Cactarium at every release tag. cactup writes a first
-version of it from your installation, for you to review:
+repository, read by Cactarium at every release tag. Others add it with
+`cactup add`, which brings in what it needs (see
+[Sharing Simulations](sharing-simulations.html#dependencies)). A `.sim` can
+pin only repositories of registered packages. cactup writes a first version
+of the file from your installation, for you to review:
 
 ```sh
 cactup package init z4c          # writes repos/z4c/cactarium.toml
@@ -91,8 +94,9 @@ how many there are.
   `git -C <clone> fetch --unshallow`, then `cactup package init <repo> -f`.
   It never changes the clone itself.
 
-The installation's claim overrides (`cactup claims`) are copied in as
-comments: they are about other packages' claims, not this one's.
+The installation's claim overrides (`cactup claims`, see
+[Sharing Simulations](sharing-simulations.html#when-a-claim-is-wrong)) are
+copied in as comments: they are about other packages' claims, not this one's.
 
 ## Forks
 
@@ -149,8 +153,10 @@ cactup stack init stacks/mine     # in another directory
 
 The installation must be on a stack release (`cactup install
 owner/stack@version`, or `cactup inst refetch --release`); a branch tip
-(`@head`) has no release to extend. Like `sim export`, it refuses
-repositories with uncommitted changes or commits on no remote. The stack:
+(`@head`) or a bare commit has no release to extend. Like `sim export`, it
+refuses repositories with uncommitted changes or commits on no remote.
+`--name` sets the stack's name (default: the installation's alias, lowercased)
+and `--owner` its owner (default: your Cactarium user). The stack:
 
 - **extends** the stack release in use by the installation;
 - **pins** each base repository moved since that release;
