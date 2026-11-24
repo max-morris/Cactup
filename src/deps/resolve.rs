@@ -111,6 +111,10 @@ fn suggested(r: &mut Refusal, o: Options) -> Vec<(Flag, &mut bool)> {
             *replace &= !o.replace;
             if *replace { vec![(Flag::Replace, replace)] } else { Vec::new() }
         }
+        Refusal::FleshHasDependents { no_deps, .. } => {
+            *no_deps &= !o.no_deps;
+            if *no_deps { vec![(Flag::NoDeps, no_deps)] } else { Vec::new() }
+        }
         Refusal::Unreadable { needs, ways } => {
             let fork = needs.iter().any(|n| matches!(n.what, UnreadFor::ForkCheck { .. }));
             *ways = Ways { upgrade: moves, replace: fork && !o.replace, no_deps: !o.no_deps };
@@ -2137,6 +2141,52 @@ impl Search<'_, '_, '_> {
         (taker, via)
     }
 
+    /// A present flesh replaced by the plan (by a flesh brought in) that a package staying still
+    /// needs: no fork standing in, no override saying another satisfies it. Its claim binds as
+    /// passive claims do (never under `--no-deps`); a dependent moved by the plan asks anew.
+    fn displaced_dependents(&self, d: &Derived, last: bool) -> Option<Failure> {
+        let replacer = |t: &PkgId| {
+            let origin = &self.present.get(t)?.origin;
+            let (_, by, _, _) = d.replaced.iter().find(|(r, _, _, flesh)| {
+                *flesh
+                    && match r {
+                        Replaced::Added { id } => id == t,
+                        Replaced::Base { repo } => matches!(origin, Origin::Base { repo: o } if o == repo),
+                    }
+            })?;
+            Some(by.clone())
+        };
+        let mut found: Option<(PkgId, PkgId)> = None;
+        let mut dependents: Vec<(String, String)> = Vec::new();
+        let (mut lives, mut needs, mut parties) = (Vec::new(), Vec::new(), Vec::new());
+        for (i, rec) in d.needs.iter().enumerate() {
+            let t = &rec.need.target;
+            let staying = rec.need.source_id().is_some_and(|s| d.chosen.contains_key(s));
+            if rec.kind == Kind::Active || rec.taker != Taker::Itself || d.chosen.contains_key(t) || !staying {
+                continue;
+            }
+            if !self.binds(rec, last) {
+                continue;
+            }
+            let Some(by) = replacer(t) else { continue };
+            if found.as_ref().is_some_and(|(flesh, _)| flesh != t) {
+                continue;
+            }
+            found.get_or_insert_with(|| (t.clone(), by));
+            let live = rec.need.live(rec.kind);
+            dependents.push((live.source.clone(), format!("{} {}", live.target, live.req)));
+            parties.extend(rec.need.source_id().cloned());
+            lives.push(live);
+            needs.push(i);
+        }
+        let (flesh, by) = found?;
+        let by_label = d.chosen.get(&by).map(|e| e.release.label()).unwrap_or_else(|| by.to_string());
+        let flesh_label = self.present_rel[&flesh].label();
+        parties.push(by);
+        let r = Refusal::FleshHasDependents { flesh: flesh_label, by: by_label, dependents, no_deps: true };
+        Some(Failure { needs, ..Failure::of(r, lives, parties).everything() })
+    }
+
     /// A flesh the plan brings in replaces the flesh the installation has (a base repo, or an
     /// added flesh package); two fleshes brought in are refused.
     fn replace_fleshes(&self, d: &mut Derived) {
@@ -2221,6 +2271,9 @@ impl Search<'_, '_, '_> {
             return Some(f.clone());
         }
         if let Some(f) = self.unread_thorns(d) {
+            return Some(f);
+        }
+        if let Some(f) = self.displaced_dependents(d, last) {
             return Some(f);
         }
         for (i, rec) in d.needs.iter().enumerate() {

@@ -152,6 +152,10 @@ pub enum Refusal {
     FleshUnmet { target: PkgId, constraints: Vec<Live> },
     /// The plan would need two fleshes. `ignore`: the claim that brings the second, when one does.
     TwoFleshes { first: String, second: String, ignore: Option<String> },
+    /// A flesh coming in would take the place of the installation's flesh (`flesh`), which
+    /// packages staying depend on: each dependent with what it asks. `no_deps`: `--no-deps`
+    /// finds a plan.
+    FleshHasDependents { flesh: String, by: String, dependents: Vec<(String, String)>, no_deps: bool },
     /// No combination of releases meets these together (or the search gave up before finding one).
     NoConsistentSet { constraints: Vec<Live> },
     /// The search ran past its wall-time safety net; `best` is the closest it came.
@@ -232,7 +236,11 @@ impl Refusal {
             | Refusal::NoConsistentSet { constraints }
             | Refusal::LibraryClash { placements: constraints, .. } => ignore_one(constraints),
             Refusal::TwoFleshes { ignore: Some(ignore), .. } => format!("Pass --ignore-claim {ignore}"),
-            Refusal::TwoFleshes { .. } => "Name one flesh".to_owned(),
+            Refusal::TwoFleshes { .. } => "Name one flesh.".to_owned(),
+            Refusal::FleshHasDependents { no_deps: true, .. } => {
+                "Remove them first, or pass --no-deps to replace it anyway".to_owned()
+            }
+            Refusal::FleshHasDependents { .. } => "Remove them first".to_owned(),
             // P4: or `cactup claims override needs …` to correct the claim for good.
             Refusal::MissingThorns { live, .. } => match &live.ignore {
                 Some(ignore) => format!("Pass --ignore-claim {ignore}"),
@@ -388,6 +396,12 @@ impl fmt::Display for Refusal {
             )?,
             Refusal::TwoFleshes { first, second, .. } => {
                 write!(f, "The plan needs two fleshes, {first} and {second}; an installation has one")?
+            }
+            Refusal::FleshHasDependents { flesh, by, dependents, .. } => {
+                write!(f, "{by} would take the place of the flesh {flesh}, which other packages need:")?;
+                for (dependent, asks) in dependents {
+                    write!(f, "\n  {dependent} ({asks})")?;
+                }
             }
             Refusal::NoConsistentSet { constraints } => write!(
                 f,
