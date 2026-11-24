@@ -889,6 +889,24 @@ fn upgrades_carry_the_present_enabled_set_and_the_flags_agree() {
     let _ = &it.a1;
 }
 
+/// A base package that an add upgraded for a dependency stays upgraded when the package that
+/// needed it is removed (Max's decision): it is recorded as named, never swept, and its base repo
+/// is not given back.
+#[test]
+fn an_upgrade_an_add_made_outlives_the_removal() {
+    let it = admbase("^2.0");
+    let s = &it.setup;
+    s.add(&["max/app"], AddFlags { upgrade: true, yes: true, ..AddFlags::default() }).unwrap_or_else(|e| panic!("{e:#}"));
+    s.remove(&["max/app"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let meta = s.meta();
+    let packages: Vec<&str> = meta.added.iter().map(|a| a.package.as_str()).collect();
+    assert_eq!(packages, ["et/admbase"]);
+    assert_eq!(meta.added[0].version, "2.0.0");
+    let state = crate::fetch::FetchState::read(&s.inst.root).unwrap().unwrap();
+    assert_eq!(state.repos["admbase"].head, it.a2, "the clone stays at 2.0.0");
+    assert!(s.inst.root.join("Cactus/arrangements/ADMBase/StaticConformal/interface.ccl").is_file());
+}
+
 /// Every pinned repo of the base goes out in one `/lookup` request (the
 /// endpoint is rate-limited), and a `commit-known` of null (the server could
 /// not check its mirror) still maps the repo: nothing reads it as unpushed.
