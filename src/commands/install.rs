@@ -351,16 +351,24 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         bail!(message);
     }
 
-    let report = crate::fetch::execute(&plan, &install_dir)?;
-    // Ctrl-C: stop here, before anything registers the tree as an
-    // installation (the per-component failures are all just "interrupted").
-    if gix::interrupt::is_triggered() {
-        // Running the same install again picks up where this one stopped; a
-        // repo cut short mid-checkout is then named, for deleting first.
-        bail!(
+    // Ctrl-C: stop before anything registers the tree as an installation,
+    // here and again just before the first write that does (below). Running
+    // the same install again picks up where this one stopped; a repo cut
+    // short mid-checkout is then named, for deleting first.
+    let interrupted = || {
+        anyhow!(
             "Interrupted; '{}' is incomplete and not registered\nRerun the same install to finish it.",
             install_dir.display()
-        );
+        )
+    };
+    let report = match crate::fetch::execute(&plan, &install_dir) {
+        Ok(report) => report,
+        // Its per-component failures are all just "interrupted".
+        Err(e) if crate::fetch::Interrupted::report_of(&e).is_some() => return Err(interrupted()),
+        Err(e) => return Err(e),
+    };
+    if gix::interrupt::is_triggered() {
+        return Err(interrupted());
     }
     if !report.failures.is_empty() {
         for f in &report.failures {
@@ -416,6 +424,9 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     // Fix sim-home/test-home into installation.toml now, from the machine's
     // [paths] (§8.1, §11.5) — every later sim/test command resolves against
     // these, and they are set exactly once, at install time.
+    if gix::interrupt::is_triggered() {
+        return Err(interrupted());
+    }
     crate::installation::Installation::new(&alias, &install_dir).ensure_meta(&machine, &database, Some(&root))?;
 
     let release_name = match &source {

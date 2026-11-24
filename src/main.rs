@@ -84,6 +84,17 @@ fn main() -> Res<()> {
     result
 }
 
+/// A command that came back `Ok` with the interrupt flag set fails as
+/// interrupted all the same (exit status 1, like any interrupted error): the
+/// first Ctrl-C promised "stopping", and a run that was cut into must not
+/// read as a clean success. An error stays the error it is.
+fn interrupted_unless_failed(result: Res<()>, interrupted: bool) -> Res<()> {
+    match result {
+        Ok(()) if interrupted => Err(anyhow::anyhow!("Interrupted")),
+        result => result,
+    }
+}
+
 /// On the way out, Ok or Err, interrupted or not: remove every gix lock and
 /// temp file this process still has registered. A fetch given up on (Ctrl-C,
 /// a remote gone quiet: `fetch::watch`) is abandoned on a thread still stuck
@@ -185,24 +196,22 @@ fn run() -> Res<()> {
         eprintln!("\n{}\n", notice.yellow().bold());
     }
 
-    // Skip the random post-command wisdom where it would be noise: the
-    // compute-node path must stay hermetic (D11), and the log-follow views
-    // end via Ctrl-C, where a trailing aphorism reads as clutter.
-    let suppress_wisdom = compute_node || match &args.command {
+    // The log-follow views end via Ctrl-C: for them it is how the command
+    // finishes, not an interrupt of it.
+    let ends_on_ctrl_c = match &args.command {
         Commands::Sim(SimCommand::Log { follow, follow_out, follow_err, .. })
-        | Commands::Test(TestCommand::Log { follow, follow_out, follow_err, .. })
-            if *follow || *follow_out || *follow_err =>
-        {
-            true
+        | Commands::Test(TestCommand::Log { follow, follow_out, follow_err, .. }) => {
+            *follow || *follow_out || *follow_err
         }
-        Commands::Build { command: Some(BuildCommand::Log { follow, follow_out, follow_err, .. }), .. }
-            if *follow || *follow_out || *follow_err =>
-        {
-            true
+        Commands::Build { command: Some(BuildCommand::Log { follow, follow_out, follow_err, .. }), .. } => {
+            *follow || *follow_out || *follow_err
         }
-        Commands::Wisdom => true, // no double dose
         _ => false,
     };
+    // Skip the random post-command wisdom where it would be noise: the
+    // compute-node path must stay hermetic (D11), and after a follow view's
+    // Ctrl-C a trailing aphorism reads as clutter.
+    let suppress_wisdom = compute_node || ends_on_ctrl_c || matches!(args.command, Commands::Wisdom); // no double dose
 
     let command_span = timing::span("command");
     let result = match args.command {
@@ -240,6 +249,9 @@ fn run() -> Res<()> {
         Commands::Cache(cmd) => commands::cache::dispatch(&ctx, cmd),
     };
     drop(command_span);
+    // A job's run ends as its run-script did, whatever signal the batch
+    // system sent it (D11); a follow view's Ctrl-C is its way out.
+    let result = interrupted_unless_failed(result, gix::interrupt::is_triggered() && !compute_node && !ends_on_ctrl_c);
 
     // Wisdom after failure would be flippant — and gating on Ok also keeps
     // anyhow's after-main `Error:` print from landing below decoration.
@@ -249,4 +261,19 @@ fn run() -> Res<()> {
     }
     timing::report();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    /// A command that came back `Ok` after the first Ctrl-C fails as
+    /// interrupted (the exit status of any error); without one it is left
+    /// alone, and an error stays its own.
+    #[test]
+    fn an_interrupted_success_fails() {
+        let e = super::interrupted_unless_failed(Ok(()), true).unwrap_err();
+        assert_eq!(format!("{e:#}"), "Interrupted");
+        assert!(super::interrupted_unless_failed(Ok(()), false).is_ok());
+        let e = super::interrupted_unless_failed(Err(anyhow::anyhow!("Lock held")), true).unwrap_err();
+        assert_eq!(format!("{e:#}"), "Lock held");
+    }
 }

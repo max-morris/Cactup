@@ -1207,10 +1207,9 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
     // away the placements this add newly made.
     let mut undo = crate::fetch::library::PutBack::drop_placements(&inst.root, &start.before, &composed)?;
     // A flesh in or out moves the links at the root; they move back unless
-    // the new list is written.
+    // the new list is written (on an interrupted fetch too: the guard drops).
     let root_links = RootLinks::save(&inst.root, &[&start.before, &composed])?;
-    let report = crate::fetch::execute(&fetch_plan, &inst.root)?;
-    undo.made(&fetch_plan, &report);
+    let report = fetched(crate::fetch::execute(&fetch_plan, &inst.root), &fetch_plan, &mut undo, &inst.root)?;
     if !report.failures.is_empty() {
         // What did fetch is recorded all the same, so a later prune knows
         // cactup made it.
@@ -1220,6 +1219,12 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
     }
     crate::fetch::FetchState::record(&inst.root, &report.records())?;
 
+    // Ctrl-C since the fetch: neither the list nor the record is written,
+    // and the placements dropped are put back (`undo`), and the root's
+    // links (`root_links`).
+    if gix::interrupt::is_triggered() {
+        bail!("Interrupted");
+    }
     let live_path = &start.live_path;
     crate::cow::Cow::at(&inst.root)?.before_replace(live_path)?;
     std::fs::write(live_path, &composed).with_context(|| format!("Failed to write '{}'", live_path.display()))?;
@@ -1298,6 +1303,31 @@ fn left_lines(left: &[String], replaced: Option<&[&str]>) -> Vec<String> {
         None => format!("Their {repos} stay on disk."),
     };
     vec![first, format!("Remove {them} with `cactup inst refetch --prune`.")]
+}
+
+/// The fetch's report, for `add` and `remove`, the placements it made noted
+/// in `undo` (taken away again unless the command goes through). A fetch
+/// Ctrl-C stopped fails the command; what it did fetch is recorded all the
+/// same, so a later prune knows cactup made it.
+fn fetched(
+    result: Res<crate::fetch::ExecReport>,
+    plan: &crate::fetch::Plan,
+    undo: &mut crate::fetch::library::PutBack<'_>,
+    root: &std::path::Path,
+) -> Res<crate::fetch::ExecReport> {
+    match result {
+        Ok(report) => {
+            undo.made(plan, &report);
+            Ok(report)
+        }
+        Err(e) => {
+            if let Some(report) = crate::fetch::Interrupted::report_of(&e) {
+                undo.made(plan, report);
+                crate::fetch::FetchState::record(root, &report.records())?;
+            }
+            Err(e)
+        }
+    }
 }
 
 /// Every snapshot nobody vouches for that the plan takes (an untrusted
@@ -2009,8 +2039,7 @@ pub fn remove(ctx: &Ctx, packages: &[String], flags: &RemoveFlags) -> Res<()> {
     let root_links = RootLinks::save(&inst.root, &[&start.before, &composed])?;
     let restored: Vec<String> = restore.as_ref().map(restored_lines).unwrap_or_default();
     if let Some(fetch_plan) = restore {
-        let report = crate::fetch::execute(&fetch_plan, &inst.root)?;
-        undo.made(&fetch_plan, &report);
+        let report = fetched(crate::fetch::execute(&fetch_plan, &inst.root), &fetch_plan, &mut undo, &inst.root)?;
         if !report.failures.is_empty() {
             let why: Vec<String> = report.failures.iter().map(|f| format!("{}: {}", f.what, f.error)).collect();
             let replaced: Vec<&str> = touched.iter().copied().collect();
@@ -2023,6 +2052,12 @@ pub fn remove(ctx: &Ctx, packages: &[String], flags: &RemoveFlags) -> Res<()> {
     // base's. They are links only; the clone keeps the files.
     let fleshless = flesh && base_flesh_repos(&base).is_empty();
     let unlinked = if fleshless { unlink_flesh(&inst.cactus_root()?, &removed)? } else { Vec::new() };
+    // Ctrl-C since the fetch (or with none to make): neither the list nor
+    // the record is written, and the placements dropped and the root's
+    // links are put back.
+    if gix::interrupt::is_triggered() {
+        bail!("Interrupted");
+    }
     let live_path = &start.live_path;
     crate::cow::Cow::at(&inst.root)?.before_replace(live_path)?;
     std::fs::write(live_path, &composed).with_context(|| format!("Failed to write '{}'", live_path.display()))?;
