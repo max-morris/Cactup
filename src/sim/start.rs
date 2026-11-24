@@ -2454,6 +2454,12 @@ mod tests {
                 ("https://dl.share.test/d.tgz".into(), "approved".into()),
                 ("https://dl.share.test/e.tgz".into(), "pending".into()),
                 ("https://dl.share.test/r.tgz".into(), "rejected".into()),
+                ("https://dl.share.test/v.tgz".into(), "pending".into()),
+                ("https://dl.share.test/w.tgz".into(), "pending".into()),
+            ],
+            checks: vec![
+                ("/v.tgz".into(), "failed".into(), Some("the server answered 404 Not Found".into())),
+                ("/w.tgz".into(), "fetching".into(), None),
             ],
             ..Default::default()
         };
@@ -2462,6 +2468,8 @@ mod tests {
             download("https://dl.share.test/e.tgz", "e.tgz", Some(&sha)),
             download("https://dl.share.test/f.tgz", "f.tgz", Some(&sha)),
             download("https://dl.share.test/r.tgz", "r.tgz", Some(&sha)),
+            download("https://dl.share.test/v.tgz", "v.tgz", Some(&sha)),
+            download("https://dl.share.test/w.tgz", "w.tgz", Some(&sha)),
             download("https://dl.share.test/g.tgz", "g.tgz", None),
             "!TARGET = $ROOT/arrangements\n!TYPE = ignore\n!CHECKOUT = Private/Thorn\n".to_owned(),
             section("https://TOKEN9@reg.share.test/o/t.git", "T/One", true),
@@ -2482,7 +2490,10 @@ mod tests {
              c: no registered package has this repo; push it and register it with `cactup package init c --publish`, or fork a registered package\n  \
              e.tgz: download awaiting verification and review by Cactarium\n  \
              f.tgz: download not reviewed by Cactarium; submit it with `cactup download submit https://dl.share.test/f.tgz`\n  \
-             r.tgz: download rejected by Cactarium\n\
+             r.tgz: download rejected by Cactarium\n  \
+             v.tgz: Cactarium could not verify https://dl.share.test/v.tgz: the server answered 404 Not Found; resubmit it with \
+             `cactup download submit https://dl.share.test/v.tgz`\n  \
+             w.tgz: download being verified by Cactarium\n\
              Pass --local to export for use here only."
         );
         assert!(!out.exists(), "nothing written");

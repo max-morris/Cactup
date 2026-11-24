@@ -101,14 +101,40 @@ impl Query {
 /// The line for a download not approved by Cactarium, if it is not.
 fn download_problem(what: &str, url: &str, info: &DownloadInfo) -> Option<String> {
     let url = Redacted(url);
-    match info.review.as_deref() {
-        Some("approved") => None,
-        None => Some(format!(
+    // A download whose check failed stays pending: the verification says so.
+    if info.review.as_deref() != Some("approved") && info.verification.as_deref() == Some("failed") {
+        let why = info.reason.as_deref().map(|r| format!(": {r}")).unwrap_or_default();
+        return Some(format!(
+            "{what}: Cactarium could not verify {url}{why}; resubmit it with `cactup download submit {url}`"
+        ));
+    }
+    match (info.review.as_deref(), info.verification.as_deref()) {
+        (Some("approved"), _) => None,
+        (None, _) => Some(format!(
             "{what}: download not reviewed by Cactarium; submit it with `cactup download submit {url}`"
         )),
-        Some("pending") => Some(format!("{what}: download awaiting verification and review by Cactarium")),
-        Some("rejected") => Some(format!("{what}: download rejected by Cactarium")),
-        Some(other) => Some(format!("{what}: download not approved by Cactarium ({other})")),
+        (Some("pending"), Some("fetching")) => Some(format!("{what}: download being verified by Cactarium")),
+        (Some("pending"), Some("ok" | "vouched")) => Some(format!("{what}: download awaiting review by Cactarium")),
+        (Some("pending"), _) => Some(format!("{what}: download awaiting verification and review by Cactarium")),
+        (Some("rejected"), _) => Some(format!("{what}: download rejected by Cactarium")),
+        (Some(other), _) => Some(format!("{what}: download not approved by Cactarium ({other})")),
+    }
+}
+
+/// Where a submitted download stands, one line each, as `download submit`
+/// says it: its review, and how far Cactarium's check of it got.
+pub fn download_status(info: &DownloadInfo) -> Vec<String> {
+    match (info.review.as_deref(), info.verification.as_deref()) {
+        (Some("approved"), _) => vec!["Approved by Cactarium.".to_owned()],
+        (Some("rejected"), _) => vec!["Rejected by Cactarium.".to_owned()],
+        (_, Some("failed")) => {
+            let why = info.reason.as_deref().map(|r| format!(": {r}")).unwrap_or_default();
+            vec![format!("Cactarium could not verify it{why}."), "Submitting it again retries the check.".to_owned()]
+        }
+        (_, Some("fetching")) => vec!["Being verified by Cactarium.".to_owned()],
+        (_, Some("ok" | "vouched")) => vec!["Verified by Cactarium; awaiting review by an admin.".to_owned()],
+        (Some(other), None) if other != "pending" => vec![format!("Review: {other}.")],
+        _ => vec!["Awaiting verification and review by Cactarium.".to_owned()],
     }
 }
 
@@ -174,6 +200,11 @@ pub(crate) mod fake {
         pub all_registered: bool,
         /// URL → the review of that download (any sha256).
         pub downloads: Vec<(String, String)>,
+        /// The end of a URL → the state of the server's check of that
+        /// download, and why it failed.
+        pub checks: Vec<(String, String, Option<String>)>,
+        /// URLs submitted while it serves: pending from then on.
+        pub fresh: Arc<Mutex<Vec<String>>>,
         /// Path → the bytes a GET of it answers.
         pub files: Vec<(String, Vec<u8>)>,
         /// How long a lookup takes to answer.
@@ -217,8 +248,15 @@ pub(crate) mod fake {
                     .collect();
                 let downloads: Vec<serde_json::Value> = (asked.downloads.iter())
                     .map(|d| {
-                        let review = self.downloads.iter().find(|(url, _)| *url == d.url).map(|(_, r)| r.clone());
-                        serde_json::json!({"url": d.url, "sha256": d.sha256, "review": review})
+                        let review = (self.downloads.iter().find(|(url, _)| *url == d.url).map(|(_, r)| r.clone()))
+                            .or_else(|| {
+                                let known = self.submitted.iter().find(|(end, _, _)| d.url.ends_with(end.as_str()));
+                                known.map(|(_, r, _)| r.clone())
+                            })
+                            .or_else(|| self.fresh.lock().unwrap().contains(&d.url).then(|| "pending".to_owned()));
+                        let check = self.checks.iter().find(|(end, _, _)| d.url.ends_with(end.as_str()));
+                        serde_json::json!({"url": d.url, "sha256": d.sha256, "review": review,
+                            "verification": check.map(|c| &c.1), "reason": check.and_then(|c| c.2.as_ref())})
                     })
                     .collect();
                 return ok(serde_json::json!({"pins": pins, "downloads": downloads}).to_string());
@@ -230,7 +268,10 @@ pub(crate) mod fake {
                         let body = serde_json::json!({"error": {"code": "conflict", "message": message}, "id": 7, "review": review});
                         ("409 Conflict", "api-generation: 1\r\n".to_owned(), body.to_string().into_bytes())
                     }
-                    None => ok(r#"{"id":8,"review":"pending"}"#.to_owned()),
+                    None => {
+                        self.fresh.lock().unwrap().push(asked.url);
+                        ok(r#"{"id":8,"review":"pending"}"#.to_owned())
+                    }
                 };
             }
             if path.starts_with("/api/v1/sims/") {

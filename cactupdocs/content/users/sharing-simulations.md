@@ -46,8 +46,10 @@ Export refuses what nobody else could reproduce:
 - **A download Cactarium has not approved.** A download (a tarball the
   thornlist fetches, or an input's file) passes once Cactarium has reviewed
   that URL with that SHA-256. Submit one for review with
-  `cactup download submit <url>` (see below); until an admin approves it,
-  export says it is awaiting review.
+  `cactup download submit <url>` (see below). Until an admin approves it,
+  export says whether Cactarium is still verifying it or it awaits review;
+  when Cactarium could not verify it (the file's hash differs, or its server
+  failed), export says why, and submitting it again retries the check.
 - **A download with no hash**, which nothing could review: the build
   recorded none (built before cactup recorded download hashes; rebuild the
   config), or, for `sim pack`, the thornlist gives none.
@@ -275,9 +277,10 @@ cactup download submit https://zenodo.org/records/1/files/id.tar.gz --note "init
 cactup downloads the file once, computes its SHA-256 (nothing is kept),
 and submits the URL and the hash with your token (`cactup login`).
 Cactarium then fetches the file itself to verify the hash, and an admin
-reviews it. A download submitted before is not an error: cactup says what
-its review is now (`pending`, `approved` or `rejected`), with Cactarium's
-message when it has more to say.
+reviews it. cactup then says where it stands: being verified, verified and
+awaiting review, approved, rejected, or not verified and why. A download
+submitted before is not an error: cactup says the same of it, and
+submitting one that could not be verified retries the check.
 
 ### Importing from Cactarium
 

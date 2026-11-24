@@ -175,7 +175,7 @@ fn shareable(
     }
     let checked = super::shareable::classify(&list, &text, &input_urls(describe));
     // No installation: the only hashes are those the list gives.
-    let more = content_problems(&text, &list, &repo_pins(&list, |_| None, |_| None), fixes);
+    let more = content_problems(&list, &repo_pins(&list, |_| None, |_| None), fixes);
     match super::shareable::settle(checked, &text, more)? {
         None => Ok((text, list)),
         Some(rewritten) => {
@@ -252,7 +252,7 @@ fn check_and_pin(
     };
     let repos = pins_of(&list);
     let mut lines = state_problems(&repos, &published(&repos)?, fixes);
-    lines.extend(content_problems(&text, &list, &repos, fixes));
+    lines.extend(content_problems(&list, &repos, fixes));
     let query = registered::Query::of(&repos, |pin| match pin.commit {
         _ if checked.refuses(&pin.name) => None,
         Some(_) if urls == Urls::Unchecked => checked.published_as(&pin.url).map(str::to_owned),
@@ -309,16 +309,17 @@ fn state_problems(repos: &[RepoPin], published: &[bool], fixes: &Fixes) -> Vec<S
     lines
 }
 
-/// A line for each component of `text` (parsed as `list`, pinned as
-/// `repos`) nobody else can fetch or reproduce: an `ignore` component (on
+/// A line for each component of `list` (pinned as `repos`) nobody else can
+/// fetch or reproduce: an `ignore` component (on
 /// this machine only), a download with no hash to pin it by (nothing
 /// Cactarium could review), and a repo of another kind than git that
 /// nothing pins (svn, cvs, hg, darcs; several downloads from one URL).
-fn content_problems(text: &str, list: &thornlist::Thornlist, repos: &[RepoPin], fixes: &Fixes) -> Vec<String> {
+fn content_problems(list: &thornlist::Thornlist, repos: &[RepoPin], fixes: &Fixes) -> Vec<String> {
     let mut lines = Vec::new();
-    for checkout in ignored_checkouts(text, list) {
+    for c in list.ignored() {
         lines.push(format!(
-            "{checkout}: an ignore component, which nobody else can fetch; put it in a repo and register that with Cactarium"
+            "{}: an ignore component, which nobody else can fetch; put it in a repo and register that with Cactarium",
+            c.checkout
         ));
     }
     for c in list.components().iter().filter(|c| single_download(list, c)) {
@@ -347,28 +348,6 @@ fn content_problems(text: &str, list: &thornlist::Thornlist, repos: &[RepoPin], 
         lines.push(line);
     }
     lines
-}
-
-/// The checkouts of the `!TYPE = ignore` sections of `text` (parsed as
-/// `list`). The parser leaves those out of its components, so they are found
-/// as what `text` parses to beyond `list` once each such section is read as
-/// git: defines, comments and long-form names all go through the parser.
-fn ignored_checkouts(text: &str, list: &thornlist::Thornlist) -> Vec<String> {
-    static IGNORE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"(?m)^([ \t]*)!TYPE[ \t]*=[ \t]*ignore[ \t]*(#.*)?$").expect("valid regex")
-    });
-    if !IGNORE.is_match(text) {
-        return Vec::new();
-    }
-    let as_git = IGNORE.replace_all(text, "$1!TYPE = git\n$1!URL = https://ignored.invalid/ignored.git");
-    let Ok(read) = thornlist::parse(&as_git) else { return Vec::new() };
-    let known: std::collections::BTreeSet<(&str, &str)> =
-        list.components().iter().map(|c| (c.target.as_str(), c.checkout.as_str())).collect();
-    read.components()
-        .iter()
-        .filter(|c| !known.contains(&(c.target.as_str(), c.checkout.as_str())))
-        .map(|c| c.checkout.clone())
-        .collect()
 }
 
 /// Record the installation's claim overrides in `provenance`, for whoever

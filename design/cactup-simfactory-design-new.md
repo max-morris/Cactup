@@ -4620,9 +4620,8 @@ the config's own record only while that still describes the same `build-id`.
   installation's repo — read locally, so a commit pushed since the last fetch,
   or below a shallow boundary, reads as unpublished and errs toward asking.
 - **`ignore` components** (`!TYPE = ignore`: on this machine only) are
-  refused. The parser leaves them out of its components, so they are found
-  by parsing the text again with each such section read as git and taking
-  what that adds (`export::ignored_checkouts`).
+  refused, as the crate's parser lists them (`crl::Thornlist::ignored`,
+  crate PR #11; they are never in `components()`).
 - **Registered packages and reviewed downloads** (`sim::registered`). One
   `POST /lookup` (crate `api::LookupRequest`, chunked at
   `MAX_LOOKUP_PINS` pins plus downloads, each request validated before it
@@ -4636,7 +4635,12 @@ the config's own record only while that still describes the same `build-id`.
   unless its probe already refused its URL. A download passes only when its
   `review` is `approved`; null (never submitted) names
   `cactup download submit <url>`, `pending` says it awaits verification and
-  review, `rejected` says so. An `[[input]]` with a `url` and `sha256` goes
+  review, `rejected` says so; and `verification` refines a pending one
+  (crate PR #11): `failed` says "Cactarium could not verify <url>:
+  <reason>" with "resubmit it with `cactup download submit <url>`" (a
+  resubmission retries the fetch), `fetching` says it is being verified,
+  `ok`/`vouched` that it awaits review. No `verification` (an older server)
+  keeps the wording above. An `[[input]]` with a `url` and `sha256` goes
   through the same review: its sha256 is known only once `finish` has
   downloaded it, after the questions, so inputs are asked about in a second
   lookup there. A lookup that fails fails the export, naming `--local`.
@@ -5044,10 +5048,14 @@ What uses it, all on the login node (D11):
   writer, nothing written to disk) on a thread of its own with a line of
   progress in bytes, so Ctrl-C ends the wait at once even on a silent
   server. The answer is printed in terse lines: "Submitted it to … for
-  review." and the review state; a 409 (`api::DownloadConflict`) is no
-  error, printed as "Already submitted, currently <review>." plus the
-  server's message when it says more than "already submitted". A server
-  without the route is an older Cactarium.
+  review." or, for a 409 (`api::DownloadConflict`, no error), "Already
+  submitted."; then where the download stands, from one lookup of it
+  (`DownloadInfo::verification`, `reason`; `registered::download_status`):
+  being verified, verified and awaiting review, approved, rejected, or "could
+  not verify it: <reason>" with "Submitting it again retries the check." A
+  server that says nothing of its check (no `verification`) gets the old
+  lines: the review, and the 409's message when it says more than "already
+  submitted". A server without the route is an older Cactarium.
 - In a shared `.sim` (§8.9), a repo of another kind than git that nothing
   pins (svn, cvs, hg, darcs; one section downloading several files) is
   refused too, since artifacts must be fully specified (Max's decision 5).
