@@ -32,8 +32,10 @@
 //! one was specific, else "no consistent set" with the constraints of the deepest failure.
 // Plan §2.2.
 
+use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -72,6 +74,43 @@ thread_local! {
 }
 
 type Rel = Rc<Release>;
+
+/// A cache key naming a release by its address, `rest` after it. The key holds the release, so
+/// that address cannot be freed, and given to another release that would read this one's entry,
+/// while it is a key. Looked up by `(Rc::as_ptr(r), rest)`, with no clone.
+struct Held<K> {
+    key: (*const Release, K),
+    _release: Rel,
+}
+
+impl<K> Held<K> {
+    fn new(r: &Rel, rest: K) -> Held<K> {
+        Held { key: (Rc::as_ptr(r), rest), _release: r.clone() }
+    }
+}
+
+impl<K: Hash> Hash for Held<K> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.key.hash(state);
+    }
+}
+
+impl<K: PartialEq> PartialEq for Held<K> {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl<K: Eq> Eq for Held<K> {}
+
+impl<K> Borrow<(*const Release, K)> for Held<K> {
+    fn borrow(&self) -> &(*const Release, K) {
+        &self.key
+    }
+}
+
+/// A cache by release (and `K`), see [`Held`].
+type ByRelease<K, V> = RefCell<HashMap<Held<K>, V>>;
 
 /// How many searches with another flag a refusal's ways past may cost.
 const WAY_CHECKS: usize = 3;
@@ -746,11 +785,12 @@ struct Search<'a, 'c, 'f> {
     holders: BTreeMap<(PkgId, usize), usize>,
     /// Each present package's passive needs: its claims that apply to its enabled thorns.
     present_passive: BTreeMap<PkgId, Vec<(usize, Rc<Need>)>>,
-    // Caches keyed by the address of a release, which stays put (and alive) for the whole search:
-    // every release lives in the catalog, the present map or a snapshot.
-    parsed: RefCell<HashMap<*const Release, Rc<Vec<Parsed>>>>,
-    need_cache: RefCell<HashMap<(*const Release, usize, usize), Rc<Need>>>,
-    fork_cache: RefCell<HashMap<*const Release, Rc<Vec<(PkgId, ForkOf)>>>>,
+    // Caches keyed by the address of a release: each key holds its release (`Held`), so a
+    // release dropped during the search (a stand-in replaced by its read) cannot hand its
+    // address, and its entries, to another.
+    parsed: ByRelease<(), Rc<Vec<Parsed>>>,
+    need_cache: ByRelease<(usize, usize), Rc<Need>>,
+    fork_cache: ByRelease<(), Rc<Vec<(PkgId, ForkOf)>>>,
     /// Every release that could come into play: the present ones, and every version of every
     /// package reachable from them or the named specs through dependency claims (any
     /// alternative, any version, commits read), all loaded before the search.
@@ -890,9 +930,14 @@ impl Search<'_, '_, '_> {
                     }
                 }
                 let read = Present { release, stand_in: false, ..(*p).clone() };
-                let rel = Rc::new(read.release.clone());
+                let copy = read.release.clone();
                 releases.retain(|r| r.id != *id);
                 self.present.insert(id.clone(), Rc::new(read));
+                self.present_rel.remove(id);
+                // Made once the stand-in is let go, so the allocator most likely hands it the
+                // stand-in's address: a cache keyed by address whose keys did not hold their
+                // release would then fail the table cases that read a stand-in, every time.
+                let rel = Rc::new(copy);
                 self.present_rel.insert(id.clone(), rel.clone());
                 // Only what its enabled thorns, and those a need names, claim: reading a
                 // package does not bring in the needs of thorns nothing enables. Followed again
@@ -1024,19 +1069,17 @@ impl Search<'_, '_, '_> {
     }
 
     fn parsed(&self, r: &Rel) -> Rc<Vec<Parsed>> {
-        let key = Rc::as_ptr(r);
-        if let Some(p) = self.parsed.borrow().get(&key) {
+        if let Some(p) = self.parsed.borrow().get(&(Rc::as_ptr(r), ())) {
             return p.clone();
         }
         let p = Rc::new(parse_claims(r));
-        self.parsed.borrow_mut().insert(key, p.clone());
+        self.parsed.borrow_mut().insert(Held::new(r, ()), p.clone());
         p
     }
 
     /// `r`'s fork-of claims that read, by upstream.
     fn fork_claims_of(&self, r: &Rel) -> Rc<Vec<(PkgId, ForkOf)>> {
-        let key = Rc::as_ptr(r);
-        if let Some(f) = self.fork_cache.borrow().get(&key) {
+        if let Some(f) = self.fork_cache.borrow().get(&(Rc::as_ptr(r), ())) {
             return f.clone();
         }
         let upstreams: BTreeSet<PkgId> =
@@ -1046,14 +1089,14 @@ impl Search<'_, '_, '_> {
             out.extend(fork_claims(r, &up).into_iter().map(|f| (up.clone(), f)));
         }
         let out = Rc::new(out);
-        self.fork_cache.borrow_mut().insert(key, out.clone());
+        self.fork_cache.borrow_mut().insert(Held::new(r, ()), out.clone());
         out
     }
 
     /// The need claim `p` of release `r` makes (for an any-of, its alternative `alt`), built once.
     fn need_of(&self, r: &Rel, p: &Parsed, alt: Option<usize>) -> Option<Rc<Need>> {
-        let key = (Rc::as_ptr(r), p.index, alt.unwrap_or(usize::MAX));
-        if let Some(n) = self.need_cache.borrow().get(&key) {
+        let rest = (p.index, alt.unwrap_or(usize::MAX));
+        if let Some(n) = self.need_cache.borrow().get(&(Rc::as_ptr(r), rest)) {
             return Some(n.clone());
         }
         let (target, req, thorns, any_of) = match (&p.body, alt) {
@@ -1075,7 +1118,7 @@ impl Search<'_, '_, '_> {
             index: p.index,
             any_of,
         });
-        self.need_cache.borrow_mut().insert(key, need.clone());
+        self.need_cache.borrow_mut().insert(Held::new(r, rest), need.clone());
         Some(need)
     }
 
