@@ -1,4 +1,4 @@
-schema = 4
+schema = 5
 active-config = "sim"
 sim-home = "/scratch/sims/et"
 test-home = "/scratch/tests/et"
@@ -37,3 +37,7 @@ for-commit = "0123456789abcdef0123456789abcdef01234567"
 [[added-for."owner/pkg".choices]]
 dependent = "owner/app"
 alternatives = ["owner/pkg", "owner/other"]
+
+[claim-overrides."drop owner/app:dependency:owner/other"]
+kind = "drop"
+note = "its thorns ship with the flesh"

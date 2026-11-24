@@ -66,13 +66,20 @@ use std::path::{Path, PathBuf};
 /// thorns, putting the base's flesh back beside it. So, as for libraries: a
 /// record with a flesh package is written as v4, sticky afterward, and an
 /// older binary refuses it; every other record keeps the version it had.
+///
+/// Version 5 added `claim-overrides`. A top-level map, so an older binary's
+/// rewrite would put it back, but that binary resolves without the overrides:
+/// `remove` sweeps as an orphan a package that only an added dependency holds,
+/// and a `satisfies` or `drop` no longer shapes a plan. So, as for libraries,
+/// a record with an override is written as v5, sticky afterward, and an older
+/// binary refuses it; every other record keeps the version it had.
 // Spec §2.5 matrix; the v1 shape is fixtures/formats/installation/v1.toml.
 pub static INSTALLATION: Format<Toml> = Format {
     name: "installation record",
     key: "schema",
-    current: 4,
-    upgrades: &[installation_up_1, installation_up_2, installation_up_3],
-    downgrades: &[installation_down_2, installation_down_3, installation_down_4],
+    current: 5,
+    upgrades: &[installation_up_1, installation_up_2, installation_up_3, installation_up_4],
+    downgrades: &[installation_down_2, installation_down_3, installation_down_4, installation_down_5],
     down_floor: 1,
     frozen_read: false,
     legacy: None,
@@ -92,6 +99,25 @@ fn installation_up_2(_doc: &mut Toml) -> Res<()> {
 /// v3 → v4: nothing to change (v3 has no flesh package).
 fn installation_up_3(_doc: &mut Toml) -> Res<()> {
     Ok(())
+}
+
+/// v4 → v5: nothing to change (v4 has no claim overrides).
+fn installation_up_4(_doc: &mut Toml) -> Res<()> {
+    Ok(())
+}
+
+/// v5 → v4: unchanged, unless some claim override is recorded.
+fn installation_down_5(doc: &mut Toml) -> Result<(), format::CannotExpress> {
+    let overrides = match doc.get("claim-overrides") {
+        None => false,
+        Some(toml::Value::Table(overrides)) => !overrides.is_empty(),
+        // Not a table: nothing v4 can hold either.
+        Some(_) => true,
+    };
+    match overrides {
+        true => Err(format::CannotExpress),
+        false => Ok(()),
+    }
 }
 
 /// v4 → v3: unchanged, unless some added package is a flesh package.
@@ -201,6 +227,12 @@ pub struct InstallationMeta {
     /// of each `[[added]]` element, so an older binary's rewrite keeps it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub added_for: BTreeMap<String, AddedFor>,
+    /// The claims the installation overrides (`cactup claims override`), by
+    /// the override's canonical text (`Override::key`). A map, so an older
+    /// binary's rewrite keeps it; see [`INSTALLATION`] for why it still needs
+    /// a version of its own.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub claim_overrides: BTreeMap<String, ClaimOverride>,
     /// For a symbolic copy (`installation cp --symbolic`, §3.1): the
     /// installation home its unchanged files are links into. Each file of the
     /// copy's tree is an absolute link to the same file there until cactup
@@ -236,6 +268,18 @@ pub struct AddedFor {
 
 fn named() -> bool {
     true
+}
+
+/// One `claim-overrides` entry. What the override does is its key's text; `kind`
+/// repeats the key's first word, for a reader of the file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ClaimOverride {
+    /// `drop`, `add`, `needs` or `satisfies`.
+    pub kind: String,
+    /// Why the override is there, as the user said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// An any-of dependency, by the package declaring it and its alternatives in
@@ -1087,8 +1131,18 @@ mod tests {
                 },
             )]
             .into(),
+            claim_overrides: [(
+                "drop owner/app:dependency:owner/other".to_owned(),
+                ClaimOverride { kind: "drop".to_owned(), note: Some("its thorns ship with the flesh".to_owned()) },
+            )]
+            .into(),
             linked_to: Some("/scratch/cacti/et".into()),
         }
+    }
+
+    /// [`exhaustive_meta`] as a record before claim overrides had it.
+    fn without_overrides() -> InstallationMeta {
+        InstallationMeta { claim_overrides: BTreeMap::new(), ..exhaustive_meta() }
     }
 
     fn exhaustive_sim_registry() -> SimRegistry {
@@ -1181,7 +1235,7 @@ mod tests {
             let doc: Toml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
             doc["schema"].as_integer().unwrap()
         };
-        let mut plain = exhaustive_meta();
+        let mut plain = without_overrides();
         plain.added[0].libraries.clear();
         plain.added[0].flesh.clear();
         plain.linked_to = None;
@@ -1191,7 +1245,7 @@ mod tests {
         let back: InstallationMeta = format::read(&path, &INSTALLATION).unwrap().unwrap();
         assert_eq!(back.added, plain.added);
 
-        let mut libraries = exhaustive_meta();
+        let mut libraries = without_overrides();
         libraries.added[0].flesh.clear();
         libraries.linked_to = None;
         format::write(&path, &libraries, &INSTALLATION).unwrap();
@@ -1227,7 +1281,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("installation.toml");
-        let mut plain = exhaustive_meta();
+        let mut plain = without_overrides();
         plain.added[0].libraries.clear();
         plain.added[0].flesh.clear();
         // Additive, and not in the v1 fixture (see the test of `added-for`).
@@ -1244,7 +1298,7 @@ mod tests {
         let v1 = crate::format::testing::fixture_dir("installation").join("v1.toml");
         assert_eq!(parse(&path), parse(&v1));
 
-        let mut libraries = exhaustive_meta();
+        let mut libraries = without_overrides();
         libraries.added[0].flesh.clear();
         libraries.linked_to = None;
         format::write(&path, &libraries, &INSTALLATION).unwrap();
@@ -1294,7 +1348,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("installation.toml");
-        let mut plain = exhaustive_meta();
+        let mut plain = without_overrides();
         plain.added[0].libraries.clear();
         plain.added[0].flesh.clear();
         plain.linked_to = None;
@@ -1322,7 +1376,7 @@ mod tests {
     fn only_the_entries_a_command_rebuilds_lose_unknown_keys() {
         let (_dir, inst) = inst();
         std::fs::create_dir_all(inst.cactup_dir()).unwrap();
-        let mut meta = exhaustive_meta();
+        let mut meta = without_overrides();
         let mut dotted = meta.added[0].clone();
         dotted.package = "owner/pkg.x".to_owned();
         meta.added.push(dotted);
@@ -1359,7 +1413,7 @@ mod tests {
     fn set_meta_drops_added_for_entries_without_a_package() {
         let (_dir, inst) = inst();
         std::fs::create_dir_all(inst.cactup_dir()).unwrap();
-        let mut meta = exhaustive_meta();
+        let mut meta = without_overrides();
         meta.added_for.insert("owner/gone".to_owned(), meta.added_for["owner/pkg"].clone());
         let locked = inst.locked().unwrap();
         locked.set_meta(&meta).unwrap();
@@ -1389,7 +1443,7 @@ mod tests {
         let schema = |path: &Path| std::fs::read_to_string(path).unwrap().lines().next().unwrap().to_owned();
 
         let path = dir.path().join("libraries.toml");
-        let mut libraries = exhaustive_meta();
+        let mut libraries = without_overrides();
         libraries.added[0].flesh.clear();
         libraries.linked_to = None;
         format::write(&path, &libraries, &INSTALLATION).unwrap();
@@ -1398,7 +1452,7 @@ mod tests {
         assert_eq!(old.added, libraries.added);
 
         let path = dir.path().join("symbolic.toml");
-        let mut symbolic = exhaustive_meta();
+        let mut symbolic = without_overrides();
         symbolic.added[0].flesh.clear();
         format::write(&path, &symbolic, &INSTALLATION).unwrap();
         assert_eq!(schema(&path), "schema = 3");
@@ -1432,7 +1486,7 @@ mod tests {
 
         // Everything else v3 holds (libraries, a symbolic copy): v3, read by it.
         let path = dir.path().join("plain.toml");
-        let mut plain = exhaustive_meta();
+        let mut plain = without_overrides();
         plain.added[0].flesh.clear();
         format::write(&path, &plain, &INSTALLATION).unwrap();
         assert_eq!(schema(&path), "schema = 3");
@@ -1440,7 +1494,7 @@ mod tests {
         assert_eq!(old.added, plain.added);
 
         let path = dir.path().join("flesh.toml");
-        format::write(&path, &exhaustive_meta(), &INSTALLATION).unwrap();
+        format::write(&path, &without_overrides(), &INSTALLATION).unwrap();
         assert_eq!(schema(&path), "schema = 4");
         let text = std::fs::read_to_string(&path).unwrap();
         let err = format::read::<InstallationMeta, _>(&path, &V3).unwrap_err();
@@ -1455,6 +1509,55 @@ mod tests {
         // The flesh package removed: the version stays (sticky).
         format::write(&path, &plain, &INSTALLATION).unwrap();
         assert_eq!(schema(&path), "schema = 4");
+    }
+
+    /// A version-4 binary must refuse a record with a claim override, which
+    /// it would resolve without (`remove` could sweep a package only an added
+    /// dependency holds), and only that: a record without one is still
+    /// written as v4 or older.
+    #[test]
+    fn an_older_binary_refuses_only_installations_with_a_claim_override() {
+        // `INSTALLATION` as it shipped at version 4.
+        static V4: Format<Toml> = Format {
+            name: "installation record",
+            key: "schema",
+            current: 4,
+            upgrades: &[installation_up_1, installation_up_2, installation_up_3],
+            downgrades: &[installation_down_2, installation_down_3, installation_down_4],
+            down_floor: 1,
+            frozen_read: false,
+            legacy: None,
+            replace_whole: &[],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let schema = |path: &Path| std::fs::read_to_string(path).unwrap().lines().next().unwrap().to_owned();
+
+        // Everything else v4 holds (a flesh package, libraries, a symbolic copy): v4, read by it.
+        let path = dir.path().join("plain.toml");
+        let plain = without_overrides();
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        assert_eq!(schema(&path), "schema = 4");
+        let old: InstallationMeta = format::read(&path, &V4).unwrap().unwrap();
+        assert_eq!(old.added, plain.added);
+
+        let path = dir.path().join("overrides.toml");
+        format::write(&path, &exhaustive_meta(), &INSTALLATION).unwrap();
+        assert_eq!(schema(&path), "schema = 5");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let err = format::read::<InstallationMeta, _>(&path, &V4).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+        let err = format::write(&path, &plain, &V4).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "the override survives");
+        let fixture = crate::format::testing::fixture_dir("installation").join("v5.toml");
+        let err = format::read::<InstallationMeta, _>(&fixture, &V4).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+
+        // The last override removed: the version stays (sticky), and an empty table counts as none.
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        assert_eq!(schema(&path), "schema = 5");
+        let mut doc: Toml = toml::from_str("schema = 5\n[claim-overrides]\n").unwrap();
+        assert!(installation_down_5(&mut doc).is_ok());
     }
 
     #[test]
