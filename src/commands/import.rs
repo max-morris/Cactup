@@ -1309,6 +1309,12 @@ pub(crate) mod tests {
         assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
+    /// A Cactarium nobody answers for. Not a stopped test server's address: a test running
+    /// alongside may bind that port again. Port 1 is privileged, so no test server ever has it.
+    fn nothing_listens() -> crate::cactarium::Client {
+        crate::cactarium::Client::at("http://127.0.0.1:1")
+    }
+
     /// An entry that is one sim is addressed and cached as before: no
     /// `?sim=`, and a copy downloaded before (an exact version) is used as it
     /// is, offline too.
@@ -1326,8 +1332,8 @@ pub(crate) mod tests {
         let heads = heads.join().unwrap();
         assert!(heads[1].starts_with("GET /api/v1/sims/max/bbh/1.2.0/download "), "{}", heads[1]);
 
-        // Offline: nothing listens at the client's address any more.
-        let gone = crate::cactarium::Client::at(client.base());
+        // Offline.
+        let gone = nothing_listens();
         assert_eq!(fetch_published(&gone, tmp.path(), "max/bbh@=1.2.0").unwrap(), path);
     }
 
@@ -1435,7 +1441,7 @@ pub(crate) mod tests {
         assert_eq!(fetch_published(&client, tmp.path(), "et/s/a@=1.0.0").unwrap(), path);
         let heads = heads.join().unwrap();
         assert!(heads[3].contains("/download?sim=a "), "the second import downloaded again: {}", heads[3]);
-        let gone = crate::cactarium::Client::at(client.base());
+        let gone = nothing_listens();
         assert_eq!(fetch_published(&gone, tmp.path(), "et/s/a@=1.0.0").unwrap(), path);
         // Offline, another sim of that version is not that copy.
         assert!(fetch_published(&gone, tmp.path(), "et/s/b@=1.0.0").is_err());
@@ -1487,7 +1493,7 @@ pub(crate) mod tests {
         let heads = heads.join().unwrap();
         assert!(heads[0].starts_with("GET /api/v1/resolve?req=et/s/a%40mixed%3A%3D1.0.0&kind=sim "), "{}", heads[0]);
         assert!(heads[1].starts_with("GET /api/v1/sims/et/s/mixed:1.0.0/download?sim=a "), "{}", heads[1]);
-        let gone = crate::cactarium::Client::at(client.base());
+        let gone = nothing_listens();
         assert_eq!(fetch_published(&gone, tmp.path(), "et/s/a@mixed:1.0.0").unwrap(), path);
     }
 
@@ -1508,7 +1514,7 @@ pub(crate) mod tests {
         assert_eq!(fetch_published(&client, tmp.path(), "et/s/a@=1.0.0").unwrap_or_else(|e| panic!("{e:#}")), path);
         let err = format!("{:#}", fetch_published(&client, tmp.path(), "et/s/a@=1.0.1+b").unwrap_err());
         assert!(err.contains("et/s/a@=1.0.1+b, and it answered with version 1.0.0+b"), "{err}");
-        let gone = crate::cactarium::Client::at(client.base());
+        let gone = nothing_listens();
         assert_eq!(fetch_published(&gone, tmp.path(), "et/s/a@=1.0.0+b").unwrap(), path);
     }
 }
