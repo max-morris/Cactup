@@ -42,7 +42,7 @@ regex = "1.13.0"
 # stacks, slugs and track versions), shared with the Cactarium registry. Pure
 # Rust with no system libraries (MUSL-safe, D13). Pinned by rev and bumped on
 # purpose, never by branch, so every build is reproducible.
-cactup-ecosystem-common = { git = "https://github.com/max-morris/cactup-ecosystem-common", rev = "dc4d05c5f6740d262a3ac9f9acf5ada0fa7dfd9f" }
+cactup-ecosystem-common = { git = "https://github.com/max-morris/cactup-ecosystem-common", rev = "bb01a0ce6f34a78c9761bd3d4e5a461d76ef9a00" }
 gethostname = "1.1.0"
 tempfile = "3.27.0"
 chrono = { version = "0.4.45", features = ["serde"] }
