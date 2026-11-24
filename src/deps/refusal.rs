@@ -237,10 +237,13 @@ impl Refusal {
             | Refusal::LibraryClash { placements: constraints, .. } => ignore_one(constraints),
             Refusal::TwoFleshes { ignore: Some(ignore), .. } => format!("Pass --ignore-claim {ignore}"),
             Refusal::TwoFleshes { .. } => "Name one flesh.".to_owned(),
-            Refusal::FleshHasDependents { no_deps: true, .. } => {
-                "Remove them first, or pass --no-deps to replace it anyway".to_owned()
+            Refusal::FleshHasDependents { dependents, no_deps, .. } => {
+                let them = if dependents.len() == 1 { "it" } else { "them" };
+                match no_deps {
+                    true => format!("Remove {them} first, or pass --no-deps to replace the flesh anyway."),
+                    false => format!("Remove {them} first."),
+                }
             }
-            Refusal::FleshHasDependents { .. } => "Remove them first".to_owned(),
             // P4: or `cactup claims override needs …` to correct the claim for good.
             Refusal::MissingThorns { live, .. } => match &live.ignore {
                 Some(ignore) => format!("Pass --ignore-claim {ignore}"),

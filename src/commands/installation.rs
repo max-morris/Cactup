@@ -268,9 +268,15 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
         }
         // §8.11: what `cactup add` put on the base, and where to take
         // problems with it.
+        // The base repos the base still has (a refetch may have dropped
+        // one a package replaced); unreadable, all are taken as there.
+        let pristine = std::fs::read_to_string(inst.source_thornlist_to_read()).ok();
+        let base = pristine.as_deref().and_then(|text| crate::thornlist::parse(text).ok());
+        let base_repos: Option<std::collections::BTreeSet<&str>> =
+            base.as_ref().map(|list| list.components().iter().map(|c| c.repo.as_str()).collect());
         for (i, package) in meta.added.iter().enumerate() {
             let label = if i == 0 { "added:" } else { "" };
-            println!("  {label:<13} {}", added_line(package));
+            println!("  {label:<13} {}", added_line(package, base_repos.as_ref()));
             println!("  {:<13}   problems? {}", "", package.contact.as_deref().unwrap_or(&package.url));
             for library in &package.libraries {
                 let what = crate::commands::add::describe(&library.package, &library.version);
@@ -313,16 +319,19 @@ fn reason(why: &str) -> String {
 }
 
 /// One added package as `inst show` lists it: what it is, its thorns (or
-/// "the flesh"), what it replaces, and whether it follows a branch.
-fn added_line(package: &crate::installation::AddedPackage) -> String {
+/// "the flesh"), what it replaces of the base repos still in `base_repos`
+/// (every one, when unknown), and whether it follows a branch.
+fn added_line(
+    package: &crate::installation::AddedPackage,
+    base_repos: Option<&std::collections::BTreeSet<&str>>,
+) -> String {
     let flesh = package.is_flesh().then_some("the flesh");
     let thorns: Vec<&str> = flesh.into_iter().chain(package.thorns.iter().map(|t| t.checkout.as_str())).collect();
-    let replaces = if package.replaces.is_empty() {
-        String::new()
-    } else {
-        let repos: Vec<String> = package.replaces.iter().map(|r| format!("base repo {r}")).collect();
-        format!(", in place of {}", repos.join(", "))
-    };
+    let repos: Vec<String> = (package.replaces.iter())
+        .filter(|r| base_repos.is_none_or(|base| base.contains(r.as_str())))
+        .map(|r| format!("base repo {r}"))
+        .collect();
+    let replaces = if repos.is_empty() { String::new() } else { format!(", in place of {}", repos.join(", ")) };
     let follows = if crate::commands::add::is_tip(&package.version) { ", follows its default branch" } else { "" };
     let what = crate::commands::add::describe(&package.package, &package.version);
     format!("{what} ({}){replaces}{follows}", thorns.join(", "))
@@ -398,7 +407,7 @@ mod tests {
     use indexmap::IndexMap;
 
     /// `inst show` names a flesh package "the flesh", beside any thorns it
-    /// has, and what it replaces as base repos.
+    /// has, and what it replaces as base repos, those the base still has.
     #[test]
     fn a_flesh_package_is_listed_as_the_flesh() {
         let package = crate::installation::AddedPackage {
@@ -414,14 +423,19 @@ mod tests {
             libraries: Vec::new(),
             flesh: vec!["Makefile".into(), "lib".into(), "src".into()],
         };
-        assert_eq!(added_line(&package), "max/mp@1.0.0 (the flesh), in place of base repo flesh");
+        assert_eq!(added_line(&package, None), "max/mp@1.0.0 (the flesh), in place of base repo flesh");
+        // After a refetch to a base with no repo flesh: nothing it is in place of.
+        let base = std::collections::BTreeSet::from(["tb"]);
+        assert_eq!(added_line(&package, Some(&base)), "max/mp@1.0.0 (the flesh)");
+        let base = std::collections::BTreeSet::from(["tb", "flesh"]);
+        assert_eq!(added_line(&package, Some(&base)), "max/mp@1.0.0 (the flesh), in place of base repo flesh");
         let thorns = crate::installation::AddedPackage {
             thorns: vec![crate::installation::AddedThorn { checkout: "A/T".into(), repo_path: String::new() }],
             flesh: Vec::new(),
             replaces: Vec::new(),
             ..package
         };
-        assert_eq!(added_line(&thorns), "max/mp@1.0.0 (A/T)");
+        assert_eq!(added_line(&thorns, None), "max/mp@1.0.0 (A/T)");
     }
 
     fn entry(unfetched_repos: IndexMap<String, UnfetchedRepo>) -> CactusInstallation {

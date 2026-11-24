@@ -1508,3 +1508,17 @@ fn not_a_library_names_a_usable_way_past() {
     let without = refusal(None).to_string();
     assert!(!without.contains("--ignore-claim") && without.ends_with("Tell the package's authors"), "{without}");
 }
+
+/// The refusal of a flesh with dependents ends with a sentence, naming one
+/// dependent as "it" and several as "them".
+#[test]
+fn a_flesh_with_dependents_says_how_past() {
+    let refusal = |n: usize, no_deps: bool| {
+        let dependents = (0..n).map(|i| (format!("installed max/u{i}@1.0.0"), "max/mp ^1.0".to_owned())).collect();
+        let (flesh, by) = ("max/mp@1.0.0".to_owned(), "max/mx@1.0.0".to_owned());
+        Refusal::FleshHasDependents { flesh, by, dependents, no_deps }.to_string()
+    };
+    assert!(refusal(1, true).ends_with("\nRemove it first, or pass --no-deps to replace the flesh anyway."), "{}", refusal(1, true));
+    assert!(refusal(2, true).ends_with("\nRemove them first, or pass --no-deps to replace the flesh anyway."));
+    assert!(refusal(2, false).ends_with("\nRemove them first."));
+}

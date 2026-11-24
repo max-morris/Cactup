@@ -27,7 +27,7 @@
     "message": [
       "et/cactus@2026.5.0 would take the place of the flesh max/cactus-mp@1.0.0, which other packages need:",
       "installed max/fleshuser@1.0.0 (max/cactus-mp ^1.0)",
-      "Remove them first, or pass --no-deps to replace it anyway"
+      "Remove it first, or pass --no-deps to replace the flesh anyway."
     ]
   }
 }

@@ -2095,7 +2095,8 @@ pub fn remove(ctx: &Ctx, packages: &[String], flags: &RemoveFlags) -> Res<()> {
     for line in &restored {
         println!("{line}");
     }
-    println!("{}", build_hint((flesh && !fleshless).then_some("the base's flesh"), true));
+    let now = if fleshless { "the base without a flesh" } else { "the base's flesh" };
+    println!("{}", build_hint(flesh.then_some(now), true));
     Ok(())
 }
 
