@@ -46,11 +46,15 @@ Export refuses what nobody else could reproduce:
 - **A download Cactarium has not approved.** A download (a tarball the
   thornlist fetches, or an input's file) passes once Cactarium has reviewed
   that URL with that SHA-256. Submit one for review with
-  `cactup download submit <url>`; until an admin approves it, export says it
-  is awaiting review.
+  `cactup download submit <url>` (see below); until an admin approves it,
+  export says it is awaiting review.
 - **A download with no hash**, which nothing could review: the build
   recorded none (built before cactup recorded download hashes; rebuild the
   config), or, for `sim pack`, the thornlist gives none.
+- **A repository nothing pins**: an svn, cvs, hg or darcs component (no
+  commit pins it), or one section downloading several files (no single
+  hash pins them). Move it to git, or to downloads each pinned by a
+  `!CHECKSUM_SHA256` line.
 - **Repository URLs nobody else can fetch, or that carry credentials.** A
   local path or `file://` URL, a URL with a user name, password or token in
   it (`https://TOKEN@host/…`), a query string (`?private_token=…`), or a
@@ -258,6 +262,22 @@ line each, and nothing is uploaded. Versions are semantic versions: `--version 1
 and without it the next major version is used (`me/bbh@1.0.0`, `@2.0.0`, …).
 A new version may wait for an admin's review before anyone can import it;
 cactup says so when it does.
+
+### Submitting a download for review
+
+A `.sim` for others may pin a download (a tarball its thornlist fetches,
+an input's file) only once Cactarium has approved it:
+
+```sh
+cactup download submit https://zenodo.org/records/1/files/id.tar.gz --note "initial data of the paper"
+```
+
+cactup downloads the file once, computes its SHA-256 (nothing is kept),
+and submits the URL and the hash with your token (`cactup login`).
+Cactarium then fetches the file itself to verify the hash, and an admin
+reviews it. A download submitted before is not an error: cactup says what
+its review is now (`pending`, `approved` or `rejected`), with Cactarium's
+message when it has more to say.
 
 ### Importing from Cactarium
 

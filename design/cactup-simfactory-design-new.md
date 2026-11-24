@@ -5035,6 +5035,22 @@ What uses it, all on the login node (D11):
   says whether it is public or pending review. A pending release (new releases of a public entry wait for an
   admin unless the entry, its owner or the publisher is trusted) is not
   served, listed or resolved until approved, and cactup says so.
+- `cactup download submit <url> [--note TEXT]` (`commands::download`)
+  submits a download for review (`POST /downloads`, bearer token, crate
+  `api::DownloadSubmission`): the URL is refused first if it carries
+  credentials or is no download URL (`url::download_shareability`), the
+  token is looked up before anything is downloaded, then the file is
+  streamed through a sha256 (`fetch::download::download_to` into a hashing
+  writer, nothing written to disk) on a thread of its own with a line of
+  progress in bytes, so Ctrl-C ends the wait at once even on a silent
+  server. The answer is printed in terse lines: "Submitted it to … for
+  review." and the review state; a 409 (`api::DownloadConflict`) is no
+  error, printed as "Already submitted, currently <review>." plus the
+  server's message when it says more than "already submitted". A server
+  without the route is an older Cactarium.
+- In a shared `.sim` (§8.9), a repo of another kind than git that nothing
+  pins (svn, cvs, hg, darcs; one section downloading several files) is
+  refused too, since artifacts must be fully specified (Max's decision 5).
 - `cactup stack publish <cactarium-stack.toml> <owner/name> --version V
   [--thornlist F]` cuts a release from a stack definition (a recipe, or a flat
   list with `--thornlist`); the registry resolves and freezes it, and refuses
