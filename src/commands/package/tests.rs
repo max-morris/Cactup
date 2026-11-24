@@ -28,6 +28,34 @@ fn depends(target: &str, range: &str, needs: &[&str]) -> Value {
     json!({"kind": "dependency", "target": target, "range": range, "needs": needs, "note": null})
 }
 
+/// How the fake answers `POST /repos`.
+#[derive(Clone, Copy, Default, PartialEq)]
+enum Repos {
+    /// A new entry: the preview with its fingerprint, then the registration.
+    #[default]
+    New,
+    /// The package is registered: `existing`, with no fingerprint.
+    Existing,
+    /// A preview of a new entry without a fingerprint.
+    NoExpect,
+    /// A server from before `only` named a registered package.
+    OldServer,
+    /// The entry has no release tag yet.
+    Untagged,
+}
+
+/// A URL as the installation names a repo after [`World::new`]: one anybody could fetch, unique
+/// to its test (tests share the routes of the anonymous probe and of remote asks).
+fn public(url: &str) -> String {
+    if url.starts_with("https://up.test/") {
+        return url.to_owned();
+    }
+    let mut parts = url.trim_end_matches('/').rsplit('/');
+    let name = parts.next().unwrap_or(url).trim_end_matches(".git");
+    let test = parts.nth(1).unwrap_or("x").trim_start_matches('.');
+    format!("https://up.test/{test}/{name}.git")
+}
+
 /// The fake Cactarium.
 #[derive(Clone, Default)]
 struct Fake {
@@ -35,8 +63,8 @@ struct Fake {
     packages: Vec<(String, Vec<Value>)>,
     /// URL → its package, the package's `fork-of` there, and whether it is a flesh.
     pins: Vec<(String, String, Vec<String>, bool)>,
-    /// The package is on Cactarium already: `/repos` answers `existing`.
-    registered: bool,
+    /// How `/repos` answers.
+    repos: Repos,
     /// `owner/name` → its release 1.0.0, frozen.
     stacks: Vec<(String, Value)>,
 }
@@ -50,6 +78,10 @@ impl Fake {
     fn pin(mut self, url: &str, package: &str) -> Fake {
         self.pins.push((url.to_owned(), package.to_owned(), Vec::new(), false));
         self
+    }
+
+    fn serve_logged(self) -> (String, Log) {
+        self.serve()
     }
 
     fn serve(self) -> (String, Log) {
@@ -79,7 +111,7 @@ impl Fake {
             "/lookup" => {
                 let asked: cactup_ecosystem_common::api::LookupRequest = serde_json::from_slice(body).unwrap();
                 let pins: Vec<Value> = (asked.pins.iter())
-                    .map(|p| match self.pins.iter().find(|(u, ..)| *u == p.url) {
+                    .map(|p| match self.pins.iter().find(|(u, ..)| public(u) == public(&p.url)) {
                         Some((_, package, fork_of, flesh)) => {
                             let version = frozen(package, &p.commit).map(|v| v["version"].clone());
                             json!({"url": p.url, "commit": p.commit, "package": package, "version": version,
@@ -94,16 +126,28 @@ impl Fake {
             "/repos" => {
                 let asked: RegisterRequest = serde_json::from_slice(body).unwrap();
                 let name = asked.only.first().cloned().unwrap_or_default();
+                let refused = |message: String| {
+                    let body = json!({"error": {"code": "bad-request", "message": message}}).to_string();
+                    ("400 Bad Request", "api-generation: 1\r\n".to_owned(), body.into_bytes())
+                };
+                match self.repos {
+                    Repos::OldServer => return refused(format!("No new entry named '{name}' to register (new here: )")),
+                    Repos::Untagged => {
+                        return refused(format!("'{name}' (cactarium.toml) can't be registered now: has none of its tags yet"))
+                    }
+                    _ => {}
+                }
+                let existing = self.repos == Repos::Existing;
                 let mut entry = json!({"slug": format!("max/{name}"), "kind": "package", "file": "cactarium.toml",
                     "tag": "v1.0.0", "version": "1.0.0", "rule": "tags vX.Y.Z", "review": "pending",
-                    "status": if self.registered { "existing" } else { "new" }});
-                if !self.registered && !asked.dry_run {
+                    "status": if existing { "existing" } else { "new" }});
+                if !existing && !asked.dry_run {
                     assert_eq!(asked.expect.as_deref(), Some("fingerprint"), "registers what the preview showed");
                     entry["url"] = json!(format!("https://cactarium.test/max/{name}"));
                     entry["new-versions"] = json!(1);
                     entry["awaiting-review"] = json!(1);
                 }
-                let expect = asked.dry_run.then_some("fingerprint");
+                let expect = (asked.dry_run && self.repos == Repos::New).then_some("fingerprint");
                 return ok(json!({"entries": [entry], "warnings": [], "expect": expect}));
             }
             _ => {}
@@ -168,6 +212,7 @@ impl World {
         let root = tmp.path().join("inst");
         let db = crate::database::Db::in_dir(&tmp.path().join("db"));
         let path = root.display().to_string();
+        let stack_less = stack.is_none();
         let (cactarium, stack) = (cactarium.to_owned(), stack.map(str::to_owned));
         db.update(move |d| {
             d.installations.insert(
@@ -218,11 +263,43 @@ impl World {
         let live = inst.live_thornlist().unwrap();
         std::fs::create_dir_all(live.parent().unwrap()).unwrap();
         std::fs::write(&live, &pristine).unwrap();
-        World { tmp, ctx, inst }
+        let w = World { tmp, ctx, inst };
+        // Fetched from local paths, named as anybody could fetch them (a local path is never sent
+        // to Cactarium). The stack tests keep the paths: their repos' origins must match.
+        if stack_less {
+            w.publicize();
+        }
+        w
     }
 
     fn cactus(&self) -> PathBuf {
         self.inst.root.join("Cactus")
+    }
+
+    /// The pristine thornlist with every upstream path named by [`public`].
+    fn publicize(&self) {
+        let up = self.tmp.path().join("up").display().to_string();
+        let pristine = std::fs::read_to_string(self.inst.source_thornlist()).unwrap();
+        let named: Vec<String> = (thornlist::parse(&pristine).unwrap().components().iter())
+            .filter_map(|c| c.url.clone())
+            .filter(|u| u.starts_with(&up))
+            .collect();
+        let mut text = pristine;
+        for url in named {
+            text = text.replace(&format!("= {url}\n"), &format!("= {}\n", public(&url)));
+        }
+        std::fs::write(self.inst.source_thornlist(), text).unwrap();
+    }
+
+    /// The pristine thornlist with `url` named as written again (as [`World::publicize`] found it).
+    fn unpublicize(&self, url: &str) {
+        let pristine = std::fs::read_to_string(self.inst.source_thornlist()).unwrap();
+        std::fs::write(self.inst.source_thornlist(), pristine.replace(&public(url), url)).unwrap();
+    }
+
+    /// The body of the lookup the command made.
+    fn lookup_body(log: &Log) -> String {
+        log.lock().unwrap().iter().find(|(p, _)| p == "/api/v1/lookup").map(|(_, b)| b.clone()).unwrap_or_default()
     }
 
     fn repo(&self, name: &str) -> PathBuf {
@@ -399,14 +476,19 @@ fn an_unregistered_or_unfrozen_provider_is_a_todo() {
     let (lurl, l) = upstream(tmp.path(), "loops", &[("Loop/interface.ccl", "IMPLEMENTS: loop\n")]);
     let (aurl, a) = upstream(tmp.path(), "arith", &[("Arith/interface.ccl", "IMPLEMENTS: arith\n")]);
     let (zurl, z) = upstream(tmp.path(), "z4c", &[("Z4c/interface.ccl", "IMPLEMENTS: z4c\nINHERITS: loop arith\n")]);
-    let (cactarium, _) = Fake::default()
+    let (cactarium, log) = Fake::default()
         .package("et/arith", vec![version("1.0.0", &"0".repeat(40), &aurl, &[("Arith", "Arith")], json!([]))])
         .pin(&aurl, "et/arith")
-        .serve();
+        .pin(&lurl, "et/loops")
+        .serve_logged();
     let base = section(&lurl, &l, &["Loop/Loop"]) + &section(&aurl, &a, &["Arith/Arith"]) + &section(&zurl, &z, &["Z4c/Z4c"]);
     let w = World::new(tmp, &base, &cactarium, None);
     w.built(&["Loop/Loop", "Arith/Arith", "Z4c/Z4c"], &[]);
+    // A local path is never sent to Cactarium: the repo is then no registered package's.
+    w.unpublicize(&lurl);
     w.init("z4c", false, false).unwrap();
+    let asked = World::lookup_body(&log);
+    assert!(asked.contains(&public(&aurl)) && !asked.contains(&lurl) && !asked.contains("loops"), "{asked}");
     let (text, m) = w.manifest("z4c");
     assert!(m.dependencies.is_empty(), "{text}");
     assert!(
@@ -452,7 +534,7 @@ fn several_implementations_are_a_todo_any_of() {
     let (text, m) = w.manifest("z4c");
     assert!(m.dependencies.is_empty(), "no claim for an ambiguous provider: {text}");
     let any_of = "# TODO: implementation driver, for Z4c: several installed packages provide it.\n\
-                  # Depend on the one these thorns need, or on any of them:\n\
+                  # Depend on the one needed by these thorns, or on any of them:\n\
                   # [[dependency]]\n# any-of = [\n\
                   #     { target = \"et/carpet@~2.0.0\", needs = [\"Carpet\"] },\n\
                   #     { target = \"et/pugh@~3.1.0\", needs = [\"PUGH\"] },\n\
@@ -603,7 +685,23 @@ fn a_shallow_clone_says_it_cannot_tell_a_fork() {
     w.built(&["Carpet/Carpet"], &[]);
     w.init("carpetmp", false, false).unwrap();
     let (text, _) = w.manifest("carpetmp");
-    assert!(text.contains("# TODO: the clone of repo carpetmp is shallow, so its history cannot tell whether it forks et/carpet.\n"), "{text}");
+    assert!(
+        text.contains(
+            "# TODO: the clone of repo carpetmp is shallow.\n# Its history cannot show whether it forks et/carpet.\n\
+             # Run `git fetch --unshallow` in it, then `cactup package init carpetmp -f`.\n"
+        ),
+        "{text}"
+    );
+    assert!(gix::open(w.repo("carpetmp")).unwrap().is_shallow(), "cactup's clone is left as it was");
+    let dir = w.repo("carpetmp");
+    assert_eq!(
+        shallow_notice("carpetmp", &dir),
+        [
+            "The clone of repo carpetmp is shallow: its history cannot show a fork.".to_owned(),
+            format!("Fetch its history with `git -C {} fetch --unshallow`.", dir.display()),
+            "Then run `cactup package init carpetmp -f`.".to_owned(),
+        ]
+    );
 }
 
 /// A flesh fork in use is a TODO naming it, with the dependency commented out.
@@ -642,10 +740,21 @@ fn overrides_go_in_as_comments() {
             "satisfies local:carpetx et/carpetx".into(),
             crate::installation::ClaimOverride { kind: "satisfies".into(), note: Some("our fork".into()) },
         );
+        // A note that would start a claim of its own, were it written as it is.
+        m.claim_overrides.insert(
+            "drop et/a:incompatible-with:et/b".into(),
+            crate::installation::ClaimOverride {
+                kind: "drop".into(),
+                note: Some("x\n[[fork-of]]\ntarget = \"et/evil@=1.0.0\"".into()),
+            },
+        );
     });
     it.world.init("z4c", false, false).unwrap();
     let (text, _) = it.world.manifest("z4c");
-    assert!(text.contains("# Claim overrides of installation t:\n#   satisfies local:carpetx et/carpetx  (our fork)\n"), "{text}");
+    assert!(text.contains("#   satisfies local:carpetx et/carpetx  (our fork)\n"), "{text}");
+    let (_, m) = it.world.manifest("z4c");
+    assert!(m.fork_of.is_empty(), "{text}");
+    assert!(text.contains("#   drop et/a:incompatible-with:et/b  (x [[fork-of]] target = \"et/evil@=1.0.0\")\n"), "{text}");
     assert!(claims_of(&text).iter().all(|l| !l.contains("satisfies")), "{text}");
 }
 
@@ -658,78 +767,180 @@ fn mark_pushed(dir: &Path) {
     repo.reference("refs/remotes/origin/main", head, gix::refs::transaction::PreviousValue::Any, "test").unwrap();
 }
 
-/// `--publish` writes nothing: it refuses an uncommitted manifest, one with uncommitted changes
-/// and an unpushed one, each naming the git commands; then registers it (a preview, then exactly
-/// what it showed, at the https URL anyone can fetch), or, when it is registered, refreshes it.
-#[test]
-fn publish_refuses_until_committed_and_pushed_then_registers_or_refreshes() {
+/// Tags HEAD of the repo at `dir` as `name`.
+fn tag(dir: &Path, name: &str) {
+    let mut repo = gix::open(dir).unwrap();
+    let _ = repo.committer_or_set_generic_fallback();
+    let head = repo.head_id().unwrap().detach();
+    repo.reference(format!("refs/tags/{name}"), head, gix::refs::transaction::PreviousValue::Any, "test").unwrap();
+}
+
+/// A repo z4c to publish, at `https://up.test/z4c.git` (served to the anonymous probe, its tags
+/// asked of the upstream repo), with Cactarium answering `/repos` as `repos` says. The repo's
+/// clone, its upstream, the manifest's text and the request log.
+struct Publishing {
+    world: World,
+    dir: PathBuf,
+    up: PathBuf,
+    log: Log,
+}
+
+const MANIFEST: &str = "format = 1\n[package]\nname = \"z4c\"\nowners = [\"max\"]\n";
+const FILES: [(&str, &str); 1] = [("Z4c/interface.ccl", "IMPLEMENTS: z4c\n")];
+
+fn publishing(repos: Repos) -> Publishing {
     use crate::fetch::anonymous::testserver::{serve, Mode};
-    serve("pkg.share.test", Mode::Public);
-    for registered in [false, true] {
-        let tmp = tempfile::tempdir().unwrap();
-        let files = [("Z4c/interface.ccl", "IMPLEMENTS: z4c\n")];
-        let (zurl, z) = upstream(tmp.path(), "z4c", &files);
-        let (cactarium, log) = Fake { registered, ..Fake::default() }.serve();
-        let w = World::new(tmp, &section(&zurl, &z, &["Z4c/Z4c"]), &cactarium, None);
-        // Published under its https URL from here on.
-        let pristine = std::fs::read_to_string(w.inst.source_thornlist()).unwrap();
-        std::fs::write(w.inst.source_thornlist(), pristine.replace(&zurl, "https://pkg.share.test/max/z4c.git")).unwrap();
-        let dir = w.repo("z4c");
-        let err = format!("{:#}", w.publish("z4c").unwrap_err());
-        assert!(err.contains("has no cactarium.toml") && err.contains("`cactup package init z4c`"), "{err}");
+    serve("up.test", Mode::Public);
+    let tmp = tempfile::tempdir().unwrap();
+    let (zurl, z) = upstream(tmp.path(), "z4c", &FILES);
+    crate::fetch::git::ASK_ROUTES.lock().unwrap().insert(public(&zurl), zurl.clone());
+    let (cactarium, log) = Fake { repos, ..Fake::default() }.serve();
+    let world = World::new(tmp, &section(&zurl, &z, &["Z4c/Z4c"]), &cactarium, None);
+    let dir = world.repo("z4c");
+    Publishing { world, dir, up: PathBuf::from(zurl), log }
+}
 
-        let manifest = "format = 1\n[package]\nname = \"z4c\"\nowners = [\"max\"]\n";
-        std::fs::write(dir.join(PACKAGE_FILE), manifest).unwrap();
-        let err = format!("{:#}", w.publish("z4c").unwrap_err());
-        assert!(err.contains("cactarium.toml is not committed in repo z4c"), "{err}");
-        assert!(err.contains(&format!("git -C {} add cactarium.toml", dir.display())), "{err}");
-        assert!(err.contains(&format!("git -C {} push", dir.display())), "{err}");
-
-        let mut tree = files.to_vec();
-        tree.push((PACKAGE_FILE, manifest));
-        crate::fetch::tests::commit_files(&dir, &tree);
-        std::fs::write(dir.join(PACKAGE_FILE), format!("{manifest}# edited\n")).unwrap();
-        let err = format!("{:#}", w.publish("z4c").unwrap_err());
-        assert!(err.contains("has uncommitted changes") && err.contains("commit -m"), "{err}");
-        std::fs::write(dir.join(PACKAGE_FILE), manifest).unwrap();
-
-        let err = format!("{:#}", w.publish("z4c").unwrap_err());
-        assert!(err.contains("is on no remote branch") && err.contains(&format!("git -C {} push", dir.display())), "{err}");
-        assert!(!log.lock().unwrap().iter().any(|(p, _)| p.contains("/repos")), "nothing asked before it is pushed");
-
-        mark_pushed(&dir);
-        w.publish("z4c").unwrap_or_else(|e| panic!("{e:#}"));
-        let asked: Vec<(String, String)> = log.lock().unwrap().clone();
-        let repos: Vec<&(String, String)> = asked.iter().filter(|(p, _)| p == "/api/v1/repos").collect();
-        let refreshes = asked.iter().filter(|(p, _)| p == "/api/v1/packages/max/z4c/refresh").count();
-        assert!(repos[0].1.contains("\"url\":\"https://pkg.share.test/max/z4c.git\""), "{}", repos[0].1);
-        assert!(repos[0].1.contains("\"only\":[\"z4c\"]") && repos[0].1.contains("\"dry-run\":true"), "{}", repos[0].1);
-        if registered {
-            assert_eq!((repos.len(), refreshes), (1, 1), "a registered package is refreshed");
-        } else {
-            assert_eq!((repos.len(), refreshes), (2, 0), "a preview, then the registration");
-            assert!(repos[1].1.contains("\"expect\":\"fingerprint\"") && !repos[1].1.contains("dry-run"), "{}", repos[1].1);
-        }
-        assert_eq!(std::fs::read_to_string(dir.join(PACKAGE_FILE)).unwrap(), manifest, "--publish writes nothing");
+impl Publishing {
+    fn publish(&self) -> Res<()> {
+        self.world.publish("z4c")
     }
+
+    fn refused(&self) -> String {
+        format!("{:#}", self.publish().unwrap_err())
+    }
+
+    /// The manifest committed in the clone and, as a push would, in the upstream: the same commit.
+    fn commit_both(&self, manifest: &str) {
+        let mut tree = FILES.to_vec();
+        tree.push((PACKAGE_FILE, manifest));
+        let here = crate::fetch::tests::commit_files(&self.dir, &tree);
+        let there = crate::fetch::tests::commit_files(&self.up, &tree);
+        assert_eq!(here, there, "one commit, made twice");
+    }
+
+    fn asked(&self, path: &str) -> Vec<String> {
+        self.log.lock().unwrap().iter().filter(|(p, _)| p == path).map(|(_, b)| b.clone()).collect()
+    }
+}
+
+/// `--publish` writes nothing and reads what Cactarium reads, a release tag on the remote: it
+/// refuses a repo with no release tag, a tag not pushed, and a manifest that differs from the
+/// one at the newest pushed tag, each naming the git commands; a newer tag not pushed is said,
+/// the pushed one used; HEAD's own unpushed work does not matter. Then it registers the package
+/// (a preview, then exactly what it showed, at the https URL anybody can fetch).
+#[test]
+fn publish_reads_the_newest_pushed_release_tag_then_registers() {
+    let it = publishing(Repos::New);
+    let dir = it.dir.display().to_string();
+    let err = it.refused();
+    assert!(err.contains("has no cactarium.toml") && err.contains("`cactup package init z4c`"), "{err}");
+
+    std::fs::write(it.dir.join(PACKAGE_FILE), MANIFEST).unwrap();
+    let err = it.refused();
+    assert!(err.contains("Repo z4c has no release tag.\nCommit cactarium.toml, tag a release and push both:"), "{err}");
+    for step in ["add cactarium.toml", "commit -m \"Add cactarium.toml\"", "tag v1.0.0", "push", "push origin v1.0.0"] {
+        assert!(err.contains(&format!("\n  git -C {dir} {step}")), "{step}: {err}");
+    }
+
+    it.commit_both(MANIFEST);
+    tag(&it.dir, "v1.0.0");
+    let err = it.refused();
+    assert!(err.contains(&format!("Tag v1.0.0 of repo z4c is not on its remote.\nPush it:\n  git -C {dir} push origin v1.0.0")), "{err}");
+
+    tag(&it.up, "v1.0.0");
+    std::fs::write(it.dir.join(PACKAGE_FILE), format!("{MANIFEST}# edited\n")).unwrap();
+    let err = it.refused();
+    assert!(err.contains("cactarium.toml in repo z4c differs from the one at tag v1.0.0."), "{err}");
+    assert!(err.contains("commit -m \"Update cactarium.toml\" cactarium.toml") && err.contains("tag v1.0.1"), "{err}");
+    assert!(it.asked("/api/v1/repos").is_empty(), "nothing asked before the tag holds the manifest");
+
+    // Committed on top and tagged here only: the pushed tag is what counts.
+    std::fs::write(it.dir.join(PACKAGE_FILE), MANIFEST).unwrap();
+    let mut tree = FILES.to_vec();
+    tree.extend([(PACKAGE_FILE, MANIFEST), ("NEWS", "unpushed\n")]);
+    crate::fetch::tests::commit_files(&it.dir, &tree);
+    tag(&it.dir, "v1.1.0");
+    it.publish().unwrap_or_else(|e| panic!("{e:#}"));
+    let repos = it.asked("/api/v1/repos");
+    assert_eq!(repos.len(), 2, "a preview, then the registration");
+    assert!(repos[0].contains(&format!("\"url\":\"{}\"", public(&it.up.display().to_string()))), "{}", repos[0]);
+    assert!(repos[0].contains("\"only\":[\"z4c\"]") && repos[0].contains("\"dry-run\":true"), "{}", repos[0]);
+    assert!(repos[1].contains("\"expect\":\"fingerprint\"") && !repos[1].contains("dry-run"), "{}", repos[1]);
+    assert_eq!(std::fs::read_to_string(it.dir.join(PACKAGE_FILE)).unwrap(), MANIFEST, "--publish writes nothing");
+}
+
+/// A pushed release tag holding the manifest on disk, ready to publish.
+fn published(repos: Repos) -> Publishing {
+    let it = publishing(repos);
+    std::fs::write(it.dir.join(PACKAGE_FILE), MANIFEST).unwrap();
+    it.commit_both(MANIFEST);
+    tag(&it.dir, "v1.0.0");
+    tag(&it.up, "v1.0.0");
+    it
+}
+
+/// A registered package (`existing`, with no fingerprint, as the server answers a name in
+/// `only` that is registered) is refreshed, never registered again.
+#[test]
+fn publish_refreshes_a_registered_package() {
+    let it = published(Repos::Existing);
+    it.publish().unwrap_or_else(|e| panic!("{e:#}"));
+    assert_eq!(it.asked("/api/v1/repos").len(), 1, "the preview only");
+    assert_eq!(it.asked("/api/v1/packages/max/z4c/refresh").len(), 1);
+}
+
+/// A preview of a new entry without a fingerprint registers nothing.
+#[test]
+fn publish_never_registers_unguarded() {
+    let it = published(Repos::NoExpect);
+    let err = it.refused();
+    assert!(err.contains("came without a fingerprint, so nothing was registered"), "{err}");
+    assert_eq!(it.asked("/api/v1/repos").len(), 1, "the preview only");
+}
+
+/// A server from before `only` named a registered package answers 400 "No new entry named …":
+/// said as a server too old to refresh this way, never taken as `existing`.
+#[test]
+fn publish_says_an_old_server_cannot_refresh_this_way() {
+    let it = published(Repos::OldServer);
+    let err = it.refused();
+    assert!(err.contains("is too old to refresh a registered package this way; it needs an update."), "{err}");
+    assert!(err.contains("run `cactup refresh OWNER/z4c`") && !err.contains("new here"), "{err}");
+    assert!(it.asked("/api/v1/packages/max/z4c/refresh").is_empty());
+}
+
+/// A refusal about tags carries the way past.
+#[test]
+fn publish_says_how_past_a_refusal_about_tags() {
+    let it = published(Repos::Untagged);
+    let err = it.refused();
+    assert!(err.contains("'z4c' (cactarium.toml) can't be registered now: has none of its tags yet\nTag a release and push the tag."), "{err}");
+}
+
+/// `--owner` must be an owner's name; nothing is asked otherwise.
+#[test]
+fn publish_checks_the_owner() {
+    let it = published(Repos::New);
+    let args = PackageInitArgs {
+        repo: Some("z4c".into()),
+        name: None,
+        owner: Some("Not An Owner".into()),
+        exact: false,
+        force: false,
+        publish: true,
+    };
+    let err = format!("{:#}", init(&it.world.ctx, &args).unwrap_err());
+    assert!(err.contains("\"Not An Owner\" is not a Cactarium owner"), "{err}");
+    assert!(it.log.lock().unwrap().is_empty());
 }
 
 /// A remote nobody else could fetch (a local path) is never registered.
 #[test]
 fn publish_refuses_a_local_remote() {
-    let tmp = tempfile::tempdir().unwrap();
-    let files = [("Z4c/interface.ccl", "IMPLEMENTS: z4c\n")];
-    let (zurl, z) = upstream(tmp.path(), "z4c", &files);
-    let (cactarium, log) = Fake::default().serve();
-    let w = World::new(tmp, &section(&zurl, &z, &["Z4c/Z4c"]), &cactarium, None);
-    let dir = w.repo("z4c");
-    let manifest = "format = 1\n[package]\nname = \"z4c\"\nowners = [\"max\"]\n";
-    let mut tree = files.to_vec();
-    tree.push((PACKAGE_FILE, manifest));
-    crate::fetch::tests::commit_files(&dir, &tree);
-    mark_pushed(&dir);
-    assert!(w.publish("z4c").is_err());
-    assert!(!log.lock().unwrap().iter().any(|(p, _)| p.contains("/repos")));
+    let it = published(Repos::New);
+    it.world.unpublicize(&it.up.display().to_string());
+    assert!(it.publish().is_err());
+    assert!(it.asked("/api/v1/repos").is_empty());
 }
 
 /// Ctrl-C while the repo's sources are read fails the command at once and writes nothing. The
@@ -748,7 +959,8 @@ fn an_interrupt_during_the_source_scan_writes_nothing() {
     }
     static READ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let it = z4c();
-    // Many sources: the scan stops after the first, not after all of them.
+    // One thorn, with many sources: the scan stops after the first, not after all of them.
+    std::fs::remove_dir_all(it.world.repo("z4c").join("Extra")).unwrap();
     let src = it.world.repo("z4c").join("Z4c/src");
     for i in 0..300 {
         std::fs::write(src.join(format!("f{i:03}.cc")), "#include \"cctk.h\"\n").unwrap();
@@ -764,7 +976,52 @@ fn an_interrupt_during_the_source_scan_writes_nothing() {
     assert!(err.contains("Interrupted"), "{err}");
     assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
     assert_eq!(READ.load(std::sync::atomic::Ordering::SeqCst), 1, "stopped at the first file");
+    assert_eq!(CRATE_SCANS.load(std::sync::atomic::Ordering::SeqCst), 0, "the crate's scan, which takes no flag, never started");
     assert!(!it.world.repo("z4c").join(PACKAGE_FILE).exists());
+}
+
+/// Runs `test` again in a child process with `env` set, and checks it passed there: a test that
+/// sets the process's interrupt flag.
+fn in_child(test: &str, env: &str) -> bool {
+    if std::env::var_os(env).is_some() {
+        return false;
+    }
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([test, "--exact", "--test-threads=1"])
+        .env(env, "1")
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && said.contains("1 passed"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+    true
+}
+
+/// A Ctrl-C after the last request, just before `package init` writes, fails it with nothing
+/// written.
+#[test]
+fn a_late_interrupt_writes_no_manifest() {
+    if in_child("commands::package::tests::a_late_interrupt_writes_no_manifest", "CACTUP_TEST_LATE_INTERRUPT") {
+        return;
+    }
+    let it = z4c();
+    BEFORE_WRITE.set(|| gix::interrupt::IS_INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst)).unwrap();
+    let err = format!("{:#}", it.world.init("z4c", false, false).unwrap_err());
+    assert!(err.contains("Interrupted"), "{err}");
+    assert!(!it.world.repo("z4c").join(PACKAGE_FILE).exists());
+}
+
+/// The same for `stack init`: neither file is written.
+#[test]
+fn a_late_interrupt_writes_no_stack() {
+    if in_child("commands::package::tests::a_late_interrupt_writes_no_stack", "CACTUP_TEST_LATE_STACK_INTERRUPT") {
+        return;
+    }
+    let it = stacked("et/base@1.0.0");
+    BEFORE_WRITE.set(|| gix::interrupt::IS_INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst)).unwrap();
+    let err = format!("{:#}", it.world.stack_init(false).unwrap_err());
+    assert!(err.contains("Interrupted"), "{err}");
+    assert!(!it.world.out().join("cactarium-stack.toml").exists());
+    assert!(!it.world.out().join("cactarium-stack.th").exists());
 }
 
 #[test]
@@ -796,6 +1053,7 @@ struct Stacked {
     c2: String,
     e: String,
     t: String,
+    z: String,
 }
 
 fn stacked(stack: &str) -> Stacked {
@@ -811,7 +1069,7 @@ fn stacked(stack: &str) -> Stacked {
         format!("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{}{}", section(&curl, &c1, &["CarpetX/CarpetX", "CarpetX/Loop"]), section(&zurl, &z, &["Z4c/Z4c"]));
     let frozen = json!({"format": 1, "stack": "et/base@1.0.0", "root": "Cactus",
         "thornlist": {"filename": "base.th", "text": release_text},
-        "repo": [{"name": "carpetx", "url": curl, "ref": "main", "commit": c1}, {"name": "z4c", "url": zurl, "commit": z}]});
+        "repo": [{"name": "carpetx", "url": curl, "ref": "main", "commit": c1}, {"name": "z4c", "url": zurl, "commit": "d".repeat(40)}]});
     let mut fake = Fake::default()
         .package("et/carpetx", vec![version("1.1.0", &c2, &curl, &[("CarpetX", "CarpetX"), ("CarpetX", "Loop")], json!([]))])
         .package("max/z4c-mp", vec![version("1.0.0", &zm, "https://x/z4c-mp.git", &[("Z4c", "Z4c")], json!([]))])
@@ -825,7 +1083,17 @@ fn stacked(stack: &str) -> Stacked {
     // Installed at carpetx's newer commit.
     let base = section(&curl, &c2, &["CarpetX/CarpetX", "CarpetX/Loop"]) + &section(&zurl, &z, &["Z4c/Z4c"]);
     let w = World::new(tmp, &base, &cactarium, Some(stack));
-    let added = |package: &str, version: &str, tag: Option<&str>, commit: &str, repo: &str, thorn: &str, replaces: &[&str]| AddedPackage {
+    w.edit_meta(|m| {
+        m.added.push(added("max/z4c-mp", "1.0.0", Some("v1.0.0"), &zm, "z4c-mp", "Z4c/Z4c", &["z4c"]));
+        m.added.push(added("max/extra", "2.0.0", Some("v2.0.0"), &e, "extra", "Extra/Extra", &[]));
+        m.added.push(added("max/tipper", "head", Some("main"), &t, "tipper", "Tip/Tip", &[]));
+    });
+    Stacked { world: w, log, c2, e, t, z }
+}
+
+/// An `[[added]]` record: at `https://x/<repo>.git`, checking out `thorn`, replacing `replaces`.
+fn added(package: &str, version: &str, tag: Option<&str>, commit: &str, repo: &str, thorn: &str, replaces: &[&str]) -> AddedPackage {
+    AddedPackage {
         package: package.into(),
         version: version.into(),
         tag: tag.map(Into::into),
@@ -837,13 +1105,7 @@ fn stacked(stack: &str) -> Stacked {
         contact: None,
         libraries: Vec::new(),
         flesh: Vec::new(),
-    };
-    w.edit_meta(|m| {
-        m.added.push(added("max/z4c-mp", "1.0.0", Some("v1.0.0"), &zm, "z4c-mp", "Z4c/Z4c", &["z4c"]));
-        m.added.push(added("max/extra", "2.0.0", Some("v2.0.0"), &e, "extra", "Extra/Extra", &[]));
-        m.added.push(added("max/tipper", "head", Some("main"), &t, "tipper", "Tip/Tip", &[]));
-    });
-    Stacked { world: w, log, c2, e, t }
+    }
 }
 
 /// `stack init`: extends the release the installation is on, pins the base repo moved since,
@@ -921,4 +1183,187 @@ fn stack_publish_uploads_the_definition() {
     assert_eq!(request.version, "1.0.0");
     assert_eq!(request.thornlist.as_deref(), Some(std::fs::read_to_string(w.out().join("cactarium-stack.th")).unwrap().as_str()));
     assert_eq!(std::fs::read_to_string(w.out().join("cactarium-stack.toml")).unwrap(), before, "--publish writes nothing");
+}
+
+/// The built thorn wins over an unbuilt one meeting the same requirement; a requirement only
+/// unbuilt thorns meet is met by them.
+#[test]
+fn built_providers_come_first_and_unbuilt_ones_after() {
+    let it = z4c();
+    let w = &it.world;
+    // Another package implementing loop, installed but not built.
+    let (ourl, o) = upstream(w.tmp.path(), "loops", &[("Loop2/interface.ccl", "IMPLEMENTS: loop\n")]);
+    let pristine = std::fs::read_to_string(w.inst.source_thornlist()).unwrap();
+    std::fs::write(w.inst.source_thornlist(), format!("{pristine}{}", section(&public(&ourl), &o, &["Loops/Loop2"]))).unwrap();
+    let loop2 = w.cactus().join("arrangements/Loops/Loop2");
+    std::fs::create_dir_all(&loop2).unwrap();
+    std::fs::write(loop2.join("interface.ccl"), "IMPLEMENTS: loop\n").unwrap();
+    w.init("z4c", false, false).unwrap_or_else(|e| panic!("{e:#}"));
+    let (text, m) = w.manifest("z4c");
+    assert_eq!(m.dependencies.len(), 1, "{text}");
+    assert_eq!(m.dependencies[0].target.as_ref().unwrap().to_string(), "et/carpetx@~1.1.0", "{text}");
+
+    // Neither built: both meet it, a TODO any-of.
+    w.built(&["CarpetX/CarpetX", "Z4c/Z4c"], &[]);
+    w.init("z4c", false, true).unwrap();
+    let (text, m) = w.manifest("z4c");
+    assert!(m.dependencies.is_empty() && text.contains("several installed packages provide it"), "{text}");
+}
+
+/// A requirement met by no built thorn but by one installed is met by it.
+#[test]
+fn an_unbuilt_provider_is_a_provider() {
+    let it = z4c();
+    it.world.built(&["CarpetX/CarpetX", "Z4c/Z4c"], &[]);
+    it.world.init("z4c", false, false).unwrap();
+    let (text, m) = it.world.manifest("z4c");
+    assert_eq!(m.dependencies.len(), 1, "{text}");
+    assert_eq!(m.dependencies[0].needs.as_deref(), Some(&["Loop".to_owned()][..]), "{text}");
+}
+
+/// The repo itself is asked about where its clone is, whatever the build recorded for it.
+#[test]
+fn the_repo_itself_is_asked_at_its_head() {
+    let it = z4c();
+    let (_, head) = crate::fetch::git::head_of(&it.world.repo("z4c")).unwrap();
+    it.world.built(&["CarpetX/CarpetX", "CarpetX/Loop", "Z4c/Z4c"], &[("z4c", &"0".repeat(40)), ("carpetx", &it.c1)]);
+    it.world.init("z4c", false, false).unwrap();
+    let asked: cactup_ecosystem_common::api::LookupRequest = serde_json::from_str(&World::lookup_body(&it.log)).unwrap();
+    let up = it.world.tmp.path().join("up");
+    let pin = asked.pins.iter().find(|p| p.url == public(&up.join("z4c").display().to_string())).expect("the repo is asked about");
+    assert_eq!(pin.commit, head.to_string());
+    let carpetx = asked.pins.iter().find(|p| p.url == public(&up.join("carpetx").display().to_string())).unwrap();
+    assert_eq!(carpetx.commit, it.c1, "another repo, as built");
+}
+
+/// A requirement met only by another clone of the repo's own package is no dependency.
+#[test]
+fn no_package_depends_on_itself() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (xurl, x) = upstream(tmp.path(), "z4cloops", &[("Loop/interface.ccl", "IMPLEMENTS: loop\n")]);
+    let (zurl, z) = upstream(tmp.path(), "z4c", &[("Z4c/interface.ccl", "IMPLEMENTS: z4c\nINHERITS: loop\n")]);
+    let (cactarium, _) = Fake::default()
+        .package("max/z4c", vec![version("1.0.0", &x, &xurl, &[("Z4c", "Loop")], json!([])), version("1.0.1", &z, &zurl, &[("Z4c", "Z4c")], json!([]))])
+        .pin(&xurl, "max/z4c")
+        .pin(&zurl, "max/z4c")
+        .serve();
+    let w = World::new(tmp, &(section(&xurl, &x, &["Z4c/Loop"]) + &section(&zurl, &z, &["Z4c/Z4c"])), &cactarium, None);
+    w.built(&["Z4c/Loop", "Z4c/Z4c"], &[]);
+    w.init("z4c", false, false).unwrap();
+    let (text, m) = w.manifest("z4c");
+    assert!(m.dependencies.is_empty(), "{text}");
+    assert!(
+        text.contains("# TODO: implementation loop, for Z4c: provided by Z4c/Loop of max/z4c, this repo's own package.\n"),
+        "{text}"
+    );
+}
+
+/// A provider at a version cactup cannot read is a TODO, never dropped.
+#[test]
+fn an_unreadable_version_is_a_todo() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (lurl, l) = upstream(tmp.path(), "loops", &[("Loop/interface.ccl", "IMPLEMENTS: loop\n")]);
+    let (zurl, z) = upstream(tmp.path(), "z4c", &[("Z4c/interface.ccl", "IMPLEMENTS: z4c\nINHERITS: loop\n")]);
+    let (cactarium, _) = Fake::default()
+        .package("et/loops", vec![version("banana", &l, &lurl, &[("Loop", "Loop")], json!([]))])
+        .pin(&lurl, "et/loops")
+        .serve();
+    let w = World::new(tmp, &(section(&lurl, &l, &["Loop/Loop"]) + &section(&zurl, &z, &["Z4c/Z4c"])), &cactarium, None);
+    w.built(&["Loop/Loop", "Z4c/Z4c"], &[]);
+    w.init("z4c", false, false).unwrap();
+    let (text, m) = w.manifest("z4c");
+    assert!(m.dependencies.is_empty(), "{text}");
+    assert!(text.contains("# TODO: implementation loop, for Z4c: provided by Loop/Loop of et/loops@banana.\n# cactup cannot read that version.\n"), "{text}");
+}
+
+/// A config built with --virtual-executable has no ThornList: said, with the way past.
+#[test]
+fn a_virtual_build_says_what_to_do() {
+    let it = z4c();
+    std::fs::remove_file(it.world.cactus().join("configs/sim/ThornList")).unwrap();
+    let err = format!("{:#}", it.world.init("z4c", false, false).unwrap_err());
+    assert!(err.contains("Config sim has no ThornList.\nA build with --virtual-executable writes none."), "{err}");
+    assert!(err.contains("`cactup build sim`"), "{err}");
+}
+
+/// The stack init's files, both checked to parse.
+fn stack_files(w: &World) -> (String, Manifest, Option<Thornlist>) {
+    let text = std::fs::read_to_string(w.out().join("cactarium-stack.toml")).unwrap();
+    let m = Manifest::from_repo_file(cactup_ecosystem_common::manifest::STACK_FILE, &text).unwrap_or_else(|e| panic!("{e}\n{text}"));
+    let th = std::fs::read_to_string(w.out().join("cactarium-stack.th")).ok().map(|t| thornlist::parse(&t).unwrap());
+    (text, m, th)
+}
+
+/// An override redirects every checkout of a repo, so only a package that takes the place of
+/// every checkout the release has from it is one (here a tip: its URL and branch, pinned at its
+/// commit). A package replacing only some checkouts is a section, as in the installation: the
+/// release's other checkouts of that repo stay where they are.
+#[test]
+fn stack_init_overrides_only_a_whole_repo() {
+    let it = stacked("et/base@1.0.0");
+    let w = &it.world;
+    let cx = "c".repeat(40);
+    w.edit_meta(|m| {
+        m.added = vec![
+            added("max/cx-mp", "1.0.0", Some("v1.0.0"), &cx, "cx-mp", "CarpetX/CarpetX", &["carpetx"]),
+            added("max/tipper", "head", Some("main"), &it.t, "tipper", "Z4c/Z4c", &["z4c"]),
+        ]
+    });
+    w.stack_init(false).unwrap_or_else(|e| panic!("{e:#}"));
+    let (text, m, th) = stack_files(w);
+    let s = m.stack.as_ref().unwrap();
+    assert_eq!(s.overrides.len(), 1, "{text}");
+    let o = &s.overrides[0];
+    assert_eq!((o.repo.as_str(), o.url.as_deref(), o.git_ref.as_deref()), ("z4c", Some("https://x/tipper.git"), Some("main")), "{text}");
+    assert!(o.package.is_none(), "{text}");
+    let pinned: Vec<(&str, Option<&str>)> = s.pins.iter().map(|p| (p.name.as_str(), p.commit.as_deref())).collect();
+    assert!(pinned.contains(&("z4c", Some(it.t.as_str()))), "the tip at its commit: {text}");
+    assert!(pinned.contains(&("carpetx", Some(it.c2.as_str()))), "carpetx's other checkouts stay, moved: {text}");
+    let th = th.expect("a section for the partial replacement");
+    let carpetx = th.components().iter().find(|c| c.checkout == "CarpetX/CarpetX").expect("CarpetX/CarpetX from the package");
+    assert_eq!((carpetx.url.as_deref(), carpetx.commit.as_deref()), (Some("https://x/cx-mp.git"), Some(cx.as_str())), "{text}");
+    assert!(th.components().iter().all(|c| c.checkout != "CarpetX/Loop"), "Loop is the release's still");
+    assert!(!text.contains("TODO"), "{text}");
+}
+
+/// A package checked out at a commit of its own (committed work on top of its version) is
+/// pinned there, never named by the version, which would drop that work. With its clone named
+/// as the repo it replaces, the release's pin for that repo is left to the override's.
+#[test]
+fn stack_init_pins_committed_work_in_an_added_package() {
+    let it = stacked("et/base@1.0.0");
+    let w = &it.world;
+    // max/z4c-mp's clone is the base's z4c clone, moved to its own repository.
+    let fork = "https://x/z4c-fork.git";
+    crate::fetch::git::set_origin_url(&w.repo("z4c"), fork).unwrap();
+    w.edit_meta(|m| {
+        let mp = m.added.iter_mut().find(|a| a.package == "max/z4c-mp").unwrap();
+        mp.repo = "z4c".into();
+        mp.url = fork.into();
+    });
+    w.stack_init(false).unwrap_or_else(|e| panic!("{e:#}"));
+    let (text, m, _) = stack_files(w);
+    let s = m.stack.as_ref().unwrap();
+    let o = s.overrides.iter().find(|o| o.repo == "z4c").expect("an override");
+    assert_eq!((o.url.as_deref(), o.git_ref.as_deref(), o.package.as_ref()), (Some(fork), None, None), "{text}");
+    let z4c: Vec<_> = s.pins.iter().filter(|p| p.name == "z4c").collect();
+    assert_eq!(z4c.len(), 1, "one pin: {text}");
+    assert_eq!(z4c[0].commit.as_deref(), Some(it.z.as_str()), "{text}");
+}
+
+/// The same for a package written as a section: pinned at the commit installed, with no tag.
+#[test]
+fn stack_init_pins_committed_work_in_a_section() {
+    let it = stacked("et/base@1.0.0");
+    let w = &it.world;
+    let (xurl, x) = upstream(w.tmp.path(), "extra", &[("Extra/interface.ccl", "IMPLEMENTS: extra\n")]);
+    copy_tree(Path::new(&xurl), &w.repo("extra"));
+    crate::fetch::git::set_origin_url(&w.repo("extra"), "https://x/extra.git").unwrap();
+    mark_pushed(&w.repo("extra"));
+    w.stack_init(false).unwrap_or_else(|e| panic!("{e:#}"));
+    let (text, _, th) = stack_files(w);
+    let th = th.unwrap();
+    let extra = th.components().iter().find(|c| c.checkout == "Extra/Extra").unwrap();
+    assert_eq!((extra.commit.as_deref(), extra.branch.as_deref()), (Some(x.as_str()), None), "{text}");
+    assert_ne!(x, it.e);
 }

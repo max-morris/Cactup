@@ -349,11 +349,25 @@ impl Registry {
         phase: &str,
         work: impl Fn(&I) -> T + Sync,
     ) -> Res<Vec<T>> {
+        self.local_under(CLONES, items, unit, name, phase, work)
+    }
+
+    /// [`Registry::local`] under a headline of its own, `title` (which the
+    /// names the registry was made with should include, for the layout).
+    pub(crate) fn local_under<I: Sync, T: Send>(
+        &self,
+        title: &str,
+        items: &[I],
+        unit: &'static str,
+        name: impl Fn(&I) -> String + Sync,
+        phase: &str,
+        work: impl Fn(&I) -> T + Sync,
+    ) -> Res<Vec<T>> {
         if items.is_empty() {
             return Ok(Vec::new());
         }
-        let item = self.progress.add_child(CLONES);
-        let headline = Mutex::new(Headline::over(item, CLONES, items.len(), unit, self.layout.clone()));
+        let item = self.progress.add_child(title.to_owned());
+        let headline = Mutex::new(Headline::over(item, title, items.len(), unit, self.layout.clone()));
         crate::par::parallel_map(items, |i| {
             let label = name(i);
             let child = headline.lock().expect("progress poisoned").add_child(label.clone());

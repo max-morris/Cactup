@@ -1821,23 +1821,69 @@ pub fn is_ancestor(repo_dir: &Path, candidates: &[ObjectId], descendant: ObjectI
     Ok(found)
 }
 
-/// The bytes of `path` (relative to the worktree root) in HEAD's tree:
-/// `None` when HEAD has no such regular file.
-pub fn file_in_head(repo_dir: &Path, path: &str) -> Res<Option<Vec<u8>>> {
+/// The bytes of `path` (relative to the worktree root) in `commit`'s tree, as the repo at
+/// `repo_dir` has it: `None` when that tree has no such regular file.
+pub fn file_in_commit(repo_dir: &Path, commit: ObjectId, path: &str) -> Res<Option<Vec<u8>>> {
     let repo = gix::open(repo_dir).with_context(|| format!("Failed to open '{}'", repo_dir.display()))?;
     let tree = repo
-        .head_commit()
-        .with_context(|| "HEAD points at no commit")?
+        .find_commit(commit)
+        .with_context(|| format!("No commit {commit} in '{}'", repo_dir.display()))?
         .tree()
-        .with_context(|| "Failed to read HEAD's tree")?;
+        .with_context(|| format!("Failed to read the tree of {commit}"))?;
     let Some(entry) = tree.lookup_entry_by_path(path).with_context(|| format!("Failed to look up {path}"))? else {
         return Ok(None);
     };
     if !entry.mode().is_blob() {
         return Ok(None);
     }
-    let blob = entry.object().with_context(|| format!("Failed to read {path} from HEAD"))?;
+    let blob = entry.object().with_context(|| format!("Failed to read {path} from {commit}"))?;
     Ok(Some(blob.data.clone()))
+}
+
+/// The repo's tags (`refs/tags/`), each with the commit it names (an annotated tag peeled).
+pub fn local_tags(repo_dir: &Path) -> Res<Vec<(String, ObjectId)>> {
+    let repo = gix::open(repo_dir).with_context(|| format!("Failed to open '{}'", repo_dir.display()))?;
+    let refs = repo.references().with_context(|| "Failed to list references")?;
+    let mut out = Vec::new();
+    for mut r in refs.prefixed("refs/tags/").map_err(|e| anyhow!("Failed to list tags: {e}"))?.filter_map(Result::ok) {
+        let name = r.name().shorten().to_string();
+        if let Ok(id) = r.peel_to_id() {
+            out.push((name, id.detach()));
+        }
+    }
+    Ok(out)
+}
+
+/// The tags the remote at `url` has now, each with the commit it names (an annotated tag
+/// peeled): `git ls-remote --tags`, fetching nothing.
+fn remote_tags(scratch: &Path, url: &str) -> Res<Vec<(String, ObjectId)>> {
+    let shown = redacted(url);
+    let repo = gix::open(scratch).with_context(|| format!("Failed to open '{}'", scratch.display()))?;
+    let remote = repo
+        .remote_at(url)
+        .with_context(|| format!("Invalid remote URL {shown}"))?
+        .with_refspecs(Some("+refs/tags/*:refs/cactup/tags/*"), Direction::Fetch)
+        .context("Invalid refspec")?;
+    let (map, _) = remote
+        .connect(Direction::Fetch)
+        .with_context(|| format!("Failed to connect to {shown}"))?
+        .ref_map(gix::progress::Discard, Default::default())
+        .with_context(|| format!("Failed to list {shown}'s tags"))?;
+    let mut out = Vec::new();
+    for m in &map.mappings {
+        let gix::remote::fetch::refmap::Source::Ref(r) = &m.remote else { continue };
+        let (name, target, peeled) = r.unpack();
+        let Some(tag) = name.to_str().ok().and_then(|n| n.strip_prefix("refs/tags/")) else { continue };
+        if let Some(id) = peeled.or(target) {
+            out.push((tag.to_owned(), id.to_owned()));
+        }
+    }
+    Ok(out)
+}
+
+/// [`remote_tags`], asked quietly within `window` and Ctrl-C (see [`ask_remote`]).
+pub fn ask_remote_tags(url: &str, window: AskWindow) -> Res<Vec<(String, ObjectId)>> {
+    ask_remote(url, window, remote_tags)
 }
 
 /// The commit `git_ref` (a branch or tag; `None`: the remote's default

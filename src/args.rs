@@ -1315,12 +1315,13 @@ pub(crate) enum PackageCommand {
     /// Reads the repo's thorns and the active config's build, and writes
     /// cactarium.toml at the repo's root for you to review and commit: the
     /// package's name and owners, and a dependency on each installed package
-    /// whose thorns meet what the repo's thorns require. What cactup cannot
-    /// decide is written as a TODO comment.
+    /// whose thorns meet the requirements of the repo's thorns. What cactup
+    /// cannot decide is written as a TODO comment.
     ///
-    /// With --publish, writes nothing: registers the committed and pushed
-    /// cactarium.toml with Cactarium (cactup login), or checks it for new
-    /// releases if it is registered already.
+    /// With --publish, writes nothing: registers the cactarium.toml held by
+    /// the repo's newest release tag on its remote with Cactarium (cactup
+    /// login), or checks the package for new releases if it is registered
+    /// already.
     Init(PackageInitArgs),
 }
 
@@ -1339,13 +1340,13 @@ pub(crate) struct PackageInitArgs {
     /// organizations (default: your own).
     #[clap(long, value_name = "OWNER")]
     pub owner: Option<String>,
-    /// Depend on exactly the versions installed (=X.Y.Z, not ~X.Y.Z).
+    /// Depend on exactly the version built with (=X.Y.Z, not ~X.Y.Z).
     #[clap(long, conflicts_with = "publish")]
     pub exact: bool,
     /// Overwrite an existing cactarium.toml.
     #[clap(short, long, conflicts_with = "publish")]
     pub force: bool,
-    /// Register the committed cactarium.toml with Cactarium; write nothing.
+    /// Register the cactarium.toml of the newest pushed release tag; write nothing.
     #[clap(long)]
     pub publish: bool,
 }
@@ -1355,12 +1356,12 @@ pub(crate) struct PackageInitArgs {
 pub(crate) enum StackCommand {
     /// Write a cactarium-stack.toml for the installation
     ///
-    /// Writes a stack that extends the release the installation is on, pins
-    /// the base repos moved since, and adds the packages added with
-    /// `cactup add`: an override where one replaces a base repo, else a
-    /// pinned section of cactarium-stack.th. The dependencies the installed
-    /// packages declare follow, for information. Refused while a repo has
-    /// uncommitted or unpushed changes.
+    /// Writes a stack that extends the stack release in use by the
+    /// installation, pins the base repos moved since, and adds the packages
+    /// added with `cactup add`: an override where one replaces every checkout
+    /// of a base repo, else a pinned section of cactarium-stack.th. The
+    /// dependencies declared by the installed packages follow, for
+    /// information. Refused while a repo has uncommitted or unpushed changes.
     ///
     /// With --publish --version, writes nothing: publishes the
     /// cactarium-stack.toml found there as that release.

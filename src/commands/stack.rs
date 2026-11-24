@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{anyhow, bail};
 use cactup_ecosystem_common::manifest::{Manifest, STACK_FILE};
 use cactup_ecosystem_common::name::Name;
 use cactup_ecosystem_common::slug::Slug;
@@ -37,7 +37,8 @@ pub const THORNLIST_FILE: &str = "cactarium-stack.th";
 pub fn init(ctx: &Ctx, args: &StackInitArgs) -> Res<()> {
     let dir = args.dir.clone().unwrap_or_else(|| PathBuf::from("."));
     if args.publish {
-        let version = args.version.as_deref().ok_or_else(|| anyhow!("Name the release with --version."))?;
+        // clap requires --version with --publish.
+        let version = args.version.as_deref().unwrap_or_default();
         return publish(ctx, &dir, args.owner.as_deref(), version);
     }
     let inst = Installation::resolve(ctx)?;
@@ -98,18 +99,63 @@ pub fn init(ctx: &Ctx, args: &StackInitArgs) -> Res<()> {
     let mut out = format!(
         "# cactarium-stack.toml for installation {}, written by `cactup stack init`.\n\
          # Review it before publishing.\nformat = 1\n\n[stack]\nname = {}\nowners = [{}]\nextends = [{}]\n",
-        inst.alias,
+        super::package::comment(&inst.alias),
         q(&name),
         q(&owner),
         q(&on.to_string())
     );
-    let mut todos: Vec<String> = Vec::new();
-
-    // Base repos moved since the release.
-    let replaced: BTreeSet<&str> = meta.added.iter().flat_map(|a| a.replaces.iter().map(String::as_str)).collect();
+    // Added packages: an override where one takes the place of every checkout the release has
+    // from the one base repo it replaces (the server redirects every checkout of an overridden
+    // repo), else pinned sections, which take the place of only the checkouts they have, as
+    // `compose` does in the installation.
+    let release_list = thornlist::parse(&release.thornlist.text)?;
+    let mut overrides: Vec<String> = Vec::new();
+    let mut overridden: BTreeSet<&str> = BTreeSet::new();
     let mut pin_lines: Vec<String> = Vec::new();
+    let mut sectioned: Vec<AddedPackage> = Vec::new();
+    for a in &meta.added {
+        let fetched = commit_of(&a.repo).unwrap_or_else(|| a.commit.clone());
+        let tip = super::add::is_tip(&a.version);
+        // At a branch tip, at a commit no version froze, or with committed work on top of its
+        // version: pinned at the commit installed, never named by a version.
+        let unreleased = tip || super::add::is_commit(&a.version) || fetched != a.commit;
+        let ours: BTreeSet<&str> = a.thorns.iter().map(|t| t.checkout.as_str()).chain(a.flesh.iter().map(String::as_str)).collect();
+        let covers = |repo: &str| {
+            let theirs: BTreeSet<&str> = (release_list.components().iter())
+                .filter(|c| c.repo == repo && c.ty != thornlist::ComponentType::Ignore)
+                .map(|c| c.checkout.as_str())
+                .collect();
+            !theirs.is_empty() && theirs.is_subset(&ours)
+        };
+        match a.replaces.as_slice() {
+            [replaced] if covers(replaced) => {
+                overridden.insert(replaced.as_str());
+                if unreleased {
+                    let mut o = format!("\n[[stack.override]]\nrepo = {}\nurl = {}\n", q(replaced), q(&a.url));
+                    let branch = a.tag.as_deref().filter(|_| tip);
+                    if let Some(branch) = branch {
+                        o.push_str(&format!("ref = {}\n", q(branch)));
+                    }
+                    overrides.push(o);
+                    pin_lines.push(pin_text(replaced, Some(&a.url), branch, &fetched));
+                } else {
+                    let v: TrackedVersion = (a.version.parse())
+                        .map_err(|e| anyhow!("installation.toml adds {} at {}: {e}", a.package, a.version))?;
+                    let package = format!("{}@{}", a.package, TrackedReq::exactly(&v));
+                    overrides.push(format!("\n[[stack.override]]\nrepo = {}\npackage = {}\n", q(replaced), q(&package)));
+                }
+            }
+            _ if unreleased => {
+                let tag = a.tag.clone().filter(|_| tip);
+                sectioned.push(AddedPackage { version: fetched.clone(), commit: fetched, tag, ..a.clone() });
+            }
+            _ => sectioned.push(a.clone()),
+        }
+    }
+
+    // Base repos moved since the release (an overridden one is pinned with its override).
     for p in &release.repos {
-        if replaced.contains(p.name.as_str()) {
+        if overridden.contains(p.name.as_str()) {
             continue;
         }
         let (Some(now), Some(was)) = (commit_of(&p.name), &p.commit) else { continue };
@@ -118,40 +164,6 @@ pub fn init(ctx: &Ctx, args: &StackInitArgs) -> Res<()> {
         }
     }
 
-    // Added packages: an override where one replaces a base repo, else a pinned section.
-    let mut overrides: Vec<String> = Vec::new();
-    let mut sectioned: Vec<AddedPackage> = Vec::new();
-    for a in &meta.added {
-        let unreleased = super::add::is_tip(&a.version) || super::add::is_commit(&a.version);
-        let fetched = commit_of(&a.repo).unwrap_or_else(|| a.commit.clone());
-        let Some((first, rest)) = a.replaces.split_first() else {
-            sectioned.push(match unreleased {
-                true => AddedPackage { version: fetched.clone(), commit: fetched, ..a.clone() },
-                false => a.clone(),
-            });
-            continue;
-        };
-        if unreleased {
-            let mut o = format!("\n[[stack.override]]\nrepo = {}\nurl = {}\n", q(first), q(&a.url));
-            if let Some(branch) = &a.tag {
-                o.push_str(&format!("ref = {}\n", q(branch)));
-            }
-            overrides.push(o);
-            pin_lines.push(pin_text(first, Some(&a.url), a.tag.as_deref(), &fetched));
-        } else {
-            let v: TrackedVersion =
-                a.version.parse().map_err(|e| anyhow!("installation.toml adds {} at {}: {e}", a.package, a.version))?;
-            let package = format!("{}@{}", a.package, TrackedReq::exactly(&v));
-            overrides.push(format!("\n[[stack.override]]\nrepo = {}\npackage = {}\n", q(first), q(&package)));
-        }
-        if !rest.is_empty() {
-            todos.push(format!(
-                "# TODO: {} also replaces the base repos {}. An override redirects one repo.\n",
-                a.package,
-                rest.join(", ")
-            ));
-        }
-    }
     // Composed onto the release's own text, so a package that adds thorns to a base clone keeps
     // exactly the source the release gives that clone.
     let sections = match sectioned.is_empty() {
@@ -163,7 +175,7 @@ pub fn init(ctx: &Ctx, args: &StackInitArgs) -> Res<()> {
             Some(format!(
                 "# Packages added to installation {} with `cactup add`, written by `cactup stack init`.\n\
                  !CRL_VERSION = 1.0\n\n!DEFINE ROOT = {root}\n\n{block}",
-                inst.alias
+                super::package::comment(&inst.alias)
             ))
         }
     };
@@ -175,10 +187,6 @@ pub fn init(ctx: &Ctx, args: &StackInitArgs) -> Res<()> {
     }
     for o in &overrides {
         out.push_str(o);
-    }
-    for t in &todos {
-        out.push('\n');
-        out.push_str(t);
     }
 
     // What the installed packages declare they depend on: information, never a pin.
@@ -217,7 +225,7 @@ pub fn init(ctx: &Ctx, args: &StackInitArgs) -> Res<()> {
         out.push_str("\n# What the installed packages declare they depend on: information, not pins.\n");
     }
     for (target, needs, by) in &declared {
-        out.push_str(&format!("\n# Declared by {by}.\n[[dependency]]\ntarget = {}\n", q(target)));
+        out.push_str(&format!("\n# Declared by {}.\n[[dependency]]\ntarget = {}\n", super::package::comment(by), q(target)));
         if !needs.is_empty() {
             out.push_str(&format!("needs = {}\n", qa(needs.iter().map(String::as_str))));
         }
@@ -227,15 +235,18 @@ pub fn init(ctx: &Ctx, args: &StackInitArgs) -> Res<()> {
     Manifest::from_repo_file(STACK_FILE, &out)
         .map_err(|e| anyhow!("The cactarium-stack.toml written does not parse ({e}); nothing was written"))?;
     let th = dir.join(THORNLIST_FILE);
+    let mut files: Vec<(&Path, &str)> = Vec::new();
     if let Some(text) = &sections {
         thornlist::parse(text)
             .map_err(|e| anyhow!("The {THORNLIST_FILE} written does not parse ({e:#}); nothing was written"))?;
         if th.exists() && !args.force {
             bail!("'{}' exists.\nPass -f to overwrite it.", th.display());
         }
-        std::fs::write(&th, text).with_context(|| format!("Failed to write '{}'", th.display()))?;
+        files.push((&th, text));
     }
-    std::fs::write(&file, &out).with_context(|| format!("Failed to write '{}'", file.display()))?;
+    files.push((&file, &out));
+    super::package::about_to_write()?;
+    crate::format::write_atomic_all(&files)?;
     match &sections {
         Some(_) => println!("Wrote '{}' and '{}'.", file.display(), th.display()),
         None => println!("Wrote '{}'.", file.display()),

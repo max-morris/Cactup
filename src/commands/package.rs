@@ -1,6 +1,7 @@
 //! `cactup package init` (D5): a `cactarium.toml` for a repo of the installation, written for
 //! review from what is installed and built; and `--publish`, which writes nothing and registers
-//! the committed one (or has Cactarium check it for new releases when it is registered).
+//! the manifest at the repo's newest pushed release tag (or has Cactarium check the package for
+//! new releases when it is registered).
 //!
 //! Nothing a heuristic finds is ever written as a claim, only as a TODO comment. A dependency is
 //! written for a requirement of the repo's CCL that exactly one installed thorn meets (the one
@@ -13,12 +14,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{anyhow, bail};
 use cactup_ecosystem_common::api::{PinInfo, PinQuery, RegisterRequest, Registered};
 use cactup_ecosystem_common::ccl::{self, Need, ThornFacts};
-use cactup_ecosystem_common::manifest::{ForkOf, Manifest, PACKAGE_FILE};
+use cactup_ecosystem_common::manifest::{ForkOf, Manifest, PackageSection, PACKAGE_FILE};
 use cactup_ecosystem_common::name::{Name, Owner};
 use cactup_ecosystem_common::slug::{is_commit_id, Slug};
 use cactup_ecosystem_common::version::{TrackedReq, TrackedVersion};
@@ -36,7 +36,13 @@ use crate::Res;
 /// The implementation every Cactus driver provides (Carpet, PUGH, CarpetX).
 const DRIVER: &str = "driver";
 
-/// `cactup package init [REPO]`, or with `--publish` the registration of its committed manifest.
+/// The headline over reading the repo's sources.
+const SOURCES: &str = "read the repo's sources";
+
+/// The headline over reading the history of the packages the repo may fork.
+const HISTORY: &str = "read the repo's history";
+
+/// `cactup package init [REPO]`, or with `--publish` the registration of its manifest.
 pub fn init(ctx: &Ctx, args: &PackageInitArgs) -> Res<()> {
     let inst = Installation::resolve(ctx)?;
     let meta = inst.meta()?;
@@ -78,14 +84,48 @@ pub fn init(ctx: &Ctx, args: &PackageInitArgs) -> Res<()> {
     // Refused unless it reads back as the manifest it means to be.
     Manifest::from_repo_file(PACKAGE_FILE, &generated.text)
         .map_err(|e| anyhow!("The cactarium.toml written for {repo} does not parse ({e}); nothing was written"))?;
-    std::fs::write(&file, &generated.text).with_context(|| format!("Failed to write '{}'", file.display()))?;
+    about_to_write()?;
+    crate::format::write_atomic(&file, &generated.text)?;
     println!("Wrote '{}'.", file.display());
     match generated.todos {
         0 => {}
         1 => println!("{}", "Resolve the TODO in it.".yellow()),
         n => println!("{}", format!("Resolve the {n} TODOs in it.").yellow()),
     }
-    println!("Commit and push it, then register it with `cactup package init {repo} --publish`.");
+    if generated.shallow {
+        let [said, fetch, again] = shallow_notice(&repo, &dir);
+        println!("{}", said.yellow());
+        println!("{fetch}");
+        println!("{again}");
+    }
+    println!("Commit it, tag a release and push both.");
+    println!("Then register it with `cactup package init {repo} --publish`.");
+    Ok(())
+}
+
+/// What `init` says of a shallow clone: what it means, and the two commands past it.
+fn shallow_notice(repo: &str, dir: &Path) -> [String; 3] {
+    [
+        format!("The clone of repo {repo} is shallow: its history cannot show a fork."),
+        format!("Fetch its history with `git -C {} fetch --unshallow`.", shell_word(&dir.display().to_string())),
+        format!("Then run `cactup package init {repo} -f`."),
+    ]
+}
+
+/// Runs just before a generated file is written (tests: a Ctrl-C that late).
+#[cfg(test)]
+pub(crate) static BEFORE_WRITE: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+/// The last check before `init` writes: a Ctrl-C that arrived after the last request fails the
+/// command with nothing written, rather than writing and then failing.
+pub(crate) fn about_to_write() -> Res<()> {
+    #[cfg(test)]
+    if let Some(hook) = BEFORE_WRITE.get() {
+        hook();
+    }
+    if gix::interrupt::is_triggered() {
+        bail!("Interrupted");
+    }
     Ok(())
 }
 
@@ -105,10 +145,12 @@ struct Input<'a> {
     built: &'a BTreeSet<String>,
 }
 
-/// The manifest's text, and how many TODOs it has.
+/// The manifest's text, how many TODOs it has, and whether the clone was too shallow to show a
+/// fork.
 pub(crate) struct Generated {
     pub text: String,
     pub todos: usize,
+    pub shallow: bool,
 }
 
 /// The repo named on the command line (a repo of the live list, or a path inside one), else the
@@ -121,7 +163,7 @@ fn which_repo(live: &Thornlist, cactus: &Path, named: Option<&str>) -> Res<Strin
         Some(n) if git.contains(n) => n.to_owned(),
         Some(n) => repo_holding(&repos_dir, Path::new(n)).ok_or_else(|| anyhow!("The installation has no repo {n}."))?,
         None => {
-            let here = std::env::current_dir().context("Failed to read the current directory")?;
+            let here = std::env::current_dir().map_err(|e| anyhow!("Failed to read the current directory: {e}"))?;
             repo_holding(&repos_dir, &here).ok_or_else(|| {
                 anyhow!("The current directory is in no repo of the installation.\nName one: `cactup package init <repo>`.")
             })?
@@ -155,11 +197,16 @@ fn package_name(given: Option<&str>, repo: &str) -> Res<String> {
     Ok(name)
 }
 
+/// `given`, checked as a Cactarium owner.
+fn owner_given(given: &str) -> Res<String> {
+    given.parse::<Owner>().map_err(|e| anyhow!("\"{given}\" is not a Cactarium owner: {e}"))?;
+    Ok(given.to_owned())
+}
+
 /// The owner to write: `given`, else the user the stored token belongs to.
 pub(crate) fn owner(client: &Client, given: Option<&str>) -> Res<String> {
     if let Some(o) = given {
-        o.parse::<Owner>().map_err(|e| anyhow!("\"{o}\" is not a Cactarium owner: {e}"))?;
-        return Ok(o.to_owned());
+        return owner_given(o);
     }
     let reg = Registry::new(client, ["your user"]);
     let who = reg.one("your user", "asking Cactarium", |c| c.whoami());
@@ -170,8 +217,12 @@ pub(crate) fn owner(client: &Client, given: Option<&str>) -> Res<String> {
 /// The thorns the config built: its `ThornList`, read as the flesh reads it.
 fn built_thorns(cactus: &Path, config: &str) -> Res<BTreeSet<String>> {
     let path = cactus.join("configs").join(config).join("ThornList");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|_| anyhow!("Config {config} has no ThornList.\nBuild it with `cactup build {config}`."))?;
+    let text = std::fs::read_to_string(&path).map_err(|_| {
+        anyhow!(
+            "Config {config} has no ThornList.\nA build with --virtual-executable writes none.\n\
+             Build the config with `cactup build {config}`."
+        )
+    })?;
     Ok(text
         .lines()
         .map(str::trim_start)
@@ -224,6 +275,10 @@ enum Gap {
     Unregistered(Candidate),
     /// Its one provider is at a commit no version froze.
     Unfrozen(Candidate, String, String),
+    /// Its one provider is of the repo's own package (another clone of it).
+    Own(Candidate, String),
+    /// Its one provider is at a version cactup cannot read.
+    Unreadable(Candidate, String, String),
     /// Several thorns of one package meet it.
     SeveralInOne(String, Vec<Candidate>),
     /// Thorns of several packages (or repos) meet it.
@@ -234,8 +289,23 @@ enum Gap {
 /// thorns of the repo needing them.
 type Gaps = BTreeMap<(u8, String, String), (Need, Gap, BTreeSet<String>)>;
 
+/// The dependencies found, by package and version: the version read, and each thorn of the
+/// package with the repo's thorns needing it.
+type Edges = BTreeMap<(String, String), (TrackedVersion, BTreeMap<String, BTreeSet<String>>)>;
+
 /// A version of a package: its version, its frozen commit and its thorns.
 type Frozen = (TrackedVersion, gix::ObjectId, Vec<String>);
+
+/// The candidates the built thorns give, else every installed thorn (a requirement only an
+/// unbuilt thorn meets is met by it).
+fn candidates_for(installed: &[Installed], need: &Need) -> Vec<Candidate> {
+    let meeting = |i: &&Installed| ccl::meets(&i.thorn, &i.facts, need);
+    let mut found: Vec<&Installed> = installed.iter().filter(|i| i.built).filter(meeting).collect();
+    if found.is_empty() {
+        found = installed.iter().filter(meeting).collect();
+    }
+    found.iter().map(|i| Candidate { checkout: i.checkout.clone(), thorn: i.thorn.clone(), repo: i.repo.clone() }).collect()
+}
 
 /// The manifest for the repo described by `input`.
 fn generate(client: &Client, input: &Input, name: &str, owner: &str, exact: bool) -> Res<Generated> {
@@ -262,27 +332,31 @@ fn generate(client: &Client, input: &Input, name: &str, owner: &str, exact: bool
         })
         .collect();
 
-    // The repo's thorns, with what their sources include.
+    // The repo's thorns.
     let (mut own, layout) = if flesh { (Vec::new(), Layout::default()) } else { own_thorns(input.dir, &mine) };
     if !flesh && own.is_empty() {
         bail!("Repo {repo} has no thorns (no interface.ccl).");
     }
-    scan_sources(input.dir, &mut own)?;
 
-    // Which package each repo is, and the versions of the packages that may be forked.
+    // Their sources, then which package each repo is.
     let repos = git_repos(input);
-    let mut reg = Registry::new(client, repos.iter().map(|c| c.repo.as_str()));
-    let asked = (|| -> Res<(Pins, Vec<Fork>)> {
+    let names: Vec<&str> =
+        [SOURCES].into_iter().chain(own.iter().map(|t| t.name.as_str())).chain(repos.iter().map(|c| c.repo.as_str())).collect();
+    let reg = Registry::new(client, names);
+    let asked = (|| -> Res<(Vec<Scanned>, Pins)> {
+        let scanned = reg.local_under(SOURCES, &own, "thorns", |t| t.name.clone(), "reading sources", |t| {
+            scan_one(input.dir, t)
+        })?;
         // Where each clone is, for the repo itself and any repo the build recorded nothing for.
-        let built = |c: &&Component| {
-            (c.repo != repo).then(|| input.sources.and_then(|s| s.get(&c.repo))).flatten().map(|s| crate::fetch::committed(s).to_owned())
-        };
+        let built = |c: &&Component| built_commit(input, c);
         let unrecorded: Vec<&Component> = repos.iter().copied().filter(|c| built(c).is_none()).collect();
         let heads = reg.local(&unrecorded, "clones", |c| c.repo.clone(), "reading where HEAD is", |c| {
             super::add::clone_head(&input.inst.root, &root, &c.repo)
         })?;
         let heads: BTreeMap<&str, Option<String>> = unrecorded.iter().map(|c| c.repo.as_str()).zip(heads).collect();
+        // A URL refused as written (credentials, a local path) is never sent.
         let pins: Vec<(String, PinQuery)> = (repos.iter())
+            .filter(|c| c.url.as_deref().is_some_and(sendable))
             .filter_map(|c| {
                 let commit = built(c)
                     .or_else(|| heads.get(c.repo.as_str()).cloned().flatten())
@@ -293,18 +367,35 @@ fn generate(client: &Client, input: &Input, name: &str, owner: &str, exact: bool
             .collect();
         let queries: Vec<PinQuery> = pins.iter().map(|(_, q)| q.clone()).collect();
         let answers = reg.lookup(&queries)?;
-        let infos: Pins = pins.iter().map(|(r, _)| r.clone()).zip(answers).collect();
-        let forks = forks(&mut reg, input, &own, flesh, &infos)?;
-        Ok((infos, forks))
+        Ok((scanned, pins.iter().map(|(r, _)| r.clone()).zip(answers).collect()))
     })();
     reg.finish();
-    let (infos, forks) = asked?;
+    let (scanned, infos) = asked?;
+    for (t, (needs, includes)) in own.iter_mut().zip(scanned) {
+        t.facts.needs_includes = needs;
+        t.includes = includes;
+    }
+
+    // The packages the repo may fork, on a renderer whose layout knows their names.
+    let (candidates, shallow) = fork_candidates(input, &own, flesh, &infos)?;
+    let forks = match candidates.is_empty() || shallow {
+        true => Vec::new(),
+        false => {
+            let names = [HISTORY].into_iter().chain(candidates.iter().map(PkgId::as_str));
+            let mut reg = Registry::new(client, names);
+            let found = forks(&mut reg, input, &candidates, &own);
+            reg.finish();
+            found?
+        }
+    };
 
     let mut out = String::new();
     out.push_str(&format!(
-        "# cactarium.toml for repo {repo}, written by `cactup package init`\n\
+        "# cactarium.toml for repo {}, written by `cactup package init`\n\
          # from installation {} and config {}. Resolve each TODO, then commit it.\n",
-        input.inst.alias, input.config
+        comment(repo),
+        comment(&input.inst.alias),
+        comment(input.config)
     ));
     out.push_str("format = 1\n\n[package]\n");
     out.push_str(&format!("name = {}\nowners = [{}]\n", q(name), q(owner)));
@@ -327,15 +418,16 @@ fn generate(client: &Client, input: &Input, name: &str, owner: &str, exact: bool
     if !unbuilt.is_empty() {
         out.push_str(&format!(
             "# TODO: not built in config {}: {}.\n# List the ones that cannot build:\n# exclude-thorns = [{}]\n",
-            input.config,
-            unbuilt.join(", "),
+            comment(input.config),
+            comment(&unbuilt.join(", ")),
             unbuilt.iter().map(|t| q(t)).collect::<Vec<_>>().join(", ")
         ));
     }
 
     // Dependencies: each requirement no thorn of the repo meets.
+    let myself = infos.get(repo).and_then(|i| i.package.clone());
     let known: Vec<&ThornFacts> = installed.iter().map(|i| &i.facts).chain(own.iter().map(|o| &o.facts)).collect();
-    let mut edges: BTreeMap<(String, String), BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
+    let mut edges: Edges = BTreeMap::new();
     let mut gaps: Gaps = BTreeMap::new();
     for t in &own {
         for need in ccl::needs_of(&t.facts) {
@@ -345,25 +437,22 @@ fn generate(client: &Client, input: &Input, name: &str, owner: &str, exact: bool
             if !ccl::counts(&t.facts, &need, known.iter().copied()) {
                 continue;
             }
-            let meeting = |i: &&Installed| ccl::meets(&i.thorn, &i.facts, &need);
-            let mut found: Vec<&Installed> = installed.iter().filter(|i| i.built).filter(meeting).collect();
-            if found.is_empty() {
-                found = installed.iter().filter(meeting).collect();
-            }
-            let candidates: Vec<Candidate> = (found.iter())
-                .map(|i| Candidate { checkout: i.checkout.clone(), thorn: i.thorn.clone(), repo: i.repo.clone() })
-                .collect();
+            let candidates = candidates_for(&installed, &need);
             let gap = match candidates.as_slice() {
                 [] => Gap::Unmet,
                 [one] => match infos.get(&one.repo).and_then(|i| i.package.clone().map(|p| (p, i))) {
                     None => Gap::Unregistered(one.clone()),
+                    Some((package, _)) if Some(&package) == myself.as_ref() => Gap::Own(one.clone(), package),
                     Some((package, info)) => match &info.version {
-                        Some(v) => {
-                            let provided = edges.entry((package, v.clone())).or_default();
-                            provided.entry(one.thorn.clone()).or_default().insert(t.name.clone());
-                            continue;
-                        }
                         None => Gap::Unfrozen(one.clone(), package, info.commit.clone()),
+                        Some(v) => match v.parse::<TrackedVersion>() {
+                            Ok(parsed) => {
+                                let (_, provided) = edges.entry((package, v.clone())).or_insert_with(|| (parsed, BTreeMap::new()));
+                                provided.entry(one.thorn.clone()).or_default().insert(t.name.clone());
+                                continue;
+                            }
+                            Err(_) => Gap::Unreadable(one.clone(), package, v.clone()),
+                        },
                     },
                 },
                 several => {
@@ -381,8 +470,7 @@ fn generate(client: &Client, input: &Input, name: &str, owner: &str, exact: bool
             entry.2.insert(t.name.clone());
         }
     }
-    for ((package, version), provided) in &edges {
-        let Ok(v) = version.parse::<TrackedVersion>() else { continue };
+    for ((package, _), (v, provided)) in &edges {
         // One entry per distinct set of thorns needing them.
         let mut by_needers: BTreeMap<&BTreeSet<String>, Vec<&str>> = BTreeMap::new();
         for (thorn, needers) in provided {
@@ -391,7 +479,7 @@ fn generate(client: &Client, input: &Input, name: &str, owner: &str, exact: bool
         for (needers, needs) in by_needers {
             out.push_str(&format!(
                 "\n[[dependency]]\ntarget = {}\nneeds = {}\nneeded-by = {}\n",
-                q(&format!("{package}@{}", range_of(&v, exact))),
+                q(&format!("{package}@{}", range_of(v, exact))),
                 qa(needs.iter().copied()),
                 qa(needers.iter().map(String::as_str))
             ));
@@ -403,23 +491,28 @@ fn generate(client: &Client, input: &Input, name: &str, owner: &str, exact: bool
     }
 
     // Forks.
+    if shallow {
+        let packages: Vec<&str> = candidates.iter().map(PkgId::as_str).collect();
+        out.push_str(&format!(
+            "\n# TODO: the clone of repo {} is shallow.\n\
+             # Its history cannot show whether it forks {}.\n\
+             # Run `git fetch --unshallow` in it, then `cactup package init {} -f`.\n",
+            comment(repo),
+            comment(&packages.join(", ")),
+            comment(repo)
+        ));
+    }
     for f in &forks {
         out.push('\n');
-        if f.target.is_empty() {
-            out.push_str(&format!(
-                "# TODO: the clone of repo {repo} is shallow, so its history cannot tell whether it forks {}.\n\
-                 # Fetch its history (git fetch --unshallow) and run `cactup package init -f` again.\n",
-                f.missing.join(", ")
-            ));
-        } else if f.missing.is_empty() {
+        if f.missing.is_empty() {
             out.push_str(&format!("[[fork-of]]\ntarget = {}\n", q(&f.target)));
         } else {
             out.push_str(&format!(
                 "# TODO: this repo contains {} but lacks its thorns {}.\n\
                  # A fork-of says it is a drop-in replacement. Add them, or leave this out:\n\
                  # [[fork-of]]\n# target = {}\n",
-                f.target,
-                f.missing.join(", "),
+                comment(&f.target),
+                comment(&f.missing.join(", ")),
                 q(&f.target)
             ));
         }
@@ -441,16 +534,38 @@ fn generate(client: &Client, input: &Input, name: &str, owner: &str, exact: bool
 
     // The installation's overrides are about other packages' claims: information only.
     if !input.meta.claim_overrides.is_empty() {
-        out.push_str(&format!("\n# Claim overrides of installation {}:\n", input.inst.alias));
+        out.push_str(&format!("\n# Claim overrides of installation {}:\n", comment(&input.inst.alias)));
         for (key, o) in &input.meta.claim_overrides {
             match &o.note {
-                Some(note) => out.push_str(&format!("#   {key}  ({note})\n")),
-                None => out.push_str(&format!("#   {key}\n")),
+                Some(note) => out.push_str(&format!("#   {}  ({})\n", comment(key), comment(note))),
+                None => out.push_str(&format!("#   {}\n", comment(key))),
             }
         }
     }
     let todos = out.lines().filter(|l| l.starts_with("# TODO:")).count();
-    Ok(Generated { text: out, todos })
+    Ok(Generated { text: out, todos, shallow })
+}
+
+/// The commit the config was built from for the repo of `c`, when the build recorded one; never
+/// for the repo itself, which is read where its clone is.
+fn built_commit(input: &Input, c: &Component) -> Option<String> {
+    if c.repo == input.repo {
+        return None;
+    }
+    input.sources.and_then(|s| s.get(&c.repo)).map(|s| crate::fetch::committed(s).to_owned())
+}
+
+/// Whether `url` may go to Cactarium: not when it is refused as written (a credential in it, a
+/// local path, a form nobody else can fetch).
+fn sendable(url: &str) -> bool {
+    use cactup_ecosystem_common::url::{shareability, Shareability};
+    matches!(shareability(url), Shareability::Shareable | Shareability::Ssh { https: Some(_) })
+}
+
+/// Text for a comment line: on one line, whatever it came with (a server's answer or a hand
+/// edit could hold a newline, which would start a line of TOML the parse check would accept).
+pub(crate) fn comment(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
 }
 
 /// A string as TOML writes it, quoted and escaped.
@@ -485,12 +600,13 @@ fn arrangement_of(checkout: &str) -> &str {
 
 /// A requirement as a TODO names it.
 fn need_label(n: &Need) -> String {
+    let named = |kind: &str, name: &str| format!("{kind} {}", comment(name));
     match n {
-        Need::Implementation(i) => format!("implementation {i}"),
-        Need::Capability(c) => format!("capability {c}"),
-        Need::Thorn(t) => format!("thorn {t}"),
-        Need::Function(f) => format!("function {f}"),
-        Need::Include(h) => format!("header {h}"),
+        Need::Implementation(i) => named("implementation", i),
+        Need::Capability(c) => named("capability", c),
+        Need::Thorn(t) => named("thorn", t),
+        Need::Function(f) => named("function", f),
+        Need::Include(h) => named("header", h),
     }
 }
 
@@ -499,20 +615,21 @@ fn gap_signature(gap: &Gap) -> String {
     let list = |cs: &[Candidate]| cs.iter().map(|c| c.checkout.as_str()).collect::<Vec<_>>().join(",");
     match gap {
         Gap::Unmet => String::new(),
-        Gap::Unregistered(c) | Gap::Unfrozen(c, _, _) => c.checkout.clone(),
+        Gap::Unregistered(c) | Gap::Unfrozen(c, _, _) | Gap::Own(c, _) | Gap::Unreadable(c, _, _) => c.checkout.clone(),
         Gap::SeveralInOne(_, cs) | Gap::AnyOf(cs) => list(cs),
     }
 }
 
 /// A candidate as a TODO names it: `CarpetX/Loop (et/carpetx@1.0.0)`, or its repo.
 fn candidate_label(c: &Candidate, infos: &Pins) -> String {
-    match infos.get(&c.repo).and_then(|i| i.package.as_ref().map(|p| (p, i))) {
+    let label = match infos.get(&c.repo).and_then(|i| i.package.as_ref().map(|p| (p, i))) {
         Some((p, i)) => match &i.version {
             Some(v) => format!("{} ({p}@{v})", c.checkout),
             None => format!("{} ({p} at commit {})", c.checkout, short(&i.commit)),
         },
         None => format!("{} (repo {})", c.checkout, c.repo),
-    }
+    };
+    comment(&label)
 }
 
 fn short(commit: &str) -> &str {
@@ -522,29 +639,46 @@ fn short(commit: &str) -> &str {
 /// The TODO for a requirement of `needers` that got no dependency.
 fn gap_text(need: &Need, gap: &Gap, needers: &BTreeSet<String>, infos: &Pins, exact: bool) -> String {
     let what = need_label(need);
-    let by = needers.iter().map(String::as_str).collect::<Vec<_>>().join(", ");
+    let by = comment(&needers.iter().map(String::as_str).collect::<Vec<_>>().join(", "));
     match gap {
         Gap::Unmet => format!("# TODO: {what}, for {by}: no installed thorn provides it.\n"),
         Gap::Unregistered(c) => format!(
             "# TODO: {what}, for {by}: provided by {} from repo {}, which is no registered package.\n\
              # Register that repo, or depend on a registered package that provides it.\n",
-            c.checkout, c.repo
+            comment(&c.checkout),
+            comment(&c.repo)
         ),
         Gap::Unfrozen(c, package, commit) => format!(
-            "# TODO: {what}, for {by}: provided by {} of {package} at commit {}, which no version froze.\n\
-             # Depend on a released version of {package} that provides it.\n",
-            c.checkout,
-            short(commit)
+            "# TODO: {what}, for {by}: provided by {} of {} at commit {}, which no version froze.\n\
+             # Depend on a released version of {} that provides it.\n",
+            comment(&c.checkout),
+            comment(package),
+            comment(short(commit)),
+            comment(package)
+        ),
+        Gap::Own(c, package) => format!(
+            "# TODO: {what}, for {by}: provided by {} of {}, this repo's own package.\n\
+             # A package does not depend on itself.\n",
+            comment(&c.checkout),
+            comment(package)
+        ),
+        Gap::Unreadable(c, package, version) => format!(
+            "# TODO: {what}, for {by}: provided by {} of {}@{}.\n# cactup cannot read that version.\n",
+            comment(&c.checkout),
+            comment(package),
+            comment(version)
         ),
         Gap::SeveralInOne(package, cs) => format!(
-            "# TODO: {what}, for {by}: several thorns of {package} provide it ({}).\n\
-             # Depend on {package} for the one these thorns need.\n",
-            cs.iter().map(|c| c.thorn.as_str()).collect::<Vec<_>>().join(", ")
+            "# TODO: {what}, for {by}: several thorns of {} provide it ({}).\n\
+             # Depend on {} for the one needed by these thorns.\n",
+            comment(package),
+            comment(&cs.iter().map(|c| c.thorn.as_str()).collect::<Vec<_>>().join(", ")),
+            comment(package)
         ),
         Gap::AnyOf(cs) => {
             let mut s = format!(
                 "# TODO: {what}, for {by}: several installed packages provide it.\n\
-                 # Depend on the one these thorns need, or on any of them:\n\
+                 # Depend on the one needed by these thorns, or on any of them:\n\
                  # [[dependency]]\n# any-of = [\n"
             );
             for c in cs {
@@ -636,7 +770,7 @@ fn own_thorns(dir: &Path, mine: &[&Component]) -> (Vec<Own>, Layout) {
         several => layout.todos.push(format!(
             "# TODO: the installation builds these thorns in several arrangements ({}).\n\
              # A package has one: set arrangement, or move the thorns into Arrangement/Thorn folders.\n",
-            several.join(", ")
+            comment(&several.join(", "))
         )),
     }
     if let Some(a) = &layout.arrangement {
@@ -647,39 +781,31 @@ fn own_thorns(dir: &Path, mine: &[&Component]) -> (Vec<Own>, Layout) {
     (own, layout)
 }
 
+
 /// Runs just after each source file the include scan reads (tests: a Ctrl-C part way through).
 #[cfg(test)]
 static AFTER_SOURCE: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
 
-/// Each thorn's sources read, in parallel with progress: which `USES INCLUDE` headers it cannot
-/// compile without (the crate's rule), and every `#include` it writes. Ctrl-C stops it between
-/// files and fails it.
-fn scan_sources(dir: &Path, own: &mut [Own]) -> Res<()> {
-    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
-    let item = progress.add_child("read the repo's sources");
-    item.init(Some(own.len()), Some(prodash::unit::label("thorns")));
-    let item = Mutex::new(item);
-    let read = crate::par::parallel_map(own, |t| {
-        let current = item.lock().expect("source scan progress poisoned").add_child(t.name.clone());
-        let at = dir.join(&t.rel);
-        let includes = includes_of(&at);
-        let mut facts = t.facts.clone();
-        if !gix::interrupt::is_triggered() {
-            facts.scan_sources(&at);
-        }
-        drop(current);
-        item.lock().expect("source scan progress poisoned").inc();
-        (facts.needs_includes, includes)
-    });
-    drop(item);
-    if let Some(renderer) = renderer {
-        renderer.shutdown_and_wait();
+/// How many times the crate's source scan was started (tests).
+#[cfg(test)]
+static CRATE_SCANS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// What reading a thorn's sources gives: the `USES INCLUDE` headers it cannot compile without
+/// (the crate's rule), and every `#include` it writes, with its file.
+type Scanned = (Vec<String>, Vec<(String, String)>);
+
+/// One thorn's sources read, on the Registry's pool: Ctrl-C stops the include scan between
+/// files, and the crate's scan (which takes no flag) is then not started.
+fn scan_one(dir: &Path, t: &Own) -> Scanned {
+    let at = dir.join(&t.rel);
+    let includes = includes_of(&at);
+    let mut facts = t.facts.clone();
+    if !gix::interrupt::is_triggered() {
+        #[cfg(test)]
+        CRATE_SCANS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        facts.scan_sources(&at);
     }
-    for (t, (needs, includes)) in own.iter_mut().zip(read?) {
-        t.facts.needs_includes = needs;
-        t.includes = includes;
-    }
-    Ok(())
+    (facts.needs_includes, includes)
 }
 
 /// The `#include` names of a thorn's sources (under `src/`), each with its file: what the crate
@@ -769,6 +895,7 @@ fn lexical(path: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
+
 /// Each git repo of the installation with a URL, once: the live list's and the base's, so a
 /// replaced base repo is asked about too. Each is asked at the commit the config was built
 /// from, else where its clone is, else its pin; the repo itself, where its clone is.
@@ -782,19 +909,16 @@ fn git_repos<'a>(input: &Input<'a>) -> Vec<&'a Component> {
     out
 }
 
-/// A fork the repo is: of `target` (`owner/pkg@=X.Y.Z`), lacking `missing` of its thorns. An
-/// empty `target`: the clone is shallow, and `missing` are the packages it may fork.
+/// A fork the repo is: of `target` (`owner/pkg@=X.Y.Z`), lacking `missing` of its thorns.
 struct Fork {
     target: String,
     missing: Vec<String>,
 }
 
-/// The packages the repo is a fork of: each installed package (or replaced base repo's) sharing
-/// a thorn name with it (a flesh, for a flesh) whose versions' frozen commits the repo's history
-/// contains, at the newest such version.
-fn forks(reg: &mut Registry, input: &Input, own: &[Own], flesh: bool, infos: &Pins) -> Res<Vec<Fork>> {
-    let dir = input.dir;
-    let (_, head) = crate::fetch::git::head_of(dir)?;
+/// The packages the repo may fork: each installed package (or replaced base repo's) sharing a
+/// thorn name with it (a flesh, for a flesh), never its own. And whether its clone is shallow
+/// (as cactup clones): such a history cannot show a fork.
+fn fork_candidates(input: &Input, own: &[Own], flesh: bool, infos: &Pins) -> Res<(Vec<PkgId>, bool)> {
     let myself = infos.get(input.repo).and_then(|i| i.package.clone());
     let my_url = (input.live.components().iter()).find(|c| c.repo == input.repo).and_then(|c| c.url.clone()).unwrap_or_default();
     let names: BTreeSet<String> = own.iter().map(|t| t.name.to_ascii_lowercase()).collect();
@@ -816,15 +940,17 @@ fn forks(reg: &mut Registry, input: &Input, own: &[Own], flesh: bool, infos: &Pi
         }
     }
     let ids: Vec<PkgId> = candidates.iter().filter_map(|p| PkgId::parse(p).ok()).collect();
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    // A shallow clone (as cactup fetches) has no history to find a fork in.
-    if gix::open(dir).is_ok_and(|r| r.is_shallow()) {
-        return Ok(vec![Fork { target: String::new(), missing: candidates.into_iter().collect() }]);
-    }
-    reg.load(&ids)?;
-    // Each package's versions, by commit.
+    let shallow = !ids.is_empty() && gix::open(input.dir).is_ok_and(|r| r.is_shallow());
+    Ok((ids, shallow))
+}
+
+/// The forks among `ids`: each package whose versions' frozen commits the repo's history
+/// contains, at the newest such version (every frozen commit asked in one walk).
+fn forks(reg: &mut Registry, input: &Input, ids: &[PkgId], own: &[Own]) -> Res<Vec<Fork>> {
+    let dir = input.dir;
+    let (_, head) = crate::fetch::git::head_of(dir)?;
+    let names: BTreeSet<String> = own.iter().map(|t| t.name.to_ascii_lowercase()).collect();
+    reg.load(ids)?;
     let versions: Vec<(PkgId, Vec<Frozen>)> = (ids.iter())
         .map(|id| {
             let vs = (reg.releases(id).unwrap_or_default().iter())
@@ -837,15 +963,14 @@ fn forks(reg: &mut Registry, input: &Input, own: &[Own], flesh: bool, infos: &Pi
             (id.clone(), vs)
         })
         .collect();
-    let walked = reg.local(&versions, "packages", |(id, _)| id.to_string(), "reading history", |(_, vs)| {
+    let walked = reg.local_under(HISTORY, &versions, "packages", |(id, _)| id.to_string(), "reading history", |(_, vs)| {
         let commits: Vec<gix::ObjectId> = vs.iter().map(|(_, c, _)| *c).collect();
         crate::fetch::git::is_ancestor(dir, &commits, head)
     })?;
     let mut out = Vec::new();
     for ((id, vs), contained) in versions.iter().zip(walked) {
         let contained = contained?;
-        let inside: Vec<&Frozen> =
-            vs.iter().zip(&contained).filter(|(_, c)| **c).map(|(v, _)| v).collect();
+        let inside: Vec<&Frozen> = vs.iter().zip(&contained).filter(|(_, c)| **c).map(|(v, _)| v).collect();
         // The newest on the default track, else on any (ties to the track first by name).
         let newest = (inside.iter().filter(|(v, _, _)| v.track.is_none()).max_by(|a, b| a.0.version.cmp(&b.0.version)))
             .or_else(|| {
@@ -864,10 +989,11 @@ fn forks(reg: &mut Registry, input: &Input, own: &[Own], flesh: bool, infos: &Pi
 
 /// A thorn as a smell names it: its checkout, with its package or repo.
 fn installed_label(i: &Installed, infos: &Pins) -> String {
-    match infos.get(&i.repo).and_then(|p| p.package.as_ref()) {
+    let label = match infos.get(&i.repo).and_then(|p| p.package.as_ref()) {
         Some(p) => format!("{} ({p})", i.checkout),
         None => format!("{} (repo {})", i.checkout, i.repo),
-    }
+    };
+    comment(&label)
 }
 
 /// An `#include` that climbs out of its thorn's directory into another installed thorn's, as the
@@ -896,7 +1022,7 @@ fn include_smells(own: &[Own], installed: &[Installed], infos: &Pins) -> Vec<Str
             }
             out.push(format!(
                 "# TODO: {} includes {} from {}.\n# If it needs that thorn, name it in the needs of a dependency.\n",
-                t.name,
+                comment(&t.name),
                 q(path),
                 installed_label(other, infos)
             ));
@@ -926,11 +1052,12 @@ fn driver_smells(own: &[Own], installed: &[Installed], infos: &Pins) -> Vec<Stri
                 continue;
             };
             out.push(format!(
-                "# TODO: {} inherits the generic {DRIVER}, but includes {h}, provided by {}.\n\
+                "# TODO: {} inherits the generic {DRIVER}, but includes {}, provided by {}.\n\
                  # If it needs that driver, depend on its package for {}.\n",
-                t.name,
+                comment(&t.name),
+                comment(h),
                 installed_label(d, infos),
-                d.thorn
+                comment(&d.thorn)
             ));
         }
     }
@@ -953,68 +1080,136 @@ fn flesh_fork(input: &Input, infos: &Pins, exact: bool) -> Option<String> {
         (None, Some(i)) if forks => (i.package.clone()?, i.version.clone()),
         _ => return None,
     };
-    let of = info.filter(|_| forks).map(|i| format!(", a fork of {}", i.fork_of.join(", "))).unwrap_or_default();
+    let of = info.filter(|_| forks).map(|i| format!(", a fork of {}", comment(&i.fork_of.join(", ")))).unwrap_or_default();
+    let shown = comment(&package);
     let mut s = match &version {
-        Some(v) => format!("# TODO: the flesh here is {package}@{v}{of}.\n"),
-        None => format!("# TODO: the flesh here is {package}, at a commit no version froze{of}.\n"),
+        Some(v) => format!("# TODO: the flesh here is {shown}@{}{of}.\n", comment(v)),
+        None => format!("# TODO: the flesh here is {shown}, at a commit no version froze{of}.\n"),
     };
     match version.as_deref().and_then(|v| v.parse::<TrackedVersion>().ok()) {
         Some(v) => s.push_str(&format!(
             "# If these thorns need it, depend on it:\n# [[dependency]]\n# target = {}\n",
             q(&format!("{package}@{}", range_of(&v, exact)))
         )),
-        None => s.push_str(&format!("# If these thorns need it, depend on a released version of {package}.\n")),
+        None => s.push_str(&format!("# If these thorns need it, depend on a released version of {shown}.\n")),
     }
     Some(s)
 }
 
-/// `cactup package init <repo> --publish`: the repo's committed and pushed `cactarium.toml`
-/// registered with Cactarium (`POST /repos`: a preview, then exactly what it showed), or, when
-/// the package is registered already, checked for new releases. Writes nothing.
+/// A release tag of the repo: its name, its version and the commit it names.
+type Tag = (String, TrackedVersion, gix::ObjectId);
+
+/// The repo's release tags as Cactarium reads them for `package` (`tag-pattern`, else
+/// `[track/]vX.Y.Z`; none below `since`), newest first: the default track first, then by
+/// version.
+fn release_tags(dir: &Path, package: &PackageSection) -> Res<Vec<Tag>> {
+    let pattern = match &package.tag_pattern {
+        Some(p) => Some(p.parse::<cactup_ecosystem_common::version::TagPattern>().map_err(|e| anyhow!("{e}"))?),
+        None => None,
+    };
+    let mut tags: Vec<Tag> = (crate::fetch::git::local_tags(dir)?.into_iter())
+        .filter_map(|(name, commit)| {
+            let v = match &pattern {
+                Some(p) => p.version(&name)?,
+                None => TrackedVersion::from_tag(&name)?,
+            };
+            package.since.as_ref().is_none_or(|s| v.version >= *s).then_some((name, v, commit))
+        })
+        .collect();
+    tags.sort_by(|a, b| {
+        (a.1.track.is_some(), std::cmp::Reverse(&a.1.version), a.1.track.as_ref().map(|t| t.as_str()))
+            .cmp(&(b.1.track.is_some(), std::cmp::Reverse(&b.1.version), b.1.track.as_ref().map(|t| t.as_str())))
+    });
+    Ok(tags)
+}
+
+/// The tag to suggest for the next release: the newest default-track version's next patch,
+/// `v1.0.0` for the first, a placeholder under a `tag-pattern`.
+fn next_tag(tags: &[Tag], package: &PackageSection) -> String {
+    if package.tag_pattern.is_some() {
+        return "<tag>".to_owned();
+    }
+    match tags.iter().find(|(_, v, _)| v.track.is_none()) {
+        Some((_, v, _)) => format!("v{}.{}.{}", v.version.major, v.version.minor, v.version.patch + 1),
+        None => "v1.0.0".to_owned(),
+    }
+}
+
+/// `cactup package init <repo> --publish`: the repo's `cactarium.toml`, as its newest release tag
+/// on its remote holds it, registered with Cactarium (`POST /repos`: a preview, then exactly
+/// what it showed), or, when the package is registered already, checked for new releases.
+/// Writes nothing.
 fn publish(client: &Client, live: &Thornlist, repo: &str, dir: &Path, namespace: Option<&str>) -> Res<()> {
+    let namespace = namespace.map(owner_given).transpose()?;
     let file = dir.join(PACKAGE_FILE);
     let text = match std::fs::read_to_string(&file) {
         Ok(text) => text,
         Err(_) => bail!("Repo {repo} has no {PACKAGE_FILE}.\nWrite one with `cactup package init {repo}`."),
     };
     let manifest = Manifest::from_repo_file(PACKAGE_FILE, &text).map_err(|e| anyhow!("'{}': {e}", file.display()))?;
-    let name = manifest.package.as_ref().expect("a package file holds a [package]").name.to_string();
+    let package = manifest.package.as_ref().expect("a package file holds a [package]");
+    let name = package.name.to_string();
     let git = format!("git -C {}", shell_word(&dir.display().to_string()));
-    match crate::fetch::git::file_in_head(dir, PACKAGE_FILE)? {
-        None => bail!(
-            "{PACKAGE_FILE} is not committed in repo {repo}.\nCommit and push it:\n  {git} add {PACKAGE_FILE}\n  \
-             {git} commit -m \"Add {PACKAGE_FILE}\"\n  {git} push"
-        ),
-        Some(committed) if committed != text.as_bytes() => bail!(
-            "{PACKAGE_FILE} in repo {repo} has uncommitted changes.\nCommit and push them:\n  \
-             {git} commit -m \"Update {PACKAGE_FILE}\" {PACKAGE_FILE}\n  {git} push"
-        ),
-        Some(_) => {}
-    }
+    let tags = release_tags(dir, package)?;
+    let next = next_tag(&tags, package);
+    // How to get the file on disk into a pushed release tag.
     let (_, head) = crate::fetch::git::head_of(dir)?;
-    if !crate::fetch::git::is_published(dir, head)? {
-        bail!("Commit {} of repo {repo} is on no remote branch.\nPush it:\n  {git} push", short(&head.to_string()));
+    let mut steps: Vec<String> = match crate::fetch::git::file_in_commit(dir, head, PACKAGE_FILE)? {
+        None => vec![format!("{git} add {PACKAGE_FILE}"), format!("{git} commit -m \"Add {PACKAGE_FILE}\"")],
+        Some(committed) if committed != text.as_bytes() => {
+            vec![format!("{git} commit -m \"Update {PACKAGE_FILE}\" {PACKAGE_FILE}")]
+        }
+        Some(_) => Vec::new(),
+    };
+    steps.extend([format!("{git} tag {next}"), format!("{git} push"), format!("{git} push origin {next}")]);
+    let steps: String = steps.iter().map(|s| format!("\n  {s}")).collect();
+    if tags.is_empty() {
+        bail!("Repo {repo} has no release tag.\nCommit {PACKAGE_FILE}, tag a release and push both:{steps}");
     }
+
+    // What anybody can fetch, and which of its release tags are there.
     let url = (live.components().iter())
         .find(|c| c.repo == repo && c.ty == ComponentType::Git)
         .and_then(|c| c.url.clone())
         .or_else(|| crate::fetch::git::origin_url(dir))
         .ok_or_else(|| anyhow!("Repo {repo} has no URL."))?;
-    let url = shareable(&url)?;
+    let (url, remote) = ask_remote(repo, &url)?;
+    let pushed = tags.iter().position(|(t, _, c)| remote.iter().any(|(rt, rc)| rt == t && rc == c));
+    let Some(at) = pushed else {
+        let newest = &tags[0].0;
+        bail!("Tag {newest} of repo {repo} is not on its remote.\nPush it:\n  {git} push origin {newest}");
+    };
+    let (tag, _, commit) = &tags[at];
+    match crate::fetch::git::file_in_commit(dir, *commit, PACKAGE_FILE)? {
+        None => bail!("Tag {tag} of repo {repo} has no {PACKAGE_FILE}.\nCommit it, tag a release and push both:{steps}"),
+        Some(tagged) if tagged != text.as_bytes() => bail!(
+            "{PACKAGE_FILE} in repo {repo} differs from the one at tag {tag}.\nCommit it, tag a release and push both:{steps}"
+        ),
+        Some(_) => {}
+    }
+    for (newer, _, _) in &tags[..at] {
+        println!("{}", format!("Tag {newer} is not on the remote.").yellow());
+    }
+    if at > 0 {
+        println!("{}", format!("Cactarium reads tag {tag}.").yellow());
+    }
+
     let request = RegisterRequest {
         url,
         tag: None,
-        owner: namespace.map(str::to_owned),
+        owner: namespace.clone(),
         only: vec![name.clone()],
         dry_run: true,
         expect: None,
     };
     let reg = Registry::new(client, ["register", "refresh"]);
     let answer = (|| -> Res<Done> {
-        let preview = reg.one("register", "previewing", {
-            let request = request.clone();
-            move |c| c.register(&request)
-        })?;
+        let preview = reg
+            .one("register", "previewing", {
+                let request = request.clone();
+                move |c| c.register(&request)
+            })
+            .map_err(|e| register_refused(e, client.base(), namespace.as_deref(), &name))?;
         let entry = entry_of(&preview, &name)?;
         match entry.status.as_str() {
             "existing" => {
@@ -1025,8 +1220,14 @@ fn publish(client: &Client, live: &Thornlist, repo: &str, dir: &Path, namespace:
                 Ok(Done::Refreshed(refreshed))
             }
             "new" => {
-                let real = RegisterRequest { dry_run: false, expect: preview.expect.clone(), ..request.clone() };
-                let registered = reg.one("register", "registering", move |c| c.register(&real))?;
+                // Never a registration unguarded by what the preview showed.
+                let Some(expect) = preview.expect.clone() else {
+                    bail!("Cactarium's preview of {} came without a fingerprint, so nothing was registered.", entry.slug);
+                };
+                let real = RegisterRequest { dry_run: false, expect: Some(expect), ..request.clone() };
+                let registered = reg
+                    .one("register", "registering", move |c| c.register(&real))
+                    .map_err(|e| register_refused(e, client.base(), namespace.as_deref(), &name))?;
                 Ok(Done::Registered(registered))
             }
             _ => Err(refused_entry(entry)),
@@ -1057,6 +1258,34 @@ fn publish(client: &Client, live: &Thornlist, repo: &str, dir: &Path, namespace:
     Ok(())
 }
 
+/// The URL to register `url` under, as the crate's rules decide for anything shared (refused
+/// with credentials, as a local path or git://, or when nobody could fetch it anonymously; an
+/// ssh remote goes as its https equivalent), and the tags the remote has there. A line each.
+fn ask_remote(repo: &str, url: &str) -> Res<(String, Vec<(String, gix::ObjectId)>)> {
+    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+    let layout = crate::progress::Layout::for_names([repo]);
+    let asked = (|| -> Res<(String, Vec<(String, gix::ObjectId)>)> {
+        let window = crate::fetch::git::AskWindow::now();
+        let line = crate::progress::Line::over(progress.add_child(repo.to_owned()), repo, layout.clone());
+        line.phase("asking for it anonymously".to_owned());
+        let verdict = crate::fetch::anonymous::check_remote(url, window);
+        drop(line);
+        let published = match verdict? {
+            crate::fetch::anonymous::Verdict::Publish(u) => u,
+            crate::fetch::anonymous::Verdict::Refuse(why) => bail!("{why}"),
+        };
+        let line = crate::progress::Line::over(progress.add_child(repo.to_owned()), repo, layout.clone());
+        line.phase("listing its tags".to_owned());
+        let tags = crate::fetch::git::ask_remote_tags(&published, window);
+        drop(line);
+        Ok((published, tags?))
+    })();
+    if let Some(renderer) = renderer {
+        renderer.shutdown_and_wait();
+    }
+    asked
+}
+
 /// What `--publish` did.
 enum Done {
     Registered(Registered),
@@ -1072,32 +1301,29 @@ fn entry_of<'r>(r: &'r Registered, name: &str) -> Res<&'r cactup_ecosystem_commo
 
 /// A registration Cactarium will not make, with its reason.
 fn refused_entry(e: &cactup_ecosystem_common::api::RegisteredEntry) -> anyhow::Error {
-    let why = e.note.as_deref().unwrap_or("no reason given");
+    let why = comment(e.note.as_deref().unwrap_or("no reason given"));
     match e.status.as_str() {
-        "needs-tag" => anyhow!("Cactarium cannot register {}: {why}\nTag a release and push the tag.", e.slug),
+        "needs-tag" | "skipped" => anyhow!("Cactarium cannot register {}: {why}\nTag a release and push the tag.", e.slug),
         _ => anyhow!("Cactarium cannot register {}: {why}", e.slug),
     }
 }
 
-/// The URL to register `url` under, as the crate's rules decide for anything shared: refused
-/// with credentials, as a local path or git://, or when nobody could fetch it anonymously; an ssh
-/// remote goes as its https equivalent.
-fn shareable(url: &str) -> Res<String> {
-    let candidate = match cactup_ecosystem_common::probe::start(url) {
-        cactup_ecosystem_common::probe::Start::Refuse(why) => bail!("{why}"),
-        cactup_ecosystem_common::probe::Start::Probe { candidate } => candidate,
-    };
-    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
-    let item = progress.add_child(format!("ask {} anonymously", crate::fetch::git::redacted(&candidate)));
-    item.init(Some(1), Some(prodash::unit::label("remotes")));
-    let verdict = crate::fetch::anonymous::check(url, &candidate, crate::fetch::git::AskWindow::now());
-    drop(item);
-    if let Some(renderer) = renderer {
-        renderer.shutdown_and_wait();
+/// A registration request Cactarium refused (400): its message, with the way past when it is
+/// about tags. A Cactarium from before `only` named a registered package answers "No new entry
+/// named …": too old to refresh this way.
+fn register_refused(e: anyhow::Error, base: &str, namespace: Option<&str>, name: &str) -> anyhow::Error {
+    let Some(refused) = e.downcast_ref::<crate::cactarium::Refused>().filter(|r| r.status == 400) else { return e };
+    let message = refused.message.clone();
+    if message.starts_with("No new entry named") {
+        let owner = namespace.unwrap_or("OWNER");
+        return anyhow!(
+            "Cactarium at {base} is too old to refresh a registered package this way; it needs an update.\n\
+             Until then, run `cactup refresh {owner}/{name}`."
+        );
     }
-    match verdict? {
-        crate::fetch::anonymous::Verdict::Publish(u) => Ok(u),
-        crate::fetch::anonymous::Verdict::Refuse(why) => bail!("{why}"),
+    match message.contains("tag") {
+        true => anyhow!("{message}\nTag a release and push the tag."),
+        false => anyhow!("{message}"),
     }
 }
 

@@ -82,7 +82,6 @@ pub fn check(url: &str, candidate: &str, window: AskWindow) -> Res<Verdict> {
 }
 
 /// [`check`] from the start: the remote's [`probe::start`], then its probes.
-#[cfg(test)]
 pub fn check_remote(url: &str, window: AskWindow) -> Res<Verdict> {
     match probe::start(url) {
         probe::Start::Refuse(message) => Ok(Verdict::Refuse(message)),

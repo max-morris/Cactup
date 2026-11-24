@@ -468,8 +468,39 @@ pub(crate) fn write_atomic(path: &Path, text: &str) -> Res<()> {
     write_atomic_as(path, text, None)
 }
 
+/// [`write_atomic`] of several files: every one written and synced under a temporary name
+/// first, then each moved into place. When a move fails, those moved before it are put back as
+/// they were (or removed, when they did not exist), so none or all of them change.
+pub(crate) fn write_atomic_all(files: &[(&Path, &str)]) -> Res<()> {
+    let staged: Vec<tempfile::NamedTempFile> =
+        files.iter().map(|(path, text)| stage(path, text, None)).collect::<Res<_>>()?;
+    let before: Vec<Option<Vec<u8>>> = files.iter().map(|(path, _)| std::fs::read(path).ok()).collect();
+    for (i, temp) in staged.into_iter().enumerate() {
+        let path = files[i].0;
+        if let Err(e) = temp.persist(path) {
+            for ((done, _), old) in files[..i].iter().zip(&before) {
+                let _ = match old {
+                    Some(old) => write_atomic(done, &String::from_utf8_lossy(old)),
+                    None => std::fs::remove_file(done).map_err(Into::into),
+                };
+            }
+            return Err(anyhow::Error::new(e.error)).with_context(|| format!("Failed to move '{}' into place", path.display()));
+        }
+    }
+    Ok(())
+}
+
 /// [`write_atomic`], with `mode` (when given) the file's mode whatever it was.
 fn write_atomic_as(path: &Path, text: &str, mode: Option<u32>) -> Res<()> {
+    stage(path, text, mode)?
+        .persist(path)
+        .with_context(|| format!("Failed to move '{}' into place", path.display()))?;
+    Ok(())
+}
+
+/// `text` written and synced under a temporary name beside `path`, with the mode
+/// [`write_atomic_as`] gives it, ready to be moved into place.
+fn stage(path: &Path, text: &str, mode: Option<u32>) -> Res<tempfile::NamedTempFile> {
     use std::os::unix::fs::PermissionsExt;
     let dir = path.parent().expect("cactup record paths have parents");
     std::fs::create_dir_all(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
@@ -487,9 +518,7 @@ fn write_atomic_as(path: &Path, text: &str, mode: Option<u32>) -> Res<()> {
     temp.write_all(text.as_bytes())
         .and_then(|()| temp.as_file().sync_all())
         .with_context(|| format!("Failed to write '{}'", path.display()))?;
-    temp.persist(path)
-        .with_context(|| format!("Failed to move '{}' into place", path.display()))?;
-    Ok(())
+    Ok(temp)
 }
 
 /// This process's umask, from `/proc` (std has no call for it, and the
@@ -885,6 +914,25 @@ mod tests {
     use super::testing::*;
     use super::*;
     use serde_derive::{Deserialize, Serialize};
+
+    /// Several files move into place together, or none changes: one that cannot be moved there
+    /// (a directory in its way) puts back the ones moved before it, or removes those that were
+    /// new.
+    #[test]
+    fn several_files_change_together_or_not_at_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (old, new, blocked) = (tmp.path().join("old"), tmp.path().join("new"), tmp.path().join("blocked"));
+        std::fs::write(&old, "before").unwrap();
+        std::fs::create_dir_all(blocked.join("inside")).unwrap();
+        let files: [(&Path, &str); 3] = [(&old, "after"), (&new, "fresh"), (&blocked, "x")];
+        assert!(write_atomic_all(&files).is_err());
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "before");
+        assert!(!new.exists());
+        write_atomic_all(&files[..2]).unwrap();
+        assert_eq!((std::fs::read_to_string(&old).unwrap(), std::fs::read_to_string(&new).unwrap()), ("after".into(), "fresh".into()));
+        let leftovers = std::fs::read_dir(tmp.path()).unwrap().count();
+        assert_eq!(leftovers, 3, "no temporary file left behind");
+    }
 
     /// A toy record at version 2: v1 called `name` `title`, and v2 added
     /// `color`, which a v1 binary would get wrong by ignoring it.
