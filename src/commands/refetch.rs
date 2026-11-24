@@ -528,6 +528,13 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
         report_configs(&inst, &configs, matches!(source, Source::Release { .. }));
     }
 
+    // A stack release is frozen: what its packages claim of each other is
+    // checked, and said, but never resolved.
+    // Plan §4.3.
+    if recorded && matches!(&source, Source::Release { described, .. } if described.starts_with("stack ")) {
+        super::claims::warn_problems(ctx, &inst)?;
+    }
+
     if !report.failures.is_empty() {
         println!("{}", format!("{} fetch failure(s):", report.failures.len()).bright_red().bold());
         for f in &report.failures {

@@ -348,6 +348,35 @@ pub(crate) fn problems(ctx: &Ctx, inst: &Installation, meta: &InstallationMeta) 
     Ok(found)
 }
 
+/// The check `claims check` makes, run after a stack install or a refetch to a stack: each problem
+/// printed as a warning, ending in its way past, and returned. It never fails the command (a
+/// release is frozen and installed as it is), but Ctrl-C does.
+// Plan §4.3, misfit 7.
+pub(crate) fn warn_problems(ctx: &Ctx, inst: &Installation) -> Res<Vec<String>> {
+    let found = inst.meta().and_then(|meta| problems(ctx, inst, &meta));
+    if gix::interrupt::is_triggered() {
+        bail!("Interrupted");
+    }
+    let mut said = Vec::new();
+    match found {
+        Ok(found) => {
+            if !found.lines.is_empty() {
+                said.push("Claim problems:".to_owned());
+                said.extend(found.lines.iter().map(|l| format!("  {l}")));
+            }
+            said.extend(found.not_checked());
+        }
+        Err(e) => {
+            said.push(format!("Did not check the claims: {e:#}"));
+            said.push("Check them with `cactup claims check`.".to_owned());
+        }
+    }
+    for line in &said {
+        println!("{}", line.yellow());
+    }
+    Ok(said)
+}
+
 /// `claims check`: prints the problems, one line each, and fails when there are any.
 fn check(ctx: &Ctx) -> Res<()> {
     let inst = Installation::resolve(ctx)?;

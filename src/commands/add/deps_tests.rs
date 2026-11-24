@@ -112,6 +112,8 @@ struct Fake {
     /// What a read at a commit no version froze answers (the package read
     /// now), by package and commit.
     snapshots: Vec<(String, String, String)>,
+    /// Stacks: their id and their one release, 1.0.0, as frozen.
+    stacks: Vec<(String, String)>,
 }
 
 /// A fake Cactarium's state, changeable while it serves.
@@ -182,6 +184,7 @@ impl Fake {
             batch_requests: 0,
             batch_fetches: 0,
             snapshots: Vec::new(),
+            stacks: Vec::new(),
         }
     }
 
@@ -227,12 +230,26 @@ impl Fake {
         if let Some(req) = path.strip_prefix("/resolve?req=") {
             let req = req.split('&').next().unwrap().replace("%40", "@").replace("%23", "#");
             let id = req.split(['@', '#']).next().unwrap();
+            if self.stacks.iter().any(|(s, _)| s == id) {
+                return ok(format!(
+                    r#"{{"slug":"{id}","kind":"stack","url":"u","contact":null,"version":"1.0.0","track":null,
+                    "tag":null,"commit":null,"tree":null,"yanked":false,"yank-reason":null,"state":"ok",
+                    "curated":false,"published":0}}"#
+                ));
+            }
             return match self.packages.iter().find(|(p, _)| p == id) {
                 Some(_) => ok(format!(
                     r#"{{"slug":"{id}","kind":"package","url":"u","contact":null,"version":"1.0.0","track":null,
                     "tag":null,"commit":null,"tree":null,"yanked":false,"yank-reason":null,"state":"ok",
                     "curated":false,"published":0}}"#
                 )),
+                None => missing(),
+            };
+        }
+        if let Some(rest) = path.strip_prefix("/stacks/") {
+            let id = rest.strip_suffix("/releases/1.0.0").unwrap_or(rest);
+            return match self.stacks.iter().find(|(s, _)| s == id) {
+                Some((_, frozen)) => ok(frozen.clone()),
                 None => missing(),
             };
         }
@@ -3653,4 +3670,59 @@ fn list_marks_what_is_wrong_with_an_override() {
     let found = crate::commands::claims::problems(&s.ctx, &s.inst, &s.meta()).unwrap();
     assert_eq!(found.lines.len(), 1, "{:?}", found.lines);
     assert!(found.lines[0].starts_with("The override 'satisfies local:gone et/carpetx' names a repo that is not installed."));
+}
+
+// ---- Stack releases: frozen, so their packages' claims are checked and only warned about ----
+
+/// `inst refetch --release` to a stack whose packages conflict (max/app is incompatible with
+/// max/solo): the refetch goes through, and the check's problem comes out as a warning naming the
+/// way past. With Cactarium unable to say what the base is, the check says it did not run, and
+/// still fails nothing.
+#[test]
+fn a_refetch_to_a_stack_warns_of_claim_problems_without_failing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (aurl, a) = upstream(tmp.path(), "app", &[("App/interface.ccl", "IMPLEMENTS: app\n")]);
+    let (surl, so) = upstream(tmp.path(), "solo", &[("Solo/interface.ccl", "IMPLEMENTS: solo\n")]);
+    let hates = r#"{"kind":"incompatible-with","target":"max/solo","range":null,"needs":[],"note":null}"#;
+    let list = format!("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{}{}", section(&aurl, &a, &["App/App"]), section(&surl, &so, &["Solo/Solo"]));
+    let frozen = serde_json::json!({
+        "format": 1, "stack": "max/stack@1.0.0", "root": "Cactus",
+        "repo": [{"name": "app", "url": aurl, "commit": a}, {"name": "solo", "url": surl, "commit": so}],
+        "thornlist": {"filename": "stack.th", "text": list},
+    });
+    let mut fake = Fake::new()
+        .package("max/app", vec![version("1.0.0", &a, &aurl, "App", &["App"], &format!("[{hates}]"))])
+        .package("max/solo", vec![version("1.0.0", &so, &surl, "Solo", &["Solo"], "[]")])
+        .pin(&aurl, "max/app", None)
+        .pin(&surl, "max/solo", None);
+    fake.stacks.push(("max/stack".into(), frozen.to_string()));
+    let (cactarium, log, fake) = fake.serve_shared();
+    let s = Setup::new(tmp, &section(&aurl, &a, &["App/App"]), &cactarium);
+    let refetch = |s: &Setup| {
+        let argv = ["cactup", "inst", "refetch", "--release", "max/stack@1.0.0"];
+        let args = match <crate::args::Args as clap::Parser>::try_parse_from(argv).unwrap().command {
+            crate::args::Commands::Inst(crate::args::InstallationCommand::Refetch(args)) => args,
+            other => panic!("{other:?}"),
+        };
+        super::super::refetch::dispatch(&s.ctx, args)
+    };
+    refetch(&s).unwrap_or_else(|e| panic!("{e:#}"));
+    assert!(s.inst.root.join("Cactus/arrangements/Solo/Solo/interface.ccl").is_file(), "the stack is installed");
+    let asked: Vec<String> = log.lock().unwrap().iter().map(|(p, _)| p.clone()).collect();
+    let at = asked.iter().position(|p| p.contains("/stacks/max/stack/releases/1.0.0")).unwrap();
+    assert!(asked[at..].iter().any(|p| p == "/api/v1/lookup"), "checked after the fetch: {asked:?}");
+    let said = crate::commands::claims::warn_problems(&s.ctx, &s.inst).unwrap();
+    assert_eq!(
+        said,
+        [
+            "Claim problems:",
+            "  max/app@1.0.0 is incompatible with max/solo@1.0.0. Run `cactup claims override drop max/app:incompatible-with:max/solo`.",
+        ]
+    );
+
+    fake.lock().unwrap().lookup = false;
+    refetch(&s).unwrap_or_else(|e| panic!("{e:#}"));
+    let said = crate::commands::claims::warn_problems(&s.ctx, &s.inst).unwrap();
+    assert!(said[0].starts_with("Did not check the claims: "), "{said:?}");
+    assert_eq!(said.last().unwrap(), "Check them with `cactup claims check`.");
 }

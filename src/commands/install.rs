@@ -486,6 +486,10 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         }
         InstallSource::Stack { slug, .. } => {
             println!("{}", format!("Success! Installed stack {slug} into '{}'", installed_root.display()).bold().bright_green());
+            // A stack release is frozen: what its packages claim of each
+            // other is checked, and said, but never resolved.
+            // Plan §4.3.
+            super::claims::warn_problems(ctx, &crate::installation::Installation::new(&alias, &install_dir))?;
         }
         InstallSource::SimFile { path, sim, .. } => {
             println!("{}", format!("Success! Installed the sources of '{}' into '{}'", path.display(), installed_root.display()).bold().bright_green());
