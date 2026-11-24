@@ -968,7 +968,7 @@ fn plan_add(
         let labels: Vec<&str> = unread.iter().map(|u| u.label.as_str()).collect();
         println!(
             "{}",
-            format!("Not checked: what {} depend on (Cactarium cannot read them).", labels.join(", ")).yellow()
+            format!("Not checked: what {} {} on (Cactarium cannot read them).", labels.join(", "), if labels.len() == 1 { "depends" } else { "depend" }).yellow()
         );
     }
     Ok((plan, set.present, set.heads))

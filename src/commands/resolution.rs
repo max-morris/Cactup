@@ -152,7 +152,7 @@ fn round_wait(stalled: bool) -> std::time::Duration {
 fn batch_why(id: &PkgId, status: &ReadStatus, error: Option<&str>) -> Option<Unanswered> {
     let message = error.unwrap_or_default();
     let (kind, why) = match status {
-        ReadStatus::Forbidden => (UnreadKind::Untrusted, "it reads an untrusted package only at released versions".to_owned()),
+        ReadStatus::Forbidden => (UnreadKind::Untrusted, "it serves an untrusted package only at approved releases (one awaiting review needs --risky-allow-untrusted-artifacts and an admin's token)".to_owned()),
         // The server's words say which: no such commit (is it pushed?), or no such package.
         ReadStatus::NotFound => match error {
             Some(error) => (UnreadKind::Missing, error.to_owned()),
@@ -211,7 +211,7 @@ fn unanswered_why(r: &crate::cactarium::Refused) -> Unanswered {
     let (status, message) = (r.status, r.message.as_str());
     let (kind, why) = match (status, r.code.as_deref()) {
         (429, _) => (UnreadKind::Retry, "its read limit held after waiting; try again in a few minutes".to_owned()),
-        (403, _) => (UnreadKind::Untrusted, "it reads an untrusted package only at released versions".to_owned()),
+        (403, _) => (UnreadKind::Untrusted, "it serves an untrusted package only at approved releases (one awaiting review needs --risky-allow-untrusted-artifacts and an admin's token)".to_owned()),
         (400, _) => (UnreadKind::Invalid, message.to_owned()),
         (502, Some("upstream")) => (UnreadKind::Retry, "it could not reach the package's repository just now".to_owned()),
         // No Cactarium error body: a proxy in front of it answered.
@@ -1291,7 +1291,9 @@ pub(crate) fn present(
             None => {
                 let label = crate::commands::add::describe(&a.package, &a.version);
                 unread.push(Unread { id: id.clone(), label, why: why(w) });
-                unknown(id, &a.commit, &a.url, false, &checkouts, local)
+                let mut r = unknown(id, &a.commit, &a.url, false, &checkouts, local);
+                r.recorded = Some(a.version.clone());
+                r
             }
         };
         let enabled = checkouts.iter().map(|(c, _)| thorn_of(c).to_owned()).collect();
@@ -1652,6 +1654,7 @@ fn unknown(
         yanked: false,
         yank_reason: None,
         pending: false,
+        recorded: None,
         usable: true,
         thorns,
         claims: Vec::new(),

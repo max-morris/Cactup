@@ -296,7 +296,8 @@ fn row(s: &Step) -> [String; 4] {
             if let Some(flag) = flag {
                 why.push_str(&format!(" ({flag})"));
             }
-            ["upgrade".into(), format!("{} {} -> {}", to.id, at(from), at(to)), thorns.join(", "), why]
+            let verb = if to.older_than(from) { "downgrade" } else { "upgrade" };
+            [verb.into(), format!("{} {} -> {}", to.id, at(from), at(to)), thorns.join(", "), why]
         }
         Step::Replace { replaced, by, thorns, .. } => {
             let what = match (replaced, thorns.is_empty()) {

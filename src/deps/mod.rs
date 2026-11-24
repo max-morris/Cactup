@@ -193,6 +193,8 @@ pub struct Release {
     pub yank_reason: Option<String>,
     /// Awaiting review: served only under `--risky-allow-untrusted-artifacts`.
     pub pending: bool,
+    /// The version an installation recorded for a release not read now (`At::Unknown`), for its label.
+    pub recorded: Option<String>,
     /// Its state is neither `invalid` nor `upstream-missing`.
     pub usable: bool,
     pub thorns: Vec<ThornInfo>,
@@ -200,6 +202,15 @@ pub struct Release {
 }
 
 impl Release {
+    /// Whether this release is at a lower version than `other`, on the same track (releases
+    /// at no version, tips and commits, compare as neither older nor newer).
+    pub fn older_than(&self, other: &Release) -> bool {
+        match (self.at.version(), other.at.version()) {
+            (Some(a), Some(b)) => a.track == b.track && a.version < b.version,
+            _ => false,
+        }
+    }
+
     /// A release as Cactarium serves it: a version, a commit no version froze (the version
     /// is the full commit), or a tip (`head`/`master`); `contact` is the package's, from the
     /// answer that listed it.
@@ -234,6 +245,7 @@ impl Release {
             yanked: info.yanked,
             yank_reason: info.yank_reason.clone().filter(|r| !r.is_empty()),
             pending: info.review.as_deref() == Some("pending"),
+            recorded: None,
             usable: !matches!(info.state.as_str(), "invalid" | "upstream-missing"),
             thorns: v.thorns.clone(),
             claims: v.claims.clone(),
@@ -246,6 +258,7 @@ impl Release {
         match &self.at {
             At::Version(v) => format!("{}@{v}", self.id),
             At::Tip { name, .. } => format!("{}@{name}", self.id),
+            At::Unknown(_) if self.recorded.is_some() => format!("{}@{}", self.id, self.recorded.as_deref().unwrap_or_default()),
             At::Commit(c) | At::Unknown(c) => format!("{}#{}", self.id, short(c)),
         }
     }

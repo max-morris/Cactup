@@ -333,9 +333,12 @@ pub(crate) struct GlobalOpts {
     /// package at an unpublished commit (#commit), from a source
     /// not trusted by Cactarium. Also asks Cactarium for versions awaiting
     /// review, and for entries awaiting their first review when your token
-    /// (cactup login) is an admin's. The stored token is sent with every
-    /// request. Nobody has reviewed such code. It may fetch and build
-    /// arbitrary code. The warning is still printed.
+    /// (cactup login) is an admin's. Your token (CACTARIUM_TOKEN, else the
+    /// one from cactup login) is sent by add, remove, claims, import,
+    /// install and inst refetch, to the Cactarium server named by
+    /// the cactarium-url knob, whatever it is. Without this option those
+    /// commands send no token. Nobody has reviewed such code. It may fetch
+    /// and build arbitrary code. The warning is still printed.
     #[clap(long, global = true)]
     pub risky_allow_untrusted_artifacts: bool,
 }

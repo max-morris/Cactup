@@ -313,7 +313,7 @@ pub(crate) fn simfile_cache_path(
 
 /// Download published sim `req` from Cactarium (§8.10) into
 /// `~/.cactup/simfiles` (see [`simfile_cache_path`]); see [`fetch_published`].
-fn download_published(ctx: &Ctx, req: &str) -> Res<PathBuf> {
+pub(crate) fn download_published(ctx: &Ctx, req: &str) -> Res<PathBuf> {
     let client = crate::cactarium::Client::for_command(ctx)?;
     fetch_published(&client, &crate::CACTUP_ROOT.join("simfiles"), req)
 }
@@ -369,10 +369,8 @@ fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) ->
     let resolved = match (client.resolve(req, "sim"), &exact) {
         (Ok(resolved), _) => resolved,
         (Err(e), Some(v)) if cached(v).is_file() => {
-            println!(
-                "{}",
-                format!("Could not ask Cactarium about {req} ({e:#}); using the cached copy").dimmed()
-            );
+            println!("{}", format!("Could not ask Cactarium about {req}; using the cached copy.").dimmed());
+            println!("{}", format!("{e:#}").dimmed());
             return Ok(cached(v));
         }
         // A Cactarium from before multi-sim entries reads the third segment
@@ -446,14 +444,12 @@ fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) ->
     // Checked (hash, and for one sim of several its stamp) before it is put
     // in the cache.
     let before = std::fs::read(&dest).ok();
-    if let Err(e) = client.download_sim(owner, name, &version.to_string(), sim, &dest) {
+    if let Err(e) = client.download_sim(owner, name, &version.to_string(), sim, &dest, unreviewed) {
         if before.is_none() || unreviewed {
             return Err(e);
         }
-        println!(
-            "{}",
-            format!("Could not download {shown}@{version} ({e:#}); using the cached copy").dimmed()
-        );
+        println!("{}", format!("Could not download {shown}@{version}; using the cached copy.").dimmed());
+        println!("{}", format!("{e:#}").dimmed());
         return Ok(dest);
     }
     match before {
@@ -600,7 +596,7 @@ fn print_published(published: &cactup_ecosystem_common::api::Published) {
 /// Where the `.sim`'s `repo-file` inputs come from, when it has any not
 /// given with `--input`: the repository that Cactarium publishes it from, at
 /// the commit of the version named by its `cactarium` stamp.
-fn repo_source(ctx: &Ctx, sim: &SimFile, given: &[String]) -> Res<Option<crate::inputs::RepoSource>> {
+pub(crate) fn repo_source(ctx: &Ctx, sim: &SimFile, given: &[String]) -> Res<Option<crate::inputs::RepoSource>> {
     let given_knob = |knob: &str| given.iter().any(|g| g.split_once('=').is_some_and(|(k, _)| k == knob));
     let Some(first) = sim.inputs.iter().find(|i| i.repo_file.is_some() && !given_knob(&i.knob)) else { return Ok(None) };
     let Some(slug) = &sim.sim.cactarium else {
@@ -611,14 +607,23 @@ fn repo_source(ctx: &Ctx, sim: &SimFile, given: &[String]) -> Res<Option<crate::
             first.knob
         );
     };
-    let resolved = crate::cactarium::Client::for_command(ctx)?.resolve(&slug.to_string(), "sim")?;
+    repo_source_at(&crate::cactarium::Client::for_command(ctx)?, slug).map(Some)
+}
+
+/// [`repo_source`] for the version `slug` names, as `client` is told it. One awaiting review
+/// is warned about (once: a published import already did).
+fn repo_source_at(client: &crate::cactarium::Client, slug: &impl std::fmt::Display) -> Res<crate::inputs::RepoSource> {
+    let resolved = client.resolve(&slug.to_string(), "sim")?;
     if resolved.kind != "sim" {
         bail!("{} is a {}, not a sim", resolved.slug, resolved.kind);
+    }
+    if resolved.awaits_review() {
+        crate::cactarium::warn_unreviewed(&resolved.slug);
     }
     let resolved = resolved.resolved;
     let url = resolved.url.ok_or_else(|| anyhow!("Cactarium names no repository for {slug}"))?;
     let commit = resolved.version.commit.ok_or_else(|| anyhow!("Cactarium names no commit for {slug}"))?;
-    Ok(Some(crate::inputs::RepoSource { url, commit }))
+    Ok(crate::inputs::RepoSource { url, commit })
 }
 
 fn settle_inputs(
@@ -1346,6 +1351,7 @@ pub(crate) mod tests {
     /// as `header` says (or, with `pending`, marks the version `review = "pending"`), and
     /// a download fails while `fail_download` is set.
     fn unreviewed_cactarium(
+        name: &'static str,
         requests: usize,
         header: bool,
         pending: bool,
@@ -1353,7 +1359,7 @@ pub(crate) mod tests {
     ) -> (crate::cactarium::Client, std::thread::JoinHandle<Vec<String>>) {
         let (base, heads) = crate::fetch::download::test_server::serve_with(requests, move |path| {
             if path.contains("/resolve?") {
-                let mut answer: serde_json::Value = serde_json::from_str(&resolved("max/bbh@1.2.0", "1.2.0", None, None)).unwrap();
+                let mut answer: serde_json::Value = serde_json::from_str(&resolved(&format!("max/{name}@1.2.0"), "1.2.0", None, None)).unwrap();
                 if pending {
                     answer["review"] = "pending".into();
                 }
@@ -1362,7 +1368,7 @@ pub(crate) mod tests {
             } else if fail_download.load(std::sync::atomic::Ordering::SeqCst) {
                 ("503 Service Unavailable", "api-generation: 1\r\n".into(), b"{}".to_vec())
             } else {
-                let body = stamped("max/bbh@1.2.0").into_bytes();
+                let body = stamped(&format!("max/{name}@1.2.0")).into_bytes();
                 let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &body);
                 let sha: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
                 ("200 OK", format!("x-sha256: {sha}\r\n"), body)
@@ -1381,7 +1387,7 @@ pub(crate) mod tests {
         for (header, pending) in [(true, false), (false, true)] {
             let tmp = tempfile::tempdir().unwrap();
             let fail = Arc::new(AtomicBool::new(false));
-            let (client, heads) = unreviewed_cactarium(4, header, pending, fail.clone());
+            let (client, heads) = unreviewed_cactarium("bbh", 4, header, pending, fail.clone());
             let path = fetch_published(&client, tmp.path(), "max/bbh@1").unwrap();
             assert_eq!(path, tmp.path().join("max/bbh/1.2.0.unreviewed.sim"), "header {header}, pending {pending}");
             assert!(path.is_file());
@@ -1412,6 +1418,24 @@ pub(crate) mod tests {
         }
     }
 
+    /// The inputs' repository is read from a version awaiting review with a warning, and a
+    /// published import that already warned about the same sim does not warn twice.
+    #[test]
+    fn the_repository_of_an_unreviewed_sim_is_warned_about_once() {
+        use std::sync::{atomic::AtomicBool, Arc};
+        let tmp = tempfile::tempdir().unwrap();
+        let (client, _) = unreviewed_cactarium("bbo", 4, true, false, Arc::new(AtomicBool::new(false)));
+        let warned = || crate::cactarium::WARNED.lock().unwrap().iter().filter(|w| *w == "max/bbo@1.2.0").count();
+        let slug: cactup_ecosystem_common::slug::Slug = "max/bbo@1.2.0".parse().unwrap();
+        let before = warned();
+        let source = repo_source_at(&client, &slug).unwrap();
+        assert_eq!(source.url, "https://github.com/et/sims");
+        assert_eq!(warned(), before + 1);
+        fetch_published(&client, tmp.path(), "max/bbo@1").unwrap();
+        repo_source_at(&client, &slug).unwrap();
+        assert_eq!(warned(), before + 1, "said once");
+    }
+
     /// A sim that does not await review keeps its plain name, and a download failure still
     /// falls back to the copy kept for it.
     #[test]
@@ -1419,7 +1443,7 @@ pub(crate) mod tests {
         use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
         let tmp = tempfile::tempdir().unwrap();
         let fail = Arc::new(AtomicBool::new(false));
-        let (client, _) = unreviewed_cactarium(4, false, false, fail.clone());
+        let (client, _) = unreviewed_cactarium("bbh", 4, false, false, fail.clone());
         let path = fetch_published(&client, tmp.path(), "max/bbh@1").unwrap();
         assert_eq!(path, tmp.path().join("max/bbh/1.2.0.sim"));
         fail.store(true, Ordering::SeqCst);

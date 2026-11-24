@@ -1200,6 +1200,100 @@ fn a_commands_client_asks_for_unreviewed_only_under_the_flag() {
     assert!(heads[1].contains("authorization: bearer cactarium_admin"), "{}", heads[1]);
 }
 
+/// An installed package that Cactarium no longer serves (a release awaiting review, read
+/// without `--risky-allow-untrusted-artifacts`) is named by the version recorded for it, not by
+/// its commit, in every line that names it.
+#[test]
+fn an_installed_package_not_served_is_named_by_its_recorded_version() {
+    let it = z4c();
+    let s = &it.setup;
+    s.add(&["max/z4c"], yes()).unwrap();
+    it.fake.lock().unwrap().packages.retain(|(p, _)| p != "max/z4c");
+    let pristine = std::fs::read_to_string(s.inst.source_thornlist()).unwrap();
+    let list = thornlist::parse(&pristine).unwrap();
+    let meta = s.meta();
+    let client = crate::cactarium::Client::new(&s.ctx.db.read().unwrap());
+    let names: Vec<&str> = meta.added.iter().map(|a| a.package.as_str()).collect();
+    let mut reg = super::super::resolution::Registry::new(&client, names);
+    let set = super::super::resolution::present(&mut reg, &s.inst.root, &list, &meta.added, None, &Default::default());
+    reg.finish();
+    let set = set.unwrap_or_else(|e| panic!("{e:#}"));
+    let z = set.present.iter().find(|p| p.release.id.as_str() == "max/z4c").expect("present");
+    assert_eq!(z.release.label(), "max/z4c@1.0.0");
+    assert_eq!(set.unread.len(), 1);
+}
+
+/// The first request a command makes, lowercased, to a server that answers every request 404
+/// (empty when it made none). Run against `s` pointed at that server, with a token stored.
+fn first_request(s: &Setup, run: impl FnOnce(&Setup)) -> String {
+    let (base, heads) = crate::fetch::download::test_server::serve_with(1, |_| {
+        ("404 Not Found", "api-generation: 1\r\n".into(), b"{}".to_vec())
+    });
+    crate::cactarium::TEST_TOKENS.lock().unwrap().insert(base.clone(), "cactarium_admin".into());
+    let to = base.clone();
+    s.ctx
+        .db
+        .update(move |d| {
+            d.set_knob(crate::cactarium::URL_KNOB, to);
+            Ok(())
+        })
+        .unwrap();
+    run(s);
+    // Lets the server finish when the command made no request.
+    let _ = std::net::TcpStream::connect(base.trim_start_matches("http://"));
+    heads.join().unwrap().into_iter().next().unwrap_or_default().to_ascii_lowercase()
+}
+
+/// Every command that asks Cactarium follows `--risky-allow-untrusted-artifacts`: its requests
+/// carry the header and the token with it, and neither without it. Flipping any call site
+/// back to an anonymous client fails here.
+#[test]
+fn every_command_that_asks_cactarium_follows_the_flag() {
+    use crate::args::{ClaimsCommand, OverrideAction};
+    let mut it = z4c();
+    it.setup.add(&["max/z4c"], yes()).unwrap();
+    let s = &mut it.setup;
+    let mut sim = cactup_ecosystem_common::sim::SimFile::from_toml(&crate::commands::import::tests::stamped("max/bbh@1.2.0")).unwrap();
+    sim.sim.cactarium = Some("max/bbh@1.2.0".parse().unwrap());
+    sim.inputs.push(cactup_ecosystem_common::sim::Input {
+        knob: "K".into(),
+        description: None,
+        url: None,
+        sha256: None,
+        unpack: false,
+        path: None,
+        fixups: vec![],
+        repo_file: Some("in.txt".into()),
+    });
+    type Run = Box<dyn Fn(&Setup)>;
+    let commands: Vec<(&str, Run)> = vec![
+        ("add", Box::new(|s| drop(s.add(&["max/z4c"], yes())))),
+        ("remove", Box::new(|s| drop(s.remove(&["max/z4c"], remove_yes())))),
+        ("claims check", Box::new(|s| drop(crate::commands::claims::dispatch(&s.ctx, ClaimsCommand::Check)))),
+        ("claims problems", Box::new(|s| drop(crate::commands::claims::problems(&s.ctx, &s.inst, &s.meta())))),
+        ("claims warnings", Box::new(|s| drop(crate::commands::claims::warn_problems(&s.ctx, &s.inst)))),
+        (
+            "claims override",
+            Box::new(|s| {
+                let action = OverrideAction::Drop { claim: "max/z4c:dependency:et/carpetx".into(), note: None };
+                drop(crate::commands::claims::dispatch(&s.ctx, ClaimsCommand::Override { remove: None, action: Some(action) }))
+            }),
+        ),
+        ("import", Box::new(|s| drop(crate::commands::import::download_published(&s.ctx, "max/bbh")))),
+        ("import inputs", Box::new(move |s| drop(crate::commands::import::repo_source(&s.ctx, &sim, &[])))),
+        ("stack", Box::new(|s| drop(crate::cactarium::stack_release_text(&s.ctx, "o/s@head")))),
+    ];
+    for flag in [false, true] {
+        s.ctx.globals.risky_allow_untrusted_artifacts = flag;
+        for (name, run) in &commands {
+            let head = first_request(s, |s| run(s));
+            assert!(head.starts_with("get ") || head.starts_with("post "), "{name} made no request: {head:?}");
+            assert_eq!(head.contains("x-cactarium-include-unreviewed: true"), flag, "{name}, flag {flag}: {head}");
+            assert_eq!(head.contains("authorization: bearer cactarium_admin"), flag, "{name}, flag {flag}: {head}");
+        }
+    }
+}
+
 /// The live thornlist is read before the prompt; hand edits made while it
 /// waits are not overwritten: the check under the lock sees them.
 #[test]
@@ -2829,7 +2923,7 @@ fn an_unread_base_package_says_why() {
         ("404", |f, _| f.snapshots.clear(), "et/admbase is at a commit unknown to Cactarium (is it pushed?)".into()),
         ("400", |f, a1| f.bad_at.push(a1.to_owned()), "invalid manifest: no [package] table".into()),
         ("400 too large", |f, a1| f.too_large_at.push(a1.to_owned()), "its tree is too large to read".into()),
-        ("403", |f, a1| f.refuse_at.push(a1.to_owned()), "it reads an untrusted package only at released versions".into()),
+        ("403", |f, a1| f.refuse_at.push(a1.to_owned()), "it serves an untrusted package only at approved releases (one awaiting review needs --risky-allow-untrusted-artifacts and an admin's token)".into()),
         ("502", |f, a1| f.down_at.push(a1.to_owned()), "it could not reach the package's repository just now".into()),
         ("504 from a proxy", |f, a1| f.proxy_timeout_at.push(a1.to_owned()), "it (or a proxy in front of it) failed (504); try again later".into()),
     ];

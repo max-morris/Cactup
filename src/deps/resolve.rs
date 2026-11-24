@@ -183,6 +183,7 @@ fn run(request: &Request, cat: &mut Catalog, mode: Mode) -> Res<Result<Plan, Opt
         parsed: RefCell::new(HashMap::new()),
         need_cache: RefCell::new(HashMap::new()),
         fork_cache: RefCell::new(HashMap::new()),
+        retired: Vec::new(),
         universe: Vec::new(),
         forkable: BTreeSet::new(),
         flesh_possible: false,
@@ -260,8 +261,14 @@ fn eligible<'r>(
 
 /// In order of preference: approved before awaiting review, then newest first (versions by
 /// semver, above any release at no version); ties keep the order they came in.
-fn preferred(mut rs: Vec<&Rel>) -> Vec<&Rel> {
-    let rank = |r: &Release| (r.pending, std::cmp::Reverse(r.at.version().map(|v| v.version.clone())));
+///
+/// A release older than the `present` one comes after every other, so that approved-over-pending
+/// never moves an installed package down to an older version.
+fn preferred<'a>(mut rs: Vec<&'a Rel>, present: Option<&Release>) -> Vec<&'a Rel> {
+    let rank = |r: &Release| {
+        let older = present.is_some_and(|p| r.older_than(p));
+        (older, r.pending, std::cmp::Reverse(r.at.version().map(|v| v.version.clone())))
+    };
     rs.sort_by_key(|r| rank(r));
     rs
 }
@@ -751,6 +758,9 @@ struct Search<'a, 'c, 'f> {
     parsed: RefCell<HashMap<*const Release, Rc<Vec<Parsed>>>>,
     need_cache: RefCell<HashMap<(*const Release, usize, usize), Rc<Need>>>,
     fork_cache: RefCell<HashMap<*const Release, Rc<Vec<(PkgId, ForkOf)>>>>,
+    /// Releases taken out of the universe or the present map, kept alive: a cache above is keyed
+    /// by address, and a freed address could be given to a release that then reads the old one's entry.
+    retired: Vec<Rel>,
     /// Every release that could come into play: the present ones, and every version of every
     /// package reachable from them or the named specs through dependency claims (any
     /// alternative, any version, commits read), all loaded before the search.
@@ -833,6 +843,7 @@ fn held_release(cat: &Catalog, lib: &PkgId, commit: &str) -> Release {
         yanked: false,
         yank_reason: None,
         pending: false,
+        recorded: None,
         usable: true,
         thorns: Vec::new(),
         claims: Vec::new(),
@@ -891,9 +902,11 @@ impl Search<'_, '_, '_> {
                 }
                 let read = Present { release, stand_in: false, ..(*p).clone() };
                 let rel = Rc::new(read.release.clone());
-                releases.retain(|r| r.id != *id);
+                let (gone, kept): (Vec<Rel>, Vec<Rel>) = releases.drain(..).partition(|r| r.id == *id);
+                *releases = kept;
+                self.retired.extend(gone);
                 self.present.insert(id.clone(), Rc::new(read));
-                self.present_rel.insert(id.clone(), rel.clone());
+                self.retired.extend(self.present_rel.insert(id.clone(), rel.clone()));
                 // Only what its enabled thorns, and those a need names, claim: reading a
                 // package does not bring in the needs of thorns nothing enables. Followed again
                 // when more of its thorns come to be wanted.
@@ -1539,7 +1552,7 @@ impl Search<'_, '_, '_> {
         }
         let ok = eligible(&all, &reqs, &reqs, present.as_deref());
         let ok: Vec<&Rel> = ok.into_iter().filter(|r| !r.library && e.enabled.iter().all(|th| r.thorn(th).is_some())).collect();
-        let ok = preferred(ok);
+        let ok = preferred(ok, present.as_deref());
         let newest_first = match present.as_ref().map(|_| &self.present[t].origin) {
             None => true,
             Some(Origin::Added) => named.is_some() || self.request.options.upgrade_all,
@@ -2533,7 +2546,7 @@ impl Search<'_, '_, '_> {
             };
             return fail(r);
         }
-        let ok: Vec<&Rel> = preferred(ok.into_iter().filter(|r| !r.library).collect());
+        let ok: Vec<&Rel> = preferred(ok.into_iter().filter(|r| !r.library).collect(), present.as_deref());
         if ok.is_empty() {
             if let Some((at, detail)) = unreadable.into_iter().next() {
                 let by = on_t.iter().find(|r| r.need.source != Source::Named).map(|r| r.need.live(r.kind));
@@ -3012,7 +3025,7 @@ impl Search<'_, '_, '_> {
                 let fitting = eligible(&candidates, &reqs, &reqs, None);
                 let not_a_library = !fitting.is_empty() && fitting.iter().all(|r| !r.library);
                 let ok: Vec<&Rel> = fitting.into_iter().filter(|r| r.library).collect();
-                let Some(best) = preferred(ok).first().map(|r| (*r).clone()) else {
+                let Some(best) = preferred(ok, None).first().map(|r| (*r).clone()) else {
                     let r = if !self.cat.known(lib) {
                         Refusal::NotRegistered { target, by: lives.first().cloned() }
                     } else if not_a_library {

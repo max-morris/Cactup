@@ -365,17 +365,25 @@ warns that it may fetch and build arbitrary code and asks you to type `yes`.
 prints), and is the only way to take such a tip in a script.
 
 The same flag covers versions that nobody has approved yet. Without it,
-cactup asks Cactarium anonymously and is served approved versions only. With
-it, every request carries `x-cactarium-include-unreviewed: true` and the
-token stored by `cactup login`, if there is one. Cactarium then serves
-versions awaiting review as its settings allow: to an admin's token always,
-to anyone only when the site serves unreviewed code. An answer that includes
-one is warned about, and `cactup add` lists each such release in red
+`add`, `remove`, `claims`, `import`, `install` and `inst refetch` ask
+Cactarium anonymously: no token, and approved versions only. With it, each
+request of those commands carries `x-cactarium-include-unreviewed: true` and
+your token (`CACTARIUM_TOKEN`, else the one stored by `cactup login`), if
+there is one, to the Cactarium server named by the `cactarium-url` knob,
+whatever server that is. Other commands (`sim export`, `sim publish`,
+`download submit`, `login`, `inst show`) never send either. Cactarium then
+serves versions awaiting review as its settings allow: to an admin's token
+always, to anyone only when the site serves unreviewed code. An answer that
+includes one is warned about, and `cactup add` lists each such release in red
 (`et/foo@1.2.0 awaits review`). Ranges prefer approved versions: a version
 awaiting review is taken only when named exactly (`@=1.2.0`), or when no
-approved version fits.
+approved version fits. An installed package is never moved to an older
+version for being awaiting review; a move to an older version is shown as a
+`downgrade`.
 
-A sim awaiting review downloads to `~/.cactup/simfiles/<owner>/<name>/<version>.unreviewed.sim`.
+A sim awaiting review downloads to
+`~/.cactup/simfiles/<owner>/<name>/[<sim>/]<version>.unreviewed.sim`
+(`<sim>/` only for one sim of a multi-sim entry).
 When Cactarium cannot be asked, `cactup import` uses the cached copy of an
 approved version and never one of these.
 

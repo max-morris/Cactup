@@ -600,7 +600,7 @@ fn resolve_source(ctx: &Ctx, inst: &Installation, args: &RefetchArgs) -> Res<Sou
         let db = ctx.db.read()?;
         let selector = stay_on_track(selector, db.installations.get(&inst.alias));
         let crate::cactarium::StackRelease { slug, text: bytes, unpinned, contact } =
-            crate::cactarium::stack_release_text(&db, &selector, ctx.globals.risky_allow_untrusted_artifacts)?;
+            crate::cactarium::stack_release_text(ctx, &selector)?;
         if unpinned {
             println!("{}", format!("{slug} is not a release: its repos follow their branches").yellow());
         }

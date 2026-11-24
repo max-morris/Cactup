@@ -127,6 +127,18 @@ pub struct Client {
     /// every request then carries the header and the stored token, if any.
     /// Without it no request does, so a token never goes with a plain read.
     unreviewed: bool,
+    /// The stored token, read once on the first request under the flag.
+    token: TokenCell,
+}
+
+/// The token a client sends under the flag, read once. Its `Debug` never shows it.
+#[derive(Clone, Default)]
+struct TokenCell(std::sync::Arc<std::sync::OnceLock<Option<String>>>);
+
+impl std::fmt::Debug for TokenCell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TokenCell(..)")
+    }
 }
 
 impl Client {
@@ -148,6 +160,7 @@ impl Client {
             patient: false,
             stop: &gix::interrupt::IS_INTERRUPTED,
             unreviewed: false,
+            token: TokenCell::default(),
         }
     }
 
@@ -204,7 +217,9 @@ impl Client {
         let url = format!("{}?req={}&kind={}", self.url("/resolve"), query_escape(req), query_escape(kind));
         let answer = self.send(self.http().get(&url))?;
         let unreviewed = answer.unreviewed();
-        Ok(Resolution { resolved: answer.json()?, unreviewed })
+        let resolution = Resolution { resolved: answer.json()?, unreviewed };
+        self.refuse_unasked(resolution.awaits_review(), &resolution.slug)?;
+        Ok(resolution)
     }
 
     /// A stack release (`version` exact, or `head`/`master`), with what the
@@ -225,20 +240,21 @@ impl Client {
             .filter(|c| !c.is_empty())
             .map(str::to_owned);
         let unreviewed = response.unreviewed();
+        self.refuse_unasked(unreviewed, &format!("{owner}/{name}@{version}"))?;
         let url = response.url.clone();
         Ok(StackResponse { stack: stack_json(response.text()?, &url)?, unpinned, untrusted, unreviewed, contact })
     }
 
     pub fn package_versions(&self, owner: &str, name: &str) -> Res<PackageVersions> {
         let url = self.url(&format!("/packages/{owner}/{name}/versions"));
-        self.send(self.http().get(&url))?.json()
+        Ok(self.asked_for_only(self.send(self.http().get(&url))?.json()?))
     }
 
     /// [`Client::package_versions`], or `None` when Cactarium has no
     /// such package.
     pub fn package_versions_if_any(&self, owner: &str, name: &str) -> Res<Option<PackageVersions>> {
         let url = self.url(&format!("/packages/{owner}/{name}/versions"));
-        self.send_found(self.http().get(&url), &[reqwest::StatusCode::NOT_FOUND])?.ok().map(Answer::json).transpose()
+        self.send_found(self.http().get(&url), &[reqwest::StatusCode::NOT_FOUND])?.ok().map(Answer::json).transpose().map(|v| v.map(|v| self.asked_for_only(v)))
     }
 
     /// A package read at something no published version names: a branch
@@ -252,7 +268,11 @@ impl Client {
             return Ok(None);
         };
         let untrusted = response.headers().get(UNTRUSTED_HEADER).is_none_or(|v| v.as_bytes() == b"true");
-        Ok(Some((response.json()?, untrusted)))
+        let version: PackageVersion = response.json()?;
+        if !self.unreviewed && version.version.review.as_deref() == Some("pending") {
+            return Ok(None);
+        }
+        Ok(Some((version, untrusted)))
     }
 
     /// Packages read at commits, as many as one request takes ([`ReadRequest`]
@@ -265,7 +285,17 @@ impl Client {
         let body = serde_json::to_vec(request).context("Failed to encode the read request")?;
         let post = self.http().post(self.url("/packages/read")).header("content-type", "application/json").body(body);
         let response = self.send_found(post, MISSING_ROUTE)?.map_err(|m| self.missing("/packages/read", m))?;
-        let answer: ReadAnswer = response.json().map_err(|e| UnusableAnswer(format!("{e:#}")))?;
+        let mut answer: ReadAnswer = response.json().map_err(|e| UnusableAnswer(format!("{e:#}")))?;
+        if !self.unreviewed {
+            // Not asked for: a server that sends one anyway is not believed.
+            for item in &mut answer.items {
+                if item.version.as_ref().is_some_and(|v| v.version.review.as_deref() == Some("pending")) {
+                    item.version = None;
+                    item.status = cactup_ecosystem_common::api::ReadStatus::Forbidden;
+                    item.error = Some(format!("{}@{} awaits review", item.package, item.commit));
+                }
+            }
+        }
         if answer.items.len() != request.items.len() {
             let why = format!("{} items for {} asked", answer.items.len(), request.items.len());
             return Err(UnusableAnswer(why).into());
@@ -410,12 +440,29 @@ impl Client {
     /// that is one sim. One sim of several must also be stamped as that sim
     /// (`owner/name/sim@number`). Nothing is written to `dest` unless every
     /// check passes.
-    pub fn download_sim(&self, owner: &str, name: &str, version: &str, sim: Option<&str>, dest: &Path) -> Res<()> {
+    pub fn download_sim(
+        &self,
+        owner: &str,
+        name: &str,
+        version: &str,
+        sim: Option<&str>,
+        dest: &Path,
+        unreviewed: bool,
+    ) -> Res<()> {
         let mut url = self.url(&format!("/sims/{owner}/{name}/{version}/download"));
         if let Some(sim) = sim {
             url.push_str(&format!("?{SIM_QUERY}={}", query_escape(sim)));
         }
         let response = self.send(self.http().get(&url))?;
+        // `unreviewed` is what `/resolve` said, and it chose `dest`: a download that says
+        // otherwise would put unreviewed bytes where the offline fallback reads.
+        if response.unreviewed() && !unreviewed {
+            let what = match sim {
+                Some(sim) => format!("{owner}/{name}/{sim}@{version}"),
+                None => format!("{owner}/{name}@{version}"),
+            };
+            bail!("Cactarium sent {what}, which awaits review, though it did not say so when asked about it");
+        }
         let expected = response.headers().get(SHA256_HEADER).and_then(|v| v.to_str().ok()).map(str::to_owned);
         let bytes = response.bytes().with_context(|| format!("Failed to download {url}"))?;
         if let Some(expected) = expected {
@@ -626,10 +673,28 @@ impl Client {
         Err(anyhow::Error::new(Refused { status: status.as_u16(), message, retry_after, code }))
     }
 
+    /// A client not asking for what awaits review does not take it: an answer that has it
+    /// anyway (a server that does not follow the protocol) is refused.
+    fn refuse_unasked(&self, awaits_review: bool, what: &str) -> Res<()> {
+        if awaits_review && !self.unreviewed {
+            bail!("Cactarium served {what}, which awaits review, without being asked\nPass --risky-allow-untrusted-artifacts to take such releases.");
+        }
+        Ok(())
+    }
+
+    /// `versions` without the releases awaiting review, unless they were asked for.
+    fn asked_for_only(&self, mut versions: PackageVersions) -> PackageVersions {
+        if !self.unreviewed {
+            versions.versions.retain(|v| v.version.review.as_deref() != Some("pending"));
+        }
+        versions
+    }
+
     /// Marks `request` as one that may be served what awaits review, with
     /// the stored token, if there is one (an admin's gets more). A request
-    /// that carries its own token keeps it. The token never leaves for another
-    /// host: it is sensitive, so a redirect drops it.
+    /// that carries its own token keeps it. reqwest drops `Authorization` from a
+    /// request that a redirect sends to another origin, by its name; a redirect within
+    /// the origin keeps it. (`set_sensitive` only hides the value from `Debug`.)
     fn ask_for_unreviewed(&self, request: &mut reqwest::blocking::Request) {
         use reqwest::header::{HeaderValue, AUTHORIZATION};
         let headers = request.headers_mut();
@@ -637,7 +702,14 @@ impl Client {
         if headers.contains_key(AUTHORIZATION) {
             return;
         }
-        if let Ok(token) = token_for(&self.base)
+        let token = self.token.0.get_or_init(|| match token_if_any(&self.base) {
+            Ok(token) => token,
+            Err(e) => {
+                eprintln!("{}", format!("Could not read the Cactarium token ({e:#}); asking without it.").yellow());
+                None
+            }
+        });
+        if let Some(token) = token
             && let Ok(mut value) = HeaderValue::from_str(&format!("Bearer {token}"))
         {
             value.set_sensitive(true);
@@ -886,8 +958,9 @@ pub struct StackRelease {
 /// is code nobody has reviewed: it is said loudly, and taken only on a yes
 /// typed at the terminal, or with `allow_untrusted`
 /// (`--risky-allow-untrusted-artifacts`), which still prints the warning.
-pub fn stack_release_text(db: &Database, req: &str, allow_untrusted: bool) -> Res<StackRelease> {
-    stack_release_from(&Client::new(db).including_unreviewed(allow_untrusted), req, allow_untrusted)
+pub fn stack_release_text(ctx: &crate::commands::Ctx, req: &str) -> Res<StackRelease> {
+    let allow_untrusted = ctx.globals.risky_allow_untrusted_artifacts;
+    stack_release_from(&Client::for_command(ctx)?, req, allow_untrusted)
 }
 
 /// [`stack_release_text`], from the registry `client` talks to.
@@ -933,6 +1006,14 @@ fn stack_release_from(client: &Client, req: &str, allow_untrusted: bool) -> Res<
 /// The warning for a release that awaits review, served because of
 /// `--risky-allow-untrusted-artifacts`. The flag is the yes, so nothing is asked.
 pub(crate) fn warn_unreviewed(slug: &str) {
+    // Once per release: an import resolves the same sim twice (its file, then its inputs).
+    static SAID: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let mut said = SAID.lock().expect("warnings poisoned");
+    if said.iter().any(|s| s == slug) {
+        return;
+    }
+    said.push(slug.to_owned());
+    drop(said);
     #[cfg(test)]
     WARNED.lock().expect("test warnings poisoned").push(slug.to_owned());
     eprintln!("{}", unreviewed_warning(slug).red().bold());
@@ -1106,19 +1187,21 @@ pub static TEST_TOKENS: std::sync::Mutex<std::collections::BTreeMap<String, Stri
 
 /// The token for `base`: `CACTARIUM_TOKEN`, else the credentials file.
 pub fn token_for(base: &str) -> Res<String> {
+    token_if_any(base)?.ok_or_else(|| anyhow!("No token for Cactarium at {base}; run `cactup login` first"))
+}
+
+/// [`token_for`], where having none is `None`; an unreadable credentials file is the error.
+fn token_if_any(base: &str) -> Res<Option<String>> {
     #[cfg(test)]
     if let Some(token) = TEST_TOKENS.lock().expect("test tokens poisoned").get(base) {
-        return Ok(token.clone());
+        return Ok(Some(token.clone()));
     }
     if let Ok(token) = std::env::var("CACTARIUM_TOKEN")
         && !token.is_empty()
     {
-        return Ok(token);
+        return Ok(Some(token));
     }
-    read_credentials(&credentials_path())?
-        .tokens
-        .remove(base)
-        .ok_or_else(|| anyhow!("No token for Cactarium at {base}; run `cactup login` first"))
+    Ok(read_credentials(&credentials_path())?.tokens.remove(base))
 }
 
 /// Store `token` for `base` in `path`, written whole under a temporary name
@@ -1155,7 +1238,7 @@ mod tests {
         let _ = client.stack_release("o", "s", "1.0.0");
         let _ = client.package_versions("o", "n");
         let _ = client.package_at_if_any("o", "n", "head");
-        let _ = client.download_sim("o", "n", "1.0.0", None, &std::env::temp_dir().join("never-written.sim"));
+        let _ = client.download_sim("o", "n", "1.0.0", None, &std::env::temp_dir().join("never-written.sim"), false);
         let _ = client.providers(&cactup_ecosystem_common::ccl::Need::Thorn("T".into()));
         let commit = "a".repeat(40);
         let _ = client.lookup(&[PinQuery { url: "https://github.com/o/n".into(), commit: commit.clone() }]);
@@ -1218,7 +1301,7 @@ mod tests {
         let answers = |header: &'static str, review: &'static str| {
             let body = body(review);
             let (base, _) = serve_with(1, move |_| ("200 OK", format!("api-generation: 1\r\n{header}"), body.as_bytes().to_vec()));
-            Client::at(&base).resolve("o/n", "sim").unwrap()
+            Client::at(&base).including_unreviewed(true).resolve("o/n", "sim").unwrap()
         };
         assert!(answers("x-cactarium-unreviewed: true\r\n", "").awaits_review());
         assert!(answers("x-cactarium-unreviewed: true\r\n", "").unreviewed);
@@ -1230,7 +1313,7 @@ mod tests {
             "thornlist":{"filename":"s.th","text":"!CRL_VERSION = 1.0\n"}}"#;
         let stack = |header: &'static str| {
             let (base, _) = serve_with(1, move |_| ("200 OK", format!("api-generation: 1\r\n{header}"), release.as_bytes().to_vec()));
-            Client::at(&base).stack_release("o", "s", "1.0.0").unwrap().unreviewed
+            Client::at(&base).including_unreviewed(true).stack_release("o", "s", "1.0.0").unwrap().unreviewed
         };
         assert!(stack("x-cactarium-unreviewed: true\r\n"));
         assert!(!stack("") && !stack("x-cactarium-unreviewed: false\r\n"));
@@ -1263,6 +1346,84 @@ mod tests {
         assert_eq!(warned("o/ws-d@head"), 1);
         let line = unreviewed_warning("o/n@1.0.0");
         assert_eq!(line, "WARNING: o/n@1.0.0 awaits review. Installing it may fetch and build arbitrary code.");
+    }
+
+    /// A client that did not ask for what awaits review does not take it, whatever a server
+    /// sends: `/resolve` and a stack release are refused, version lists and batch reads
+    /// lose the pending releases, and a download that says it awaits review is not kept.
+    #[test]
+    fn a_client_not_asking_takes_nothing_awaiting_review() {
+        let resolve = r#"{"slug":"o/n@1.0.0","kind":"sim","url":null,"version":"1.0.0","commit":"c","yanked":false,"state":"ok","curated":false,"published":0}"#;
+        let (base, _) = serve_with(2, move |_| {
+            ("200 OK", "api-generation: 1\r\nx-cactarium-unreviewed: true\r\n".into(), resolve.as_bytes().to_vec())
+        });
+        let err = format!("{:#}", Client::at(&base).resolve("o/n", "sim").unwrap_err());
+        assert!(err.contains("o/n@1.0.0") && err.contains("awaits review") && err.contains("--risky-allow-untrusted-artifacts"), "{err}");
+        let err = format!("{:#}", Client::at(&base).stack_release("o", "s", "1.0.0").err().unwrap());
+        assert!(err.contains("awaits review"), "{err}");
+
+        let version = |v: &str, review: &str| {
+            format!(r#"{{"version":"{v}","commit":"c","yanked":false,"state":"ok","curated":false,"published":0,"url":"u","thorns":[],"claims":[]{review}}}"#)
+        };
+        let list = format!(
+            r#"{{"slug":"o/n","versions":[{},{}]}}"#,
+            version("2.0.0", r#","review":"pending""#),
+            version("1.0.0", "")
+        );
+        let (base, _) = serve_with(2, move |_| ("200 OK", "api-generation: 1\r\n".into(), list.clone().into_bytes()));
+        let kept = |client: Client| client.package_versions("o", "n").unwrap().versions.len();
+        assert_eq!(kept(Client::at(&base)), 1);
+        assert_eq!(kept(Client::at(&base).including_unreviewed(true)), 2);
+
+        let commit = "a".repeat(40);
+        let item = format!(
+            r#"{{"items":[{{"package":"o/n","commit":"{commit}","status":"ok","version":{}}}]}}"#,
+            version("2.0.0", r#","review":"pending""#)
+        );
+        let (base, _) = serve_with(2, move |_| ("200 OK", "api-generation: 1\r\n".into(), item.clone().into_bytes()));
+        let read = |client: Client| {
+            let q = cactup_ecosystem_common::api::ReadQuery { package: "o/n".into(), commit: "a".repeat(40) };
+            client.read_packages(&ReadRequest { items: vec![q] }).unwrap().items.remove(0)
+        };
+        let item = read(Client::at(&base));
+        assert!(item.version.is_none() && item.error.unwrap().contains("awaits review"));
+        assert!(read(Client::at(&base).including_unreviewed(true)).version.is_some());
+
+        // A download that says it awaits review where `/resolve` did not: nothing is written.
+        let (base, _) = serve_with(2, |_| ("200 OK", "api-generation: 1\r\nx-cactarium-unreviewed: true\r\n".into(), b"x".to_vec()));
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("a.sim");
+        let client = Client::at(&base).including_unreviewed(true);
+        let err = format!("{:#}", client.download_sim("o", "n", "1.0.0", None, &dest, false).unwrap_err());
+        assert!(err.contains("awaits review") && !dest.exists(), "{err}");
+        client.download_sim("o", "n", "1.0.0", None, &dest, true).unwrap();
+        assert!(dest.exists());
+    }
+
+    /// The token is read once for a client: a change to what is stored afterward is not seen,
+    /// and a redirect to another origin takes no `Authorization` along.
+    #[test]
+    fn the_token_is_read_once_and_stays_at_home() {
+        let (other, other_heads) = serve_with(1, |_| ("404 Not Found", "api-generation: 1\r\n".into(), b"{}".to_vec()));
+        let to = format!("{other}/api/v1/elsewhere");
+        let (base, heads) = serve_with(2, move |path| {
+            if path.contains("first") {
+                ("302 Found", format!("Location: {to}\r\n"), Vec::new())
+            } else {
+                ("404 Not Found", "api-generation: 1\r\n".into(), b"{}".to_vec())
+            }
+        });
+        TEST_TOKENS.lock().unwrap().insert(base.clone(), "cactarium_one".into());
+        let client = Client::at(&base).including_unreviewed(true);
+        let _ = client.send(client.http().get(client.url("/first")));
+        TEST_TOKENS.lock().unwrap().insert(base.clone(), "cactarium_two".into());
+        let _ = client.send(client.http().get(client.url("/second")));
+        let heads = heads.join().unwrap();
+        assert!(heads[0].to_ascii_lowercase().contains("authorization: bearer cactarium_one"), "{}", heads[0]);
+        assert!(heads[1].to_ascii_lowercase().contains("authorization: bearer cactarium_one"), "{}", heads[1]);
+        let elsewhere = other_heads.join().unwrap()[0].to_ascii_lowercase();
+        assert!(elsewhere.starts_with("get /api/v1/elsewhere"), "{elsewhere}");
+        assert!(!elsewhere.contains("authorization") && !elsewhere.contains("cactarium_one"), "{elsewhere}");
     }
 
     #[test]
@@ -1316,9 +1477,9 @@ mod tests {
             ("200 OK", format!("x-sha256: {hash}\r\n"), b"format = 1\n".to_vec())
         });
         let client = Client::at(&base);
-        client.download_sim("o", "n", "1.0.0", None, &tmp.path().join("ok.sim")).unwrap();
+        client.download_sim("o", "n", "1.0.0", None, &tmp.path().join("ok.sim"), false).unwrap();
         assert_eq!(std::fs::read_to_string(tmp.path().join("ok.sim")).unwrap(), "format = 1\n");
-        let err = format!("{:#}", client.download_sim("o", "n", "2.0.0", None, &tmp.path().join("bad.sim")).unwrap_err());
+        let err = format!("{:#}", client.download_sim("o", "n", "2.0.0", None, &tmp.path().join("bad.sim"), false).unwrap_err());
         assert!(err.contains("SHA-256"), "{err}");
         assert!(!tmp.path().join("bad.sim").exists());
     }
@@ -1344,9 +1505,9 @@ mod tests {
         });
         let client = Client::at(&base);
         let at = |file: &str| tmp.path().join(file);
-        client.download_sim("et", "sims", "1.0.0", Some("qc0-z4c"), &at("ok.sim")).unwrap();
+        client.download_sim("et", "sims", "1.0.0", Some("qc0-z4c"), &at("ok.sim"), false).unwrap();
         let fails = |sim: &str, file: &str| {
-            let err = format!("{:#}", client.download_sim("et", "sims", "1.0.0", Some(sim), &at(file)).unwrap_err());
+            let err = format!("{:#}", client.download_sim("et", "sims", "1.0.0", Some(sim), &at(file), false).unwrap_err());
             assert!(!at(file).exists(), "{file} was written");
             err
         };
@@ -1356,7 +1517,7 @@ mod tests {
         assert!(err.contains("et/sims/other@1.0.0") && err.contains("sent the file of et/sims/qc0-z4c@1.0.0"), "{err}");
         let err = fails("bare", "bare.sim");
         assert!(err.contains("does not say which sim it is"), "{err}");
-        client.download_sim("et", "one", "1.0.0", None, &at("one.sim")).unwrap();
+        client.download_sim("et", "one", "1.0.0", None, &at("one.sim"), false).unwrap();
         let heads = heads.join().unwrap();
         assert!(heads[0].starts_with("GET /api/v1/sims/et/sims/1.0.0/download?sim=qc0-z4c "), "{}", heads[0]);
         assert!(heads[1].starts_with("GET /api/v1/sims/et/sims/1.0.0/download?sim=mag-tov "), "{}", heads[1]);

@@ -400,6 +400,7 @@ fn load(dir: &Path) -> Loaded {
                 yanked: false,
                 yank_reason: None,
                 pending: false,
+                recorded: None,
                 usable: true,
                 thorns: p.thorns.iter().map(ThornSpec::info).collect(),
                 claims: Vec::new(),
@@ -1297,6 +1298,7 @@ fn synthetic_release(id: &str, version: &str, thorns: &[(String, ThornFacts)], c
         yanked: false,
         yank_reason: None,
         pending: false,
+        recorded: None,
         usable: true,
         thorns: thorns
             .iter()
