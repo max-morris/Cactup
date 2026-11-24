@@ -364,6 +364,21 @@ warns that it may fetch and build arbitrary code and asks you to type `yes`.
 `--risky-allow-untrusted-artifacts` skips the question (the warning still
 prints), and is the only way to take such a tip in a script.
 
+The same flag covers versions that nobody has approved yet. Without it,
+cactup asks Cactarium anonymously and is served approved versions only. With
+it, every request carries `x-cactarium-include-unreviewed: true` and the
+token stored by `cactup login`, if there is one. Cactarium then serves
+versions awaiting review as its settings allow: to an admin's token always,
+to anyone only when the site serves unreviewed code. An answer that includes
+one is warned about, and `cactup add` lists each such release in red
+(`et/foo@1.2.0 awaits review`). Ranges prefer approved versions: a version
+awaiting review is taken only when named exactly (`@=1.2.0`), or when no
+approved version fits.
+
+A sim awaiting review downloads to `~/.cactup/simfiles/<owner>/<name>/<version>.unreviewed.sim`.
+When Cactarium cannot be asked, `cactup import` uses the cached copy of an
+approved version and never one of these.
+
 A stack release is installed as it was frozen: nothing is resolved. After
 `install` and `inst refetch --release` to a stack, once their own output is
 done, cactup runs `cactup claims check` over the result and prints what it

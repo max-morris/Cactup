@@ -327,12 +327,15 @@ pub(crate) struct GlobalOpts {
         action = ArgAction::Append
     )]
     pub knob: Vec<KnobOverride>,
-    /// Accept untrusted branch tips and commits without asking
+    /// Accept untrusted and unreviewed code without asking
     ///
     /// Covers a stack or package at a branch tip (@head, @master), or a
     /// package at an unpublished commit (#commit), from a source
-    /// not trusted by Cactarium. Nobody reviews these. They may fetch and
-    /// build arbitrary code. The warning is still printed.
+    /// not trusted by Cactarium. Also asks Cactarium for versions awaiting
+    /// review, and for entries awaiting their first review when your token
+    /// (cactup login) is an admin's. The stored token is sent with every
+    /// request. Nobody has reviewed such code. It may fetch and build
+    /// arbitrary code. The warning is still printed.
     #[clap(long, global = true)]
     pub risky_allow_untrusted_artifacts: bool,
 }

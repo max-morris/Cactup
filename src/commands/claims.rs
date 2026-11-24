@@ -155,7 +155,7 @@ fn list(ctx: &Ctx) -> Res<()> {
 /// some version.
 fn validate(ctx: &Ctx, inst: &Installation, o: &Override) -> Res<()> {
     let meta = inst.meta()?;
-    let client = Client::new(&ctx.db.read()?);
+    let client = Client::for_command(ctx)?;
     let names: Vec<&str> = meta.added.iter().map(|a| a.package.as_str()).collect();
     // Version lists only: no read at a commit, so no reason to wait as long as resolving does.
     let mut reg = Registry::new(&client, names).bounded(std::time::Duration::from_secs(60));
@@ -316,7 +316,7 @@ impl Checked {
 /// resolver over everything installed, with the installation's overrides applied). Changes
 /// nothing; fails when Cactarium cannot be asked.
 pub(crate) fn problems(ctx: &Ctx, inst: &Installation, meta: &InstallationMeta) -> Res<Checked> {
-    problems_with(&Client::new(&ctx.db.read()?), inst, meta, &PresentOptions::default())
+    problems_with(&Client::for_command(ctx)?, inst, meta, &PresentOptions::default())
 }
 
 /// [`problems`], asking `client`, reading the installation with `options`.
@@ -385,7 +385,7 @@ pub(crate) fn warn_problems(ctx: &Ctx, inst: &Installation) -> Vec<String> {
     if gix::interrupt::is_triggered() {
         return Vec::new();
     }
-    let said = match ctx.db.read().map(|db| Client::new(&db)).and_then(|c| Ok((c, inst.meta()?))) {
+    let said = match Client::for_command(ctx).and_then(|c| Ok((c, inst.meta()?))) {
         Ok((client, meta)) => {
             let client = client.stopped_by(&WARN_STOP).with_timeout(WARN_REQUEST);
             warn_lines(bounded_check(client, Installation::new(inst.alias.clone(), inst.root.clone()), meta))

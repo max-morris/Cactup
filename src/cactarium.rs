@@ -15,8 +15,8 @@ use colored::Colorize;
 use cactup_ecosystem_common::api::{
     DownloadConflict, DownloadQuery, DownloadReview, DownloadSubmission, ErrorBody, LookedUp, LookupRequest, PackageVersion, PackageVersions, PinInfo, PinQuery, Providers,
     ProvidersQuery, Published, ReadAnswer, ReadRequest, Refreshed, Resolved, StackReleases, VersionInfo, API_GENERATION,
-    API_GENERATION_HEADER, API_PREFIX, CONTACT_HEADER, MAX_LOOKUP_PINS, SHA256_HEADER, SIM_QUERY,
-    UNPINNED_HEADER, UNTRUSTED_HEADER,
+    API_GENERATION_HEADER, API_PREFIX, CONTACT_HEADER, INCLUDE_UNREVIEWED_HEADER, MAX_LOOKUP_PINS, SHA256_HEADER,
+    SIM_QUERY, UNPINNED_HEADER, UNREVIEWED_HEADER, UNTRUSTED_HEADER,
 };
 use cactup_ecosystem_common::stack::FrozenStack;
 use cactup_ecosystem_common::STACK_FORMAT;
@@ -123,6 +123,10 @@ pub struct Client {
     patient: bool,
     /// What interrupts a request in flight: Ctrl-C (a test's own flag).
     stop: &'static std::sync::atomic::AtomicBool,
+    /// Asks for what awaits review too (`--risky-allow-untrusted-artifacts`):
+    /// every request then carries the header and the stored token, if any.
+    /// Without it no request does, so a token never goes with a plain read.
+    unreviewed: bool,
 }
 
 impl Client {
@@ -143,7 +147,20 @@ impl Client {
             timeout: None,
             patient: false,
             stop: &gix::interrupt::IS_INTERRUPTED,
+            unreviewed: false,
         }
+    }
+
+    /// [`Client::new`], asking for what awaits review when the command was
+    /// given `--risky-allow-untrusted-artifacts`.
+    pub fn for_command(ctx: &crate::commands::Ctx) -> Res<Client> {
+        Ok(Client::new(&ctx.db.read()?).including_unreviewed(ctx.globals.risky_allow_untrusted_artifacts))
+    }
+
+    /// This client, asking (or not) for what awaits review: its requests
+    /// carry the header and the stored token, as [`Client::unreviewed`] says.
+    pub fn including_unreviewed(self, yes: bool) -> Client {
+        Client { unreviewed: yes, ..self }
     }
 
     /// This client, waiting as long as resolving dependencies may: a read of
@@ -183,9 +200,11 @@ impl Client {
     /// another kind saying so, before reading the rest of the reference; an
     /// older one ignores it, and the caller's own check of `Resolved::kind`
     /// still holds.
-    pub fn resolve(&self, req: &str, kind: &str) -> Res<Resolved> {
+    pub fn resolve(&self, req: &str, kind: &str) -> Res<Resolution> {
         let url = format!("{}?req={}&kind={}", self.url("/resolve"), query_escape(req), query_escape(kind));
-        self.send(self.http().get(&url))?.json()
+        let answer = self.send(self.http().get(&url))?;
+        let unreviewed = answer.unreviewed();
+        Ok(Resolution { resolved: answer.json()?, unreviewed })
     }
 
     /// A stack release (`version` exact, or `head`/`master`), with what the
@@ -205,8 +224,9 @@ impl Client {
             .and_then(|v| v.to_str().ok())
             .filter(|c| !c.is_empty())
             .map(str::to_owned);
+        let unreviewed = response.unreviewed();
         let url = response.url.clone();
-        Ok(StackResponse { stack: stack_json(response.text()?, &url)?, unpinned, untrusted, contact })
+        Ok(StackResponse { stack: stack_json(response.text()?, &url)?, unpinned, untrusted, unreviewed, contact })
     }
 
     pub fn package_versions(&self, owner: &str, name: &str) -> Res<PackageVersions> {
@@ -547,10 +567,12 @@ impl Client {
             Some(timeout) => request.timeout(timeout),
             None => request,
         };
-        let mut response = request
-            .header(API_GENERATION_HEADER, API_GENERATION.to_string())
-            .send()
-            .map_err(|e| self.unreachable(e))?;
+        let (http, request) = request.header(API_GENERATION_HEADER, API_GENERATION.to_string()).build_split();
+        let mut request = request.map_err(|e| self.unreachable(e))?;
+        if self.unreviewed {
+            self.ask_for_unreviewed(&mut request);
+        }
+        let mut response = http.execute(request).map_err(|e| self.unreachable(e))?;
         let generation = (response.headers().get(API_GENERATION_HEADER))
             .map(|g| g.to_str().ok().and_then(|g| g.parse::<u32>().ok()).unwrap_or(0));
         if let Some(generation) = generation
@@ -602,6 +624,25 @@ impl Client {
             Err(_) => (format!("Cactarium at {} answered {status}", self.base), None),
         };
         Err(anyhow::Error::new(Refused { status: status.as_u16(), message, retry_after, code }))
+    }
+
+    /// Marks `request` as one that may be served what awaits review, with
+    /// the stored token, if there is one (an admin's gets more). A request
+    /// that carries its own token keeps it. The token never leaves for another
+    /// host: it is sensitive, so a redirect drops it.
+    fn ask_for_unreviewed(&self, request: &mut reqwest::blocking::Request) {
+        use reqwest::header::{HeaderValue, AUTHORIZATION};
+        let headers = request.headers_mut();
+        headers.insert(INCLUDE_UNREVIEWED_HEADER, HeaderValue::from_static("true"));
+        if headers.contains_key(AUTHORIZATION) {
+            return;
+        }
+        if let Ok(token) = token_for(&self.base)
+            && let Ok(mut value) = HeaderValue::from_str(&format!("Bearer {token}"))
+        {
+            value.set_sensitive(true);
+            headers.insert(AUTHORIZATION, value);
+        }
     }
 
     /// Whether `url` is under this client's base: the same scheme, host and
@@ -718,6 +759,11 @@ struct Answer {
 }
 
 impl Answer {
+    /// Whether the answer serves something awaiting review.
+    fn unreviewed(&self) -> bool {
+        self.headers.get(UNREVIEWED_HEADER).is_some_and(|v| v.as_bytes() == b"true")
+    }
+
     fn headers(&self) -> &reqwest::header::HeaderMap {
         &self.headers
     }
@@ -795,7 +841,31 @@ pub struct StackResponse {
     pub stack: FrozenStack,
     pub unpinned: bool,
     pub untrusted: bool,
+    /// The release awaits review (served under `--risky-allow-untrusted-artifacts`).
+    pub unreviewed: bool,
     pub contact: Option<String>,
+}
+
+/// `/resolve`'s answer, and whether it serves something awaiting review.
+#[derive(Debug)]
+pub struct Resolution {
+    pub resolved: Resolved,
+    /// The answer said `x-cactarium-unreviewed: true`.
+    pub unreviewed: bool,
+}
+
+impl Resolution {
+    /// Awaiting review, by the header or by the version's own state.
+    pub fn awaits_review(&self) -> bool {
+        self.unreviewed || self.resolved.version.review.as_deref() == Some("pending")
+    }
+}
+
+impl std::ops::Deref for Resolution {
+    type Target = Resolved;
+    fn deref(&self) -> &Resolved {
+        &self.resolved
+    }
 }
 
 /// A stack release for `req` (`owner/stack[@range|version|head|master]`):
@@ -817,13 +887,14 @@ pub struct StackRelease {
 /// typed at the terminal, or with `allow_untrusted`
 /// (`--risky-allow-untrusted-artifacts`), which still prints the warning.
 pub fn stack_release_text(db: &Database, req: &str, allow_untrusted: bool) -> Res<StackRelease> {
-    stack_release_from(&Client::new(db), req, allow_untrusted)
+    stack_release_from(&Client::new(db).including_unreviewed(allow_untrusted), req, allow_untrusted)
 }
 
 /// [`stack_release_text`], from the registry `client` talks to.
 fn stack_release_from(client: &Client, req: &str, allow_untrusted: bool) -> Res<StackRelease> {
     use cactup_ecosystem_common::slug::Slug;
     let slug: Slug = req.parse().map_err(|e| anyhow!("\"{req}\" is not a stack (owner/name[@version]): {e}"))?;
+    let mut warned = false;
     let version = match slug.tip() {
         Some(_) => slug.at.clone().expect("a tip is an @ form"),
         None => {
@@ -831,12 +902,19 @@ fn stack_release_from(client: &Client, req: &str, allow_untrusted: bool) -> Res<
             if resolved.kind != "stack" {
                 bail!("{} is a {}, not a stack", resolved.slug, resolved.kind);
             }
+            if resolved.awaits_review() {
+                warn_unreviewed(&resolved.slug);
+                warned = true;
+            }
             warn_if_yanked(&resolved.slug, &resolved.version);
-            resolved.version.version
+            resolved.resolved.version.version
         }
     };
-    let StackResponse { stack, unpinned, untrusted, contact } =
+    let StackResponse { stack, unpinned, untrusted, unreviewed, contact } =
         client.stack_release(slug.owner.as_str(), slug.name.as_str(), &version)?;
+    if unreviewed && !untrusted && !warned {
+        warn_unreviewed(&stack.stack.to_string());
+    }
     if untrusted {
         confirm_untrusted(&stack.stack.to_string(), "stack", Unreviewed::Tip, allow_untrusted)?;
     }
@@ -850,6 +928,22 @@ fn stack_release_from(client: &Client, req: &str, allow_untrusted: bool) -> Res<
     }
     let text = crate::thornlist::pin_text(&stack.thornlist.text, &pins).with_context(pin_failed)?;
     Ok(StackRelease { slug: stack.stack.to_string(), text, unpinned, contact })
+}
+
+/// The warning for a release that awaits review, served because of
+/// `--risky-allow-untrusted-artifacts`. The flag is the yes, so nothing is asked.
+pub(crate) fn warn_unreviewed(slug: &str) {
+    #[cfg(test)]
+    WARNED.lock().expect("test warnings poisoned").push(slug.to_owned());
+    eprintln!("{}", unreviewed_warning(slug).red().bold());
+}
+
+/// The slugs [`warn_unreviewed`] warned about, for tests.
+#[cfg(test)]
+pub static WARNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn unreviewed_warning(slug: &str) -> String {
+    format!("WARNING: {slug} awaits review. Installing it may fetch and build arbitrary code.")
 }
 
 /// What an untrusted, unreviewed source is: a branch tip, or a commit no
@@ -1053,6 +1147,122 @@ mod tests {
         let head = &heads.join().unwrap()[0];
         assert!(head.starts_with("GET /api/v1/resolve?req=max-morris/carpetx%40mixed-precision%3A%5E1.2&kind=package "), "{head}");
         assert!(head.to_ascii_lowercase().contains("api-generation: 1"), "{head}");
+    }
+
+    /// Every request a client makes, one of each kind.
+    fn every_request(client: &Client) {
+        let _ = client.resolve("o/n", "package");
+        let _ = client.stack_release("o", "s", "1.0.0");
+        let _ = client.package_versions("o", "n");
+        let _ = client.package_at_if_any("o", "n", "head");
+        let _ = client.download_sim("o", "n", "1.0.0", None, &std::env::temp_dir().join("never-written.sim"));
+        let _ = client.providers(&cactup_ecosystem_common::ccl::Need::Thorn("T".into()));
+        let commit = "a".repeat(40);
+        let _ = client.lookup(&[PinQuery { url: "https://github.com/o/n".into(), commit: commit.clone() }]);
+        let _ = client.read_packages(&ReadRequest { items: vec![cactup_ecosystem_common::api::ReadQuery { package: "o/n".into(), commit }] });
+    }
+
+    /// Without the flag no request carries the header or the token, even where a token is
+    /// stored; with it every one carries both, and a request with its own token keeps just that.
+    #[test]
+    fn the_token_and_the_header_go_only_under_the_flag() {
+        let (base, heads) = serve_with(8, |_| ("404 Not Found", "api-generation: 1\r\n".into(), b"{}".to_vec()));
+        TEST_TOKENS.lock().unwrap().insert(base.clone(), "cactarium_secret".into());
+        every_request(&Client::at(&base));
+        let heads = heads.join().unwrap();
+        assert!(!heads.is_empty());
+        for head in &heads {
+            let head = head.to_ascii_lowercase();
+            assert!(!head.contains("authorization") && !head.contains("cactarium_secret"), "{head}");
+            assert!(!head.contains("include-unreviewed"), "{head}");
+        }
+
+        let (base, heads) = serve_with(8, |_| ("404 Not Found", "api-generation: 1\r\n".into(), b"{}".to_vec()));
+        TEST_TOKENS.lock().unwrap().insert(base.clone(), "cactarium_secret".into());
+        every_request(&Client::at(&base).including_unreviewed(true));
+        let heads = heads.join().unwrap();
+        assert!(!heads.is_empty());
+        for head in &heads {
+            let head = head.to_ascii_lowercase();
+            assert!(head.contains("x-cactarium-include-unreviewed: true"), "{head}");
+            assert_eq!(head.matches("authorization: bearer cactarium_secret").count(), 1, "{head}");
+        }
+
+        // A request that brings its own token is not given a second one.
+        let (base, heads) = serve_with(1, |_| ("404 Not Found", "api-generation: 1\r\n".into(), b"{}".to_vec()));
+        TEST_TOKENS.lock().unwrap().insert(base.clone(), "cactarium_secret".into());
+        let own = Client::at(&base).including_unreviewed(true);
+        let _ = own.send(own.http().get(own.url("/x")).bearer_auth("cactarium_own"));
+        let head = heads.join().unwrap()[0].to_ascii_lowercase();
+        assert!(head.contains("include-unreviewed: true") && head.contains("bearer cactarium_own"), "{head}");
+        assert!(!head.contains("cactarium_secret"), "{head}");
+    }
+
+    /// Under the flag with no token stored: the header, and no `Authorization`.
+    #[test]
+    fn the_flag_without_a_token_sends_the_header_alone() {
+        let (base, heads) = serve_with(1, |_| ("404 Not Found", "api-generation: 1\r\n".into(), b"{}".to_vec()));
+        let _ = Client::at(&base).including_unreviewed(true).package_versions("o", "n");
+        let head = heads.join().unwrap()[0].to_ascii_lowercase();
+        assert!(head.contains("x-cactarium-include-unreviewed: true"), "{head}");
+        assert!(!head.contains("authorization"), "{head}");
+    }
+
+    /// An answer that says `x-cactarium-unreviewed: true` (or a version that says it awaits
+    /// review) is read as unreviewed, from `/resolve` and from a stack release; any other is not.
+    #[test]
+    fn an_unreviewed_answer_is_told() {
+        let body = |review: &str| {
+            format!(r#"{{"slug":"o/n@1.0.0","kind":"sim","url":null,"version":"1.0.0","commit":"c","yanked":false,"state":"ok","curated":false,"published":0{review}}}"#)
+        };
+        let answers = |header: &'static str, review: &'static str| {
+            let body = body(review);
+            let (base, _) = serve_with(1, move |_| ("200 OK", format!("api-generation: 1\r\n{header}"), body.as_bytes().to_vec()));
+            Client::at(&base).resolve("o/n", "sim").unwrap()
+        };
+        assert!(answers("x-cactarium-unreviewed: true\r\n", "").awaits_review());
+        assert!(answers("x-cactarium-unreviewed: true\r\n", "").unreviewed);
+        assert!(answers("", r#","review":"pending""#).awaits_review());
+        assert!(!answers("x-cactarium-unreviewed: false\r\n", "").awaits_review());
+        assert!(!answers("", "").awaits_review());
+
+        let release = r#"{"format":1,"stack":"o/s@1.0.0","root":"Cactus","repo":[],
+            "thornlist":{"filename":"s.th","text":"!CRL_VERSION = 1.0\n"}}"#;
+        let stack = |header: &'static str| {
+            let (base, _) = serve_with(1, move |_| ("200 OK", format!("api-generation: 1\r\n{header}"), release.as_bytes().to_vec()));
+            Client::at(&base).stack_release("o", "s", "1.0.0").unwrap().unreviewed
+        };
+        assert!(stack("x-cactarium-unreviewed: true\r\n"));
+        assert!(!stack("") && !stack("x-cactarium-unreviewed: false\r\n"));
+        // The warning is given for a release awaiting review (by header or by state), once per
+        // answer, and for nothing else.
+        let warned = |slug: &str| WARNED.lock().unwrap().iter().filter(|w| *w == slug).count();
+        let stack_answer = |slug: &str, header: &'static str, review: &str| {
+            let release = format!(r#"{{"format":1,"stack":"{slug}","root":"Cactus","repo":[],
+                "thornlist":{{"filename":"s.th","text":"!CRL_VERSION = 1.0\n"}}}}"#);
+            let resolve = format!(
+                r#"{{"slug":"{slug}","kind":"stack","url":null,"version":"1.0.0","commit":null,"yanked":false,"state":"ok","curated":false,"published":0{review}}}"#
+            );
+            let (base, _) = serve_with(2, move |path| {
+                let body = if path.contains("/resolve?") { resolve.clone() } else { release.clone() };
+                ("200 OK", format!("api-generation: 1\r\n{header}"), body.into_bytes())
+            });
+            stack_release_from(&Client::at(&base).including_unreviewed(true), "o/ws@1", true).unwrap();
+        };
+        stack_answer("o/ws-a@1.0.0", "x-cactarium-unreviewed: true\r\n", "");
+        stack_answer("o/ws-b@1.0.0", "", r#","review":"pending""#);
+        stack_answer("o/ws-c@1.0.0", "x-cactarium-unreviewed: false\r\n", "");
+        assert_eq!((warned("o/ws-a@1.0.0"), warned("o/ws-b@1.0.0"), warned("o/ws-c@1.0.0")), (1, 1, 0));
+        // A tip is no resolve: the release's own answer is what says it awaits review.
+        let (base, _) = serve_with(1, |_| {
+            let release = r#"{"format":1,"stack":"o/ws-d@head","root":"Cactus","repo":[],
+                "thornlist":{"filename":"s.th","text":"!CRL_VERSION = 1.0\n"}}"#;
+            ("200 OK", "api-generation: 1\r\nx-cactarium-untrusted: false\r\nx-cactarium-unreviewed: true\r\n".into(), release.as_bytes().to_vec())
+        });
+        stack_release_from(&Client::at(&base).including_unreviewed(true), "o/ws-d@head", true).unwrap();
+        assert_eq!(warned("o/ws-d@head"), 1);
+        let line = unreviewed_warning("o/n@1.0.0");
+        assert_eq!(line, "WARNING: o/n@1.0.0 awaits review. Installing it may fetch and build arbitrary code.");
     }
 
     #[test]

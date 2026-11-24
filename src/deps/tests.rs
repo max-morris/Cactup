@@ -781,6 +781,8 @@ fn plan_lines_say_what_they_are() {
     let lines = plan_of("pending-when-nothing-approved-fits").lines("cactup add max/z4c");
     let kinds: Vec<LineKind> = lines.iter().map(|(k, _)| *k).collect();
     assert_eq!(kinds, [LineKind::Header, LineKind::Step, LineKind::Step, LineKind::Pending]);
+    let pending = lines.iter().find(|(k, _)| *k == LineKind::Pending).unwrap();
+    assert!(pending.1.ends_with(" awaits review"), "{}", pending.1);
     let lines = plan_of("flesh-replace").lines("x");
     assert!(lines.iter().any(|(k, _)| *k == LineKind::Rebuild));
     let lines = plan_of("unknown-meets-range-with-note").lines("x");

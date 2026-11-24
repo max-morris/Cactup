@@ -1182,6 +1182,24 @@ fn the_requests_add_and_remove_make() {
     assert_eq!(counts(&log), [0, 1, 0, 6, 0]);
 }
 
+/// A command's client carries the header and the stored token under
+/// `--risky-allow-untrusted-artifacts`, and neither without it.
+#[test]
+fn a_commands_client_asks_for_unreviewed_only_under_the_flag() {
+    let (base, heads) = crate::fetch::download::test_server::serve_with(2, |_| {
+        ("404 Not Found", "api-generation: 1\r\n".into(), b"{}".to_vec())
+    });
+    crate::cactarium::TEST_TOKENS.lock().unwrap().insert(base.clone(), "cactarium_admin".into());
+    let mut s = Setup::new(tempfile::tempdir().unwrap(), "", &base);
+    let _ = crate::cactarium::Client::for_command(&s.ctx).unwrap().package_versions("o", "n");
+    s.ctx.globals.risky_allow_untrusted_artifacts = true;
+    let _ = crate::cactarium::Client::for_command(&s.ctx).unwrap().package_versions("o", "n");
+    let heads: Vec<String> = heads.join().unwrap().iter().map(|h| h.to_ascii_lowercase()).collect();
+    assert!(!heads[0].contains("include-unreviewed") && !heads[0].contains("authorization"), "{}", heads[0]);
+    assert!(heads[1].contains("x-cactarium-include-unreviewed: true"), "{}", heads[1]);
+    assert!(heads[1].contains("authorization: bearer cactarium_admin"), "{}", heads[1]);
+}
+
 /// The live thornlist is read before the prompt; hand edits made while it
 /// waits are not overwritten: the check under the lock sees them.
 #[test]

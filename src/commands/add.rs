@@ -1085,7 +1085,7 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
     let base = thornlist::parse(&start.pristine)?;
     let live = thornlist::parse(&start.before)?;
     let local = super::resolution::local_facts(&live, &start.inst.cactus_root()?)?;
-    let client = crate::cactarium::Client::new(&ctx.db.read()?);
+    let client = crate::cactarium::Client::for_command(ctx)?;
     let (plan, present, heads) = plan_add(&client, &start.inst.root, &base, &start.meta, Some(&local), specs, flags)?;
 
     let command = format!("cactup add {}", specs.join(" "));
@@ -1847,7 +1847,7 @@ fn plan_remove_with_deps(
         "Pass --no-deps to remove {} without Cactarium.",
         named.join(", ")
     );
-    let client = crate::cactarium::Client::new(&ctx.db.read()?);
+    let client = crate::cactarium::Client::for_command(ctx)?;
     let names: Vec<&str> = start.meta.added.iter().map(|a| a.package.as_str()).collect();
     let mut reg = super::resolution::Registry::new(&client, names);
     let options = super::resolution::PresentOptions::default();
