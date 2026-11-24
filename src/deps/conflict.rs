@@ -91,14 +91,17 @@ pub(super) fn conflicts(
                 let ((first, ef, tf), (_, es, _)) =
                     if a < b { ((a, ea, ta), (b, eb, tb)) } else { ((b, eb, tb), (a, ea, ta)) };
                 let b_new = eb.thorn_is_new(tb);
-                let (newcomer, other) = if b_new && b > a { (*b, *ea) } else { (*a, *eb) };
+                let ((newcomer, other), other_id) =
+                    if b_new && b > a { ((*b, *ea), *a) } else { ((*a, *eb), *b) };
                 let r = Refusal::SameThorn {
                     thorn: tf.clone(),
                     first: ef.release.label(),
                     second: es.release.label(),
                     newcomer: newcomer.clone(),
+                    other: other_id.clone(),
                     base_repo: other.base_repo().map(str::to_owned),
                     ignore: None,
+                    needed: false,
                     // Checked by a search with it, when it is suggested.
                     replace: other.base_repo().is_some(),
                 };
@@ -112,7 +115,7 @@ pub(super) fn conflicts(
 
 /// A thorn's hard requirements, header includes left out: those are
 /// feature/include-closure's, and this branch checks as before the crate produced them.
-fn needs_of(facts: &ThornFacts) -> Vec<Requirement> {
+pub(super) fn needs_of(facts: &ThornFacts) -> Vec<Requirement> {
     ccl::needs_of(facts).into_iter().filter(|r| !matches!(r, Requirement::Include(_))).collect()
 }
 

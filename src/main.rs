@@ -231,6 +231,7 @@ fn run() -> Res<()> {
         Commands::Remove { packages, force, no_deps, yes, dry_run } => {
             commands::add::remove(&ctx, &packages, &commands::add::RemoveFlags { force, no_deps, yes, dry_run })
         }
+        Commands::Claims(cmd) => commands::claims::dispatch(&ctx, cmd),
         Commands::Stack(crate::args::StackCommand::Publish { definition, target, version, thornlist }) => {
             commands::import::publish_stack(&ctx, &definition, &target, &version, thornlist.as_deref())
         }

@@ -3298,3 +3298,225 @@ fn a_config_s_own_thornlist_sees_the_flesh_swapped() {
     // And a build after that one is up to date.
     assert_eq!(crate::build::source_delta(Some(&back.heads), Some(&probe())).0, crate::build::SourceDelta::Unchanged);
 }
+
+// ---- `cactup claims`: overrides kept in the installation, applied by add, remove and check ----
+
+
+/// What `cactup claims …` does on the setup's installation, as the command line reads it.
+fn claims(s: &Setup, words: &str) -> Res<()> {
+    claims_args(s, &words.split_whitespace().collect::<Vec<_>>())
+}
+
+/// [`claims`], the words already split as a shell would (a key with spaces is one word).
+fn claims_args(s: &Setup, words: &[&str]) -> Res<()> {
+    use clap::Parser;
+    let args = crate::args::Args::try_parse_from(std::iter::once("cactup").chain(words.iter().copied()))
+        .unwrap_or_else(|e| panic!("`cactup {}` does not parse: {e}", words.join(" ")));
+    match args.command {
+        crate::args::Commands::Claims(cmd) => crate::commands::claims::dispatch(&s.ctx, cmd),
+        _ => panic!("`cactup {}` is no claims command", words.join(" ")),
+    }
+}
+
+/// The command a refusal names (`cactup claims override …` in backticks), run as the user would.
+fn run_the_hint(s: &Setup, refusal: &str) {
+    let start = refusal.find("`cactup claims override").unwrap_or_else(|| panic!("no hint in: {refusal}")) + 1;
+    let words = &refusal[start..][..refusal[start..].find('`').unwrap()];
+    claims(s, words.strip_prefix("cactup ").unwrap()).unwrap_or_else(|e| panic!("`{words}` failed: {e:#}"));
+}
+
+fn overrides(s: &Setup) -> Vec<String> {
+    s.meta().claim_overrides.keys().cloned().collect()
+}
+
+/// A Cactarium with max/z4c (needs et/carpetx's CarpetX), et/carpetx (CarpetX, Loop, Arith),
+/// max/app (incompatible with max/solo), max/solo and max/plain. With `base`, the installation's
+/// base has a repo `basecx` (no registered package) with CarpetX and Loop thorns.
+fn overridable(base: bool) -> Setup {
+    let tmp = tempfile::tempdir().unwrap();
+    let one = |name: &str, thorns: &[&str]| {
+        let files: Vec<(String, String)> =
+            thorns.iter().map(|t| (format!("{t}/interface.ccl"), format!("IMPLEMENTS: {}\n", t.to_lowercase()))).collect();
+        let files: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        upstream(tmp.path(), name, &files)
+    };
+    let (zurl, z) = one("z4c", &["Z4c"]);
+    let (curl, c) = one("carpetx", &["CarpetX", "Loop", "Arith"]);
+    let (aurl, a) = one("app", &["App"]);
+    let (surl, so) = one("solo", &["Solo"]);
+    let (purl, p) = one("plain", &["Plain"]);
+    let (burl, b) = one("basecx", &["CarpetX", "Loop"]);
+    let hates = r#"{"kind":"incompatible-with","target":"max/solo","range":null,"needs":[],"note":null}"#;
+    let (cactarium, _) = Fake::new()
+        .package("max/z4c", vec![version("1.0.0", &z, &zurl, "Z4c", &["Z4c"], &format!("[{}]", depends("et/carpetx", "^1.0", &["CarpetX"])))])
+        .package("et/carpetx", vec![version("1.0.0", &c, &curl, "CarpetX", &["CarpetX", "Loop", "Arith"], "[]")])
+        .package("max/app", vec![version("1.0.0", &a, &aurl, "App", &["App"], &format!("[{hates}]"))])
+        .package("max/solo", vec![version("1.0.0", &so, &surl, "Solo", &["Solo"], "[]")])
+        .package("max/plain", vec![version("1.0.0", &p, &purl, "Plain", &["Plain"], "[]")])
+        .serve();
+    let text = match base {
+        true => section(&burl, &b, &["CarpetX/CarpetX", "CarpetX/Loop"]),
+        false => String::new(),
+    };
+    Setup::new(tmp, &text, &cactarium)
+}
+
+/// `satisfies` turns the refusal that names it into a plan, and removing the override brings the
+/// refusal back: the unregistered base repo stands in for the dependency's package.
+#[test]
+fn a_satisfies_override_lets_a_base_repo_stand_in_for_a_dependency() {
+    let s = overridable(true);
+    let err = format!("{:#}", s.add(&["max/z4c"], yes()).unwrap_err());
+    assert!(err.contains("both have a thorn CarpetX"), "{err}");
+    assert!(err.contains("or `cactup claims override satisfies local:basecx et/carpetx`"), "{err}");
+    assert!(overrides(&s).is_empty() && s.added().is_empty());
+
+    run_the_hint(&s, &err);
+    assert_eq!(overrides(&s), ["satisfies local:basecx et/carpetx"]);
+    s.add(&["max/z4c"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    assert_eq!(s.added(), [("max/z4c".to_owned(), vec!["Z4c/Z4c".to_owned()])]);
+
+    // Back to the refusal, whichever way the key is spelled.
+    s.remove(&["max/z4c"], remove_yes()).unwrap();
+    claims_args(&s, &["claims", "override", "--remove", "drop"]).unwrap_err();
+    assert_eq!(overrides(&s).len(), 1);
+    claims_args(&s, &["claims", "override", "--remove", "satisfies  local:basecx   et/carpetx"]).unwrap();
+    assert!(overrides(&s).is_empty());
+    let err = format!("{:#}", s.add(&["max/z4c"], yes()).unwrap_err());
+    assert!(err.contains("both have a thorn CarpetX"), "{err}");
+    // The file stays at the version that holds overrides.
+    let text = std::fs::read_to_string(s.inst.cactup_dir().join("installation.toml")).unwrap();
+    assert!(text.starts_with("schema = 5"), "{text}");
+}
+
+/// `drop` lets an incompatibility through, the refusal names the command that does it, and
+/// `check` agrees with the plan both ways: no problem while the claim is dropped, one when it is not.
+#[test]
+fn a_drop_override_passes_an_incompatible_with_and_check_agrees() {
+    let s = overridable(false);
+    s.add(&["max/solo"], yes()).unwrap();
+    let err = format!("{:#}", s.add(&["max/app"], yes()).unwrap_err());
+    assert!(err.contains("`cactup claims override drop max/app:incompatible-with:max/solo` (for good)"), "{err}");
+    assert!(err.contains("--ignore-claim max/app:incompatible-with:max/solo (this command)"), "{err}");
+    run_the_hint(&s, &err);
+    s.add(&["max/app"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    claims(&s, "claims check").unwrap();
+
+    claims_args(&s, &["claims", "override", "--remove", "drop max/app:incompatible-with:max/solo"]).unwrap();
+    assert!(overrides(&s).is_empty());
+    let meta = s.meta();
+    let found = crate::commands::claims::problems(&s.ctx, &s.inst, &meta).unwrap();
+    assert_eq!(
+        found.lines,
+        ["max/app@1.0.0 is incompatible with max/solo@1.0.0. Run `cactup claims override drop max/app:incompatible-with:max/solo`."]
+    );
+    let err = format!("{:#}", claims(&s, "claims check").unwrap_err());
+    assert_eq!(err, "1 problem.");
+    // The way past the check names works.
+    claims(&s, "claims override drop max/app:incompatible-with:max/solo --note hand-built").unwrap();
+    assert_eq!(s.meta().claim_overrides["drop max/app:incompatible-with:max/solo"].note.as_deref(), Some("hand-built"));
+    claims(&s, "claims check").unwrap();
+    claims(&s, "claims list").unwrap();
+    // Set again, it keeps the note it has.
+    claims(&s, "claims override drop max/app:incompatible-with:max/solo --note other").unwrap();
+    assert_eq!(s.meta().claim_overrides["drop max/app:incompatible-with:max/solo"].note.as_deref(), Some("hand-built"));
+}
+
+/// `needs` adds a thorn to a dependency's needs: `add` brings it in; `add` of a dependency the
+/// manifest lacks holds the package against `remove`, and `drop` of a dependency frees it.
+#[test]
+fn needs_add_and_drop_overrides_reach_add_and_remove() {
+    let s = overridable(false);
+    claims(&s, "claims override needs max/z4c:dependency:et/carpetx Loop").unwrap();
+    assert_eq!(overrides(&s), ["needs max/z4c:dependency:et/carpetx Loop"]);
+    s.add(&["max/z4c"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    assert_eq!(
+        s.added(),
+        [
+            ("max/z4c".to_owned(), vec!["Z4c/Z4c".to_owned()]),
+            ("et/carpetx".to_owned(), vec!["CarpetX/CarpetX".to_owned(), "CarpetX/Loop".to_owned()]),
+        ]
+    );
+    // The dependency holds et/carpetx; dropped, nothing does.
+    let err = format!("{:#}", s.remove(&["et/carpetx"], remove_yes()).unwrap_err());
+    assert!(err.contains("Other packages depend on et/carpetx"), "{err}");
+    claims(&s, "claims override drop max/z4c:dependency:et/carpetx").unwrap();
+    s.remove(&["max/z4c"], remove_yes()).unwrap();
+
+    // A dependency the manifest lacks.
+    s.add(&["max/plain", "et/carpetx/Arith"], yes()).unwrap();
+    s.remove(&["et/carpetx"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    s.add(&["et/carpetx/Arith"], yes()).unwrap();
+    claims(&s, "claims override add max/plain --dependency et/carpetx@^1.0 --needs Arith --needed-by Plain").unwrap();
+    assert!(overrides(&s).contains(&"add max/plain dependency et/carpetx@^1.0 needs Arith needed-by Plain".to_owned()));
+    let err = format!("{:#}", s.remove(&["et/carpetx"], remove_yes()).unwrap_err());
+    assert!(err.contains("Other packages depend on et/carpetx") && err.contains("max/plain@1.0.0"), "{err}");
+}
+
+/// What an override names must exist, and the refusal says what does not.
+#[test]
+fn an_override_must_name_what_exists() {
+    let s = overridable(true);
+    let refused = |words: &str| match words.split_once("--remove ") {
+        Some((head, key)) => {
+            let words: Vec<&str> = head.split_whitespace().chain(["--remove", key]).collect();
+            format!("{:#}", claims_args(&s, &words).unwrap_err())
+        }
+        None => format!("{:#}", claims(&s, words).unwrap_err()),
+    };
+    assert_eq!(refused("claims override drop max/nothere:dependency:et/bar"), "max/nothere is unknown to Cactarium.");
+    assert_eq!(
+        refused("claims override drop max/z4c:dependency:et/arith"),
+        "max/z4c makes no dependency claim on et/arith in any version."
+    );
+    assert_eq!(
+        refused("claims override drop max/z4c:fork-of:et/carpetx"),
+        "max/z4c makes no fork-of claim on et/carpetx in any version."
+    );
+    assert_eq!(refused("claims override needs max/z4c:dependency:et/arith Loop"), "max/z4c has no dependency on et/arith in any version.");
+    assert_eq!(
+        refused("claims override needs max/z4c:dependency:et/carpetx Nothere"),
+        "et/carpetx has no thorn Nothere in any version."
+    );
+    assert!(refused("claims override add max/z4c --dependency et/carpetx --needs Loop").contains("already depends on et/carpetx"));
+    assert_eq!(
+        refused("claims override add max/plain --dependency et/carpetx --needs Nothere"),
+        "et/carpetx has no thorn Nothere in any version."
+    );
+    assert_eq!(
+        refused("claims override add max/plain --dependency et/carpetx --needs Loop --needed-by Nothere"),
+        "max/plain has no thorn Nothere in any version."
+    );
+    assert_eq!(refused("claims override satisfies max/carpetx-mp et/carpetx"), "max/carpetx-mp is unknown to Cactarium.");
+    assert_eq!(refused("claims override satisfies local:nothere et/carpetx"), "The installation has no repo nothere.");
+    assert!(refused("claims override satisfies max/plain max/plain").contains("cannot stand in for itself"));
+    assert!(refused("claims override drop max/z4c").contains("OWNER/PKG:KIND:TARGET"));
+    assert!(refused("claims override --remove drop max/z4c:dependency:et/carpetx").contains("No override"));
+    assert!(overrides(&s).is_empty());
+
+    // Setting one twice says so, and keeps one.
+    claims(&s, "claims override satisfies local:basecx et/carpetx").unwrap();
+    claims(&s, "claims override satisfies local:basecx et/carpetx").unwrap();
+    assert_eq!(overrides(&s).len(), 1);
+}
+
+/// The record is read before every resolution: one that does not read refuses the command rather
+/// than running without it, and an override changed while a prompt waits refuses the add.
+#[test]
+fn a_record_that_does_not_read_refuses_and_a_change_under_the_prompt_is_caught() {
+    let s = overridable(false);
+    let mut meta = s.meta();
+    meta.claim_overrides.insert("prefer et/a".into(), crate::installation::ClaimOverride { kind: "drop".into(), note: None });
+    s.write_meta(&meta);
+    let err = format!("{:#}", s.add(&["max/plain"], yes()).unwrap_err());
+    assert!(err.contains("claim-overrides in installation.toml: \"prefer et/a\""), "{err}");
+    assert!(claims(&s, "claims list").is_err());
+    meta.claim_overrides.clear();
+    s.write_meta(&meta);
+
+    let start = Start::read(&s.ctx, false, Doing::Adding).unwrap();
+    claims(&s, "claims override drop max/app:incompatible-with:max/solo").unwrap();
+    let locked = start.inst.locked().unwrap();
+    let err = format!("{:#}", start.recheck(&locked).unwrap_err());
+    assert!(err.contains("changed while"), "{err}");
+}

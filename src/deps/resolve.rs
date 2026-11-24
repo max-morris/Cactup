@@ -2393,10 +2393,13 @@ impl Search<'_, '_, '_> {
 
     /// The claim that brings the newcomer in, for the generic same-thorn refusal.
     fn fill_ignore(&self, r: &mut Refusal, d: &Derived) {
-        if let Refusal::SameThorn { newcomer, base_repo: None, ignore, .. } = r {
-            *ignore = (d.needs.iter())
-                .find(|r| r.kind == Kind::Active && r.taken_by() == Some(newcomer) && r.need.label().is_some())
-                .and_then(|r| r.need.live(r.kind).ignore);
+        if let Refusal::SameThorn { newcomer, base_repo, ignore, needed, .. } = r {
+            let claim = (d.needs.iter())
+                .find(|r| r.kind == Kind::Active && r.taken_by() == Some(newcomer) && r.need.label().is_some());
+            *needed = claim.is_some();
+            if base_repo.is_none() {
+                *ignore = claim.and_then(|r| r.need.live(r.kind).ignore);
+            }
         }
     }
 

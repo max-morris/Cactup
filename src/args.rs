@@ -440,6 +440,14 @@ pub(crate) enum Commands {
         #[clap(long)]
         dry_run: bool,
     },
+    // §4.4 of the dependency plan
+    /// Inspect and correct package claims
+    ///
+    /// A claim is what a package says about another: a dependency, an
+    /// incompatibility, a fork. An override changes a claim for this
+    /// installation, and applies to every add and remove in it.
+    #[clap(subcommand)]
+    Claims(ClaimsCommand),
     // §8.10
     /// Work with Cactarium stacks
     #[clap(subcommand)]
@@ -1197,6 +1205,91 @@ pub(crate) enum ConfigCommand {
     Delta {
         /// Config to inspect (default: the active config).
         name: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum ClaimsCommand {
+    /// Show the overrides and the any-of choices
+    List,
+    /// Check the installed packages against each other's claims
+    ///
+    /// Reports clashing thorns, incompatibilities, forks installed beside
+    /// their upstream and CCL requirements that no installed thorn meets,
+    /// one line each. Changes nothing. Fails when it finds a problem.
+    Check,
+    /// Change or remove a claim override
+    #[command(args_conflicts_with_subcommands = true, arg_required_else_help = true)]
+    Override {
+        /// Remove an override, named by its key as `claims list` shows it
+        #[clap(long, value_name = "KEY")]
+        remove: Option<String>,
+        #[clap(subcommand)]
+        action: Option<OverrideAction>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum OverrideAction {
+    /// Drop a claim: a dependency, incompatible-with or fork-of
+    ///
+    /// The claim goes in every version of the package.
+    ///
+    ///   cactup claims override drop max/foo:incompatible-with:et/bar
+    #[clap(verbatim_doc_comment)]
+    Drop {
+        /// The claim: OWNER/PKG:KIND:TARGET
+        #[clap(value_name = "OWNER/PKG:KIND:TARGET")]
+        claim: String,
+        /// Why, shown by `claims list`.
+        #[clap(long)]
+        note: Option<String>,
+    },
+    /// Add a dependency the package's manifest lacks
+    ///
+    ///   cactup claims override add max/foo --dependency et/carpet --needs CarpetSlab
+    #[clap(verbatim_doc_comment)]
+    Add {
+        /// The package that depends: OWNER/PKG
+        #[clap(value_name = "OWNER/PKG")]
+        package: String,
+        /// The package it depends on: OWNER/PKG, or OWNER/PKG@RANGE.
+        #[clap(long, value_name = "TARGET")]
+        dependency: String,
+        /// Thorns of the target it needs (comma separated).
+        #[clap(long, required = true, value_delimiter = ',', value_name = "A,B")]
+        needs: Vec<String>,
+        /// Thorns of the package that need it (default: all).
+        #[clap(long, value_delimiter = ',', value_name = "T")]
+        needed_by: Vec<String>,
+    },
+    /// Add thorns to a dependency's needs
+    ///
+    ///   cactup claims override needs max/foo:dependency:et/bar Loop
+    #[clap(verbatim_doc_comment)]
+    Needs {
+        /// The dependency: OWNER/PKG:dependency:TARGET
+        #[clap(value_name = "OWNER/PKG:dependency:TARGET")]
+        claim: String,
+        /// Thorns of the target to add.
+        #[clap(required = true, value_name = "THORN")]
+        thorns: Vec<String>,
+    },
+    /// Let one package stand in for another
+    ///
+    /// The first takes every need for the second, with no version check.
+    /// Name an unregistered repo of the installation as local:NAME.
+    ///
+    ///   cactup claims override satisfies max/carpet-mp et/carpet
+    ///   cactup claims override satisfies local:carpetx et/carpetx
+    #[clap(verbatim_doc_comment)]
+    Satisfies {
+        /// The package that stands in: OWNER/PKG or local:NAME
+        #[clap(value_name = "X")]
+        by: String,
+        /// The package it stands in for: OWNER/PKG
+        #[clap(value_name = "Y")]
+        target: String,
     },
 }
 

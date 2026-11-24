@@ -847,6 +847,7 @@ impl Start {
         let live = std::fs::read_to_string(self.inst.live_thornlist_to_read()?).unwrap_or_default();
         if meta.added != self.meta.added
             || meta.added_for != self.meta.added_for
+            || meta.claim_overrides != self.meta.claim_overrides
             || pristine != self.pristine
             || live != self.live
         {
@@ -883,12 +884,10 @@ fn plan_add(
     specs: &[String],
     flags: &AddFlags,
 ) -> Res<(crate::deps::Plan, Vec<crate::deps::Present>, std::collections::BTreeMap<String, String>)> {
-    use crate::deps::{self, ClaimPattern, NamedSpec, Options, Request, Rules, Step};
+    use crate::deps::{self, NamedSpec, Options, Request, Rules, Step};
     use super::resolution::{PresentOptions, Registry};
     let named: Vec<NamedSpec> = specs.iter().map(|s| NamedSpec::parse(s)).collect::<Res<_>>()?;
-    let ignore: Vec<ClaimPattern> = (flags.ignore_claim.iter())
-        .map(|s| s.parse::<ClaimPattern>().with_context(|| format!("--ignore-claim {s}")))
-        .collect::<Res<_>>()?;
+    let ignore = deps::parse_ignores(&flags.ignore_claim)?;
     let names: Vec<String> = (named.iter().map(|s| s.id.to_string()))
         .chain(meta.added.iter().map(|a| a.package.clone()))
         .chain(base.components().iter().map(|c| c.repo.clone()))
@@ -923,8 +922,8 @@ fn plan_add(
         }
         Err(e) => return Err(e),
     };
-    // Claim overrides kept in the installation join these with `cactup claims` (P4).
-    let rules = Rules { ignore, overrides: Vec::new() };
+    // The installation's overrides (`cactup claims override`) and this command's ignores.
+    let rules = Rules::of(&meta.claim_overrides, ignore)?;
     let options =
         Options { upgrade: flags.upgrade, upgrade_all: flags.upgrade_all, no_deps: flags.no_deps, replace: flags.replace };
     let request = Request { specs: &named, present: &set.present, rules: &rules, options };
@@ -1080,9 +1079,7 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
     for spec in specs {
         crate::deps::NamedSpec::parse(spec)?;
     }
-    for pattern in &flags.ignore_claim {
-        pattern.parse::<crate::deps::ClaimPattern>().with_context(|| format!("--ignore-claim {pattern}"))?;
-    }
+    crate::deps::parse_ignores(&flags.ignore_claim)?;
     let start = Start::read(ctx, flags.force, Doing::Adding)?;
     let base = thornlist::parse(&start.pristine)?;
     let live = thornlist::parse(&start.before)?;
@@ -1914,8 +1911,8 @@ fn plan_remove_with_deps(
         );
     }
     let extensions = extensions_of(&set);
-    // Claim overrides kept in the installation join with `cactup claims` (P4).
-    let mut plan = deps::plan_remove(&set.present, &added_for, targets, &Rules::default(), false, &extensions, &returning)
+    let rules = Rules::of(&start.meta.claim_overrides, Vec::new())?;
+    let mut plan = deps::plan_remove(&set.present, &added_for, targets, &rules, false, &extensions, &returning)
         .map_err(|r| {
             // What comes back with the targets that could not be read might have held them.
             let lines: Vec<String> = (unread_returning.iter())

@@ -20,7 +20,8 @@
     "refusal": "Incompatible",
     "message": [
       "et/b@1.5.0 says it is incompatible with max/a@1.0.0",
-      "--ignore-claim et/b:incompatible-with:max/a"
+      "--ignore-claim et/b:incompatible-with:max/a",
+      "`cactup claims override drop et/b:incompatible-with:max/a` (for good)"
     ]
   }
 }

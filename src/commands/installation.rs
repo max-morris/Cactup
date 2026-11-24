@@ -286,6 +286,11 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
                 println!("{}", format!("  {:<13}   yanked on Cactarium{}", "", reason(why)).yellow());
             }
         }
+        // `cactup claims override`: one line each, the first labeled.
+        for (i, key) in meta.claim_overrides.keys().enumerate() {
+            let label = if i == 0 { "overrides:" } else { "" };
+            println!("  {label:<13} {key}");
+        }
     }
     if let Ok(sims) = inst.simulations() {
         println!("  simulations:  {} (see `cactup sim list`)", sims.simulations.len());

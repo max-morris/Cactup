@@ -15,6 +15,7 @@
 //! dependencies are decided in a fixed order, so the same inputs give the same plan whatever the
 //! order a hash map, the server or the caller happened to list them in.
 
+mod check;
 mod conflict;
 mod overrides;
 mod plan;
@@ -37,7 +38,8 @@ use anyhow::{anyhow, bail};
 
 // The module's API, for P3 (re-exports, so nothing in this module uses them).
 #[allow(unused_imports)]
-pub use overrides::{ClaimKind, ClaimPattern, Override, Rules};
+pub use check::check;
+pub use overrides::{overrides_of, parse_ignores, ClaimKind, ClaimPattern, Override, Rules};
 #[allow(unused_imports)]
 pub use plan::{
     Choice, ChoiceKey, ChoiceRule, Library, LineKind, Placement, Plan, Record, Replaced, Step, Untrusted, FLESH_REBUILD,

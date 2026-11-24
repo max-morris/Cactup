@@ -6,6 +6,7 @@ pub mod add;
 pub(crate) mod resolution;
 pub mod build;
 pub mod cache;
+pub mod claims;
 pub mod config;
 pub mod copy;
 pub mod delete;

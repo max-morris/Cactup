@@ -1,6 +1,6 @@
 //! Every way resolution refuses, each with its way past.
-// Plan §4.5. The text is user-visible: no spec refs in any string here, and no command that does
-// not exist yet (`cactup claims override …` comes with P4; each place it belongs says so).
+// Plan §4.5. The text is user-visible: no spec refs in any string here, and every `cactup claims
+// override …` it names is a command as built (the table tests parse each one with clap).
 
 use std::fmt;
 
@@ -127,9 +127,13 @@ pub enum Refusal {
         first: String,
         second: String,
         newcomer: PkgId,
+        /// The package the newcomer clashes with.
+        other: PkgId,
         base_repo: Option<String>,
-        /// The claim that brings the newcomer in, when one does.
+        /// The claim that brings the newcomer in, when one does (and the other is no base repo).
         ignore: Option<String>,
+        /// A dependency brings the newcomer in, so another package may stand in for it.
+        needed: bool,
         /// `--replace` finds a plan.
         replace: bool,
     },
@@ -206,9 +210,12 @@ impl Refusal {
                 (false, Some(ignore)) => format!("Pass --ignore-claim {ignore}"),
                 (false, None) => "Change what asks for it; --upgrade finds no plan either".to_owned(),
             },
-            // P4: or `cactup claims override satisfies local:<repo> <newcomer>`.
-            Refusal::SameThorn { newcomer, base_repo: Some(repo), replace: true, .. } => {
-                format!("Pass --replace to use {newcomer} in place of base repo {repo}")
+            Refusal::SameThorn { newcomer, other, base_repo: Some(repo), replace: true, needed, .. } => {
+                let stand_in = match *needed {
+                    true => format!(", or `cactup claims override satisfies {other} {newcomer}`"),
+                    false => String::new(),
+                };
+                format!("Pass --replace to use {newcomer} in place of base repo {repo}{stand_in}")
             }
             Refusal::SameThorn { ignore: Some(ignore), .. } => format!(
                 "Name single thorns (owner/pkg/Thorn) to leave one of them out, or pass --ignore-claim {ignore}"
@@ -216,9 +223,11 @@ impl Refusal {
             Refusal::SameThorn { .. } => {
                 "Name single thorns (owner/pkg/Thorn) to leave one of them out".to_owned()
             }
-            // P4: or `cactup claims override drop <by>:incompatible-with:<target>` (for good).
             Refusal::Incompatible { by, target, .. } => {
-                format!("Pass --ignore-claim {by}:incompatible-with:{target}")
+                format!(
+                    "Pass --ignore-claim {by}:incompatible-with:{target} (this command) or \
+                     `cactup claims override drop {by}:incompatible-with:{target}` (for good)"
+                )
             }
             Refusal::ForkAndUpstream { fork, upstream, upstream_base_repo: Some(repo), replace: true, .. } => format!(
                 "Pass --replace to use {fork} in place of base repo {repo}, or --ignore-claim {fork}:fork-of:{upstream}"
@@ -226,9 +235,11 @@ impl Refusal {
             Refusal::ForkAndUpstream { fork, upstream, .. } => {
                 format!("Remove one of them, or pass --ignore-claim {fork}:fork-of:{upstream}")
             }
-            // P4: or `cactup claims override satisfies <fork> <target>`.
-            Refusal::ForkDoesNotStandIn { live, .. } => match &live.ignore {
-                Some(ignore) => format!("Pass --ignore-claim {ignore}"),
+            Refusal::ForkDoesNotStandIn { fork, live, .. } => match &live.ignore {
+                Some(ignore) => format!(
+                    "Pass --ignore-claim {ignore}, or `cactup claims override satisfies {fork} {}`",
+                    live.target
+                ),
                 None => "Name a version the fork stands in for".to_owned(),
             },
             Refusal::NoReleaseFits { constraints, .. }
@@ -244,7 +255,6 @@ impl Refusal {
                     false => format!("Remove {them} first."),
                 }
             }
-            // P4: or `cactup claims override needs …` to correct the claim for good.
             Refusal::MissingThorns { live, .. } => match &live.ignore {
                 Some(ignore) => format!("Pass --ignore-claim {ignore}"),
                 None => "Name thorns the package has".to_owned(),

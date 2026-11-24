@@ -26,6 +26,9 @@
     "message": [
       "both have a thorn CarpetX",
       "Pass --replace to use et/carpetx in place of base repo carpetx"
+    ],
+    "not_in_message": [
+      "claims override"
     ]
   }
 }

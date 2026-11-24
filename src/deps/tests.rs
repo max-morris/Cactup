@@ -478,9 +478,12 @@ fn check_refusal(expect: &Expect, refusal: Option<&Refusal>, other: Option<Strin
             if text.contains('§') {
                 errors.push(format!("a spec ref in user-visible text: {text}"));
             }
-            // Until P4 adds the command, no refusal may name it.
-            if text.contains("claims override") {
-                errors.push(format!("names a command that does not exist yet: {text}"));
+            // Every command a refusal names is one the command line reads.
+            for command in commands_in(&text) {
+                use clap::Parser;
+                if let Err(e) = crate::args::Args::try_parse_from(command.split(' ')) {
+                    errors.push(format!("names a command that does not parse (`{command}`): {e}"));
+                }
             }
         }
         (Some(want), None) => errors.push(format!("expected a {want} refusal, got {}", other.unwrap_or("a plan".into()))),
@@ -491,6 +494,11 @@ fn check_refusal(expect: &Expect, refusal: Option<&Refusal>, other: Option<Strin
             }
         }
     }
+}
+
+/// The commands (`cactup …` in backticks) a text names.
+fn commands_in(text: &str) -> Vec<String> {
+    text.split('`').skip(1).step_by(2).filter(|c| c.starts_with("cactup ")).map(str::to_owned).collect()
 }
 
 fn record_text(r: &Record) -> String {
@@ -1521,4 +1529,99 @@ fn a_flesh_with_dependents_says_how_past() {
     assert!(refusal(1, true).ends_with("\nRemove it first, or pass --no-deps to replace the flesh anyway."), "{}", refusal(1, true));
     assert!(refusal(2, true).ends_with("\nRemove them first, or pass --no-deps to replace the flesh anyway."));
     assert!(refusal(2, false).ends_with("\nRemove them first."));
+}
+
+// ---- `check`: the installation as it is (`cactup claims check`) ----
+
+fn installed(id: &str, version: &str, thorns: &[(&str, &str)], claims: Vec<ClaimInfo>, origin: Origin) -> Present {
+    let facts: Vec<(String, ThornFacts)> = thorns.iter().map(|(n, f)| (n.to_string(), ThornFacts::scan(f, None))).collect();
+    let release = synthetic_release(id, version, &facts, claims);
+    let enabled = thorns.iter().map(|(n, _)| n.to_string()).collect();
+    Present { release, enabled, origin, libraries: vec![], stand_in: false }
+}
+
+fn claim(kind: &str, target: &str, range: &str) -> ClaimInfo {
+    ClaimInfo { kind: kind.into(), range: Some(range.into()), ..dependency(target, range, &[]) }
+}
+
+fn checked(present: &[Present], rules: &Rules, providers: &[(&str, &str, &str)]) -> Vec<String> {
+    let mut facts = FixtureFacts::default();
+    for (need, package, thorn) in providers {
+        let p = Provider {
+            package: PkgId::parse(package).unwrap(),
+            version: "1.0.0".into(),
+            arrangement: "Arr".into(),
+            thorn: thorn.to_string(),
+        };
+        facts.providers.entry(need.to_string()).or_default().push(p);
+    }
+    check(present, rules, &mut facts).unwrap()
+}
+
+/// What `claims check` finds in an installation: forks beside their upstream, incompatibilities
+/// in either direction, one thorn name enabled twice, requirements nothing meets (with the
+/// providers that could meet them): one line each, ending in the way past; and an override that
+/// drops the claim drops the problem.
+#[test]
+fn check_reports_each_problem_with_its_way_past() {
+    let base = || Origin::Base { repo: "x".into() };
+    let none = Rules::default();
+    let clean = [
+        installed("et/a", "1.0.0", &[("A", "IMPLEMENTS: a\n")], vec![], base()),
+        installed("et/b", "1.0.0", &[("B", "IMPLEMENTS: b\nINHERITS: a\n")], vec![], Origin::Added),
+    ];
+    assert!(checked(&clean, &none, &[]).is_empty());
+
+    // A fork beside its upstream.
+    let fork = installed("max/a-mp", "1.0.0", &[("AMP", "IMPLEMENTS: amp\n")], vec![claim("fork-of", "et/a", "=1.0.0")], Origin::Added);
+    let present = [clean[0].clone(), fork];
+    assert_eq!(
+        checked(&present, &none, &[]),
+        ["max/a-mp@1.0.0 is a fork of et/a@1.0.0, also installed. Run `cactup claims override drop max/a-mp:fork-of:et/a`."]
+    );
+    let drop_it = Rules { overrides: vec![Override::drop_claim("max/a-mp:fork-of:et/a").unwrap()], ..Rules::default() };
+    assert!(checked(&present, &drop_it, &[]).is_empty());
+
+    // Incompatible, declared by either side; one line per declaring side.
+    let hates = installed("et/b", "1.0.0", &[("B", "IMPLEMENTS: b\n")], vec![claim("incompatible-with", "et/a", "<2")], Origin::Added);
+    let present = [clean[0].clone(), hates];
+    assert_eq!(
+        checked(&present, &none, &[]),
+        ["et/b@1.0.0 is incompatible with et/a@1.0.0. Run `cactup claims override drop et/b:incompatible-with:et/a`."]
+    );
+    let drop_it = Rules { overrides: vec![Override::drop_claim("et/b:incompatible-with:et/a").unwrap()], ..Rules::default() };
+    assert!(checked(&present, &drop_it, &[]).is_empty());
+
+    // One thorn name twice: an added package can go, two base repos cannot.
+    let twin = |origin| installed("max/a2", "1.0.0", &[("a", "IMPLEMENTS: a2\n")], vec![], origin);
+    let present = [clean[0].clone(), twin(Origin::Added)];
+    assert_eq!(
+        checked(&present, &none, &[]),
+        ["The thorn A is enabled by et/a@1.0.0 and max/a2@1.0.0. Run `cactup remove max/a2`."]
+    );
+    let present = [clean[0].clone(), twin(Origin::Base { repo: "y".into() })];
+    assert_eq!(
+        checked(&present, &none, &[]),
+        ["The thorn A is enabled by et/a@1.0.0 and max/a2@1.0.0. Remove one from the thornlist."]
+    );
+    // A fork shares its upstream's thorn names: said once, as a fork.
+    let fork = installed("max/a-mp", "1.0.0", &[("A", "IMPLEMENTS: a\n")], vec![claim("fork-of", "et/a", "=1.0.0")], Origin::Added);
+    let lines = checked(&[clean[0].clone(), fork], &none, &[]);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("is a fork of"), "{lines:?}");
+
+    // A requirement nothing meets, with and without a provider; asked once per requirement.
+    let needy = |n: &str| installed(n, "1.0.0", &[(&n[3..].to_uppercase(), "IMPLEMENTS: n\nINHERITS: grid\n")], vec![], Origin::Added);
+    let present = [needy("et/n1"), needy("et/n2")];
+    assert_eq!(
+        checked(&present, &none, &[]),
+        [
+            "N1 (et/n1@1.0.0) inherits or befriends grid; no installed thorn provides it. No registered package provides it.",
+            "N2 (et/n2@1.0.0) inherits or befriends grid; no installed thorn provides it. No registered package provides it.",
+        ]
+    );
+    let lines = checked(&present, &none, &[("implementation:grid", "et/carpet", "CarpetSlab")]);
+    assert!(lines.iter().all(|l| l.ends_with("Run `cactup add et/carpet/CarpetSlab`.")), "{lines:?}");
+    let met = installed("et/grid", "1.0.0", &[("Grid", "IMPLEMENTS: grid\n")], vec![], base());
+    assert!(checked(&[needy("et/n1"), met], &none, &[]).is_empty());
 }
