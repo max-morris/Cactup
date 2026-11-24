@@ -3787,9 +3787,14 @@ fn pack_of_a_repo_the_installation_never_fetched_is_refused() {
     let (aurl, a) = upstream(tmp.path(), "app", &[("App/interface.ccl", "IMPLEMENTS: app\n")]);
     let (cactarium, _, _) = Fake::new().package("max/app", vec![version("1.0.0", &a, &aurl, "App", &["App"], "[]")]).serve_shared();
     let s = Setup::new(tmp, &section(&aurl, &a, &["App/App"]), &cactarium);
+    serve("private.pack.test", Mode::Private);
     let list = format!(
         "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{}\n!TARGET = $ROOT/arrangements\n!TYPE = git\n\
-         !URL = https://unfetched.pack.test/o/nofetch.git\n!REPO_PATH = $2\n!CHECKOUT = Nofetch/One\n",
+         !URL = https://unfetched.pack.test/o/nofetch.git\n!REPO_PATH = $2\n!CHECKOUT = Nofetch/One\n\
+         !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://TOKEN@unfetched.pack.test/o/tok.git\n\
+         !REPO_PATH = $2\n!CHECKOUT = Tok/One\n\
+         !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = git@private.pack.test:o/priv.git\n\
+         !REPO_PATH = $2\n!CHECKOUT = Priv/One\n",
         section(&aurl, &a, &["App/App"])
     );
     let th = s.inst.root.join("pack.th");
@@ -3802,12 +3807,46 @@ fn pack_of_a_repo_the_installation_never_fetched_is_refused() {
     };
     let args = crate::args::SimPackArgs {
         thornlist: th,
-        parfile: par,
+        parfile: par.clone(),
         file: Some(s.inst.root.join("out.sim")),
         describe: crate::args::SimDescribeArgs { force: true, yes: true, ..Default::default() },
         trim: false,
     };
     let err = format!("{:#}", crate::sim::export::pack(&ctx, args).unwrap_err());
-    assert!(err.contains("\n  nofetch: not fetched by the installation; run `cactup inst refetch`\n"), "{err}");
+    let shown = s.inst.root.join("pack.th").display().to_string();
+    let hint = format!("\n  nofetch: not in the installation's thornlist; fetch it with `cactup inst refetch {shown}`\n");
+    assert!(err.contains(&hint), "{err}");
+    // A repo with a URL refused is said once, for its URL.
+    assert!(err.contains("\n  tok: https://***@unfetched.pack.test/o/tok.git carries"), "{err}");
+    assert!(err.contains("\n  priv: git@private.pack.test:o/priv.git is an ssh URL"), "{err}");
+    assert_eq!(err.matches("\n  tok: ").count() + err.matches("\n  priv: ").count(), 2, "{err}");
     assert!(!s.inst.root.join("out.sim").exists());
+
+    // The hint works: a refetch from the packed list fetches a repo the
+    // installation's list lacked, and pack then pins it.
+    let (lurl, l) = upstream(s.inst.root.parent().unwrap(), "late", &[("Late/interface.ccl", "IMPLEMENTS: late\n")]);
+    let list = format!("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{}{}", section(&aurl, &a, &["App/App"]), section(&lurl, &l, &["Late/Late"]));
+    let th = s.inst.root.join("late.th");
+    std::fs::write(&th, &list).unwrap();
+    let pack_local = |th: &std::path::Path| {
+        let args = crate::args::SimPackArgs {
+            thornlist: th.to_owned(),
+            parfile: par.clone(),
+            file: Some(s.inst.root.join("out.sim")),
+            describe: crate::args::SimDescribeArgs { force: true, yes: true, local: true, ..Default::default() },
+            trim: false,
+        };
+        crate::sim::export::pack(&ctx, args).unwrap_or_else(|e| panic!("{e:#}"));
+        let text = std::fs::read_to_string(s.inst.root.join("out.sim")).unwrap();
+        cactup_ecosystem_common::sim::SimFile::from_toml(&text).unwrap()
+    };
+    let late = |file: &cactup_ecosystem_common::sim::SimFile| file.repos.iter().find(|r| r.name == "late").unwrap().commit.clone();
+    assert_eq!(late(&pack_local(&th)), None, "not fetched yet");
+    let argv = ["cactup", "inst", "refetch", th.to_str().unwrap()];
+    let args = match <crate::args::Args as clap::Parser>::try_parse_from(argv).unwrap().command {
+        crate::args::Commands::Inst(crate::args::InstallationCommand::Refetch(args)) => args,
+        other => panic!("{other:?}"),
+    };
+    super::super::refetch::dispatch(&s.ctx, args).unwrap_or_else(|e| panic!("{e:#}"));
+    assert_eq!(late(&pack_local(&th)), Some(l.clone()));
 }

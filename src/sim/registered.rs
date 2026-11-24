@@ -205,6 +205,7 @@ fn publish_fixes() -> super::export::Fixes {
         commit: "commit them, rebuild, and export it again",
         unhashed: "download with no hash; pin it with !CHECKSUM_SHA256 and export it again".to_owned(),
         unpinned: "no commit pins it; export it again from a build that pinned it".to_owned(),
+        unlisted: None,
         unknown_commits: false,
     }
 }
@@ -228,6 +229,7 @@ pub fn check_publish(client: &Client, file: &std::path::Path, sim: &SimFile) -> 
         sim.inputs.iter().filter_map(|i| Some((i.knob.clone(), i.url.clone()?))).collect();
     let checked = super::shareable::classify(&list, &sim.thornlist.text, &inputs);
     let mut lines = checked.refused().to_vec();
+    let mut refused_pins = std::collections::BTreeSet::new();
     for pin in sim.repos.iter().filter(|p| !checked.refuses(&p.name)) {
         let why = match (&pin.commit, &pin.sha256) {
             (Some(_), _) => match probe::start(&pin.url) {
@@ -239,10 +241,13 @@ pub fn check_publish(client: &Client, file: &std::path::Path, sim: &SimFile) -> 
         };
         if let Some(why) = why {
             lines.push(format!("{}: {why}", super::shareable::shown_repo(&pin.name)));
+            refused_pins.insert(pin.name.clone());
         }
     }
-    lines.extend(super::export::content_problems(&list, &sim.repos, &publish_fixes()));
-    lines.extend(super::export::unpinned_git(&list, &sim.repos, &publish_fixes()));
+    // One line for a repo with a URL refused: that refusal.
+    let refused = |repo: &str| checked.refuses(repo) || refused_pins.contains(repo);
+    lines.extend(super::export::content_problems(&list, &sim.repos, &publish_fixes(), &refused).lines);
+    lines.extend(super::export::unpinned_git(&list, &sim.repos, &publish_fixes(), &refused));
     for (knob, url) in &inputs {
         if download_shareability(url).download_refusal(url).is_none()
             && let Some(why) = crate::fetch::anonymous::private_download(url)

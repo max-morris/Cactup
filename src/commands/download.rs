@@ -56,6 +56,16 @@ pub(crate) fn submit_with(client: &Client, token: &str, url: &str, note: Option<
         bail!("Interrupted");
     }
     match (status, submitted) {
+        (Some(status), Submitted::Known(known)) => {
+            // Why its last check failed, which the 409 says and a check
+            // running again no longer does.
+            let message = known.error.message.trim();
+            let failed = message.strip_prefix("the server couldn't verify it: ");
+            if let Some(why) = failed.filter(|_| !status.iter().any(|l| l.starts_with("Cactarium could not verify"))) {
+                say(format!("The last check failed: {}.", why.trim_end_matches('.')));
+            }
+            status.into_iter().for_each(&mut say);
+        }
         (Some(status), _) => status.into_iter().for_each(&mut say),
         (None, Submitted::New(review)) => review_line(&review.review).into_iter().for_each(&mut say),
         // An older Cactarium says no more than the 409 does.
@@ -222,8 +232,9 @@ mod tests {
 
         // A Cactarium that says where its check stands: that, not the 409's words.
         let registry = Registry {
-            files: vec![file("f.tgz"), file("o.tgz"), file("a.tgz")],
+            files: vec![file("f.tgz"), file("o.tgz"), file("a.tgz"), file("g.tgz")],
             submitted: vec![
+                ("/g.tgz".into(), "pending".into(), "the server couldn't verify it: the file's sha256 is abc, not def".into()),
                 ("/f.tgz".into(), "pending".into(), "the server couldn't verify it: the server answered 404 Not Found".into()),
                 ("/o.tgz".into(), "pending".into(), "already submitted".into()),
                 ("/a.tgz".into(), "approved".into(), "already submitted".into()),
@@ -232,6 +243,7 @@ mod tests {
                 ("/f.tgz".into(), "failed".into(), Some("the server answered 404 Not Found".into())),
                 ("/o.tgz".into(), "ok".into(), None),
                 ("/a.tgz".into(), "ok".into(), None),
+                ("/g.tgz".into(), "fetching".into(), None),
             ],
             ..Default::default()
         };
@@ -248,6 +260,11 @@ mod tests {
             ]
         );
         assert_eq!(said("o.tgz")[1..], ["Already submitted.", "Verified by Cactarium; awaiting review by an admin."]);
+        // Resubmitted after a failed check, which runs again: why the last one failed, then that.
+        assert_eq!(
+            said("g.tgz")[1..],
+            ["Already submitted.", "The last check failed: the file's sha256 is abc, not def.", "Being verified by Cactarium."]
+        );
         assert_eq!(said("a.tgz")[1..], ["Already submitted.", "Approved by Cactarium."]);
     }
 

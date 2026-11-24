@@ -1985,11 +1985,12 @@ mod tests {
         assert!(err.contains(&line) && !err.contains("uncommitted"), "{err}");
         export("unpushed", export_args("unpushed", &out)).unwrap();
 
-        // A build that recorded no commit for the repo: refused, but with --local.
+        // A build that recorded no commit for the repo: refused once, for
+        // the URL already refused (a local path); and taken with --local.
         fs::write(&cfg_path, record(&built.to_string()).replace("[sources]\ncarpetx", "[sources]\nother")).unwrap();
         create("unpinned");
         let err = shared("unpinned");
-        assert!(err.contains("\n  carpetx: the build recorded no commit; rebuild config sim to pin it\n"), "{err}");
+        assert!(err.contains("is a local path") && !err.contains("recorded no commit"), "{err}");
         export("unpinned", export_args("unpinned", &out)).unwrap();
 
         // Unpack: the thornlist comes back with its pin, the parfile verbatim.
@@ -2608,7 +2609,7 @@ mod tests {
         use crate::sim::registered::fake::Registry;
         let tmp = tempfile::tempdir().unwrap();
         serve("reg.share.test", Mode::Public);
-        let (cactarium, _) = Registry { all_registered: true, ..Default::default() }.serve();
+        let (cactarium, log) = Registry { all_registered: true, ..Default::default() }.serve();
         let list = registry_list(&["a"], &download("http://127.0.0.1:18777/data.bin", "data.bin", Some(&"c".repeat(64))));
         let describe = crate::args::SimDescribeArgs {
             input_urls: vec!["data=http://10.1.2.3/id.h5".to_owned()],
@@ -2622,6 +2623,11 @@ mod tests {
         ] {
             assert!(err.contains(line), "{line:?} not in: {err}");
         }
+        // Refused, so never sent to Cactarium, and said once.
+        assert_eq!(err.matches("data.bin").count(), 2, "{err}");
+        let asked: Vec<String> = log.lock().unwrap().iter().map(|(_, body)| body.clone()).collect();
+        assert!(asked.iter().any(|b| b.contains("o/a.git")), "the rest is asked: {asked:?}");
+        assert!(!asked.iter().any(|b| b.contains("18777") || b.contains("10.1.2.3")), "{asked:?}");
     }
 
     /// RepoPin.cactarium: a git pin of a registered package is labeled

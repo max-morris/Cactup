@@ -4622,13 +4622,19 @@ the config's own record only while that still describes the same `build-id`.
 - **Repos nothing pins** are refused (Max's decision 5, artifacts fully
   specified): a git repo with no commit (`export::unpinned_git`: "the
   build recorded no commit; rebuild config X", or for `pack -I` "not
-  fetched by the installation; run `cactup inst refetch`"), an svn, cvs,
+  fetched by the installation; run `cactup inst refetch`", and for a repo
+  the installation's own list lacks, which a plain refetch would not
+  fetch, "fetch it with `cactup inst refetch <the packed list>`"), an svn, cvs,
   hg or darcs component, a section downloading several files.
 - **Downloads on a private address** (and inputs' URLs) are refused:
   `fetch::anonymous::private_download` resolves the host and refuses when
   any address fails `probe::is_public_address`, as the git probe does; a
   host that does not resolve here passes to Cactarium. Tests' loopback
   servers are listed in `PUBLIC_IN_TESTS`.
+- **One line per refused repo, and nothing refused sent.** A repo whose URL
+  is refused (offline or by its probe) gets no "unpinned", "no hash" or
+  "cannot be pinned" line besides; a download refused offline (its form, a
+  private address) is left out of the lookup, as a refused git URL is.
 - **`ignore` components** (`!TYPE = ignore`: on this machine only) are
   refused, as the crate's parser lists them (`crl::Thornlist::ignored`,
   crate PR #11; they are never in `components()`).

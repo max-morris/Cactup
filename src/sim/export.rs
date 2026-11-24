@@ -76,6 +76,7 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
         commit: "commit them and rebuild",
         unhashed: format!("the build recorded no hash; rebuild config {} to pin it", sim.meta.configuration),
         unpinned: format!("the build recorded no commit; rebuild config {} to pin it", sim.meta.configuration),
+        unlisted: None,
         unknown_commits: false,
     };
     let (source_text, list, repos) = check_and_pin(
@@ -177,7 +178,7 @@ fn shareable(
     }
     let checked = super::shareable::classify(&list, &text, &input_urls(describe));
     // No installation: the only hashes are those the list gives.
-    let more = content_problems(&list, &repo_pins(&list, |_| None, |_| None), fixes);
+    let more = content_problems(&list, &repo_pins(&list, |_| None, |_| None), fixes, &|r| checked.refuses(r)).lines;
     match super::shareable::settle(checked, &text, more)? {
         None => Ok((text, list)),
         Some(rewritten) => {
@@ -215,10 +216,19 @@ pub(super) struct Fixes {
     pub unhashed: String,
     /// Why a git repo has no commit, and the fix.
     pub unpinned: String,
+    /// The repos of the installation's own thornlist, and the fix for a git
+    /// repo it lacks (which [`Fixes::unpinned`]'s refetch would not fetch).
+    pub unlisted: Option<Unlisted>,
     /// No local check places the command's commits (a pack's
     /// `!REPO_COMMIT`s): one that Cactarium says the package's repo lacks
     /// is refused.
     pub unknown_commits: bool,
+}
+
+/// For `sim pack -I`: what [`Fixes::unlisted`] holds.
+pub(super) struct Unlisted {
+    pub listed: std::collections::BTreeSet<String>,
+    pub fix: String,
 }
 
 /// The §8.9 check that a `.sim` for others holds nothing nobody else could
@@ -260,8 +270,8 @@ fn check_and_pin(
     };
     let repos = pins_of(&list);
     let mut lines = state_problems(&repos, &published(&repos)?, fixes);
-    lines.extend(content_problems(&list, &repos, fixes));
-    lines.extend(unpinned_git(&list, &repos, fixes));
+    let content = content_problems(&list, &repos, fixes, &|r| checked.refuses(r));
+    lines.extend(content.lines);
     for (knob, url) in input_urls(describe) {
         if cactup_ecosystem_common::url::download_shareability(&url).download_refusal(&url).is_none()
             && let Some(why) = fetch::anonymous::private_download(&url)
@@ -269,8 +279,10 @@ fn check_and_pin(
             lines.push(format!("input {knob}: {why}"));
         }
     }
+    // Nothing refused offline is sent: a URL may carry a credential, or
+    // name a private host.
     let query = registered::Query::of(&repos, |pin| match pin.commit {
-        _ if checked.refuses(&pin.name) => None,
+        _ if checked.refuses(&pin.name) || content.private.contains(&pin.name) => None,
         Some(_) if urls == Urls::Unchecked => checked.published_as(&pin.url).map(str::to_owned),
         _ => Some(pin.url.clone()),
     });
@@ -278,6 +290,9 @@ fn check_and_pin(
     let settled = super::shareable::settle_with(checked, Some((&client, &query)))?;
     let mut refused = settled.refused.clone();
     refused.append(&mut lines);
+    // A git repo with no commit, but one with a URL refused (offline or by
+    // its probe): that refusal is its line.
+    refused.extend(unpinned_git(&list, &repos, fixes, &|r| settled.refused_repos.contains(r)));
     let answer = match settled.looked_up.as_ref() {
         None => None,
         Some(Ok(answer)) => Some(answer),
@@ -338,33 +353,38 @@ fn state_problems(repos: &[RepoPin], published: &[bool], fixes: &Fixes) -> Vec<S
 /// on a private address, and a repo of another kind than git that nothing
 /// pins (svn, cvs, hg, darcs; several downloads from one
 /// URL).
-pub(super) fn content_problems(list: &thornlist::Thornlist, repos: &[RepoPin], fixes: &Fixes) -> Vec<String> {
+pub(super) fn content_problems(
+    list: &thornlist::Thornlist,
+    repos: &[RepoPin],
+    fixes: &Fixes,
+    refused: &dyn Fn(&str) -> bool,
+) -> Content {
     let mut lines = Vec::new();
+    let mut private = std::collections::BTreeSet::new();
     for c in list.ignored() {
         lines.push(format!(
             "{}: an ignore component, which nobody else can fetch; put it in a repo and register that with Cactarium",
             c.checkout
         ));
     }
-    for c in list.components().iter().filter(|c| single_download(list, c)) {
+    // A repo with a URL refused already is said once, by that refusal.
+    for c in list.components().iter().filter(|c| single_download(list, c) && !refused(&c.repo)) {
         if repos.iter().any(|r| r.name == c.repo && r.sha256.is_none()) {
             lines.push(format!("{}: {}", c.checkout, fixes.unhashed));
         }
     }
-    // A download on a private address (a URL refused for its form is said
-    // already, by the URL check).
+    // A download on a private address.
     let mut asked = std::collections::BTreeSet::new();
     for c in list.components().iter().filter(|c| matches!(c.ty, ComponentType::Http | ComponentType::Https | ComponentType::Ftp)) {
         let Some(url) = c.url.as_deref().filter(|u| asked.insert(u.to_owned())) else { continue };
-        if cactup_ecosystem_common::url::download_shareability(url).download_refusal(url).is_none()
-            && let Some(why) = fetch::anonymous::private_download(url)
-        {
+        if !refused(&c.repo) && let Some(why) = fetch::anonymous::private_download(url) {
             lines.push(format!("{}: {why}", c.checkout));
+            private.insert(c.repo.clone());
         }
     }
     // Every other repo that nothing pins: a .sim for others is fully
     // specified. Max's decision 5 (plan §10).
-    for r in repos.iter().filter(|r| r.commit.is_none() && r.sha256.is_none()) {
+    for r in repos.iter().filter(|r| r.commit.is_none() && r.sha256.is_none() && !refused(&r.name)) {
         let Some(c) = list.components().iter().find(|c| c.repo == r.name) else { continue };
         let line = match c.ty {
             ComponentType::Git | ComponentType::Ignore => continue,
@@ -381,17 +401,37 @@ pub(super) fn content_problems(list: &thornlist::Thornlist, repos: &[RepoPin], f
         };
         lines.push(line);
     }
-    lines
+    Content { lines, private }
+}
+
+/// What [`content_problems`] found.
+pub(super) struct Content {
+    /// A line for each problem.
+    pub lines: Vec<String>,
+    /// The repos (as the thornlist names them) of downloads on a private
+    /// address: refused, so never sent to Cactarium.
+    pub private: std::collections::BTreeSet<String>,
 }
 
 /// A line for each git repo of `list` (pinned as `repos`) that no commit
 /// pins: a .sim for others is fully specified (Max's decision 5).
-pub(super) fn unpinned_git(list: &thornlist::Thornlist, repos: &[RepoPin], fixes: &Fixes) -> Vec<String> {
+pub(super) fn unpinned_git(
+    list: &thornlist::Thornlist,
+    repos: &[RepoPin],
+    fixes: &Fixes,
+    refused: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
     let git = |r: &RepoPin| list.components().iter().any(|c| c.repo == r.name && c.ty == ComponentType::Git);
     repos
         .iter()
-        .filter(|r| r.commit.is_none() && r.sha256.is_none() && git(r))
-        .map(|r| format!("{}: {}", shown_repo(&r.name), fixes.unpinned))
+        .filter(|r| r.commit.is_none() && r.sha256.is_none() && git(r) && !refused(&r.name))
+        .map(|r| {
+            let fix = match &fixes.unlisted {
+                Some(unlisted) if !unlisted.listed.contains(&r.name) => &unlisted.fix,
+                _ => &fixes.unpinned,
+            };
+            format!("{}: {fix}", shown_repo(&r.name))
+        })
         .collect()
 }
 
@@ -593,6 +633,7 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
         commit: "commit them",
         unhashed: "download with no hash; add !CHECKSUM_SHA256 to the thornlist".to_owned(),
         unpinned: "not fetched by the installation; run `cactup inst refetch`".to_owned(),
+        unlisted: None,
         unknown_commits: false,
     };
     let (text, list, repos, provenance) = if ctx.globals.installation.is_some() {
@@ -607,6 +648,21 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
         };
         let fetched = FetchState::read(&inst.root)?;
         let published = |repos: &[RepoPin]| check_repos(&repos_dir, repos, fetched.as_ref());
+        // A repo the installation's own list lacks: a plain refetch would
+        // not fetch it, a refetch from the list being packed does.
+        let listed = inst
+            .live_thornlist_to_read()
+            .ok()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|text| thornlist::parse(&text).ok())
+            .map(|own| own.components().iter().map(|c| c.repo.clone()).collect());
+        let shown = args.thornlist.display().to_string();
+        let shown = if shown.contains(char::is_whitespace) { format!("'{shown}'") } else { shown };
+        let unlisted = listed.map(|listed| Unlisted {
+            listed,
+            fix: format!("not in the installation's thornlist; fetch it with `cactup inst refetch {shown}`"),
+        });
+        let fixes = Fixes { unlisted, ..fixes };
         let (text, list, repos) =
             check_and_pin(ctx, &args.describe, Urls::Unchecked, (text, list), &pins_of, &published, &fixes)?;
         let mut provenance = exporter();
@@ -1081,6 +1137,28 @@ fn short(commit: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A git repo with no commit gets the fix of its case: a repo the
+    /// installation's list lacks the refetch from the packed list, any other
+    /// the plain refetch; one with a URL refused gets no line of its own.
+    #[test]
+    fn an_unpinned_repo_gets_the_fix_that_works() {
+        let section = |name: &str| {
+            format!("!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://h.test/o/{name}.git\n!CHECKOUT = {name}/One\n")
+        };
+        let list = thornlist::parse(&format!("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{}{}{}", section("a"), section("b"), section("c")))
+            .unwrap();
+        let repos = repo_pins(&list, |_| None, |_| None);
+        let fixes = Fixes {
+            when: "",
+            commit: "",
+            unhashed: String::new(),
+            unpinned: "plain".into(),
+            unlisted: Some(Unlisted { listed: ["a".to_owned()].into(), fix: "from the list".into() }),
+            unknown_commits: false,
+        };
+        assert_eq!(unpinned_git(&list, &repos, &fixes, &|r| r == "c"), ["a: plain", "b: from the list"]);
+    }
 
     /// The claim overrides are information: an installation.toml that does
     /// not read records none and fails nothing.

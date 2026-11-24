@@ -61,7 +61,9 @@ Export refuses what nobody else could reproduce:
   config), or, for `sim pack`, the thornlist gives none.
 - **A repository nothing pins**: a git repository with no commit (the
   build recorded none: rebuild the config; or, for `sim pack -I`, the
-  installation never fetched it: run `cactup inst refetch`), an svn, cvs,
+  installation never fetched it: run `cactup inst refetch`, or, when the
+  installation's own thornlist lacks it, `cactup inst refetch <the list>`,
+  which makes the installation follow that list), an svn, cvs,
   hg or darcs component (no commit pins it), or one section downloading
   several files (no single hash pins them). Move such a component to git,
   or to downloads each pinned by a `!CHECKSUM_SHA256` line. For `sim pack`
@@ -99,7 +101,9 @@ each repository of a registered package with it: `owner/pkg@1.2.0` when
 that version froze the commit, a bare `owner/pkg` for any other commit. An
 input's file is asked about once it is downloaded and hashed, after the
 questions. When Cactarium cannot be asked (it is down, or failing), that is
-one more line of the error, beside everything else refused. The claim overrides of the installation (`cactup claims`) are
+one more line of the error, beside everything else refused. A repository
+or download refused before then (for its URL, or a private address) is
+never sent to Cactarium, and is named once, for that. The claim overrides of the installation (`cactup claims`) are
 recorded in the `.sim`'s provenance, for information only: `import` never
 resolves dependencies.
 
@@ -294,7 +298,8 @@ Cactarium then fetches the file itself to verify the hash, and an admin
 reviews it. cactup then says where it stands: being verified, verified and
 awaiting review, approved, rejected, or not verified and why. A download
 submitted before is not an error: cactup says the same of it, and
-submitting one that could not be verified makes Cactarium check it again.
+submitting one that could not be verified makes Cactarium check it again
+(cactup says why the last check failed).
 A URL with credentials, or on a private address, is refused before
 anything is downloaded.
 
