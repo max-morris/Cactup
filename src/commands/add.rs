@@ -1132,8 +1132,7 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
     // written, any failure (the fetch, a `?` below) undoes that, and takes
     // away the placements this add newly made.
     let mut undo = crate::fetch::library::PutBack::drop_placements(&inst.root, &start.before, &composed)?;
-    let report = crate::fetch::execute(&fetch_plan, &inst.root)?;
-    undo.made(&fetch_plan, &report);
+    let report = fetched(crate::fetch::execute(&fetch_plan, &inst.root), &fetch_plan, &mut undo, &inst.root)?;
     if !report.failures.is_empty() {
         // What did fetch is recorded all the same, so a later prune knows
         // cactup made it.
@@ -1143,6 +1142,11 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
     }
     crate::fetch::FetchState::record(&inst.root, &report.records())?;
 
+    // Ctrl-C since the fetch: neither the list nor the record is written,
+    // and the placements dropped are put back (`undo`).
+    if gix::interrupt::is_triggered() {
+        bail!("Interrupted");
+    }
     let live_path = &start.live_path;
     crate::cow::Cow::at(&inst.root)?.before_replace(live_path)?;
     std::fs::write(live_path, &composed).with_context(|| format!("Failed to write '{}'", live_path.display()))?;
@@ -1188,6 +1192,31 @@ pub fn dispatch(ctx: &Ctx, specs: &[String], flags: &AddFlags) -> Res<()> {
     }
     println!("Build a config to compile them, e.g. `{}`.", "cactup build <config>".bold());
     Ok(())
+}
+
+/// The fetch's report, for `add` and `remove`, the placements it made noted
+/// in `undo` (taken away again unless the command goes through). A fetch
+/// Ctrl-C stopped fails the command; what it did fetch is recorded all the
+/// same, so a later prune knows cactup made it.
+fn fetched(
+    result: Res<crate::fetch::ExecReport>,
+    plan: &crate::fetch::Plan,
+    undo: &mut crate::fetch::library::PutBack<'_>,
+    root: &std::path::Path,
+) -> Res<crate::fetch::ExecReport> {
+    match result {
+        Ok(report) => {
+            undo.made(plan, &report);
+            Ok(report)
+        }
+        Err(e) => {
+            if let Some(report) = crate::fetch::Interrupted::report_of(&e) {
+                undo.made(plan, report);
+                crate::fetch::FetchState::record(root, &report.records())?;
+            }
+            Err(e)
+        }
+    }
 }
 
 /// Every snapshot nobody vouches for that the plan takes (an untrusted
@@ -1745,14 +1774,18 @@ pub fn remove(ctx: &Ctx, packages: &[String], flags: &RemoveFlags) -> Res<()> {
     let mut undo = crate::fetch::library::PutBack::drop_placements(&inst.root, &start.before, &composed)?;
     let restored: Vec<String> = restore.as_ref().map(restored_lines).unwrap_or_default();
     if let Some(fetch_plan) = restore {
-        let report = crate::fetch::execute(&fetch_plan, &inst.root)?;
-        undo.made(&fetch_plan, &report);
+        let report = fetched(crate::fetch::execute(&fetch_plan, &inst.root), &fetch_plan, &mut undo, &inst.root)?;
         if !report.failures.is_empty() {
             let why: Vec<String> = report.failures.iter().map(|f| format!("{}: {}", f.what, f.error)).collect();
             let replaced: Vec<&str> = touched.iter().copied().collect();
             bail!("Failed to restore {}:\n  {}", replaced.join(", "), why.join("\n  "));
         }
         crate::fetch::FetchState::record(&inst.root, &report.records())?;
+    }
+    // Ctrl-C since the fetch (or with none to make): neither the list nor
+    // the record is written, and the placements dropped are put back.
+    if gix::interrupt::is_triggered() {
+        bail!("Interrupted");
     }
     let live_path = &start.live_path;
     crate::cow::Cow::at(&inst.root)?.before_replace(live_path)?;

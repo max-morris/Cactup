@@ -1675,6 +1675,43 @@ fn clones_changed_while_the_prompt_waits_are_caught() {
     let _ = (&it.a1, &it.a2, &it.log, &it.fake);
 }
 
+/// Ctrl-C landing after the fetch's git work, with nothing left queued, and
+/// before its link pass fails the add ("Interrupted"): the thorn is not
+/// linked, and neither the list nor the record is written. The interrupt
+/// flag is the process's: run in a child of its own.
+#[test]
+fn an_interrupt_between_the_fetch_and_its_links_fails_the_add() {
+    const NAME: &str = "commands::add::deps_tests::an_interrupt_between_the_fetch_and_its_links_fails_the_add";
+    if std::env::var_os("CACTUP_TEST_INTERRUPT_CHILD").is_none() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([NAME, "--exact", "--test-threads=1"])
+            .env("CACTUP_TEST_INTERRUPT_CHILD", "1")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success() && said.contains("1 passed"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+        return;
+    }
+    let it = admbase("^1.0");
+    let s = &it.setup;
+    let live = s.inst.live_thornlist().unwrap();
+    let list = std::fs::read_to_string(&live).unwrap();
+    let added = s.added();
+    crate::fetch::AFTER_POOL.with(|h| {
+        h.set(Some(|| gix::interrupt::IS_INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst)))
+    });
+    let result = s.add(&["max/solo"], yes());
+    crate::fetch::AFTER_POOL.with(|h| h.set(None));
+    let err = result.unwrap_err();
+    assert_eq!(format!("{err:#}"), "Interrupted");
+    // Cloned, and not linked.
+    assert!(s.inst.root.join("Cactus/repos/solo/Solo/interface.ccl").is_file());
+    assert!(std::fs::symlink_metadata(s.inst.root.join("Cactus/arrangements/Solo")).is_err());
+    assert_eq!(std::fs::read_to_string(&live).unwrap(), list);
+    assert_eq!(s.added(), added);
+    let _ = (&it.a1, &it.a2, &it.log, &it.fake);
+}
+
 /// `n` packages, each read at a commit of its own in the fake (`fake` made
 /// as `change` says), read up front by one registry: the batch requests and
 /// rounds it took, and how many it read.

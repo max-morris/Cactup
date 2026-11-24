@@ -292,7 +292,15 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     for note in &dropping.notes {
         println!("{note}");
     }
-    let report = fetch::execute(&plan, &inst.root)?;
+    // Ctrl-C stops the fetch with what it did get done: that is recorded all
+    // the same (below), and the refetch fails.
+    let (report, interrupted) = match fetch::execute(&plan, &inst.root) {
+        Ok(report) => (report, false),
+        Err(e) => match e.downcast::<fetch::Interrupted>() {
+            Ok(fetch::Interrupted(report)) => (report, true),
+            Err(e) => return Err(e),
+        },
+    };
     if let Some(undo) = undo.as_mut() {
         undo.made(&plan, &report);
     }
@@ -305,7 +313,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // Ctrl-C during the fetch: what completed is recorded above; everything
     // else (the summary, thornlist adoption, config reports) belongs to a
     // finished refetch, not an aborted one.
-    if gix::interrupt::is_triggered() {
+    if interrupted || gix::interrupt::is_triggered() {
         // A repo cut short mid-checkout now reads as modified, with nothing of
         // the user's in it; name the forced refetch that finishes it.
         let unfinished: Vec<&str> = report
@@ -380,7 +388,11 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
 
     // Thornlist writes. The pristine as-fetched copy always tracks what was
     // fetched; the live copy is only replaced by an explicit source (and the
-    // old live copy is snapshotted first).
+    // old live copy is snapshotted first). Ctrl-C since the fetch: nothing is
+    // adopted (the dropped placements are put back), as for one during it.
+    if gix::interrupt::is_triggered() {
+        bail!("Interrupted");
+    }
     let fetch_ok = report.failures.is_empty();
     let mut recorded = false;
     if fetch_ok || had_work {

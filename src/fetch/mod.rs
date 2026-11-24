@@ -454,6 +454,47 @@ pub struct Failure {
     pub error: String,
 }
 
+/// [`execute`]'s error when Ctrl-C stopped it before it had done everything
+/// (the link pass and the libraries included): it says "Interrupted", and
+/// carries what the fetch did get done, the work it never started among the
+/// failures. A caller that keeps a partial record (what was fetched, for
+/// prune; placements to undo) reads it with [`Interrupted::report_of`]; any
+/// other passes the error on. An interrupted fetch is never an `Ok`: its
+/// links may not match its plan.
+#[derive(Debug)]
+pub struct Interrupted(pub ExecReport);
+
+impl std::fmt::Display for Interrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Interrupted")
+    }
+}
+
+impl std::error::Error for Interrupted {}
+
+impl Interrupted {
+    /// The partial report, if `e` is an interrupted fetch.
+    pub fn report_of(e: &anyhow::Error) -> Option<&ExecReport> {
+        e.downcast_ref::<Interrupted>().map(|i| &i.0)
+    }
+
+    /// Stop with `report`, `rest` (what, why) still to do recorded as
+    /// failures.
+    fn with<'a>(mut report: ExecReport, rest: impl IntoIterator<Item = (String, &'a str)>) -> anyhow::Error {
+        for (what, error) in rest {
+            report.failures.push(Failure { what, error: error.to_owned() });
+        }
+        Interrupted(report).into()
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's hook, run by [`execute`] on the calling thread the moment
+    /// its pool of fetches is joined, before it looks at the interrupt flag.
+    pub(crate) static AFTER_POOL: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+}
+
 /// What a fetch leaves in `fetch-state.toml`: a record per repo, and the
 /// hash of each download by [`download_key`].
 pub struct FetchRecords {
@@ -609,7 +650,9 @@ fn left_as_it_was(item: &GitRepoPlan, unasked: &Unasked, label: &str, fetched: O
 /// green for a clean fetch, yellow when it overwrote something, red when it
 /// failed. Errors are collected per item, never fatal to the rest of the
 /// fetch; the red line is what makes a failure visible live, next to the
-/// work going on around it, rather than only in the final report.
+/// work going on around it, rather than only in the final report. Ctrl-C
+/// before everything is done, links and libraries included, fails it with
+/// [`Interrupted`], never an `Ok`.
 pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
     enum Work<'p> {
         Git(&'p GitRepoPlan),
@@ -911,41 +954,49 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
     renderer.shutdown_and_wait();
 
     let mut report = report.into_inner().expect("fetch report poisoned");
+    #[cfg(test)]
+    AFTER_POOL.with(|h| h.get().map(|h| h()));
 
-    // Interrupted (§ Ctrl-C): the workers drained out with items still
-    // queued. Those were never fetched — record each as a failure so the
-    // caller's report and exit code see them (in-flight items already failed
-    // with gix's own abort error), and skip the externals and the symlink
-    // pass: nothing further should run, and returning a success-shaped
-    // report here is what once let an interrupted fetch masquerade as
-    // complete.
+    // What is still to do once the externals are done, for a Ctrl-C's report.
+    let after_externals = || {
+        let links = plan.links.iter().map(|c| (c.checkout.clone(), "Interrupted before this link was made"));
+        links.chain(plan.libraries.iter().map(|p| (p.label(), "Interrupted before this library was placed")))
+    };
+
+    // Interrupted (§ Ctrl-C): the workers drained out, with items still
+    // queued or none. Those never fetched are recorded as failures (in-flight
+    // items already failed with gix's own abort error), and nothing further
+    // runs: not the externals, not the symlink pass, not the libraries, each
+    // a failure too. The fetch fails ("Interrupted") even when the queue was
+    // already empty: an `Ok` here, its links never made, once let callers
+    // commit a record the tree did not match.
     if gix::interrupt::is_triggered() {
-        for work in queue.into_inner().expect("fetch queue poisoned") {
-            let what = match work {
-                Work::Git(item) => item.repo.clone(),
-                Work::Download(c) => c.checkout.clone(),
-            };
-            report
-                .failures
-                .push(Failure { what, error: "Interrupted before this component was fetched".into() });
-        }
-        return Ok(report);
+        let queued = queue.into_inner().expect("fetch queue poisoned").into_iter().map(|work| match work {
+            Work::Git(item) => item.repo.clone(),
+            Work::Download(c) => c.checkout.clone(),
+        });
+        let queued = queued.map(|what| (what, "Interrupted before this component was fetched"));
+        let externals = plan.external.iter().map(|c| (c.checkout.clone(), "Interrupted"));
+        return Err(Interrupted::with(report, queued.chain(externals).chain(after_externals())));
     }
 
     // Externals sequentially: they spawn system tools that may talk to the
     // terminal, and none occur in the real ET list anyway.
-    for c in &plan.external {
+    for (i, c) in plan.external.iter().enumerate() {
         if gix::interrupt::is_triggered() {
-            report
-                .failures
-                .push(Failure { what: c.checkout.clone(), error: "Interrupted".into() });
-            continue;
+            let rest = plan.external[i..].iter().map(|c| (c.checkout.clone(), "Interrupted"));
+            return Err(Interrupted::with(report, rest.chain(after_externals())));
         }
         // A system tool writes in its checkout in place.
         let reified = cow.reify(&install_root.join(&c.target), &gix::interrupt::IS_INTERRUPTED, &|| ());
         if let Err(e) = reified.and_then(|_| external::fetch_external(install_root, c)) {
             report.failures.push(Failure { what: c.checkout.clone(), error: format!("{e:#}") });
         }
+    }
+    // Ctrl-C during the last external: the links and libraries are still to
+    // do (the checks in their loops cover only lists that are not empty).
+    if gix::interrupt::is_triggered() {
+        return Err(Interrupted::with(report, after_externals()));
     }
 
     // Symlink pass, after every fetch: repoint-or-create per checkout.
@@ -960,11 +1011,9 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
         // Ctrl-C: the links not yet made are failures, like the components
         // never fetched above, and nothing further runs (no settle pass).
         if gix::interrupt::is_triggered() {
-            for c in &links[i..] {
-                let error = "Interrupted before this link was made".to_owned();
-                report.failures.push(Failure { what: c.checkout.clone(), error });
-            }
-            return Ok(report);
+            let rest = links[i..].iter().map(|c| (c.checkout.clone(), "Interrupted before this link was made"));
+            let libraries = plan.libraries.iter().map(|p| (p.label(), "Interrupted before this library was placed"));
+            return Err(Interrupted::with(report, rest.chain(libraries)));
         }
         match pass.link(c) {
             Ok(outcome) => report.links.push((c.checkout.clone(), outcome)),
@@ -985,11 +1034,8 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
     let mut unplaced = std::collections::BTreeSet::new();
     for (i, p) in plan.libraries.iter().enumerate() {
         if gix::interrupt::is_triggered() {
-            for p in &plan.libraries[i..] {
-                let error = "Interrupted before this library was placed".to_owned();
-                report.failures.push(Failure { what: p.label(), error });
-            }
-            return Ok(report);
+            let rest = plan.libraries[i..].iter().map(|p| (p.label(), "Interrupted before this library was placed"));
+            return Err(Interrupted::with(report, rest));
         }
         match library::place(&clones_done, install_root, &plan.root, p, &failed, &unplaced) {
             Ok(outcome) => report.links.push((p.label(), outcome)),
@@ -2542,10 +2588,15 @@ pub(crate) mod tests {
         std::thread::sleep(std::time::Duration::from_millis(500));
         gix::interrupt::IS_INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
         let interrupted = std::time::Instant::now();
-        let (report, returned) = fetching.join().unwrap();
-        let report = report.unwrap();
-        assert_eq!(report.failures.len(), 3, "{:?}", report.failures);
+        let (result, returned) = fetching.join().unwrap();
+        let e = result.unwrap_err();
+        assert_eq!(format!("{e:#}"), "Interrupted");
+        let report = Interrupted::report_of(&e).expect("the fetch's partial report");
+        // The three clones, and the three links never made.
+        assert_eq!(report.failures.len(), 6, "{:?}", report.failures);
         assert!(report.failures.iter().all(|f| f.error.to_lowercase().contains("interrupted")), "{:?}", report.failures);
+        let unlinked = report.failures.iter().filter(|f| f.error == "Interrupted before this link was made").count();
+        assert_eq!(unlinked, 3, "{:?}", report.failures);
         let took = returned.duration_since(interrupted);
         assert!(took < std::time::Duration::from_secs(2), "{took:?}");
     }
@@ -3268,6 +3319,43 @@ pub(crate) mod tests {
         assert!(install_root.join("MyTree/repos/cactusbase").is_dir());
         assert_tree_lands_under_root(&install_root, "MyTree");
         assert_no_cactus_dir_anywhere(&install_root);
+    }
+
+    /// Ctrl-C landing once every clone is done (nothing left queued) and
+    /// before the link pass fails the fetch ("Interrupted"), never an `Ok`
+    /// whose links were never made: each link is a failure saying so, and
+    /// none is on disk. The interrupt flag is the process's: run in a child
+    /// of its own.
+    #[test]
+    fn an_interrupt_after_the_clones_and_before_the_links_fails_the_fetch() {
+        const NAME: &str = "fetch::tests::an_interrupt_after_the_clones_and_before_the_links_fails_the_fetch";
+        if std::env::var_os("CACTUP_TEST_INTERRUPT_CHILD").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([NAME, "--exact", "--test-threads=1"])
+                .env("CACTUP_TEST_INTERRUPT_CHILD", "1")
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && said.contains("1 passed"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let install_root = tmp.path().join("install");
+        let plan = plan_for(&et_shaped_thornlist(&tmp.path().join("sources"), "Cactus"), &install_root);
+        assert!(!plan.links.is_empty());
+        AFTER_POOL.with(|h| h.set(Some(|| gix::interrupt::IS_INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst))));
+        let result = execute(&plan, &install_root);
+        AFTER_POOL.with(|h| h.set(None));
+        let e = result.unwrap_err();
+        assert_eq!(format!("{e:#}"), "Interrupted");
+        let report = Interrupted::report_of(&e).expect("the fetch's partial report");
+        assert!(report.links.is_empty(), "{:?}", report.links);
+        assert_eq!(report.failures.len(), plan.links.len(), "{:?}", report.failures);
+        assert!(report.failures.iter().all(|f| f.error == "Interrupted before this link was made"), "{:?}", report.failures);
+        // Cloned, and not linked.
+        assert!(install_root.join("Cactus/repos/cactusbase").is_dir());
+        assert!(std::fs::symlink_metadata(install_root.join("Cactus/arrangements/CactusBase/Boundary")).is_err());
+        assert!(std::fs::symlink_metadata(install_root.join("Cactus/src")).is_err());
     }
 
     /// Control case: the identical ET-shaped list, but with the ordinary
