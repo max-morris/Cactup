@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use super::plan::{table, ChoiceKey, LineKind};
 use super::refusal::Refusal;
 use super::resolve::claim_label;
-use super::{forks, Origin, PkgId, Present, Rules};
+use super::{fork_claims, forks, Origin, PkgId, Present, Req, Rules};
 
 /// An `added-for` entry of `installation.toml`, as read.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -300,9 +300,16 @@ struct Graph<'a> {
 impl Graph<'_> {
     /// Who in `set` takes a dependency on `target`: the target itself, a package an override
     /// says satisfies it, or a fork of it (identity only: the versions were checked when it was
-    /// added). An extension node shares its base node's claims, but the base node, which sorts
+    /// added, unless what the fork says it is a drop-in for shows it does not: an override that
+    /// let the dependent in may have been removed since). An extension node shares its base node's claims, but the base node, which sorts
     /// before it and never goes, is always found first.
-    fn taker<'s>(&self, target: &str, set: &BTreeSet<&'s PkgId>) -> Option<&'s PkgId> {
+    fn taker<'s>(
+        &self,
+        target: &str,
+        range: Option<&str>,
+        sha: Option<&str>,
+        set: &BTreeSet<&'s PkgId>,
+    ) -> Option<&'s PkgId> {
         if let Some(id) = set.iter().find(|id| id.as_str() == target) {
             return Some(id);
         }
@@ -315,7 +322,26 @@ impl Graph<'_> {
                 return Some(id);
             }
         }
-        set.iter().find(|id| forks(&self.all[**id].release, &t)).copied()
+        set.iter().find(|id| forks(&self.all[**id].release, &t) && self.fork_stands_in(&self.all[**id], &t, range, sha)).copied()
+    }
+
+    /// Whether a fork of `t` may stand in for a dependency asking `range` or `sha` of it. The
+    /// versions `t` has published are not known here: a fork that says it is a drop-in for one
+    /// exact version is judged by that version, and any other fork (a range, a commit) is taken
+    /// to stand in, the safe side for a removal.
+    fn fork_stands_in(&self, fork: &Present, t: &PkgId, range: Option<&str>, sha: Option<&str>) -> bool {
+        let Ok(req) = Req::from_claim(range, sha) else { return true };
+        let Some(dep) = t.slug(&req) else { return true };
+        fork_claims(&fork.release, t).iter().any(|k| {
+            let exact = match k.target.sha.is_none() && k.target.commit_fallback().is_none() {
+                true => k.target.req().ok().and_then(|q| exact_version(&q)),
+                false => None,
+            };
+            match exact {
+                Some(v) => k.stands_in_for(&dep, &[(v, None)]),
+                None => true,
+            }
+        })
     }
 
     /// Whether `taker`, when it is a base package coming back, meets a dependency of `dependent`
@@ -383,7 +409,7 @@ impl Graph<'_> {
             }
             let label = claim_label(c);
             let held: Vec<&PkgId> = if c.alternatives.is_empty() {
-                let taker = self.taker(&c.target, set).filter(|t| self.back_fits(p, t, c.range.as_deref(), c.sha.as_deref(), &c.needs));
+                let taker = self.taker(&c.target, c.range.as_deref(), c.sha.as_deref(), set).filter(|t| self.back_fits(p, t, c.range.as_deref(), c.sha.as_deref(), &c.needs));
                 taker.and_then(|t| self.holder(p, t, &c.needs, set)).into_iter().collect()
             } else {
                 let alternatives: Option<Vec<PkgId>> =
@@ -393,7 +419,7 @@ impl Graph<'_> {
                 let key = alternatives.map(|alternatives| ChoiceKey { dependent, alternatives });
                 let takers: Vec<(&PkgId, &Vec<String>)> = (c.alternatives.iter())
                     .filter_map(|a| {
-                        let t = self.taker(&a.target, set)?;
+                        let t = self.taker(&a.target, a.range.as_deref(), a.sha.as_deref(), set)?;
                         self.back_fits(p, t, a.range.as_deref(), a.sha.as_deref(), &a.needs).then_some((t, &a.needs))
                     })
                     .collect();
@@ -447,4 +473,15 @@ impl Graph<'_> {
         }
         reached
     }
+}
+
+/// The one version a range holds (`=1.2.3`, with its track), when it is exactly that.
+fn exact_version(q: &cactup_ecosystem_common::version::TrackedReq) -> Option<cactup_ecosystem_common::version::TrackedVersion> {
+    let [alt] = q.alts.as_slice() else { return None };
+    let [c] = alt.req.comparators.as_slice() else { return None };
+    if !q.is_exact() || !c.pre.is_empty() {
+        return None;
+    }
+    let track = alt.track.as_ref().map(|t| format!("{t}:")).unwrap_or_default();
+    format!("{track}{}.{}.{}", c.major, c.minor?, c.patch?).parse().ok()
 }

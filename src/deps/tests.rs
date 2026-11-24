@@ -1689,6 +1689,13 @@ fn check_meets_dependencies_with_what_is_installed() {
     assert!(check(&[user(dep(&["A"])), fork("=1.2.0")], &Rules::default(), &mut facts).unwrap().is_empty());
     assert_eq!(check(&[user(dep(&["A"])), fork("=0.5.0")], &Rules::default(), &mut facts).unwrap().len(), 1);
 
+    // An installed fork that is no drop-in for the range blocks adding the target: the way past
+    // is the override, or removing the fork.
+    let blocked = check(&[user(dep(&["A"])), fork("=0.5.0")], &Rules::default(), &mut facts).unwrap();
+    assert_eq!(
+        blocked,
+        ["max/user@1.0.0 needs et/lib ^1.0, which is not installed; the fork max/lib-mp@1.0.0 does not stand in. Run `cactup claims override satisfies max/lib-mp et/lib`, `cactup remove max/lib-mp`, or `cactup claims override drop max/user:dependency:et/lib`."]
+    );
     // Any-of: one alternative is enough; none says so.
     let alt = |t: &str| cactup_ecosystem_common::api::AlternativeInfo { target: t.into(), range: None, sha: None, needs: vec![] };
     let any = ClaimInfo { alternatives: vec![alt("et/a"), alt("et/b")], ..depends_on("et/a", "*", &[]) };

@@ -245,6 +245,11 @@ impl Override {
 /// A version range as a key keeps it: as the range reads, with no whitespace (`>=1.0,<2.0`,
 /// `^1||:^2`), so the key is one word that reads back as the same range.
 fn canonical_range(text: &str) -> Res<String> {
+    // `>=1.0,,` reads as `>=1.0` to semver; an empty comparator is a slip.
+    let empty = |alt: &str| alt.split_once(':').map_or(alt, |(_, body)| body).split(',').any(|c| c.trim().is_empty());
+    if text.split("||").any(empty) {
+        bail!("\"{text}\" has an empty comparator.");
+    }
     let range: TrackedReq = text.parse()?;
     let canonical: String = range.to_string().split_whitespace().collect();
     if canonical.parse::<TrackedReq>().map(|r| r != range).unwrap_or(true) {
@@ -470,6 +475,10 @@ mod tests {
         assert!(err(Override::add_dependency("max/foo", "local:bar", &strings(&["A"]), &[])).contains("not a registered"));
         assert!(err(Override::add_dependency("max/foo", "et/bar@not a range", &strings(&["A"]), &[])).contains("et/bar@not a range"));
         assert!(err(Override::add_dependency("max/foo", "max/foo", &strings(&["A"]), &[])).contains("cannot depend on itself."));
+        for range in [">=1.0,,", ">=1.0,", ",^1", "", "^1||", "mp:^1||:"] {
+            let given = format!("et/bar@{range}");
+            assert!(err(Override::add_dependency("max/foo", &given, &strings(&["A"]), &[])).contains("empty comparator"), "{range}");
+        }
         for key in ["", "drop", "drop a b", "needs max/foo:dependency:et/bar", "remove max/foo", "add max/foo et/bar needs A"] {
             assert!(Override::from_key(key).is_err(), "{key}");
         }

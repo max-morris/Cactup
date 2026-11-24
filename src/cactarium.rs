@@ -446,7 +446,10 @@ impl Client {
         while let Some(next) = cause.source() {
             cause = next;
         }
-        let why = if e.is_timeout() { "it did not answer in time".to_owned() } else { cause.to_string() };
+        if e.is_timeout() {
+            return self.timed_out();
+        }
+        let why = cause.to_string();
         anyhow!(
             "Cactarium at {} isn't reachable ({why})\nTo use another server, set the {URL_KNOB} knob or CACTARIUM_URL.",
             self.base
@@ -574,13 +577,17 @@ impl Client {
     /// server that did not answer in time.
     fn unreachable_read(&self, e: std::io::Error, url: &str) -> anyhow::Error {
         if e.kind() == std::io::ErrorKind::TimedOut || e.to_string().contains("timed out") {
-            return anyhow!(
-                "Cactarium at {} isn't reachable (it did not answer in time)\nTo use another server, set the \
-                 {URL_KNOB} knob or CACTARIUM_URL.",
-                self.base
-            );
+            return self.timed_out();
         }
         anyhow::Error::new(e).context(format!("Failed to read the answer from {url}"))
+    }
+
+    /// A server that took the request and did not answer: not that it is unreachable.
+    fn timed_out(&self) -> anyhow::Error {
+        anyhow!(
+            "Cactarium at {} did not answer in time.\nTo use another server, set the {URL_KNOB} knob or CACTARIUM_URL.",
+            self.base
+        )
     }
 }
 
@@ -991,6 +998,16 @@ mod tests {
             assert!(validate_url(bad).is_err(), "{bad}");
         }
         assert!(crate::database::knob_spec(URL_KNOB).is_some(), "a built-in knob");
+    }
+
+    /// A server that took the request and said nothing did not answer: it is not called unreachable.
+    #[test]
+    fn a_silent_server_did_not_answer() {
+        let err = format!("{:#}", Client::at("http://127.0.0.1:9").timed_out());
+        assert_eq!(
+            err,
+            "Cactarium at http://127.0.0.1:9 did not answer in time.\nTo use another server, set the cactarium-url knob or CACTARIUM_URL."
+        );
     }
 
     #[test]

@@ -194,7 +194,9 @@ fn dependencies(ps: &[Present], rules: &Rules, facts: &mut dyn Facts, out: &mut 
                     Some(u) => why.push((target, req, u)),
                 }
             }
-            if !met && let Some(line) = dependency_line(p, c.alternatives.is_empty(), &why) {
+            // A fork of the first target that is installed blocks adding the target itself.
+            let fork = why.first().and_then(|(t, _, _)| ps.iter().find(|f| f.release.id != *t && forks(&f.release, t)));
+            if !met && let Some(line) = dependency_line(p, c.alternatives.is_empty(), &why, fork) {
                 out.push(line);
             }
         }
@@ -203,7 +205,7 @@ fn dependencies(ps: &[Present], rules: &Rules, facts: &mut dyn Facts, out: &mut 
 }
 
 /// One line for a dependency that nothing met: what is wrong and the ways past.
-fn dependency_line(p: &Present, single: bool, why: &[(PkgId, Req, Unmet)]) -> Option<String> {
+fn dependency_line(p: &Present, single: bool, why: &[(PkgId, Req, Unmet)], fork: Option<&Present>) -> Option<String> {
     let (id, label) = (&p.release.id, p.release.label());
     let (first, req, unmet) = why.first()?;
     let drop = format!("`cactup claims override drop {id}:dependency:{first}`");
@@ -216,6 +218,20 @@ fn dependency_line(p: &Present, single: bool, why: &[(PkgId, Req, Unmet)]) -> Op
         ));
     }
     Some(match unmet {
+        // The fork stands in for none of what is asked, and adding the target beside it is refused.
+        Unmet::NotInstalled if fork.is_some() => {
+            let fork = fork?;
+            let id = &fork.release.id;
+            let remove = match fork.origin {
+                Origin::Added => format!(", `cactup remove {id}`"),
+                Origin::Base { .. } => String::new(),
+            };
+            format!(
+                "{label} needs {first} {req}, which is not installed; the fork {} does not stand in. \
+                 Run `cactup claims override satisfies {id} {first}`{remove}, or {drop}.",
+                fork.release.label()
+            )
+        }
         Unmet::NotInstalled => {
             format!("{label} needs {first} {req}, which is not installed. Run `cactup add {first}`, or {drop}.")
         }
