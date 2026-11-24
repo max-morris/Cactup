@@ -2320,7 +2320,8 @@ mod tests {
 
         let overridden = format!(
             "{unused}!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://TOKEN4@github.com/o/b.git\n\
-             !URL = https://clean.share.test/o/b.git\n!REPO_COMMIT = {c}\n!CHECKOUT = B/One\n{svn}",
+             !URL = https://clean.share.test/o/b.git\n!REPO_COMMIT = {c}\n!ANON_USER = anonymous\n\
+             !ANON_PASS = anonymous\n!CHECKOUT = B/One\n",
             c = "a".repeat(40)
         );
         let (packed, out, list) = pack_list(tmp.path(), &overridden, Default::default());
@@ -2497,6 +2498,39 @@ mod tests {
         let err = format!("{:#}", packed.unwrap_err());
         assert!(err.contains("\n  p: git@private.reg.test:o/p.git is an ssh URL"), "{err}");
         assert_eq!(err.matches("\n  p: ").count(), 1, "{err}");
+    }
+
+    /// Artifacts are fully specified (Max's decision 5): an svn, cvs or hg
+    /// repo, which no commit pins, and several downloads from one URL,
+    /// which no hash pins, are refused in a shared .sim, each a line of the
+    /// one error; with --local they go in unpinned.
+    #[test]
+    fn a_shared_sim_refuses_repos_nothing_pins() {
+        use crate::fetch::anonymous::testserver::{serve, Mode};
+        use crate::sim::registered::fake::Registry;
+        let tmp = tempfile::tempdir().unwrap();
+        serve("reg.share.test", Mode::Public);
+        let (cactarium, _) = Registry { all_registered: true, ..Default::default() }.serve();
+        let more = "!TARGET = $ROOT/arrangements\n!TYPE = svn\n!URL = https://svn.share.test/s/$2/trunk\n!CHECKOUT = S/One\n\
+                    !TARGET = $ROOT/arrangements\n!TYPE = cvs\n!URL = :pserver:anonymous@cvs.share.test:/cvsroot\n!CHECKOUT = V/One\n\
+                    !TARGET = $ROOT/arrangements\n!TYPE = hg\n!URL = https://hg.share.test/h\n!CHECKOUT = H/One\n\
+                    !TARGET = $ROOT/dl\n!TYPE = https\n!URL = https://dl.share.test/many\n!CHECKOUT = a.tgz b.tgz\n";
+        let list = registry_list(&["a"], more);
+        let (packed, out, _) = pack_list_at(tmp.path(), &list, Default::default(), &cactarium);
+        let err = format!("{:#}", packed.unwrap_err());
+        for said in [
+            "\n  trunk: svn repos cannot be pinned; move it to git, or to a download pinned by !CHECKSUM_SHA256\n",
+            "\n  cvsroot: cvs repos cannot be pinned; move it to git, or to a download pinned by !CHECKSUM_SHA256\n",
+            "\n  h: hg repos cannot be pinned; move it to git, or to a download pinned by !CHECKSUM_SHA256\n",
+            "\n  many: several downloads from one URL, which no hash can pin; give each its own section with !CHECKSUM_SHA256\n",
+        ] {
+            assert!(err.contains(said), "{said:?} not in: {err}");
+        }
+        assert!(err.ends_with("\nPass --local to export for use here only."), "{err}");
+        assert!(!out.exists());
+        let describe = crate::args::SimDescribeArgs { local: true, ..Default::default() };
+        let (packed, _, _) = pack_list_at(tmp.path(), &list, describe, &cactarium);
+        packed.unwrap_or_else(|e| panic!("{e:#}"));
     }
 
     /// RepoPin.cactarium: a git pin of a registered package is labeled

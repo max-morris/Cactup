@@ -310,9 +310,10 @@ fn state_problems(repos: &[RepoPin], published: &[bool], fixes: &Fixes) -> Vec<S
 }
 
 /// A line for each component of `text` (parsed as `list`, pinned as
-/// `repos`) nobody else can fetch: an `ignore` component (on this machine
-/// only), and a download with no hash to pin it by (nothing Cactarium could
-/// review).
+/// `repos`) nobody else can fetch or reproduce: an `ignore` component (on
+/// this machine only), a download with no hash to pin it by (nothing
+/// Cactarium could review), and a repo of another kind than git that
+/// nothing pins (svn, cvs, hg, darcs; several downloads from one URL).
 fn content_problems(text: &str, list: &thornlist::Thornlist, repos: &[RepoPin], fixes: &Fixes) -> Vec<String> {
     let mut lines = Vec::new();
     for checkout in ignored_checkouts(text, list) {
@@ -324,6 +325,26 @@ fn content_problems(text: &str, list: &thornlist::Thornlist, repos: &[RepoPin], 
         if repos.iter().any(|r| r.name == c.repo && r.sha256.is_none()) {
             lines.push(format!("{}: {}", c.checkout, fixes.unhashed));
         }
+    }
+    // Every other repo that nothing pins, but git (a commit pins it, or
+    // nothing recorded one): a .sim for others is fully specified.
+    // Max's decision 5 (plan §10).
+    for r in repos.iter().filter(|r| r.commit.is_none() && r.sha256.is_none()) {
+        let Some(c) = list.components().iter().find(|c| c.repo == r.name) else { continue };
+        let line = match c.ty {
+            ComponentType::Git | ComponentType::Ignore => continue,
+            _ if single_download(list, c) => continue,
+            ComponentType::Http | ComponentType::Https | ComponentType::Ftp => format!(
+                "{}: several downloads from one URL, which no hash can pin; give each its own section with !CHECKSUM_SHA256",
+                shown_repo(&r.name)
+            ),
+            ty => format!(
+                "{}: {} repos cannot be pinned; move it to git, or to a download pinned by !CHECKSUM_SHA256",
+                shown_repo(&r.name),
+                format!("{ty:?}").to_ascii_lowercase()
+            ),
+        };
+        lines.push(line);
     }
     lines
 }
