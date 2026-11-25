@@ -5746,9 +5746,14 @@ requirement met only by another clone of the repo's own package.
   asked of the repo's history in one walk (`fetch::git::is_ancestor`). The newest
   contained version with every thorn present is `[[fork-of]] target =
   "<pkg>@=<version>"` (exact: decision 8); missing thorns make a TODO. cactup's
-  clones are depth 1, so a shallow clone cannot show a fork: a TODO names the
-  candidates, and the command prints `git -C <clone> fetch --unshallow` and
-  `cactup package init <repo> -f` and never changes the clone.
+  clones are depth 1, and a shallow clone cannot show a fork: when there is a
+  candidate, `init` fetches the clone's whole history from its `origin`, under
+  the installation's lock, on a line of its own (`fetch::git::unshallow`: HEAD's
+  commit by its id, else the remote's HEAD). Only objects are added; HEAD, its
+  branch and the work tree stay. A later refetch at depth 1 may make the clone
+  shallow again. When the fetch fails, a TODO names the candidates, and the
+  command prints `git -C <clone> fetch --unshallow` and `cactup package init
+  <repo> -f`; Ctrl-C fails the command.
 - **Smells (TODOs only):** repo thorns not in the built list (an
   `exclude-thorns` comment); an `#include` that leaves its thorn's directory
   (`..`, resolved lexically in the tree's layout) into another repo's installed

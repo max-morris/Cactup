@@ -836,6 +836,46 @@ fn fetch_commit(
     Ok(())
 }
 
+/// Fetch the whole history behind HEAD into the shallow clone at `repo_dir`, through its
+/// `origin`: objects only, so HEAD, its branch and the work tree stay as they are. First HEAD's
+/// commit by its id; a server that does not grant that want gets the remote's HEAD instead, which
+/// unshallows the clone when HEAD's commit is in that history. Fails when the clone is still
+/// shallow after both, and at once on Ctrl-C or a remote gone quiet.
+pub fn unshallow(repo_dir: &Path, progress: &mut impl crate::progress::Handoff) -> Res<()> {
+    let open = || gix::open(repo_dir).with_context(|| format!("Failed to open '{}'", repo_dir.display()));
+    let repo = open()?;
+    let head = repo.head_id().with_context(|| "The clone has no HEAD commit")?.detach();
+    let by_id = fetch_refspec(&repo, &format!("+{head}:{PIN_REF}"), Shallow::undo(), progress);
+    let done = |repo: &gix::Repository| -> Res<bool> {
+        delete_pin_ref(repo);
+        Ok(!open()?.is_shallow())
+    };
+    if gix::interrupt::is_triggered() {
+        by_id?;
+        bail!("Interrupted while fetching the history of '{}'", repo_dir.display());
+    }
+    if let Err(e) = &by_id
+        && is_unanswered(e)
+    {
+        delete_pin_ref(&repo);
+        return by_id;
+    }
+    if by_id.is_ok() && done(&repo)? {
+        return Ok(());
+    }
+    let by_head = fetch_refspec(&repo, &format!("+HEAD:{PIN_REF}"), Shallow::undo(), progress);
+    if gix::interrupt::is_triggered() {
+        by_head?;
+        bail!("Interrupted while fetching the history of '{}'", repo_dir.display());
+    }
+    let unshallowed = done(&repo)?;
+    match (by_head, unshallowed) {
+        (_, true) => Ok(()),
+        (Err(e), false) => Err(e),
+        (Ok(()), false) => bail!("The history fetched from origin does not reach HEAD ({head})"),
+    }
+}
+
 fn depth_one() -> Shallow {
     Shallow::DepthAtRemote(1.try_into().expect("nonzero"))
 }
@@ -3173,6 +3213,43 @@ mod align_tests {
 /// suite never depends on a `git` binary. Commits carry an empty tree — HEAD
 /// movement is what the source-tracking tests need, and an empty tree keeps
 /// the helper small.
+#[cfg(test)]
+mod unshallow_tests {
+    use super::*;
+
+    /// A depth-1 clone, on a branch or pinned (detached) at an older commit, gets its whole
+    /// history: older commits are there, and HEAD, its branch and the work tree stay put.
+    #[test]
+    fn a_shallow_clone_gets_its_history_and_stays_where_it_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        let upstream = tmp.path().join("upstream");
+        testrepo::init(&upstream);
+        let c1 = testrepo::commit_tree(&upstream, &[("a", "1\n", false)]);
+        let c2 = testrepo::commit_tree(&upstream, &[("a", "2\n", false)]);
+        let c3 = testrepo::commit_tree(&upstream, &[("a", "3\n", false)]);
+        let (branch, tip) = head_of(&upstream).unwrap();
+        assert_eq!(tip, c3);
+        let url = upstream.to_string_lossy().into_owned();
+        let mut progress = prodash::tree::Root::new().add_child("test unshallow");
+
+        let on_branch = tmp.path().join("on-branch");
+        clone(&url, Some(&branch), &on_branch, &mut progress).unwrap();
+        let pinned = tmp.path().join("pinned");
+        clone_pinned(&url, None, c2, &pinned, &mut progress).unwrap();
+        for (dir, at, older) in [(&on_branch, (branch.clone(), c3), c1), (&pinned, (DETACHED.to_owned(), c2), c1)] {
+            let repo = gix::open(dir).unwrap();
+            assert!(repo.is_shallow() && !repo.has_object(older), "{}", dir.display());
+            unshallow(dir, &mut progress).unwrap_or_else(|e| panic!("{}: {e:#}", dir.display()));
+            let repo = gix::open(dir).unwrap();
+            assert!(!repo.is_shallow(), "{}", dir.display());
+            assert_eq!(is_ancestor(dir, &[older], at.1).unwrap(), [true], "{}", dir.display());
+            assert_eq!(head_of(dir).unwrap(), at, "{}", dir.display());
+            assert!(repo.try_find_reference(PIN_REF).unwrap().is_none(), "no ref of cactup's left");
+            assert_eq!(std::fs::read_to_string(dir.join("a")).unwrap(), if at.1 == c3 { "3\n" } else { "2\n" });
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod testrepo {
     use super::*;

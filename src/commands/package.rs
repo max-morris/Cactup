@@ -377,7 +377,12 @@ fn generate(client: &Client, input: &Input, name: &str, owner: &str, exact: bool
     }
 
     // The packages the repo may fork, on a renderer whose layout knows their names.
-    let (candidates, shallow) = fork_candidates(input, &own, flesh, &infos)?;
+    let (candidates, mut shallow) = fork_candidates(input, &own, flesh, &infos)?;
+    // A fork is possible and cactup's depth-1 clone holds no history to show it: fetched into
+    // the clone (objects only). Failed, the fork stays a TODO with the way past.
+    if shallow {
+        shallow = !fetch_history(input)?;
+    }
     let forks = match candidates.is_empty() || shallow {
         true => Vec::new(),
         false => {
@@ -943,6 +948,37 @@ fn fork_candidates(input: &Input, own: &[Own], flesh: bool, infos: &Pins) -> Res
     let ids: Vec<PkgId> = candidates.iter().filter_map(|p| PkgId::parse(p).ok()).collect();
     let shallow = !ids.is_empty() && gix::open(input.dir).is_ok_and(|r| r.is_shallow());
     Ok((ids, shallow))
+}
+
+/// Fetch the whole history of the shallow clone of `input.repo`, under the installation's lock
+/// (a refetch writes the same clone), on a line of its own that says how it went. Whether it
+/// worked; Ctrl-C fails the command.
+fn fetch_history(input: &Input) -> Res<bool> {
+    let _locked = input.inst.locked()?;
+    let (progress, renderer) = crate::manifest::setup_prodash();
+    let layout = crate::progress::Layout::for_names([input.repo]);
+    let mut line = crate::progress::Line::over(progress.add_child(input.repo.to_owned()), input.repo, layout);
+    line.phase("fetching its history".to_owned());
+    let fetched = crate::fetch::git::unshallow(input.dir, &mut line);
+    let interrupted = gix::interrupt::is_triggered();
+    match &fetched {
+        Ok(()) => line.succeeded("fetched its history to look for a fork"),
+        Err(_) if interrupted => {}
+        Err(e) => {
+            let said = format!("could not fetch its history: {e:#}");
+            // A transport's own words may quote the URL whole.
+            match crate::fetch::git::origin_url(input.dir) {
+                Some(url) if !url.trim().is_empty() => line.failed(crate::fetch::git::scrub(&said, &url)),
+                _ => line.failed(said),
+            }
+        }
+    }
+    drop(line);
+    renderer.shutdown_and_wait();
+    if interrupted {
+        bail!("Interrupted");
+    }
+    Ok(fetched.is_ok())
 }
 
 /// The forks among `ids`: each package whose versions' frozen commits the repo's history
