@@ -8,7 +8,7 @@
   ],
   "present": [
     {
-      "package": "repo:carpetx",
+      "package": "local:carpetx",
       "unknown": "2222222222222222222222222222222222222222",
       "thorns": [
         "CarpetX",
@@ -26,6 +26,9 @@
     "message": [
       "both have a thorn CarpetX",
       "Pass --replace to use et/carpetx in place of base repo carpetx"
+    ],
+    "not_in_message": [
+      "claims override"
     ]
   }
 }

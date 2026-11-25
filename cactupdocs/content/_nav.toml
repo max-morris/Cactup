@@ -44,6 +44,10 @@ title = "User Guide"
   title = "Sharing Simulations"
   file = "users/sharing-simulations.md"
 
+  [[sections.pages]]
+  title = "Publishing Packages"
+  file = "users/publishing-packages.md"
+
 [[sections]]
 title = "Cluster Authors"
 

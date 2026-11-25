@@ -11,7 +11,7 @@
   "expect": {
     "refusal": "NoConsistentSet",
     "message": [
-      "no combination meets these constraints together",
+      "No combination of releases meets these constraints together",
       "et/p ^1 (from et/q@1.0.0)",
       "et/p * (from max/x@1.0.0)"
     ]

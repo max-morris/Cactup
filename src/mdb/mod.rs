@@ -351,8 +351,8 @@ fn check_root_generation(root: &Path) -> Res<()> {
     let want = crate::build_info::MDB_GENERATION;
     match read_generation(root)? {
         Some(found) if found != want => bail!(
-            "The MDB at '{}' is generation {found}, but this cactup reads generation {want}; \
-             point --mdb-path at a generation-{want} MDB{}",
+            "The MDB at '{}' is generation {found}; this cactup reads generation {want}.\n\
+             Point --mdb-path at a generation-{want} MDB{}.",
             root.display(),
             if found > want { " or run `cactup update`" } else { "" }
         ),
@@ -379,20 +379,19 @@ fn unmarked_warning(name: &str, meta_path: &Path, text: &str, guide: &str) -> St
         // Generation 1 is never brought forward automatically: the hand
         // recipe, then the stamp it leads to.
         Some(1) => format!(
-            "Warning: user-MDB machine \"{name}\" in '{}' records no MDB generation, but looks like \
-             generation 1, which cactup does not update automatically; follow {} by hand, then add \
-             `mdb-generation = 2` under [cactup] and cactup will bring it the rest of the way.",
+            "Warning: user-MDB machine \"{name}\" in '{}' records no MDB generation and looks like \
+             generation 1.\nUpdate it by hand following {}, then add `mdb-generation = 2` under [cactup].",
             meta_path.display(),
             migrate::guide_section(guide, 2)
         ),
         Some(older) => format!(
-            "Warning: user-MDB machine \"{name}\" in '{}' records no MDB generation, but looks like \
-             generation {older}; add `mdb-generation = {older}` under [cactup] and cactup will bring it forward.",
+            "Warning: user-MDB machine \"{name}\" in '{}' records no MDB generation and looks like \
+             generation {older}.\nAdd `mdb-generation = {older}` under [cactup] to bring it forward.",
             meta_path.display()
         ),
         None => format!(
             "Warning: user-MDB machine \"{name}\" in '{}' records no MDB generation; assuming \
-             generation {want}. Add `mdb-generation = {want}` under [cactup] to silence this.",
+             generation {want}.\nAdd `mdb-generation = {want}` under [cactup] to silence this.",
             meta_path.display()
         ),
     }
@@ -1181,7 +1180,7 @@ mod tests {
         // Generation 1 is never brought forward: the hint leads to the hand
         // recipe, not to a promise.
         let first = unmarked_warning("m", path, "[variants.submitscript]\n", "/g.md");
-        assert!(first.contains("does not update automatically"), "{first}");
+        assert!(first.contains("by hand"), "{first}");
         assert!(first.contains("\"Generation 2\" in '/g.md'") && first.contains("mdb-generation = 2"), "{first}");
     }
 

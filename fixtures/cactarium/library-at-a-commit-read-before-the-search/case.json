@@ -1,0 +1,24 @@
+{
+  "about": "A library placed at a commit no version froze is read before the search, never during it",
+  "packages": [
+    "max--kadath--fuka-at-commit",
+    "et--fuka"
+  ],
+  "snapshots": [
+    "et--fuka--at-9a9a"
+  ],
+  "specs": [
+    "max/kadath"
+  ],
+  "expect": {
+    "reads": [
+      "et/fuka@9a9a9a9a9a9a"
+    ],
+    "plan": [
+      "add max/kadath@1.0.0 Kadath named"
+    ],
+    "libraries": [
+      "et/fuka#9a9a9a9a9a9a: src/fuka by max/kadath"
+    ]
+  }
+}

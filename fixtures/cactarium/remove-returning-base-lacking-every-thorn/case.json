@@ -1,0 +1,46 @@
+{
+  "about": "An added package's dependency that names no thorns asks for every thorn: a base that comes back with fewer enabled does not hold it",
+  "packages": [
+    "et--carpet--two",
+    "max--dall--every-carpet-thorn"
+  ],
+  "present": [
+    {
+      "package": "et/carpet",
+      "version": "2026.6.0",
+      "enabled": [
+        "Carpet",
+        "CarpetSlab"
+      ]
+    },
+    {
+      "package": "max/dall",
+      "version": "1.0.0",
+      "enabled": [
+        "DAll"
+      ]
+    }
+  ],
+  "remove": {
+    "targets": [
+      "et/carpet"
+    ],
+    "returning": [
+      {
+        "replacer": "et/carpet",
+        "package": "et/carpet",
+        "version": "2026.5.0",
+        "base": "carpet",
+        "enabled": [
+          "Carpet"
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "refusal": "HasDependents",
+    "message": [
+      "max/dall@1.0.0"
+    ]
+  }
+}

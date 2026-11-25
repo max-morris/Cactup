@@ -52,6 +52,8 @@ pub(super) fn conflicts(
                         fork_label: ef.release.label(),
                         upstream: (*up).clone(),
                         upstream_base_repo: eu.base_repo().map(str::to_owned),
+                        // Checked by a search with it, when it is suggested.
+                        replace: eu.base_repo().is_some(),
                     };
                     return Some((r, vec![(*fork).clone(), (*up).clone()]));
                 }
@@ -89,14 +91,19 @@ pub(super) fn conflicts(
                 let ((first, ef, tf), (_, es, _)) =
                     if a < b { ((a, ea, ta), (b, eb, tb)) } else { ((b, eb, tb), (a, ea, ta)) };
                 let b_new = eb.thorn_is_new(tb);
-                let (newcomer, other) = if b_new && b > a { (*b, *ea) } else { (*a, *eb) };
+                let ((newcomer, other), other_id) =
+                    if b_new && b > a { ((*b, *ea), *a) } else { ((*a, *eb), *b) };
                 let r = Refusal::SameThorn {
                     thorn: tf.clone(),
                     first: ef.release.label(),
                     second: es.release.label(),
                     newcomer: newcomer.clone(),
+                    other: other_id.clone(),
                     base_repo: other.base_repo().map(str::to_owned),
                     ignore: None,
+                    needed: false,
+                    // Checked by a search with it, when it is suggested.
+                    replace: other.base_repo().is_some(),
                 };
                 let _ = first;
                 return Some((r, vec![(*a).clone(), (*b).clone()]));
@@ -104,6 +111,14 @@ pub(super) fn conflicts(
         }
     }
     None
+}
+
+/// A thorn's hard requirements, header includes left out: what `claims check` reads. Whether a
+/// header counts depends on the thorns the check knows (`ccl::counts`), and Cactarium's
+/// providers answer names packages, not thorn facts; the closure check (`crate::closure`)
+/// refuses an unmet header where it matters, before a build.
+pub(super) fn needs_of(facts: &ThornFacts) -> Vec<Requirement> {
+    ccl::needs_of(facts).into_iter().filter(|r| !matches!(r, Requirement::Include(_))).collect()
 }
 
 /// The enabled thorns, with their facts.
@@ -161,4 +176,17 @@ pub(super) fn broken_requirements(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    /// A header a thorn includes is no requirement to `claims check`; every other kind is as
+    /// the crate gives it.
+    #[test]
+    fn includes_are_left_out() {
+        let mut facts = cactup_ecosystem_common::ccl::ThornFacts::scan("IMPLEMENTS: z\nINHERITS: grid", None);
+        facts.needs_includes = vec!["loop.hxx".into()];
+        assert_eq!(cactup_ecosystem_common::ccl::needs_of(&facts).len(), 2);
+        assert_eq!(super::needs_of(&facts), [super::Requirement::Implementation("grid".into())]);
+    }
 }

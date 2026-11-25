@@ -107,7 +107,7 @@ fn added_package_hint(installation: &Installation, name: Option<&str>) {
         println!(
             "{}",
             format!(
-                "{checkout} comes from {} (added with cactup add); problems with it? {contact}",
+                "{checkout} comes from {} (cactup add); report problems to {contact}",
                 crate::commands::add::describe(&package.package, &package.version)
             )
             .yellow()
@@ -148,12 +148,54 @@ fn implicated<'a>(log: &str, added: &'a [crate::installation::AddedPackage]) -> 
 
 /// `cactup build` for a caller that needs the binary before it can go on
 /// (`cactup import`, §8.9): exactly the bare command, except that a build
-/// the machine sends to the queue is blocked on (`--block`) instead of left
-/// running, and one in the foreground simply runs.
-pub(crate) fn build_to_completion(ctx: &Ctx, mut start: BuildStartArgs) -> Res<()> {
+/// the machine sends to the queue is followed to its end (`build submit
+/// --follow`) instead of left running, and one in the foreground simply runs.
+///
+/// Followed, never blocked on: the import is a person at a terminal waiting
+/// on a build that may sit in the queue for an hour, and a machine's
+/// `blocking-submit` (`sbatch --wait`) holds back even the job id until the
+/// job ends, so nothing at all would show for the whole wait. The plain
+/// `submit` names the job at once, the wait shows the job's state, and the
+/// build's output streams as it runs, as it does in the foreground.
+///
+/// Ctrl-C detaches as it does for `--follow`, leaving the job running, and
+/// the import fails "interrupted": nothing after the build may run on a
+/// binary that is not there yet.
+pub(crate) fn build_to_completion(ctx: &Ctx, start: BuildStartArgs) -> Res<()> {
     let machine = machine::resolve(ctx)?;
-    start.block = choose_submit(&machine, &start.opts)?;
-    auto(ctx, start)
+    let installation = Installation::resolve(ctx)?;
+    let name = start.name.clone();
+    let result = build_to_completion_with(ctx, &machine, &installation, start);
+    if result.is_err() {
+        added_package_hint(&installation, name.as_deref());
+    }
+    result
+}
+
+fn build_to_completion_with(
+    ctx: &Ctx,
+    machine: &Machine,
+    installation: &Installation,
+    mut start: BuildStartArgs,
+) -> Res<()> {
+    if !choose_submit(machine, &start.opts)? {
+        return run_with(machine, installation, start);
+    }
+    // The plain submit: `blocking-submit` is only ever `--block`'s.
+    start.block = false;
+    let db = ctx.db.read()?;
+    let submitted = submit_impl(installation, machine, &db, &start, ctx.globals.hostname.as_deref())?;
+    drop(db);
+    // None: the config was already up to date, so there is no job.
+    let Some((name, attempt_id)) = submitted else { return Ok(()) };
+    let config_dir = installation.cactus_root()?.join("configs").join(&name);
+    watch_build(machine, &config_dir, attempt_id, Watch::Follow)?;
+    if gix::interrupt::is_triggered() {
+        bail!(
+            "Interrupted; the build stays in the queue.\nRerun once it ends to finish the import."
+        );
+    }
+    Ok(())
 }
 
 /// Why `--block` has nothing to wait for on a build that is about to run in
@@ -287,9 +329,8 @@ fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force
             && !force
         {
             bail!(
-                "Config \"{name}\"'s last build attempt ended, but the scheduler could not be asked \
-                 whether its job {} was queued again: {failed}\nRun `cactup build stop {name}`, or pass \
-                 -f to stop it and build",
+                "Could not ask the scheduler whether build job {} of config \"{name}\" was requeued: \
+                 {failed}\nRun `cactup build stop {name}`, or pass -f to stop it and build.",
                 job.id
             );
         }
@@ -299,7 +340,7 @@ fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force
             && !force
         {
             bail!(
-                "Config \"{name}\"'s last build attempt ended, but the scheduler still lists its job \
+                "The last build of config \"{name}\" ended, but the scheduler still lists its job \
                  {} {}; or pass -f to stop it",
                 job.id,
                 crate::scheduler::listed_after_end(status, &format!("cactup build stop {name}"))
@@ -307,8 +348,8 @@ fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force
         }
         if !force {
             bail!(
-                "Config \"{name}\" already has a live build attempt (job {}); \
-                 run `cactup build stop {name}` first, or pass -f to stop it",
+                "Config \"{name}\" is already building (job {})\nRun `cactup build stop {name}` first, \
+                 or pass -f to stop it.",
                 job.id
             );
         }
@@ -345,8 +386,7 @@ fn run(ctx: &Ctx, args: BuildStartArgs) -> Res<()> {
     // after.
     if args.block {
         bail!(
-            "--block does not apply to `cactup build run`, which builds in the foreground; drop the \
-             flag or use `cactup build submit --block`"
+            "--block does not apply to `cactup build run`\nDrop it, or use `cactup build submit --block`."
         );
     }
     if let (Some(config_dir), Some(attempt_id)) = (args.config_dir.clone(), args.attempt_id) {
@@ -390,13 +430,12 @@ fn start_name(inst: &Installation, name: Option<&str>) -> Res<String> {
         .collect();
     if existing.is_empty() {
         bail!(
-            "This installation has no active config yet; name the config to build: \
-             `cactup build <name>`"
+            "No active config\nName the config to build: `cactup build <name>`."
         );
     }
     bail!(
-        "This installation has no active config; name the config to build (`cactup build <name>`) \
-         or select one with `cactup config use <name>`. Configs here: {}",
+        "No active config; configs here: {}\nName one with `cactup build <name>`, or select one with \
+         `cactup config use <name>`.",
         config_name_list(&existing)
     )
 }
@@ -488,8 +527,8 @@ fn submit_impl(
     // `make` — queueing it would just burn a scheduler slot to run `cp`.
     if args.opts.virtual_executable.is_some() {
         bail!(
-            "`cactup build submit` cannot be combined with --virtual-executable; use `cactup \
-             build run --virtual-executable` instead"
+            "`cactup build submit` does not take --virtual-executable\nUse `cactup build run \
+             --virtual-executable`."
         );
     }
 
@@ -529,8 +568,7 @@ fn submit_impl(
     let topo = resolve_topology(&flags, machine, db, None, false, Placement::submit(machine))?;
     if let Some(knob) = skipped_knob {
         eprintln!(
-            "{} ignoring `build-queue` knob \"{knob}\": machine \"{}\" cannot queue a build there; \
-             using \"{}\"",
+            "{} machine \"{}\" cannot queue builds in \"{knob}\" (build-queue knob); using \"{}\"",
             "note:".yellow(),
             machine.name,
             topo.queue
@@ -641,6 +679,14 @@ fn submit_impl(
     // what is on disk now, not into our copy, and never drops an outcome the
     // compute node has already written.
     if args.block && machine.meta.scheduler.blocking_submit.is_some() {
+        // The submit holds the terminal for the whole build, and may hold
+        // back the job id until the end too: said up front, and a line shows
+        // the wait is alive meanwhile.
+        println!(
+            "Submitting build of {} and waiting for it.\nCtrl-C stops waiting, not the job.",
+            name.bold()
+        );
+        let waiting = WaitLine::start(&name, None);
         let mut record = |job: &crate::scheduler::JobRecord| -> Res<()> {
             let _lock = BuildAttempt::record_lock(&BuildAttempt::attempt_dir(&config_dir, attempt_id))?;
             let mut fresh = BuildAttempt::open(&config_dir, attempt_id)?;
@@ -648,10 +694,13 @@ fn submit_impl(
             fresh.meta.submitted = true;
             fresh.meta.timestamps.submitted.get_or_insert_with(Utc::now);
             fresh.store_meta()?;
-            println!("Submitted build of {} as job {}", name.bold(), job.id.bold());
+            waiting.job(&job.id);
             Ok(())
         };
-        sched.submit_blocking(&vset, uni, &mut record)?;
+        let submitted = sched.submit_blocking(&vset, uni, &mut record);
+        drop(waiting);
+        let job = submitted?;
+        println!("The build of {} is job {}.", name.bold(), job.id.bold());
         return Ok(Some((name, attempt_id)));
     }
 
@@ -690,15 +739,119 @@ fn detached_message(job_id: &str) {
 enum Watch {
     /// `--follow`: stream the attempt's output as it grows.
     Follow,
-    /// `--block`: wait in silence for the outcome. Also how a *native*
-    /// blocking submit finishes — by the time it returns the outcome is
-    /// already on disk, so the first round through the loop reads it and
+    /// `--block`: wait for the outcome without the output. Also how a
+    /// *native* blocking submit finishes — by the time it returns the outcome
+    /// is already on disk, so the first round through the loop reads it and
     /// returns, and the polling below never happens.
     Block,
 }
 
+/// The one line a queued build's wait draws while nothing else shows that it
+/// is alive (CLAUDE.md's progress contract): the job, the state its
+/// scheduler last gave, and how long the wait has run, kept current by a
+/// clock of its own. `--block` draws it for the whole wait, `--follow` until
+/// the build's output starts. Only a bar, no messages, so on a non-tty there
+/// is no renderer at all.
+struct WaitLine {
+    shown: std::sync::Arc<std::sync::Mutex<Shown>>,
+    renderer: Option<crate::manifest::JoinHandle>,
+    // Owns the tree the line hangs from for as long as the line is drawn.
+    _root: std::sync::Arc<prodash::tree::Root>,
+}
+
+/// What a [`WaitLine`] shows, shared with its clock.
+struct Shown {
+    line: Option<crate::progress::Line>,
+    /// `None` while a blocking submit has not reported it.
+    job_id: Option<String>,
+    since: std::time::Instant,
+    state: Option<JobStatus>,
+}
+
+impl Shown {
+    fn paint(&self) {
+        let Some(line) = &self.line else { return };
+        let what = match self.state {
+            Some(JobStatus::Queued) => "waiting in the queue",
+            Some(JobStatus::Holding) => "held in the queue",
+            Some(JobStatus::Running) => "building",
+            _ => "submitted",
+        };
+        let job = match &self.job_id {
+            Some(id) => format!(" as job {id}"),
+            None => String::new(),
+        };
+        line.phase(format!("{what}{job}, {}", elapsed(self.since.elapsed())));
+    }
+}
+
+impl WaitLine {
+    fn start(config_name: &str, job_id: Option<&str>) -> WaitLine {
+        let (root, renderer) = crate::manifest::setup_prodash_if_tty();
+        let layout = crate::progress::Layout::for_names([config_name]);
+        let line = crate::progress::Line::over(root.add_child(config_name), config_name, layout);
+        let shown = std::sync::Arc::new(std::sync::Mutex::new(Shown {
+            line: Some(line),
+            job_id: job_id.map(str::to_owned),
+            since: std::time::Instant::now(),
+            state: None,
+        }));
+        shown.lock().expect("wait line poisoned").paint();
+        // The clock: it goes when the line does.
+        let weak = std::sync::Arc::downgrade(&shown);
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                let Some(shown) = weak.upgrade() else { break };
+                let shown = shown.lock().expect("wait line poisoned");
+                if shown.line.is_none() {
+                    break;
+                }
+                shown.paint();
+            }
+        });
+        WaitLine { shown, renderer, _root: root }
+    }
+
+    /// Note the state the scheduler just gave (`None`: it could not say).
+    fn state(&self, state: Option<JobStatus>) {
+        let mut shown = self.shown.lock().expect("wait line poisoned");
+        shown.state = state;
+        shown.paint();
+    }
+
+    /// Note the job id a blocking submit just reported.
+    fn job(&self, job_id: &str) {
+        let mut shown = self.shown.lock().expect("wait line poisoned");
+        shown.job_id = Some(job_id.to_owned());
+        shown.paint();
+    }
+}
+
+impl Drop for WaitLine {
+    /// Take the line off the screen, before anything else prints.
+    fn drop(&mut self) {
+        self.shown.lock().expect("wait line poisoned").line = None;
+        if let Some(renderer) = self.renderer.take() {
+            renderer.shutdown_and_wait();
+        }
+    }
+}
+
+/// How long a wait has run: `42s`, `3m05s`, `1h02m`.
+fn elapsed(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m{:02}s", secs / 60, secs % 60),
+        _ => format!("{}h{:02}m", secs / 3600, secs % 3600 / 60),
+    }
+}
+
 /// Wait for a freshly-queued attempt and report the outcome once it lands —
-/// `--follow` streaming its output as it grows, `--block` silent (§7.9).
+/// `--follow` streaming its output as it grows, `--block` without it (§7.9).
+/// Either way a line names the job and its state while nothing else shows
+/// ([`WaitLine`]): a queued build can wait an hour before its first line.
 /// Deliberately NOT `tail::tail_log` — that streams until Ctrl-C only, and
 /// its side-by-side mode needs a tty, neither of which fits "watch my build
 /// finish" — but built from the same two primitives it is itself built from:
@@ -723,30 +876,26 @@ fn watch_build(machine: &Machine, config_dir: &Path, attempt_id: u32, mode: Watc
         err_path = PathBuf::from(s);
     }
     // A native blocking submit has already waited; announcing a wait that is
-    // over would be a lie, so the banner waits for the first round to prove
-    // there is something left to wait for.
+    // over would be a lie, so the banner (and the line after it) waits for
+    // the first round to prove there is something left to wait for.
     let mut announced = false;
-    let mut announce = || {
-        if std::mem::replace(&mut announced, true) {
-            return;
-        }
-        let what = match mode {
-            Watch::Follow => "Following",
-            Watch::Block => "Waiting for",
-        };
-        println!(
-            "{what} build of {} (job {job_id}); Ctrl-C detaches without stopping the job.",
-            config_name.bold()
-        );
-    };
+    // Drawn from the banner on, until the output starts (`--follow`) or the
+    // wait ends; `None` once it is gone for good.
+    let mut waiting: Option<WaitLine> = None;
+    let mut output_started = false;
+    let mut last_state: Option<JobStatus> = None;
 
     let mut tails = [crate::tail::LogTail::new(out_path, 0), crate::tail::LogTail::new(err_path, 0)];
     let mut backoff = crate::tail::PollBackoff::new();
     let mut last_job_check = std::time::Instant::now() - FOLLOW_JOB_CHECK_INTERVAL;
+    let detach = |waiting: &mut Option<WaitLine>| {
+        drop(waiting.take());
+        detached_message(&job_id);
+    };
 
     loop {
         if gix::interrupt::is_triggered() {
-            detached_message(&job_id);
+            detach(&mut waiting);
             return Ok(());
         }
 
@@ -755,6 +904,10 @@ fn watch_build(machine: &Machine, config_dir: &Path, attempt_id: u32, mode: Watc
             for tail in &mut tails {
                 if let Some(buf) = tail.poll() {
                     had_data = true;
+                    // The output is what shows the build is alive now; the
+                    // line must be off the screen before it prints.
+                    drop(waiting.take());
+                    output_started = true;
                     let mut stdout = std::io::stdout();
                     let _ = stdout.write_all(&buf);
                     let _ = stdout.flush();
@@ -764,6 +917,7 @@ fn watch_build(machine: &Machine, config_dir: &Path, attempt_id: u32, mode: Watc
 
         let fresh = BuildAttempt::open(config_dir, attempt_id)?;
         if let Some(outcome) = &fresh.meta.outcome {
+            drop(waiting.take());
             // Drain whatever landed between the poll above and the outcome
             // being written, so the tail never truncates the last lines.
             if mode == Watch::Follow {
@@ -790,25 +944,45 @@ fn watch_build(machine: &Machine, config_dir: &Path, attempt_id: u32, mode: Watc
         if last_job_check.elapsed() >= FOLLOW_JOB_CHECK_INTERVAL {
             last_job_check = std::time::Instant::now();
             // A query that failed is no sign the job died: keep waiting.
-            let live = match sched.get_status(fresh.meta.job()) {
-                Ok(status) => matches!(status, JobStatus::Running | JobStatus::Queued | JobStatus::Holding),
-                Err(_) => true,
-            } || LinkLock::is_held_live(&fresh.running_lock_path()).unwrap_or(false);
+            let status = sched.get_status(fresh.meta.job()).ok();
+            let lock_live = LinkLock::is_held_live(&fresh.running_lock_path()).unwrap_or(false);
+            let live = status.is_none_or(|status| {
+                matches!(status, JobStatus::Running | JobStatus::Queued | JobStatus::Holding)
+            }) || lock_live;
             if !live {
+                drop(waiting.take());
                 bail!(
                     "Build of {config_name} ended without recording an outcome; see '{}' and '{}'",
                     fresh.out_path().display(),
                     fresh.err_path().display()
                 );
             }
+            last_state = if lock_live { Some(JobStatus::Running) } else { status };
+            if let Some(wait) = &waiting {
+                wait.state(last_state);
+            }
         }
 
-        announce();
+        if !std::mem::replace(&mut announced, true) {
+            let what = match mode {
+                Watch::Follow => "Following",
+                Watch::Block => "Waiting for",
+            };
+            println!(
+                "{what} build of {} (job {job_id}).\nCtrl-C detaches without stopping the job.",
+                config_name.bold()
+            );
+            if !output_started {
+                let wait = WaitLine::start(&config_name, Some(&job_id));
+                wait.state(last_state);
+                waiting = Some(wait);
+            }
+        }
         backoff.note(had_data);
         let mut remaining = backoff.interval();
         while !remaining.is_zero() {
             if gix::interrupt::is_triggered() {
-                detached_message(&job_id);
+                detach(&mut waiting);
                 return Ok(());
             }
             let chunk = remaining.min(std::time::Duration::from_millis(100));
@@ -1362,8 +1536,7 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
             Some((job, AfterEnd::Listed(_))) => match sched.stop_judged(job, StopCase::Listed)? {
                 EndedStop::Sent => {
                     println!(
-                        "Asked the scheduler to stop build job {}, which it still lists after the build \
-                         ended",
+                        "Asked the scheduler to stop build job {}, still listed after the build ended",
                         job.id.bold()
                     );
                     false
@@ -1376,8 +1549,7 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
             Some((job, AfterEnd::Unanswered(failed))) => {
                 match sched.stop_judged(job, StopCase::Unanswered(&failed))? {
                     EndedStop::Sent => println!(
-                        "Could not query the scheduler about build job {}; asked it to stop the job in \
-                         case it was queued again",
+                        "Could not query build job {}; asked the scheduler to stop it in case it was requeued",
                         job.id.bold()
                     ),
                     EndedStop::NotKnown(said) => refused(job, &said),
@@ -1386,8 +1558,8 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
             }
             Some((job, AfterEnd::Over(JobStatus::Unknown))) => {
                 println!(
-                    "Config {}'s latest build attempt already finished, and the scheduler does not know its \
-                     job {}; nothing to stop",
+                    "The last build of {} already finished, and the scheduler does not know its job {}; \
+                     nothing to stop",
                     name.bold(),
                     job.id
                 );
@@ -1395,15 +1567,14 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
             }
             Some((job, AfterEnd::Over(_))) => {
                 println!(
-                    "Config {}'s latest build attempt already finished, and the scheduler lists its job {} as \
-                     over; nothing to stop",
+                    "The last build of {} already finished, and its job {} is over; nothing to stop",
                     name.bold(),
                     job.id
                 );
                 false
             }
             None => {
-                println!("Config {}'s latest build attempt already finished; nothing to stop", name.bold());
+                println!("The last build of {} already finished; nothing to stop", name.bold());
                 false
             }
         };
@@ -1432,7 +1603,7 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
             return Ok(());
         }
         println!(
-            "Build job {} was submitted on host {host} and its run's lock is not held; treating it as ended",
+            "Build job {} was submitted on host {host} and is not running; treating it as ended",
             attempt.meta.job_id
         );
     } else if attempt.meta.submitted {
@@ -1452,15 +1623,14 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
         }
     } else if force {
         println!(
-            "Config {}'s build is running in the foreground (pid {}); cactup cannot stop it. \
-             Press Ctrl-C in its terminal.",
+            "The build of {} runs in the foreground (pid {}); -f cannot stop it.\nPress Ctrl-C in its \
+             terminal.",
             name.bold(),
             attempt.meta.job_id
         );
     } else {
         println!(
-            "Config {}'s build is running in the foreground (pid {}); press Ctrl-C in its \
-             terminal to stop it.",
+            "The build of {} runs in the foreground (pid {}).\nPress Ctrl-C in its terminal to stop it.",
             name.bold(),
             attempt.meta.job_id
         );
@@ -1495,7 +1665,7 @@ fn attempt_is_live(attempt: &BuildAttempt, sched: &Scheduler) -> Res<bool> {
                 bail!("Interrupted");
             }
             eprintln!(
-                "{} attempt {} kept: its job's status query failed ({})",
+                "{} kept attempt {}: status query failed ({})",
                 "note:".yellow(),
                 BuildAttempt::dir_name(attempt.id),
                 format!("{e:#}").lines().next().unwrap_or_default()
@@ -1589,6 +1759,7 @@ mod tests {
         use crate::installation::{AddedPackage, AddedThorn};
         let package = AddedPackage {
             libraries: Vec::new(),
+            flesh: Vec::new(),
             package: "max/carpetx".into(),
             version: "1.0.0".into(),
             tag: None,
@@ -2440,13 +2611,13 @@ mod tests {
         // A second submit is refused...
         let err =
             submit_impl(&inst, &machine, &db, &submit_args("sim", bare_topology()), Some("h")).unwrap_err();
-        assert!(format!("{err:#}").contains("already has a live build attempt"), "{err:#}");
+        assert!(format!("{err:#}").contains("is already building (job "), "{err:#}");
 
         // ...and so is a foreground run of the same config.
         let mut run_args = start_args(None, None);
         run_args.name = Some("sim".to_owned());
         let err = run_with(&machine, &inst, run_args).unwrap_err();
-        assert!(format!("{err:#}").contains("already has a live build attempt"), "{err:#}");
+        assert!(format!("{err:#}").contains("is already building (job "), "{err:#}");
 
         // -f stops the old job (our fake `stop` always succeeds) and a fresh
         // submit proceeds, minting attempt 0001.
@@ -2530,7 +2701,7 @@ mod tests {
         let db = Database::new();
 
         let err = format!("{:#}", run_with(&machine, &inst, start_args(None, None)).unwrap_err());
-        assert!(err.contains("name the config to build"), "{err}");
+        assert!(err.contains("Name the config to build"), "{err}");
         assert!(err.contains("cactup build <name>"), "{err}");
         let submitted = format!(
             "{:#}",
@@ -2541,7 +2712,7 @@ mod tests {
         // A config on disk with nothing active: point at it, not at creation.
         fs::create_dir_all(cactus.join("configs/sim")).unwrap();
         let err = format!("{:#}", run_with(&machine, &inst, start_args(None, None)).unwrap_err());
-        assert!(err.contains("Configs here: sim"), "{err}");
+        assert!(err.contains("configs here: sim"), "{err}");
         assert!(err.contains("cactup config use <name>"), "{err}");
     }
 
@@ -2950,7 +3121,7 @@ mod tests {
         let failing = machine("echo 'slurm_load_jobs error: Socket timed out on send/recv operation' >&2; exit 1");
         let failing_sched = Scheduler::new(&failing.meta);
         let refused = guard_no_live_attempt(&config_dir, "sim", &failing_sched, false).unwrap_err().to_string();
-        assert!(refused.contains("could not be asked whether its job 4242 was queued again"), "{refused}");
+        assert!(refused.contains("whether build job 4242 of config \"sim\" was requeued"), "{refused}");
         // The failed query's own text, and the way out that always works.
         assert!(refused.contains("Socket timed out") && refused.contains("unknown-job-pattern"), "{refused}");
         assert!(refused.contains("`cactup build stop sim`"), "{refused}");

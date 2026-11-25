@@ -6,6 +6,9 @@ use std::fmt;
 use super::remove::{is_requested, AddedFor};
 use super::{PkgId, Release, Req, Why};
 
+/// The plan's line when the flesh changes.
+pub const FLESH_REBUILD: &str = "  The flesh changes; every config needs a rebuild";
+
 /// What a [`Step::Replace`] takes the place of.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Replaced {
@@ -191,6 +194,9 @@ pub struct Plan {
     pub steps: Vec<Step>,
     pub choices: Vec<Choice>,
     pub notes: Vec<String>,
+    /// Releases the search could not consider because they need what Cactarium did not
+    /// read, each with why: such a plan is always shown and confirmed.
+    pub skipped: Vec<String>,
     /// Releases awaiting review that the plan chose, `owner/name@version`.
     pub pending: Vec<String>,
     pub untrusted: Vec<Untrusted>,
@@ -206,15 +212,17 @@ impl Plan {
         self.steps.iter().all(|s| matches!(s, Step::Keep { .. }))
     }
 
-    /// Whether the plan goes beyond what was named, so it is shown and confirmed.
+    /// Whether the plan goes beyond what was named (or passed over releases it could not
+    /// check), so it is shown and confirmed.
     pub fn beyond_named(&self) -> bool {
-        self.steps.iter().any(|s| match s {
-            Step::Add { why, .. } | Step::AddThorns { why, .. } | Step::Upgrade { why, .. } => {
-                why != &Why::Named
-            }
-            Step::Replace { explicit, .. } => !explicit,
-            Step::Readd { .. } | Step::Keep { .. } => false,
-        })
+        !self.skipped.is_empty()
+            || self.steps.iter().any(|s| match s {
+                Step::Add { why, .. } | Step::AddThorns { why, .. } | Step::Upgrade { why, .. } => {
+                    why != &Why::Named
+                }
+                Step::Replace { explicit, .. } => !explicit,
+                Step::Readd { .. } | Step::Keep { .. } => false,
+            })
     }
 
     /// The plan as people read it, each line with its kind: the header, one line per step, then
@@ -228,13 +236,15 @@ impl Plan {
         let mut out = vec![(LineKind::Header, format!("Plan for {command}:"))];
         out.extend(table(&rows).into_iter().map(|l| (LineKind::Step, l)));
         for p in &self.pending {
-            out.push((LineKind::Pending, format!("  {p} is awaiting review: nobody has approved it")));
+            out.push((LineKind::Pending, format!("  {p} awaits review")));
         }
         if self.rebuild {
-            let text = "  The flesh changes: every config of this installation needs a rebuild";
-            out.push((LineKind::Rebuild, text.to_owned()));
+            out.push((LineKind::Rebuild, FLESH_REBUILD.to_owned()));
         }
         for n in &self.notes {
+            out.push((LineKind::Note, format!("  note: {n}")));
+        }
+        for n in &self.skipped {
             out.push((LineKind::Note, format!("  note: {n}")));
         }
         out
@@ -286,7 +296,8 @@ fn row(s: &Step) -> [String; 4] {
             if let Some(flag) = flag {
                 why.push_str(&format!(" ({flag})"));
             }
-            ["upgrade".into(), format!("{} {} -> {}", to.id, at(from), at(to)), thorns.join(", "), why]
+            let verb = if to.older_than(from) { "downgrade" } else { "upgrade" };
+            [verb.into(), format!("{} {} -> {}", to.id, at(from), at(to)), thorns.join(", "), why]
         }
         Step::Replace { replaced, by, thorns, .. } => {
             let what = match (replaced, thorns.is_empty()) {
@@ -296,6 +307,10 @@ fn row(s: &Step) -> [String; 4] {
             };
             ["replace".into(), format!("{what} with {by}"), String::new(), String::new()]
         }
-        Step::Keep { id, note } => ["keep".into(), id.to_string(), String::new(), note.clone()],
+        // The note names the package that stays: not said twice.
+        Step::Keep { id, note } => {
+            let note = note.strip_prefix(&format!("{id} ")).unwrap_or(note);
+            ["keep".into(), id.to_string(), String::new(), note.to_owned()]
+        }
     }
 }

@@ -1,0 +1,65 @@
+{
+  "slug": "max/danyof",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "ab93a157e362bd89328159ec7e4f5b47274071a7",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/danyof.git",
+      "thorns": [
+        {
+          "arrangement": "DAnyOf",
+          "thorn": "DAnyOf",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "DAnyOf",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/carpet",
+          "range": "^2026.6",
+          "alternatives": [
+            {
+              "target": "et/carpet",
+              "range": "^2026.6",
+              "needs": [
+                "Carpet"
+              ]
+            },
+            {
+              "target": "et/q",
+              "range": null,
+              "needs": [
+                "Q"
+              ]
+            }
+          ],
+          "needs": [
+            "Carpet"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

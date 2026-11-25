@@ -1,0 +1,83 @@
+{
+  "slug": "et/zpx",
+  "versions": [
+    {
+      "version": "2.0.0",
+      "track": null,
+      "tag": "v2.0.0",
+      "commit": "3f893c08f481509cd9901b266f936a4c6f7ed978",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/zpx.git",
+      "thorns": [
+        {
+          "arrangement": "Zpx",
+          "thorn": "ZX",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "ZX",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/admbase",
+          "range": null,
+          "needs": [
+            "StaticConformal"
+          ],
+          "note": null
+        }
+      ]
+    },
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "2c4eb7197b09a0bea8fc97c0e1215da9600a2e9a",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/zpx.git",
+      "thorns": [
+        {
+          "arrangement": "Zpx",
+          "thorn": "ZX",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "ZX",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    }
+  ]
+}

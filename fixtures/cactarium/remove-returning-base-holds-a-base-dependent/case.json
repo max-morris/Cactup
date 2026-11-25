@@ -1,0 +1,47 @@
+{
+  "about": "A base package's dependency that names no thorns never asked for more than the base it came with: the base that comes back holds it",
+  "packages": [
+    "et--carpet--two",
+    "et--base-dep--every-carpet-thorn"
+  ],
+  "present": [
+    {
+      "package": "et/carpet",
+      "version": "2026.6.0",
+      "enabled": [
+        "Carpet",
+        "CarpetSlab"
+      ]
+    },
+    {
+      "package": "et/base-dep",
+      "version": "1.0.0",
+      "base": "base-dep",
+      "enabled": [
+        "BaseDep"
+      ]
+    }
+  ],
+  "remove": {
+    "targets": [
+      "et/carpet"
+    ],
+    "returning": [
+      {
+        "replacer": "et/carpet",
+        "package": "et/carpet",
+        "version": "2026.5.0",
+        "base": "carpet",
+        "enabled": [
+          "Carpet"
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "removed": [
+      "et/carpet"
+    ],
+    "orphans": []
+  }
+}

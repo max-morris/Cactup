@@ -1086,6 +1086,27 @@ impl prodash::NestedProgress for Line {
     }
 }
 
+/// A progress handle that can give work moved to a thread of its own a
+/// handle of its own on the same display, keeping this one to say how the
+/// work ended (`crate::fetch::watch`).
+pub trait Handoff: prodash::NestedProgress<SubProgress: 'static> + 'static {
+    fn handoff(&mut self) -> Self;
+}
+
+impl Handoff for Line {
+    fn handoff(&mut self) -> Line {
+        self.another_handle()
+    }
+}
+
+/// A child item: the work reports one level down (what tests hand gix).
+impl Handoff for prodash::tree::Item {
+    fn handoff(&mut self) -> prodash::tree::Item {
+        let name = prodash::Progress::name(self).unwrap_or_default();
+        self.add_child(name)
+    }
+}
+
 /// gix's sideband naming *chains* the server's actions with `": "`
 /// ("Counting objects: Compressing objects"), so a long fetch would grow an
 /// ever-longer label. Only the action actually running is interesting.

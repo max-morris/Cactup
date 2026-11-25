@@ -1,0 +1,143 @@
+{
+  "slug": "max/fieldlib",
+  "versions": [
+    {
+      "version": "3.0.0",
+      "track": null,
+      "tag": "v3.0.0",
+      "commit": "14c925f398df119a669dbdee0ac9d2bb7a0ea1e8",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/fieldlib.git",
+      "thorns": [
+        {
+          "arrangement": "Fieldlib",
+          "thorn": "FieldA",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "FieldA",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        },
+        {
+          "arrangement": "Fieldlib",
+          "thorn": "FieldD",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "FieldD",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    },
+    {
+      "version": "mp:1.0.0",
+      "track": "mp",
+      "tag": "mp/v1.0.0",
+      "commit": "5d8fc59c3672839ebb353ebc1cccf58cdfdf1840",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/fieldlib.git",
+      "thorns": [
+        {
+          "arrangement": "Fieldlib",
+          "thorn": "FieldA",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "FieldA",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        },
+        {
+          "arrangement": "Fieldlib",
+          "thorn": "FieldMP",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "FieldMP",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    },
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "f25e08f20665c1e9a1c801888da3bf414f67ebb5",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/fieldlib.git",
+      "thorns": [
+        {
+          "arrangement": "Fieldlib",
+          "thorn": "FieldA",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "FieldA",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    }
+  ]
+}

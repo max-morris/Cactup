@@ -1,4 +1,4 @@
-//! Dependency resolution over the Cactarium's claims (design/dependency-resolution-plan.md §2):
+//! Dependency resolution over Cactarium's claims (design/dependency-resolution-plan.md §2):
 //! which releases an `add` brings in, and which packages a `remove` leaves unneeded.
 //!
 //! Pure: no I/O, no printing, no network, no filesystem. Everything the resolver knows about the
@@ -15,6 +15,7 @@
 //! dependencies are decided in a fixed order, so the same inputs give the same plan whatever the
 //! order a hash map, the server or the caller happened to list them in.
 
+mod check;
 mod conflict;
 mod overrides;
 mod plan;
@@ -37,29 +38,30 @@ use anyhow::{anyhow, bail};
 
 // The module's API, for P3 (re-exports, so nothing in this module uses them).
 #[allow(unused_imports)]
-pub use overrides::{ClaimKind, ClaimPattern, Override, Rules};
+pub use check::{check, NO_PROVIDER};
+pub use overrides::{parse_ignores, read_record, unreadable, ClaimKind, ClaimPattern, Override, Rules};
 #[allow(unused_imports)]
 pub use plan::{
-    Choice, ChoiceKey, ChoiceRule, Library, LineKind, Placement, Plan, Record, Replaced, Step, Untrusted,
+    Choice, ChoiceKey, ChoiceRule, Library, LineKind, Placement, Plan, Record, Replaced, Step, Untrusted, FLESH_REBUILD,
 };
 #[allow(unused_imports)]
-pub use refusal::{Live, Refusal, Unmet};
+pub use refusal::{Live, Refusal, UnreadNeed, Unmet, Ways};
 #[allow(unused_imports)]
-pub use remove::{is_requested, plan_remove, AddedFor, Extension, Orphan, RemovePlan};
+pub use remove::{is_requested, may_bring_back, plan_remove, AddedFor, Extension, Orphan, RemovePlan};
 #[allow(unused_imports)]
 pub use resolve::resolve;
 
-/// A package: `owner/name`, or `repo:<name>` for a repo of the installation's base that no
+/// A package: `owner/name`, or `local:<name>` for a repo of the installation's base that no
 /// registered package is known to be (a pseudo-package, so conflicts still see its thorns).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PkgId(String);
 
 impl PkgId {
-    /// `owner/name` (checked against the registry's name rules) or `repo:<name>`.
+    /// `owner/name` (checked against the registry's name rules) or `local:<name>`.
     pub fn parse(s: &str) -> Res<PkgId> {
-        if let Some(repo) = s.strip_prefix("repo:") {
+        if let Some(repo) = s.strip_prefix("local:") {
             if repo.is_empty() || repo.contains('/') {
-                bail!("\"{s}\" is not a repo of the installation (repo:<name>)");
+                bail!("\"{s}\" is not a repo of the installation (local:<name>)");
             }
             return Ok(PkgId(s.to_owned()));
         }
@@ -73,12 +75,12 @@ impl PkgId {
 
     /// The pseudo-package for an unmapped base repo.
     pub fn repo(name: &str) -> PkgId {
-        PkgId(format!("repo:{name}"))
+        PkgId(format!("local:{name}"))
     }
 
-    /// A pseudo-package (`repo:<name>`), which the registry knows nothing about.
+    /// A pseudo-package (`local:<name>`), which the registry knows nothing about.
     pub fn is_repo(&self) -> bool {
-        self.0.starts_with("repo:")
+        self.0.starts_with("local:")
     }
 
     pub fn as_str(&self) -> &str {
@@ -170,7 +172,7 @@ fn short(commit: &str) -> &str {
     commit.get(..12).unwrap_or(commit)
 }
 
-/// One release of a package: what the resolver chooses among. Built from the Cactarium's
+/// One release of a package: what the resolver chooses among. Built from Cactarium's
 /// `PackageVersion` ([`Release::from_served`]), or by the caller for a present base repo.
 #[derive(Clone, Debug)]
 pub struct Release {
@@ -191,6 +193,8 @@ pub struct Release {
     pub yank_reason: Option<String>,
     /// Awaiting review: served only under `--risky-allow-untrusted-artifacts`.
     pub pending: bool,
+    /// The version an installation recorded for a release not read now (`At::Unknown`), for its label.
+    pub recorded: Option<String>,
     /// Its state is neither `invalid` nor `upstream-missing`.
     pub usable: bool,
     pub thorns: Vec<ThornInfo>,
@@ -198,25 +202,34 @@ pub struct Release {
 }
 
 impl Release {
-    /// A release as the Cactarium serves it: a version, a commit no version froze (the version
+    /// Whether this release is at a lower version than `other`, on the same track (releases
+    /// at no version, tips and commits, compare as neither older nor newer).
+    pub fn older_than(&self, other: &Release) -> bool {
+        match (self.at.version(), other.at.version()) {
+            (Some(a), Some(b)) => a.track == b.track && a.version < b.version,
+            _ => false,
+        }
+    }
+
+    /// A release as Cactarium serves it: a version, a commit no version froze (the version
     /// is the full commit), or a tip (`head`/`master`); `contact` is the package's, from the
     /// answer that listed it.
     pub fn from_served(id: &PkgId, v: &PackageVersion, contact: Option<&str>) -> Res<Release> {
         let info = &v.version;
         let commit = info.commit.clone().unwrap_or_default();
         if !is_commit_id(&commit) {
-            bail!("The Cactarium gave {id}@{} \"{}\" as its commit, which is none", info.version, commit.escape_debug());
+            bail!("Cactarium gave {id}@{} \"{}\" as its commit, which is none", info.version, commit.escape_debug());
         }
         let at = match info.version.as_str() {
             "head" | "master" => At::Tip { name: info.version.clone(), commit: commit.clone() },
             version if is_commit_id(version) => {
                 if version != commit {
-                    bail!("The Cactarium read {id} at {version} and answered with commit {commit}");
+                    bail!("Cactarium read {id} at {version} and answered with commit {commit}");
                 }
                 At::Commit(commit.clone())
             }
             version => {
-                let v = version.parse().map_err(|e| anyhow!("The Cactarium gave {id} a version that is none: {e}"))?;
+                let v = version.parse().map_err(|e| anyhow!("Cactarium gave {id} a version that is none: {e}"))?;
                 At::Version(v)
             }
         };
@@ -232,6 +245,7 @@ impl Release {
             yanked: info.yanked,
             yank_reason: info.yank_reason.clone().filter(|r| !r.is_empty()),
             pending: info.review.as_deref() == Some("pending"),
+            recorded: None,
             usable: !matches!(info.state.as_str(), "invalid" | "upstream-missing"),
             thorns: v.thorns.clone(),
             claims: v.claims.clone(),
@@ -244,6 +258,7 @@ impl Release {
         match &self.at {
             At::Version(v) => format!("{}@{v}", self.id),
             At::Tip { name, .. } => format!("{}@{name}", self.id),
+            At::Unknown(_) if self.recorded.is_some() => format!("{}@{}", self.id, self.recorded.as_deref().unwrap_or_default()),
             At::Commit(c) | At::Unknown(c) => format!("{}#{}", self.id, short(c)),
         }
     }
@@ -292,11 +307,13 @@ pub struct Present {
     /// The libraries it placed, held where they are while it does not change.
     pub libraries: Vec<InstalledLibrary>,
     /// `release` stands in for one not read yet (a base package at a commit no version froze):
-    /// its enabled thorns as the tree has them, no other thorns, and only the claims known
+    /// every thorn its clone has at that commit, as the tree has them, and only the claims known
     /// without reading it. The resolver reads it at its commit ([`Facts::snapshot`]) when the
     /// search comes to depend on it: a named spec or a need's thorns name it, or it may be a fork
-    /// of a package the plan could bring in. One it cannot read then refuses
-    /// ([`Refusal::Unreadable`]).
+    /// of a package the plan could bring in. Where it could not be read, only its claims are
+    /// unknown: a branch that would need them (enabling a thorn of it, or telling whether it is a
+    /// fork of a package coming in) fails, and a plan found without them carries a note; no plan
+    /// at all because of them is [`Refusal::Unreadable`].
     pub stand_in: bool,
 }
 
@@ -478,8 +495,8 @@ impl fmt::Display for Why {
     }
 }
 
-/// A hard CCL requirement of a thorn: the shared definition the Cactarium's dependency check and
-/// `--trim` use too (`ccl::needs_of` makes them, `ccl::meets` tells whether a thorn meets one).
+/// A hard CCL requirement of a thorn: the shared definition that Cactarium's dependency check
+/// and `--trim` use too (`ccl::needs_of` makes them, `ccl::meets` tells whether a thorn meets one).
 /// Named `Requirement` here, since [`resolve`]'s own need is a dependency on a package.
 pub use cactup_ecosystem_common::ccl::Need as Requirement;
 
@@ -490,6 +507,27 @@ pub struct Provider {
     pub version: String,
     pub arrangement: String,
     pub thorn: String,
+}
+
+/// Why Cactarium did not answer a read at a commit, as far as what to do about it goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UnreadKind {
+    /// It has no such commit (not pushed?).
+    Missing,
+    /// It cannot read the package there (a bad manifest, a thorn problem): its message says why.
+    Invalid,
+    /// It reads this package only at released versions.
+    Untrusted,
+    /// Not now: its read limit, or the server or the git host failing.
+    Retry,
+}
+
+/// A read at a commit that Cactarium did not answer with the package: the kind, and why in words
+/// that say what is true.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Unanswered {
+    pub kind: UnreadKind,
+    pub why: String,
 }
 
 /// A package read at a commit or branch tip.
@@ -509,21 +547,25 @@ pub trait Facts {
     /// Fetches the served versions of these packages: one wave. Packages already loaded, and
     /// pseudo-packages, are never asked for. Returns an error when interrupted (the flag is
     /// polled per package), never a partial load: a package missing from a finished load is one
-    /// the Cactarium does not have.
+    /// unknown to Cactarium.
     fn load(&mut self, ids: &[PkgId]) -> Res<()>;
-    /// A loaded package's releases, newest first within each track; `None` when the Cactarium
+    /// A loaded package's releases, newest first within each track; `None` when Cactarium
     /// has no such package.
     fn releases(&self, id: &PkgId) -> Option<&[Release]>;
     /// The package read at a commit (full or abbreviated) or a tip (`head`, `master`); `None`
-    /// when the Cactarium has no such commit (the search then tries something else). An error is
+    /// when Cactarium has no such commit (the search then tries something else). An error is
     /// for what should stop the command: the network, an interrupt. Never asks the user anything:
     /// an untrusted snapshot is only marked, and confirmed by the caller once the plan is known.
     fn snapshot(&mut self, id: &PkgId, at: &str) -> Res<Option<Snapshot>>;
     /// Why a snapshot just answered `None` was not answered (rate-limited, not served to this
-    /// caller, the server failing), rather than not found; `None` when it was not found.
-    fn unanswered(&self, _id: &PkgId, _at: &str) -> Option<String> {
+    /// caller, a package unreadable by Cactarium there, the server failing), rather than not
+    /// found; `None` when it was not found.
+    fn unanswered(&self, _id: &PkgId, _at: &str) -> Option<Unanswered> {
         None
     }
+    /// Called once, after every read the search may need is done and before the search starts:
+    /// the search itself never reads (a read there would be waited for inside its time limit).
+    fn searching(&mut self) {}
     /// The registered thorns meeting a requirement (to list in a refusal; never planned).
     fn providers(&mut self, requirement: &Requirement) -> Res<Vec<Provider>>;
     /// Called every few search steps with the number taken so far, so the caller can show that a

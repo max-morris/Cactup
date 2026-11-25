@@ -1,5 +1,5 @@
 {
-  "about": "A fork beside its upstream in the base: --replace is the way past",
+  "about": "A fork beside its upstream in the base: --replace is no way past, as the fork lacks thorns the base has enabled (it is suggested only when a search with it finds a plan)",
   "packages": [
     "et--carpetx",
     "max--carpetx-mp--carpetx-only"
@@ -23,7 +23,7 @@
     "refusal": "ForkAndUpstream",
     "message": [
       "max/carpetx-mp@1.0.0 is a fork of et/carpetx",
-      "Pass --replace to use max/carpetx-mp in place of base repo carpetx, or --ignore-claim max/carpetx-mp:fork-of:et/carpetx"
+      "Remove one of them, or pass --ignore-claim max/carpetx-mp:fork-of:et/carpetx"
     ]
   }
 }

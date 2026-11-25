@@ -1,0 +1,49 @@
+{
+  "slug": "et/b",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "cf2813c3fae5219ed691bd1e7b60699908649a64",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/b.git",
+      "thorns": [
+        {
+          "arrangement": "B",
+          "thorn": "B",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "B",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "max/p",
+          "range": null,
+          "needs": [
+            "P"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

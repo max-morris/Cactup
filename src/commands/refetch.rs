@@ -9,7 +9,7 @@
 //! `ensure_meta` (non-reentrant); the only other lock taken is the global DB
 //! lock, briefly, inside `ctx.db.update` at the very end.
 
-use super::{prompt_with_default, Ctx};
+use super::{prompt_with_default, remove_tree_until, Ctx};
 use crate::args::RefetchArgs;
 use crate::commands::installation::Tone;
 use crate::database::{UnfetchedReason, UnfetchedRepo};
@@ -72,7 +72,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
 
     // §2.3 item 6: the fetch lock. Dry-run stays read-only but still probes
     // it — classifying 81 worktrees mid-checkout would be garbage.
-    let lock_path = inst.cactup_dir().join(".cactup-fetch.lock");
+    let lock_path = inst.fetch_lock_path();
     fs::create_dir_all(inst.cactup_dir())
         .with_context(|| format!("Failed to create '{}'", inst.cactup_dir().display()))?;
     let _lock = if args.dry_run {
@@ -90,6 +90,16 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     } else {
         Some(LinkLock::acquire(&lock_path)?.with_heartbeat())
     };
+    // A symbolic copy reads its source's files, which must hold still while
+    // they are copied in (`crate::cow`).
+    let cow = crate::cow::Cow::at(&inst.root)?;
+    let _source_locks = match cow.source() {
+        Some(source) if !args.dry_run => super::copy::lock_fetches(&Installation::new("", source))?,
+        _ => Vec::new(),
+    };
+    if !args.dry_run {
+        super::copy::note_dependents(ctx, &inst)?;
+    }
 
     // Thornlist source, in precedence order (§3.2).
     let source = resolve_source(ctx, &inst, &args)?;
@@ -172,8 +182,8 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             println!("  {line}");
         }
         bail!(
-            "Refusing to replace a hand-edited thornlist; pass --replace-thornlist or -f to \
-             snapshot it to '{}' and overwrite it",
+            "Refusing to replace a hand-edited thornlist.\nPass --replace-thornlist or -f to save it to '{}' \
+             and overwrite it.",
             inst.cactup_dir().join("thornlists").display()
         );
     }
@@ -232,7 +242,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     }
 
     // Back the dirty repos actually being forced up outside the installation
-    // (uninstall deletes the installation), then fetch them like clean repos.
+    // (`inst delete` deletes the installation), then fetch them like clean repos.
     if !forced_repo_names.is_empty() {
         let to_force: Vec<&fetch::SkippedRepo> =
             plan.skipped.iter().filter(|s| forced_repo_names.contains(&s.repo)).collect();
@@ -243,9 +253,9 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             );
         }
         let moved = if overwrite_modified {
-            plan.force()
+            plan.force()?
         } else {
-            plan.force_where(|s| forced_repo_names.contains(&s.repo))
+            plan.force_where(|s| forced_repo_names.contains(&s.repo))?
         };
         // "local modifications" would be wrong for a repo forced for a
         // changed remote URL, a detached HEAD, or local commits — none of
@@ -277,12 +287,20 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     let mut undo = Some(fetch::library::PutBack::drop_placements(&inst.root, &before, &composed)?);
     let dropping = undo.as_ref().expect("just made").unplacing();
     for link in dropping.links() {
-        println!("Took away the old library link at {link}.");
+        println!("Removed the old library link at {link}.");
     }
     for note in &dropping.notes {
         println!("{note}");
     }
-    let report = fetch::execute(&plan, &inst.root)?;
+    // Ctrl-C stops the fetch with what it did get done: that is recorded all
+    // the same (below), and the refetch fails.
+    let (report, interrupted) = match fetch::execute(&plan, &inst.root) {
+        Ok(report) => (report, false),
+        Err(e) => match e.downcast::<fetch::Interrupted>() {
+            Ok(fetch::Interrupted(report)) => (report, true),
+            Err(e) => return Err(e),
+        },
+    };
     if let Some(undo) = undo.as_mut() {
         undo.made(&plan, &report);
     }
@@ -295,7 +313,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // Ctrl-C during the fetch: what completed is recorded above; everything
     // else (the summary, thornlist adoption, config reports) belongs to a
     // finished refetch, not an aborted one.
-    if gix::interrupt::is_triggered() {
+    if interrupted || gix::interrupt::is_triggered() {
         // A repo cut short mid-checkout now reads as modified, with nothing of
         // the user's in it; name the forced refetch that finishes it.
         let unfinished: Vec<&str> = report
@@ -308,14 +326,13 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             String::new()
         } else {
             format!(
-                "; {} stopped mid-checkout (`cactup inst refetch --overwrite {}` finishes it)",
+                "\n{} stopped mid-checkout.\nFinish with `cactup inst refetch --overwrite {}`.",
                 unfinished.join(", "),
                 unfinished.join(" ")
             )
         };
         bail!(
-            "Interrupted after fetching {} repo(s) and {} download(s); the remaining \
-             component(s) were not fetched{finish}",
+            "Interrupted after fetching {} repo(s) and {} download(s){finish}",
             report.repos.len(),
             report.downloads.len()
         );
@@ -339,14 +356,15 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     if !repointed.is_empty() {
         println!("{}", format!("{} repo(s) had their origin re-pointed:", repointed.len()).bold());
         for (repo, url) in &repointed {
-            println!("  {repo}: origin now points at {}", url.bold());
+            println!("  {repo}: origin now points at {}", fetch::git::redacted(url).bold());
         }
     }
     if ctx.globals.verbose {
         for r in &report.repos {
             let mark = if r.changed { "updated" } else { "up to date" };
             let forced = r.forced.as_deref().map(|f| format!(" (forced: {f})")).unwrap_or_default();
-            println!("  {} @ {}: {mark}{forced}", r.repo, r.branch.as_deref().unwrap_or("<default>"));
+            let warning = r.warning.as_deref().map(|w| format!("; {w}")).unwrap_or_default();
+            println!("  {} @ {}: {mark}{forced}{warning}", r.repo, r.branch.as_deref().unwrap_or("<default>"));
         }
     }
     let blocked: Vec<_> = report
@@ -370,12 +388,17 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
 
     // Thornlist writes. The pristine as-fetched copy always tracks what was
     // fetched; the live copy is only replaced by an explicit source (and the
-    // old live copy is snapshotted first).
+    // old live copy is snapshotted first). Ctrl-C since the fetch: nothing is
+    // adopted (the dropped placements are put back), as for one during it.
+    if gix::interrupt::is_triggered() {
+        bail!("Interrupted");
+    }
     let fetch_ok = report.failures.is_empty();
     let mut recorded = false;
     if fetch_ok || had_work {
         if source.is_explicit() {
             snapshot_live(&inst, &live_read)?;
+            cow.before_replace(&live_path)?;
             fs::write(&live_path, &composed)
                 .with_context(|| format!("Failed to write '{}'", live_path.display()))?;
             // The list is written: the placements it drops stay dropped,
@@ -396,6 +419,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             // — hand edits in the live file stay visible as divergence, so
             // the guard above keeps protecting them on the next explicit
             // refetch even after they have been fetched once.
+            cow.before_replace(&pristine_path)?;
             fs::write(&pristine_path, source.bytes())
                 .with_context(|| format!("Failed to write '{}'", pristine_path.display()))?;
             if pristine_read != pristine_path {
@@ -450,12 +474,12 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             Source::Release { described, .. } => println!(
                 "This installation is now on {}.{}",
                 described.bold(),
-                if clears_partial { " Every repo is now fetched." } else { "" }
+                if clears_partial { "\nEvery repo is now fetched." } else { "" }
             ),
             Source::File { path, .. } => println!(
                 "This installation now tracks the custom thornlist {}.{}",
                 format!("'{}'", path.display()).bold(),
-                if clears_partial { " Every repo is now fetched." } else { "" }
+                if clears_partial { "\nEvery repo is now fetched." } else { "" }
             ),
             Source::Live { .. } if clears_partial => println!(
                 "This installation is now fully in sync with the live thornlist."
@@ -498,7 +522,9 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // (§7.4) and each thorn's recorded provider, so `report_configs`'s claim
     // that a plain `cactup build` does the right thing holds even when the
     // refetched thornlist re-points a thorn *name* at a different provider.
-    if changed > 0 && !configs.is_empty() {
+    // Only a source that changed: a clone put on a branch at the commit it
+    // was at counts as updated, but no config has anything to pick up.
+    if report.repos.iter().any(|r| r.moved_commit) && !configs.is_empty() {
         report_configs(&inst, &configs, matches!(source, Source::Release { .. }));
     }
 
@@ -512,6 +538,13 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             if recorded { "was updated despite the failures" } else { "is unchanged" }
         );
         bail!("Refetch completed with {} failure(s)", report.failures.len());
+    }
+
+    // A stack release is frozen: what its packages claim of each other is
+    // checked, and said, but never resolved; last, once the refetch has
+    // said everything of its own. Plan §4.3.
+    if recorded && matches!(&source, Source::Release { described, .. } if described.starts_with("stack ")) {
+        super::claims::warn_problems(ctx, &inst);
     }
 
     Ok(())
@@ -549,8 +582,8 @@ fn stay_on_track(selector: &str, entry: Option<&crate::database::CactusInstallat
 fn check_root_unchanged(list_root: &str, recorded: &str) -> Res<()> {
     if list_root != recorded {
         bail!(
-            "This thornlist's !DEFINE ROOT is \"{list_root}\", but the installation's source \
-             tree is \"{recorded}\" and cannot move; install this thornlist as a new installation"
+            "The thornlist's !DEFINE ROOT is \"{list_root}\", not \"{recorded}\"; an installation's \
+             source tree cannot move.\nInstall this thornlist as a new installation."
         );
     }
     Ok(())
@@ -567,7 +600,7 @@ fn resolve_source(ctx: &Ctx, inst: &Installation, args: &RefetchArgs) -> Res<Sou
         let db = ctx.db.read()?;
         let selector = stay_on_track(selector, db.installations.get(&inst.alias));
         let crate::cactarium::StackRelease { slug, text: bytes, unpinned, contact } =
-            crate::cactarium::stack_release_text(&db, &selector, ctx.globals.risky_allow_untrusted_artifacts)?;
+            crate::cactarium::stack_release_text(ctx, &selector)?;
         if unpinned {
             println!("{}", format!("{slug} is not a release: its repos follow their branches").yellow());
         }
@@ -585,7 +618,7 @@ fn resolve_source(ctx: &Ctx, inst: &Installation, args: &RefetchArgs) -> Res<Sou
             .read_file("einsteintoolkit.th")
             .with_context(|| format!("Release {described} has no einsteintoolkit.th"))?;
         let bytes = String::from_utf8(bytes)
-            .with_context(|| format!("Release {described}'s thornlist is not UTF-8"))?;
+            .with_context(|| format!("The thornlist of release {described} is not UTF-8"))?;
         return Ok(Source::Release { name: release.name.clone(), described, bytes, contact: None });
     }
     if let Some(path) = &args.thornlist {
@@ -762,7 +795,7 @@ fn skip_status_lines(
         if !s.untracked.is_empty() {
             lines.push((
                 Tone::Plain,
-                format!("    ({} untracked file(s), which never block a fetch)", s.untracked.len()),
+                format!("    ({} untracked file(s), ignored)", s.untracked.len()),
             ));
         }
     };
@@ -787,12 +820,9 @@ fn skip_status_lines(
             }
             lines.push((
                 Tone::Plain,
-                format!(
-                    "  Modified files are copied to {} first; local commits and detached \
-                     HEADs stay in the repo's reflog.",
-                    "~/.cactup/refetch-backups/<alias>/".bold()
-                ),
+                format!("  Modified files are backed up to {} first.", "~/.cactup/refetch-backups/<alias>/".bold()),
             ));
+            lines.push((Tone::Plain, "  Local commits and detached HEADs stay in the reflog.".to_owned()));
         }
     }
 
@@ -820,12 +850,12 @@ fn skip_status_lines(
             lines.push((
                 Tone::Plain,
                 format!(
-                    "  Or {} to overwrite selected repos (e.g. {}), or {} to hide this list.",
+                    "  Pass {} to overwrite selected repos, e.g. {}.",
                     "--overwrite <name>".bold(),
-                    format!("--overwrite {}", kept[0].repo).bold(),
-                    "-s/--silent".bold()
+                    format!("--overwrite {}", kept[0].repo).bold()
                 ),
             ));
+            lines.push((Tone::Plain, format!("  Pass {} to hide this list.", "-s/--silent".bold())));
         }
     }
     lines
@@ -1157,6 +1187,9 @@ fn print_dry_run(
             (GitAction::Pin, None) => "pin (no commit: a bug)".to_owned(),
         };
         println!("  {}: {target} ({} thorn(s))", item.repo.bold(), item.checkouts.len());
+        if let Some(note) = &item.note {
+            println!("    {}", note.yellow());
+        }
     }
     for c in &plan.downloads {
         println!("  {}: download", c.checkout.bold());
@@ -1216,8 +1249,7 @@ fn print_dry_run(
         }
         if !pre.is_empty() {
             println!(
-                "Config(s) {} have no source baseline, so a build would miss the refetch; \
-                 rebuild each with `cactup build <name> -f`.",
+                "Config(s) {} have no source baseline.\nRebuild each with `cactup build <name> -f`.",
                 names(&pre)
             );
         }
@@ -1231,7 +1263,7 @@ fn print_dry_run(
 /// saving here — a retargeted repo can also be locally edited (the
 /// fork-adoption workflow is exactly "edit a thorn, then repoint origin at
 /// your fork"), and forcing replaces the whole worktree either way. Outside
-/// the installation because `uninstall` deletes the installation directory.
+/// the installation because `inst delete` deletes the installation directory.
 /// `Ok(None)` when none of `skipped` actually has file contents to save (e.g.
 /// a --overwrite selection that only hit local-commit/detached-HEAD repos) —
 /// callers must not report a backup path, or create a backup dir, in that case.
@@ -1301,16 +1333,16 @@ fn remove_pruned_repo_until(inst: &Installation, repo: &str, dir: &Path, stop: &
         Ok(()) => aside,
         Err(_) => dir.to_owned(),
     };
-    remove_tree_until(&target, stop).map_err(|e| match stop.load(Ordering::Relaxed) {
+    remove_tree_until(&target, stop, &|| ()).map_err(|e| match stop.load(Ordering::Relaxed) {
         true if target != dir => anyhow!(
-            "Interrupted while deleting the pruned repo {repo}; it is already out of the \
-             tree, and the next `cactup inst refetch --prune` finishes deleting it"
+            "Interrupted while deleting the pruned repo {repo}.\nThe next `cactup inst refetch --prune` \
+             finishes deleting it."
         ),
         // Deleted in place (it could not be moved aside): what is left may no
         // longer read as a repo at all, so say where it is.
         true => anyhow!(
-            "Interrupted while deleting the pruned repo {repo}; '{}' is partly deleted; \
-             delete the rest by hand",
+            "Interrupted while deleting the pruned repo {repo}; '{}' is partly deleted.\nDelete the \
+             rest by hand.",
             dir.display()
         ),
         false => e,
@@ -1323,26 +1355,10 @@ fn finish_interrupted_prunes(inst: &Installation) -> Res<()> {
     let Ok(entries) = fs::read_dir(&pruning) else { return Ok(()) };
     for entry in entries {
         let path = entry?.path();
-        remove_tree_until(&path, &gix::interrupt::IS_INTERRUPTED)?;
+        remove_tree_until(&path, &gix::interrupt::IS_INTERRUPTED, &|| ())?;
         println!("Finished deleting '{}' from an interrupted prune.", path.display());
     }
     Ok(())
-}
-
-/// `remove_dir_all`, but checking `stop` (Ctrl-C) before every entry, failing
-/// with "interrupted" when it is set. Symlinks are removed, never followed.
-fn remove_tree_until(path: &Path, stop: &AtomicBool) -> Res<()> {
-    if stop.load(Ordering::Relaxed) {
-        bail!("Interrupted while deleting '{}'", path.display());
-    }
-    let meta = fs::symlink_metadata(path).with_context(|| format!("Failed to stat '{}'", path.display()))?;
-    if !meta.is_dir() {
-        return fs::remove_file(path).with_context(|| format!("Failed to remove '{}'", path.display()));
-    }
-    for entry in fs::read_dir(path).with_context(|| format!("Failed to list '{}'", path.display()))? {
-        remove_tree_until(&entry?.path(), stop)?;
-    }
-    fs::remove_dir(path).with_context(|| format!("Failed to remove '{}'", path.display()))
 }
 
 /// Where refetch backs files up before it overwrites or prunes them:
@@ -1393,7 +1409,7 @@ fn snapshot_live(inst: &Installation, live: &Path) -> Res<()> {
     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let path = dir.join(format!("{ts}.th"));
     fs::write(&path, bytes).with_context(|| format!("Failed to write '{}'", path.display()))?;
-    println!("Snapshotted the previous thornlist to '{}'.", path.display());
+    println!("Saved the previous thornlist to '{}'.", path.display());
     Ok(())
 }
 
@@ -1487,7 +1503,7 @@ fn print_partial_adoption(header_line: &str, unfetched: &IndexMap<String, Unfetc
         println!(
             "{}",
             format!(
-                "  skipped: {} (local state preserved); `cactup inst refetch -f` fetches over them",
+                "  skipped: {} (local state preserved); fetch over them with `cactup inst refetch -f`",
                 summarize_names(&skipped, NAMES_SHOWN)
             )
             .yellow()
@@ -1546,22 +1562,19 @@ fn report_configs(
         }
         let custom =
             meta.as_ref().is_some_and(|m| inst.is_live_thornlist(&m.thornlist).is_ok_and(|live| !live));
+        println!("  {}: run `cactup build {name}`.", name.bold());
         if custom {
             println!(
-                "  {}: `cactup build {name}` recompiles the refetched sources but keeps its own \
-                 thornlist '{}'; pass --thornlist to adopt the refetched one.",
-                name.bold(),
+                "      note: it keeps its own thornlist '{}'; pass --thornlist to adopt the refetched one.",
                 meta.as_ref().map(|m| m.thornlist.as_str()).unwrap_or("?")
             );
         } else {
-            println!("  {}: run `cactup build {name}`.", name.bold());
             if let Some(m) = meta {
                 let changed =
                     crate::build::provider_delta(m.thorn_providers.as_ref(), fresh_providers.as_ref());
                 if !changed.is_empty() {
                     println!(
-                        "      note: thorn(s) {} now come from a different provider; \
-                         `cactup build {name}` clears their stale build state.",
+                        "      note: thorn(s) {} now come from a different provider.",
                         summarize_names(&changed, 8)
                     );
                 }
@@ -1575,9 +1588,8 @@ fn report_configs(
                     reshaped.into_iter().filter(|t| !changed.contains(t)).collect();
                 if !reshaped.is_empty() {
                     println!(
-                        "      note: thorn(s) {} had files added or removed, or a \
-                         .ccl/make.code.defn edited; `cactup build {name}` clears their stale \
-                         build state.",
+                        "      note: thorn(s) {} had files added or removed, or a .ccl/make.code.defn \
+                         edited.",
                         summarize_names(&reshaped, 8)
                     );
                 }
@@ -1612,6 +1624,7 @@ mod tests {
             current_thornlist: None,
             stack_contact: None,
             unfetched_repos: Default::default(),
+            copied_from: None,
         };
         let mp = entry(Some("max/carpetx-mp@mixed-precision:1.2.0"), None);
         assert_eq!(stay_on_track("max/carpetx-mp", Some(&mp)), "max/carpetx-mp@mixed-precision");
@@ -1784,6 +1797,7 @@ mod tests {
             reason: fetch::git::DirtyReason::WorktreeModified(vec!["src/foo.c".to_string()]),
             untracked: Vec::new(),
             checkouts: checkouts.iter().map(|s| s.to_string()).collect(),
+            record: None,
         }
     }
 
@@ -1798,6 +1812,8 @@ mod tests {
             checkouts: checkouts.iter().map(|s| s.to_string()).collect(),
             forced: None,
             retarget: None,
+            note: None,
+            unasked: None,
         }
     }
 

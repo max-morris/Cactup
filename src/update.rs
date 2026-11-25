@@ -444,7 +444,7 @@ fn is_permission_error(e: &anyhow::Error) -> bool {
 
 fn cannot_write(bin_dir: &Path, e: &anyhow::Error) -> Applied {
     Applied::NotUpdatable(format!(
-        "'{}' is not writable ({}); ask whoever installed cactup there to update it",
+        "'{}' is not writable ({}); ask its owner to update cactup",
         bin_dir.display(),
         e.root_cause()
     ))
@@ -822,7 +822,7 @@ pub fn maybe_auto_update(ctx: &Ctx) {
         spend_check();
         eprintln!(
             "{}",
-            format!("{available}, but cannot be installed automatically: {reason}").yellow()
+            format!("{available}\nCannot install it automatically: {reason}").yellow()
         );
     };
     let exe = match std::env::current_exe() {

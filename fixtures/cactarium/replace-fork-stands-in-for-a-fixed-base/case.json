@@ -1,0 +1,34 @@
+{
+  "about": "Under --replace, a fork the plan brings in takes the place of a base package that cannot move and is outside a range: the fork stands in for it, rather than the base package refusing first",
+  "packages": [
+    "max--zprobe",
+    "max--carpetx-mp--whole",
+    "et--carpetx"
+  ],
+  "specs": [
+    "max/zprobe"
+  ],
+  "present": [
+    {
+      "package": "et/carpetx",
+      "version": "2026.4.0",
+      "base": "carpetx",
+      "enabled": [
+        "Arith",
+        "CarpetX",
+        "Loop"
+      ]
+    }
+  ],
+  "options": {
+    "replace": true
+  },
+  "expect": {
+    "plan": [
+      "add max/zprobe@1.0.0 ZProbe named",
+      "add max/carpetx-mp@1.0.0 Arith, CarpetX, Loop needed by max/zprobe@1.0.0",
+      "replace base repo carpetx with max/carpetx-mp",
+      "note: max/carpetx-mp@1.0.0 stands in for et/carpetx"
+    ]
+  }
+}

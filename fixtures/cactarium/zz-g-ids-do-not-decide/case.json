@@ -1,0 +1,35 @@
+{
+  "about": "One package's newest needs an unread thorn, another rules that version out: the same plan whichever is decided first, and the same note on the release left out (it needs the read, whatever else rules it out)",
+  "packages": [
+    "max--zzg",
+    "max--zzh",
+    "et--admbase"
+  ],
+  "specs": [
+    "max/zzg",
+    "max/zzh"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "unknown": "abababababababababababababababababababab",
+      "thorns": [
+        "ADMBase",
+        "ADMCoupling",
+        "StaticConformal"
+      ],
+      "base": "admbase",
+      "enabled": [
+        "ADMBase"
+      ],
+      "stand_in": true
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/zzg@1.0.0 G named",
+      "add max/zzh@2.0.0 H named",
+      "note: max/zzg@2.0.0 was not considered: it needs StaticConformal of et/admbase#abababababab, and Cactarium did not read et/admbase there: et/admbase is at a commit unknown to Cactarium (is it pushed?)"
+    ]
+  }
+}

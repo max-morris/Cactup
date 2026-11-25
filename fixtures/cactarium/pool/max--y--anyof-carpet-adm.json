@@ -1,0 +1,65 @@
+{
+  "slug": "max/y",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "56c0bb3c6c05296e9d6c40093251ff9366880646",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/y.git",
+      "thorns": [
+        {
+          "arrangement": "Y",
+          "thorn": "Y",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Y",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/carpet",
+          "range": null,
+          "alternatives": [
+            {
+              "target": "et/carpet",
+              "range": null,
+              "needs": [
+                "CarpetSlab"
+              ]
+            },
+            {
+              "target": "et/admbase",
+              "range": null,
+              "needs": [
+                "StaticConformal"
+              ]
+            }
+          ],
+          "needs": [
+            "CarpetSlab"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

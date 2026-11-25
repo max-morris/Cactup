@@ -71,13 +71,16 @@ pub(crate) fn thorn_facts(list: &Thornlist, cactus_root: &Path) -> Res<BTreeMap<
 /// A `.ccl` file's text, read only when it is a regular file of sane size —
 /// the shared crate's rule for its own tree scan: a `.ccl` that is a symlink
 /// could read anything (or `/dev/zero`, forever), and none is a megabyte.
-/// The thorn's directory itself may be a link, as every fetched one is.
+/// The thorn's directory itself may be a link, as every fetched one is. Bytes
+/// that are no UTF-8 (a Latin-1 comment) are replaced, as the crate reads
+/// them, never a reason to drop the file.
 pub(crate) fn read_ccl(path: &Path) -> Option<String> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.file_type().is_file() || meta.len() > cactup_ecosystem_common::ccl::MAX_CCL_BYTES {
         return None;
     }
-    std::fs::read_to_string(path).ok()
+    let bytes = std::fs::read(path).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// A thorn the list builds from an arrangement — what a trim decides on. A
@@ -101,7 +104,7 @@ pub fn needed(list: &Thornlist, cactus_root: &Path, par: &str) -> Res<BTreeSet<S
     let facts = thorn_facts(list, cactus_root)?;
     let active = active_thorns(par);
     if active.is_empty() {
-        bail!("The parfile activates no thorns (no ActiveThorns statement), so there is nothing to trim to");
+        bail!("The parfile has no ActiveThorns statement; nothing to trim to");
     }
     let by_name: BTreeMap<&str, &str> = facts.iter().map(|(checkout, (name, _))| (name.as_str(), checkout.as_str())).collect();
     let missing: Vec<&String> = active.iter().filter(|t| !by_name.contains_key(t.as_str())).collect();
@@ -109,7 +112,7 @@ pub fn needed(list: &Thornlist, cactus_root: &Path, par: &str) -> Res<BTreeSet<S
         let names: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
         bail!("The parfile activates thorns the thornlist does not build: {}", names.join(", "));
     }
-    // The thorns as the shared rule reads them (the Cactarium's dependency
+    // The thorns as the shared rule reads them (Cactarium's dependency
     // check reads the same), with one difference: a thorn without an
     // IMPLEMENTS line implements its own name here, where the shared rule
     // has it implement nothing. Cactus refuses to build such a thorn, and a
@@ -134,7 +137,8 @@ pub fn needed(list: &Thornlist, cactus_root: &Path, par: &str) -> Res<BTreeSet<S
         .collect();
     let scanned = crate::par::parallel_map(&includes, |(checkout, dir)| {
         let mut f = facts[*checkout].1.clone().expect("readable facts");
-        f.scan_sources(dir);
+        // Stops at Ctrl-C; `parallel_map` then fails, so a cut-short scan is never read.
+        f.scan_sources_until(dir, &gix::interrupt::IS_INTERRUPTED);
         f.needs_includes
     })?;
     let needed_includes: BTreeMap<&str, Vec<String>> =
@@ -427,6 +431,35 @@ mod tests {
         let keep = needed(&list, &cactus, "ActiveThorns = \"Main\"\n").unwrap();
         let keep: Vec<&str> = keep.iter().map(String::as_str).collect();
         assert_eq!(keep, ["A/Grid", "A/Main"]);
+    }
+
+    /// A `.ccl` file with bytes that are no UTF-8 (a Latin-1 comment) is read
+    /// all the same, as the shared crate reads it: its requirements are
+    /// followed, and a thorn nothing needs is trimmed. Before, such a file read
+    /// as unreadable, and its thorn was kept whatever the parfile needed (and
+    /// its requirements were never followed).
+    #[test]
+    fn a_ccl_file_that_is_no_utf8_is_read_lossily() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = tmp.path().join("Cactus");
+        let thorn = |checkout: &str, interface: &[u8], configuration: Option<&[u8]>| {
+            let dir = cactus.join("arrangements").join(checkout);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("interface.ccl"), interface).unwrap();
+            if let Some(c) = configuration {
+                std::fs::write(dir.join("configuration.ccl"), c).unwrap();
+            }
+        };
+        thorn("A/Main", b"# Gr\xfc\xdfe\nIMPLEMENTS: main\n", Some(b"# \xe9t\xe9\nREQUIRES THORNS: Helper\n"));
+        thorn("A/Helper", b"IMPLEMENTS: helper\n", None);
+        thorn("A/Unused", b"# \xa9 2026\nIMPLEMENTS: unused\n", None);
+        let text = "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\
+                    !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://x/a.git\n!REPO_PATH = $2\n\
+                    !CHECKOUT =\nA/Main\nA/Helper\nA/Unused\n";
+        let list = crate::thornlist::parse(text).unwrap();
+        let keep = needed(&list, &cactus, "ActiveThorns = \"Main\"\n").unwrap();
+        let keep: Vec<&str> = keep.iter().map(String::as_str).collect();
+        assert_eq!(keep, ["A/Helper", "A/Main"]);
     }
 
     /// Max's real list, which writes checkout-only thorns on their

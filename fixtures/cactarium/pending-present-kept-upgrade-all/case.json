@@ -1,0 +1,22 @@
+{
+  "about": "--upgrade-all keeps a present release awaiting review rather than moving to an older approved one",
+  "packages": [
+    "et--carpetx--pending"
+  ],
+  "command": "cactup add --upgrade-all",
+  "present": [
+    {
+      "package": "et/carpetx",
+      "version": "2026.6.0",
+      "enabled": [
+        "CarpetX"
+      ]
+    }
+  ],
+  "options": {
+    "upgrade-all": true
+  },
+  "expect": {
+    "plan": []
+  }
+}

@@ -8,7 +8,7 @@ description = "Every table and field of a .sim file, formats 1 to 4"
 A `.sim` file is TOML. It holds a simulation's parfile and thornlist
 verbatim, the exact source each repository was at, the inputs the parfile
 needs from outside the source tree, and a little description. `cactup sim
-export` and `cactup sim pack` write one; `cactup import` reproduces it; the
+export` and `cactup sim pack` write one; `cactup import` reproduces it;
 Cactarium publishes it. This page lists everything a `.sim` may contain.
 
 Unknown keys are an error in every table: a file that uses something a
@@ -56,7 +56,7 @@ root = "Cactus"
 | `license` | no | An SPDX license expression. |
 | `contact` | no | Where to go for help with it: an `https://` URL or a `mailto:` address. |
 | `root` | yes | The thornlist's `!DEFINE ROOT`: the source tree's directory under the installation. |
-| `cactarium` | no | Set by the Cactarium when it publishes the file: `owner/name@version`, or `owner/name/sim@version` for one sim of an entry that holds several (format 4). `cactup import` uses it to find a published simulation's repository for `repo-file` inputs. |
+| `cactarium` | no | Set by Cactarium when it publishes the file: `owner/name@version`, or `owner/name/sim@version` for one sim of an entry that holds several (format 4). `cactup import` uses it to find a published simulation's repository for `repo-file` inputs. |
 
 ## `[thornlist]`
 
@@ -122,7 +122,7 @@ with = "eos = {dir}/bhns_gw230529_ID/gam2.polytrope"
 | `sha256` | 1 | The SHA-256 of that file (the archive itself, when unpacked): 64 lowercase hex digits. A download that does not match is refused. |
 | `unpack` | 2 | The file is an archive to unpack: `.tar`, `.tar.gz`/`.tgz`, `.tar.xz`/`.txz` or `.zip`, told by the extension. Needs a `sha256` (or a `repo-file`): an archive is never unpacked unverified. |
 | `path` | 2 | With `unpack`: the file (or directory) in the unpacked tree the knob points at, relative to its root. Without it, the knob gets the unpacked directory itself. |
-| `repo-file` | 3 | A file of the simulation's own repository, at the published version's commit, instead of `url` and `sha256` (the commit pins its content). Only a simulation the Cactarium publishes from its repository can have one. May be unpacked like a download. |
+| `repo-file` | 3 | A file of the simulation's own repository, at the published version's commit, instead of `url` and `sha256` (the commit pins its content). Only a simulation published by Cactarium from its repository can have one. May be unpacked like a download. |
 
 Paths inside an archive or a repository (`path`, `repo-file`, a fixup's
 `file`) are relative, `/`-separated, and have no empty, `.` or `..` part and
@@ -165,8 +165,8 @@ commit = "3f2c9e1a00112233445566778899aabbccddeeff"
 | `ref` | The branch or tag the thornlist names. A label only: `commit` is what is fetched. |
 | `commit` | The full commit id (40 or 64 hex digits). |
 | `sha256` | For a downloaded file instead of a git repository: its SHA-256. At most one of `commit` and `sha256`. |
-| `cactarium` | The Cactarium package version this commit belongs to, if any. |
-| `dirty` | `true` when the source had uncommitted changes at export (only with `--allow-dirty`). |
+| `cactarium` | The Cactarium package of this git repo: `owner/pkg@version` when that version froze the commit, else `owner/pkg`. Written by export from Cactarium's answer; never on a download. |
+| `dirty` | `true` when the source had uncommitted changes at export (only with `--local`). |
 
 A file is **fully specified** when every repository has a `commit` or a
 `sha256`, none is dirty, and `[thornlist] untracked` is empty. Only a fully
@@ -198,4 +198,4 @@ Where the file came from. Informational: `import` needs none of it.
 | `flags` | Build flags. |
 | `machine-disabled` | Thorns that machine's configuration turned off. |
 | `base` | The Cactarium stack the installation was based on, if any. |
-| `extra` | Anything else, as strings. |
+| `extra` | Anything else, as strings. Export writes `claims-overrides` here: the installation's claim overrides, joined by `; `. |

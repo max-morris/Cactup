@@ -1,0 +1,92 @@
+{
+  "slug": "max/zpapq",
+  "versions": [
+    {
+      "version": "2.0.0",
+      "track": null,
+      "tag": "v2.0.0",
+      "commit": "5d073b7dcd4372275ef4bdee5818cae76b757af8",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/zpapq.git",
+      "thorns": [
+        {
+          "arrangement": "Zpapq",
+          "thorn": "ZQ",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "ZQ",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/admbase",
+          "range": null,
+          "needs": [
+            "StaticConformal"
+          ],
+          "note": null
+        },
+        {
+          "kind": "dependency",
+          "target": "et/cactusbase",
+          "range": null,
+          "needs": [
+            "SymBase"
+          ],
+          "note": null
+        }
+      ]
+    },
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "98fce80a522195e96fbbab3b10fe1606b57e2c1e",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/zpapq.git",
+      "thorns": [
+        {
+          "arrangement": "Zpapq",
+          "thorn": "ZQ",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "ZQ",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    }
+  ]
+}

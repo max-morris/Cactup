@@ -1,0 +1,49 @@
+{
+  "slug": "max/zzy",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "29edbb94512f712db33880dc97d4f4241654bf1e",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/zzy.git",
+      "thorns": [
+        {
+          "arrangement": "Zzy",
+          "thorn": "ZY",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "ZY",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/admbase",
+          "range": "=2026.5.0",
+          "needs": [
+            "ADMBase"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

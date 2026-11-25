@@ -249,8 +249,7 @@ impl LinkLock {
         match Self::acquire_inner(path)? {
             Ok(lock) => Ok(lock),
             Err(holder) => bail!(
-                "'{}' is locked by {holder}; if that process is gone, the lock expires within {} \
-                 minutes",
+                "'{}' is locked by {holder}; a stale lock expires within {} minutes",
                 path.display(),
                 LOCK_STALE_SECS / 60
             ),
@@ -278,8 +277,8 @@ impl LinkLock {
             let elapsed = started.elapsed();
             if elapsed >= timeout {
                 bail!(
-                    "'{}' is still locked by {holder} after waiting {}s; if that process is gone, \
-                     the lock expires within {} minutes",
+                    "'{}' is still locked by {holder} after waiting {}s; a stale lock expires \
+                     within {} minutes",
                     path.display(),
                     timeout.as_secs(),
                     LOCK_STALE_SECS / 60

@@ -82,7 +82,8 @@ pub fn unmet(list: &Thornlist, cactus_root: &Path) -> Res<Vec<Unmet>> {
             candidates.iter().map(|&i| (i, cactus_root.join("arrangements").join(&built[i].0))).collect();
         let scanned = crate::par::parallel_map(&dirs, |(i, dir)| {
             let mut facts = built[*i].2.clone();
-            facts.scan_sources(dir);
+            // Stops at Ctrl-C; `parallel_map` then fails, so a cut-short scan is never read.
+            facts.scan_sources_until(dir, &gix::interrupt::IS_INTERRUPTED);
             facts.needs_includes
         })?;
         for ((i, _), needs) in dirs.iter().zip(scanned) {

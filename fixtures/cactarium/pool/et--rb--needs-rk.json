@@ -1,0 +1,47 @@
+{
+  "slug": "et/rb",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "32c5ed4a195d3894e2d2d41b4d8bc192bc07aebb",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/rb.git",
+      "thorns": [
+        {
+          "arrangement": "RB",
+          "thorn": "RB",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "RB",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "max/rk",
+          "range": null,
+          "needs": [],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

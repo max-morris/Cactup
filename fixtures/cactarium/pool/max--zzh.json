@@ -1,0 +1,83 @@
+{
+  "slug": "max/zzh",
+  "versions": [
+    {
+      "version": "2.0.0",
+      "track": null,
+      "tag": "v2.0.0",
+      "commit": "d0830a0bdec308dcf90d89a4de6d3804dbf4ab4d",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/zzh.git",
+      "thorns": [
+        {
+          "arrangement": "Zzh",
+          "thorn": "H",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "H",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "max/zzg",
+          "range": "^1.0",
+          "needs": [
+            "G"
+          ],
+          "note": null
+        }
+      ]
+    },
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "bb3625b1d252dad7e9b01a84ccd61c21d208be27",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/zzh.git",
+      "thorns": [
+        {
+          "arrangement": "Zzh",
+          "thorn": "H",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "H",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    }
+  ]
+}

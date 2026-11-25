@@ -1,0 +1,38 @@
+{
+  "about": "A named thorn of a base package unread by Cactarium now, with no release to move it to: no flag finds a plan, so try again later",
+  "packages": [],
+  "specs": [
+    "et/admbase/StaticConformal"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "unknown": "abababababababababababababababababababab",
+      "thorns": [
+        "ADMBase",
+        "ADMCoupling",
+        "StaticConformal"
+      ],
+      "base": "admbase",
+      "enabled": [
+        "ADMBase"
+      ],
+      "stand_in": true
+    }
+  ],
+  "unanswered": {
+    "et/admbase": "retry"
+  },
+  "expect": {
+    "refusal": "Unreadable",
+    "message": [
+      "the command line needs StaticConformal of et/admbase#abababababab",
+      "Try again later"
+    ],
+    "not_in_message": [
+      "--upgrade",
+      "--no-deps",
+      "--replace"
+    ]
+  }
+}

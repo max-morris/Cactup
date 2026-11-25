@@ -1,0 +1,39 @@
+{
+  "slug": "max/p",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "d11edc8a4b3cfe32744376d52547809796921edc",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/p.git",
+      "thorns": [
+        {
+          "arrangement": "P",
+          "thorn": "P",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "P",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    }
+  ]
+}

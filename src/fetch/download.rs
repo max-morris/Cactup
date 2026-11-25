@@ -66,6 +66,7 @@ pub fn download_component(
     install_root: &Path,
     component: &Component,
     progress: &mut impl prodash::Progress,
+    cow: &crate::cow::Cow,
 ) -> crate::Res<Downloaded> {
     if component.ty == ComponentType::Ftp {
         let dest_dir = install_root.join(&component.target);
@@ -96,6 +97,9 @@ pub fn download_component(
         .with_context(|| format!("Failed to create '{}'", dest_dir.display()))?;
     let dest_path = dest_dir.join(&filename);
     let tmp_path = dest_dir.join(format!("{filename}.part"));
+    // The rename below replaces a symbolic copy's link to the file whole;
+    // the temp file is written in place, so a link there must go first.
+    cow.before_replace(&tmp_path)?;
 
     // A checksummed download already there with that very content is left
     // alone, like a git repo already at its pin: nothing to fetch.
@@ -124,8 +128,7 @@ pub fn download_component(
         if actual != *expected {
             let _ = std::fs::remove_file(&tmp_path);
             bail!(
-                "{fetch_url} is not the file the thornlist pins: its SHA-256 is {actual}, not {expected}. The file \
-                 on the server has changed since the list was pinned"
+                "{fetch_url} is not the file the thornlist pins: its SHA-256 is {actual}, not {expected}"
             );
         }
     }
@@ -163,7 +166,7 @@ pub(crate) fn client() -> &'static reqwest::blocking::Client {
 pub(crate) fn download_to(
     client: &reqwest::blocking::Client,
     url: &str,
-    dest: &mut std::fs::File,
+    dest: &mut impl std::io::Write,
     progress: &mut impl prodash::Progress,
 ) -> crate::Res<u64> {
     download_to_limited(client, url, dest, progress, None)
@@ -175,7 +178,7 @@ pub(crate) fn download_to(
 pub(crate) fn download_to_limited(
     client: &reqwest::blocking::Client,
     url: &str,
-    dest: &mut std::fs::File,
+    dest: &mut impl std::io::Write,
     progress: &mut impl prodash::Progress,
     limit: Option<u64>,
 ) -> crate::Res<u64> {
@@ -282,7 +285,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut c = http_component("file.txt", None);
         c.url = Some(base);
-        let path = download_component(dir.path(), &c, &mut test_progress()).unwrap().path;
+        let path = download_component(dir.path(), &c, &mut test_progress(), &crate::cow::Cow::default()).unwrap().path;
         assert_eq!(std::fs::read(&path).unwrap(), b"payload");
 
         let head = server.join().expect("server thread");
@@ -305,7 +308,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut c = http_component("file.txt", None);
         c.url = Some(base);
-        let path = download_component(dir.path(), &c, &mut test_progress()).unwrap().path;
+        let path = download_component(dir.path(), &c, &mut test_progress(), &crate::cow::Cow::default()).unwrap().path;
         assert_eq!(std::fs::read(&path).unwrap(), b"payload");
         assert_eq!(server.join().expect("server thread").len(), 2);
     }
@@ -316,7 +319,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut c = http_component("file.txt", None);
         c.url = Some(base);
-        let err = download_component(dir.path(), &c, &mut test_progress()).unwrap_err();
+        let err = download_component(dir.path(), &c, &mut test_progress(), &crate::cow::Cow::default()).unwrap_err();
         assert!(format!("{err:#}").contains("404"), "{err:#}");
         assert!(!format!("{err:#}").contains("gave up"), "a 404 is not retried: {err:#}");
         assert_eq!(server.join().expect("server thread").len(), 1);
@@ -337,21 +340,21 @@ mod tests {
         c.checksum = Some(payload_hash.clone());
         let (base, server) = serve_once(b"payload");
         c.url = Some(base.clone());
-        let got = download_component(dir.path(), &c, &mut test_progress()).unwrap();
+        let got = download_component(dir.path(), &c, &mut test_progress(), &crate::cow::Cow::default()).unwrap();
         assert!(got.fetched);
         assert_eq!(std::fs::read(&got.path).unwrap(), b"payload");
         server.join().expect("server thread");
 
         // Already there with that content: kept, and no request goes out (no server is listening).
         c.url = Some(base);
-        let kept = download_component(dir.path(), &c, &mut test_progress()).unwrap();
+        let kept = download_component(dir.path(), &c, &mut test_progress(), &crate::cow::Cow::default()).unwrap();
         assert!(!kept.fetched);
 
         // A different pin: the download is refused and the file stays as it was.
         let (base, server) = test_server::serve(vec![("*", b"payload".to_vec())], 1);
         c.url = Some(base);
         c.checksum = Some(other);
-        let err = format!("{:#}", download_component(dir.path(), &c, &mut test_progress()).unwrap_err());
+        let err = format!("{:#}", download_component(dir.path(), &c, &mut test_progress(), &crate::cow::Cow::default()).unwrap_err());
         assert!(err.contains("not the file the thornlist pins") && err.contains(&payload_hash), "{err}");
         assert_eq!(server.join().expect("server thread").len(), 1, "a mismatch is not retried");
         assert_eq!(std::fs::read(&got.path).unwrap(), b"payload");
@@ -406,7 +409,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut c = http_component("file.tar.gz", None);
         c.ty = ComponentType::Ftp;
-        let err = download_component(dir.path(), &c, &mut test_progress()).unwrap_err();
+        let err = download_component(dir.path(), &c, &mut test_progress(), &crate::cow::Cow::default()).unwrap_err();
         let message = format!("{err:#}");
         assert!(message.contains("ftp"), "{message}");
         assert!(message.contains("file.tar.gz"), "{message}");
@@ -417,7 +420,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut c = http_component("file.tar.gz", None);
         c.ty = ComponentType::Git;
-        let err = download_component(dir.path(), &c, &mut test_progress()).unwrap_err();
+        let err = download_component(dir.path(), &c, &mut test_progress(), &crate::cow::Cow::default()).unwrap_err();
         assert!(format!("{err:#}").contains("caller bug"));
     }
 
@@ -426,7 +429,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut c = http_component("file.tar.gz", None);
         c.url = None;
-        let err = download_component(dir.path(), &c, &mut test_progress()).unwrap_err();
+        let err = download_component(dir.path(), &c, &mut test_progress(), &crate::cow::Cow::default()).unwrap_err();
         assert!(format!("{err:#}").contains("!URL"));
     }
 }

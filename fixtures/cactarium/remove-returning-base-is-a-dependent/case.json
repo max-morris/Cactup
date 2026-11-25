@@ -1,0 +1,47 @@
+{
+  "about": "A base that comes back depends on what is removed with its replacer: the refusal names it as the base's, after the removal",
+  "packages": [
+    "max--o--needs-p",
+    "max--p",
+    "et--b--needs-p"
+  ],
+  "present": [
+    {
+      "package": "max/o",
+      "version": "1.0.0",
+      "enabled": [
+        "O"
+      ]
+    },
+    {
+      "package": "max/p",
+      "version": "1.0.0",
+      "enabled": [
+        "P"
+      ]
+    }
+  ],
+  "remove": {
+    "targets": [
+      "max/o",
+      "max/p"
+    ],
+    "returning": [
+      {
+        "replacer": "max/o",
+        "package": "et/b",
+        "version": "1.0.0",
+        "base": "b",
+        "enabled": [
+          "B"
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "refusal": "HasDependents",
+    "message": [
+      "et/b@1.0.0 (the base's, after the removal)"
+    ]
+  }
+}

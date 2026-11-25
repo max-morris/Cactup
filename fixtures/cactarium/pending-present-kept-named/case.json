@@ -1,0 +1,23 @@
+{
+  "about": "naming a present package keeps its release awaiting review rather than moving to an older approved one",
+  "packages": [
+    "et--carpetx--pending"
+  ],
+  "specs": [
+    "et/carpetx"
+  ],
+  "present": [
+    {
+      "package": "et/carpetx",
+      "version": "2026.6.0",
+      "enabled": [
+        "CarpetX"
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "re-add et/carpetx@2026.6.0 CarpetX, Loop named"
+    ]
+  }
+}

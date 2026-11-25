@@ -208,22 +208,20 @@ fn stop_by_hand(id: &str, group: Option<&crate::lock::ProcGroup>) -> String {
     let pids = |list: &[u32]| list.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
     match group {
         Some(group) if group.own && group.outside.is_empty() => {
-            format!("`kill -- -{}` stops it and every process it started", group.pgid)
+            format!("stop it with `kill -- -{}`", group.pgid)
         }
         Some(group) if group.own => format!(
-            "`kill -- -{}` stops it and the processes it started in its group, but not pids {}, which run \
-             in groups of their own; stop those too",
+            "stop it with `kill -- -{}`, then stop pids {} too",
             group.pgid,
             pids(&group.outside)
         ),
         Some(group) if group.tree.len() > 1 => format!(
-            "its process group holds processes that may not be the job's; stop pid {id} and the processes it started \
-             (now pids {}; see `pstree -p {id}`), or interrupt the run (Ctrl-C)",
+            "stop pid {id} and the processes it started (now pids {}; see `pstree -p {id}`), or interrupt \
+             the run (Ctrl-C)",
             pids(&group.tree)
         ),
         _ => format!(
-            "its process group holds processes that may not be the job's; stop pid {id} and any process it started \
-             (see `pstree -p {id}`), or interrupt the run (Ctrl-C)"
+            "stop pid {id} and any process it started (see `pstree -p {id}`), or interrupt the run (Ctrl-C)"
         ),
     }
 }
@@ -233,8 +231,8 @@ impl std::fmt::Display for UnverifiedPid {
         let how = stop_by_hand(&self.id, self.group.as_ref());
         write!(
             f,
-            "job {0} was recorded by an older cactup and pid {0} may now be another process, so \
-             cactup will not stop it; if it is the job, {how}, or try again once it has ended",
+            "job {0} was recorded by an older cactup and pid {0} may now be another process; cactup \
+             will not stop it\nIf it is the job, {how}, or wait until it ends",
             self.id
         )
     }
@@ -254,9 +252,9 @@ impl std::fmt::Display for SharedGroup {
         let pgid = group.as_ref().map(|g| format!(" ({})", g.pgid)).unwrap_or_default();
         write!(
             f,
-            "job {0} shares its process group{pgid} with processes that may not be the job's, so cactup \
-             will not stop it: the machine's stop command would stop them too. Stop pid {0} and the processes it started by hand (see `pstree -p {0}`), or interrupt the \
-             run (Ctrl-C); starting each job with `setsid` in the submit command avoids this",
+            "job {0} shares its process group{pgid} with processes that may not be the job's; cactup \
+             will not stop it\nStop pid {0} and the processes it started by hand (see `pstree -p {0}`), \
+             or interrupt the run (Ctrl-C)",
             self.0
         )
     }
@@ -302,8 +300,8 @@ pub const REQUEUE_WINDOW: chrono::TimeDelta = chrono::TimeDelta::days(14);
 /// as ended by what only reads or removes records (displays, deletes).
 pub fn note_taken_as_ended(job_id: &str) {
     eprintln!(
-        "{} the status query for job {job_id} failed after its run ended; treating it as ended. \
-         If this repeats, check unknown-job-pattern in the machine's [scheduler] table",
+        "{} the status query for job {job_id} failed after its run ended; treating it as ended\n\
+         If this repeats, check unknown-job-pattern in the machine's [scheduler] table.",
         "note:".yellow()
     );
 }
@@ -640,9 +638,8 @@ impl<'m> Scheduler<'m> {
             let said = match output.trim() {
                 "" => "It printed nothing.".to_owned(),
                 text => format!(
-                    "It printed:\n{text}\nIf the scheduler's message for an unknown job is among these \
-                     lines, unknown-job-pattern does not match it: fix the pattern in the machine's \
-                     [scheduler] table."
+                    "It printed:\n{text}\nIf a line above says the job is unknown, unknown-job-pattern \
+                     does not match it: fix the pattern in the machine's [scheduler] table."
                 ),
             };
             return Err(FailedQuery(format!(
@@ -763,9 +760,8 @@ impl<'m> Scheduler<'m> {
         }
         let pattern = self.meta.scheduler.unknown_job_pattern.as_deref().unwrap_or_default();
         let hint = format!(
-            "If the scheduler's message for an unknown job is among these lines, \
-             unknown-job-pattern ('{pattern}') does not match it: fix the pattern in the machine's \
-             [scheduler] table."
+            "If that says the job is unknown, unknown-job-pattern ('{pattern}') does not match it: \
+             fix the pattern in the machine's [scheduler] table."
         );
         match case {
             StopCase::Unanswered(failed) => bail!(
@@ -1684,8 +1680,7 @@ mod tests {
         assert!(group.own, "{group:?}");
         assert_eq!(group.outside, vec![run.child], "{group:?}");
         let text = UnverifiedPid::of(&run.top.to_string()).to_string();
-        assert!(text.contains(&format!("`kill -- -{}`", run.pgid)) && text.contains(&format!("but not pids {}", run.child)), "{text}");
-        assert!(!text.contains("every process it started"), "{text}");
+        assert!(text.contains(&format!("`kill -- -{}`, then stop pids {} too", run.pgid, run.child)), "{text}");
     }
 
     /// A run-script in a group that holds processes it did not start (the
@@ -2296,6 +2291,66 @@ mod tests {
                 "{name}: {held_line:?} classified as {held:?}, expected Holding or Queued"
             );
         }
+    }
+
+    /// A guard on the mdb itself (§10): every machine asking `squeue -j`
+    /// must read each thing squeue prints of a job it no longer lists as
+    /// the job gone, and nothing else. Just after a job ends (within the
+    /// controller's MinJobAge) squeue exits 0 with only its header line;
+    /// once the controller has forgotten the job, the error on stderr.
+    /// Reading the header as a failed query refused the next build submit
+    /// until `build stop`.
+    #[test]
+    fn every_squeue_machine_reads_a_job_it_no_longer_lists_as_gone() {
+        let mdb = crate::mdb::Mdb::with_roots(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"),
+            std::path::PathBuf::from("/nonexistent-user-mdb"),
+        );
+        let id = "3774765";
+        let header = "             JOBID PARTITION     NAME     USER ST       TIME  NODES NODELIST(REASON)";
+        let gone = [
+            format!("{header}\n"),
+            // A site's SQUEUE_FORMAT changes the columns, not the first one.
+            "JOBID PARTITION NAME USER STATE TIME NODES\n".to_owned(),
+            "slurm_load_jobs error: Invalid job id specified\n".to_owned(),
+        ];
+        let failed = ["", "slurm_load_jobs error: Socket timed out on send/recv operation\n"];
+        let listed = format!("{header}\n           {id}     workq   build-x      max  R       0:42      1 qbd123\n");
+        let mut asked = 0;
+        for (name, _layer) in mdb.machines().unwrap() {
+            let machine = mdb.load(&name).unwrap_or_else(|e| panic!("machine {name} failed to load: {e:#}"));
+            if machine.meta.scheduler.get_status.as_deref() != Some("squeue -j @JOB_ID@") {
+                continue;
+            }
+            asked += 1;
+            let sched = Scheduler::new(&machine.meta);
+            for output in &gone {
+                assert_eq!(classify_listed(output, id, &machine.meta).unwrap(), None, "{name}: {output:?}");
+                assert_eq!(sched.unknown_job(output, id).unwrap(), Some(true), "{name}: {output:?} is the job gone");
+            }
+            for output in failed {
+                assert_eq!(sched.unknown_job(output, id).unwrap(), Some(false), "{name}: {output:?} is a failed query");
+            }
+            assert_eq!(classify_listed(&listed, id, &machine.meta).unwrap(), Some(JobStatus::Running), "{name}");
+        }
+        assert!(asked > 0, "no machine asks squeue -j");
+
+        // End to end: the header alone, exit 0, is U; a timeout still fails.
+        let squeue = |script: &str| {
+            meta(&format!(
+                r#"
+                get-status = "{script}"
+                status-pattern = "@JOB_ID@ "
+                running-pattern = " R "
+                unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified|^ *JOBID '
+                "#
+            ))
+        };
+        let ended = squeue(&format!("echo '{header}'"));
+        assert_eq!(Scheduler::new(&ended).get_status(JobRef::bare(id)).unwrap(), JobStatus::Unknown);
+        let timeout = squeue("echo 'slurm_load_jobs error: Socket timed out on send/recv operation' >&2; exit 1");
+        let err = Scheduler::new(&timeout).get_status(JobRef::bare(id)).unwrap_err();
+        assert!(err.downcast_ref::<FailedQuery>().is_some(), "{err:#}");
     }
 
     #[test]

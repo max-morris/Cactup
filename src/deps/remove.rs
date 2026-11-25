@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use super::plan::{table, ChoiceKey, LineKind};
 use super::refusal::Refusal;
 use super::resolve::claim_label;
-use super::{forks, Origin, PkgId, Present, Rules};
+use super::{fork_claims, forks, Origin, PkgId, Present, Req, Rules};
 
 /// An `added-for` entry of `installation.toml`, as read.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -39,15 +39,21 @@ pub struct Orphan {
     pub label: String,
     /// Whose dependencies brought it in, as recorded (informational).
     pub by: Vec<String>,
+    /// What the plan could not check about it, said beside it.
+    pub caveat: Option<String>,
 }
 
 impl Orphan {
-    /// `brought in by max/z4c@1.2.0, nothing else needs it`.
+    /// `brought in by max/z4c@1.2.0, no longer needed`.
     pub fn why(&self) -> String {
-        if self.by.is_empty() {
-            "brought in as a dependency, nothing else needs it".to_owned()
+        let why = if self.by.is_empty() {
+            "brought in as a dependency, no longer needed".to_owned()
         } else {
-            format!("brought in by {}, nothing else needs it", self.by.join(", "))
+            format!("brought in by {}, no longer needed", self.by.join(", "))
+        };
+        match &self.caveat {
+            Some(caveat) => format!("{why} ({caveat})"),
+            None => why,
         }
     }
 }
@@ -59,6 +65,10 @@ pub struct RemovePlan {
     pub removed_labels: Vec<String>,
     /// Removed too, once confirmed (none under `--no-deps`).
     pub orphans: Vec<Orphan>,
+    /// What any state of the sweep had going, the targets among them: the packages whose
+    /// replaced bases it counted back.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub took: BTreeSet<PkgId>,
 }
 
 impl RemovePlan {
@@ -105,7 +115,10 @@ pub struct Extension {
 /// (to a fixpoint, cycles included). A package nothing reached before the removal (one an
 /// earlier `--no-deps` left behind) counts as named: it is never swept, nor what it needs.
 /// A target, or an orphan, that is one of `extensions` is that extension: its thorns go, the
-/// base package stays.
+/// base package stays. `returning` are the base packages that come back when an added package
+/// that replaced their base repos goes (each with that package: a target, or an orphan swept
+/// with them), as read where the base has them: they hold what they meet after the removal (a
+/// release that fits the dependency, with the thorns it needs), never before.
 pub fn plan_remove(
     present: &[Present],
     added_for: &BTreeMap<PkgId, AddedFor>,
@@ -113,12 +126,26 @@ pub fn plan_remove(
     rules: &Rules,
     no_deps: bool,
     extensions: &[Extension],
+    returning: &[(PkgId, Present)],
 ) -> Result<RemovePlan, Refusal> {
     let mut all: BTreeMap<PkgId, Present> = BTreeMap::new();
     for p in present {
         let mut p = p.clone();
         rules.apply(&mut p.release);
         all.insert(p.release.id.clone(), p);
+    }
+    // Each returning base package a node of its own (its package may be the very target going),
+    // with the added package whose going brings it back.
+    let mut back: BTreeMap<PkgId, PkgId> = BTreeMap::new();
+    let mut back_with: BTreeMap<PkgId, PkgId> = BTreeMap::new();
+    for (replacer, p) in returning {
+        let mut p = p.clone();
+        rules.apply(&mut p.release);
+        // Keyed apart, its release its own (a label, claims, forks read as the package's).
+        let node = PkgId(format!("{}#base", p.release.id));
+        back.insert(node.clone(), p.release.id.clone());
+        back_with.insert(node.clone(), replacer.clone());
+        all.insert(node, p);
     }
     // Each extension its own node, beside the base node of its package, which keeps the rest.
     let mut ext: BTreeMap<PkgId, (PkgId, &Extension)> = BTreeMap::new();
@@ -139,17 +166,32 @@ pub fn plan_remove(
     let real = |id: &PkgId| ext.get(id).map_or_else(|| id.clone(), |(b, _)| b.clone());
     let label = |id: &PkgId, all: &BTreeMap<PkgId, Present>| match ext.get(id) {
         Some((_, e)) => e.label.clone(),
+        None if back.contains_key(id) => {
+            all.get(id).map_or_else(|| id.to_string(), |p| format!("{} (the base's, after the removal)", p.release.label()))
+        }
         None => all.get(id).map_or_else(|| id.to_string(), |p| p.release.label()),
     };
     let removed: Vec<PkgId> = targets.iter().map(node_of).collect();
     let removed_labels = removed.iter().map(|id| label(id, &all)).collect();
     if no_deps {
-        return Ok(RemovePlan { removed: targets.to_vec(), removed_labels, orphans: Vec::new() });
+        let took = targets.iter().cloned().collect();
+        return Ok(RemovePlan { removed: targets.to_vec(), removed_labels, orphans: Vec::new(), took });
     }
     let gone: BTreeSet<&PkgId> = removed.iter().collect();
-    let remaining: BTreeSet<&PkgId> = all.keys().filter(|id| !gone.contains(id)).collect();
-    let everything: BTreeSet<&PkgId> = all.keys().collect();
-    let g = Graph { all: &all, rules, added_for, ext: &ext };
+    // After the removal: what stays, and the base packages that come back with what goes (the
+    // targets, then the orphans swept with them).
+    let back_for = |going: &BTreeSet<PkgId>| -> BTreeSet<&PkgId> {
+        back_with.iter().filter(|(_, r)| going.contains(*r)).map(|(n, _)| n).collect()
+    };
+    let after = |going: &BTreeSet<PkgId>| -> BTreeSet<&PkgId> {
+        let comes_back = back_for(going);
+        all.keys().filter(|id| !gone.contains(id) && (!back.contains_key(*id) || comes_back.contains(id))).collect()
+    };
+    let targets_set: BTreeSet<PkgId> = targets.iter().cloned().collect();
+    let remaining: BTreeSet<&PkgId> = after(&targets_set);
+    // Before the removal, the returning base packages are not there.
+    let everything: BTreeSet<&PkgId> = all.keys().filter(|id| !back.contains_key(*id)).collect();
+    let g = Graph { all: &all, rules, added_for, ext: &ext, back: &back };
 
     // Each dependent once per dependency: a claim of a base package that applies to a base thorn
     // and an added one is the base node's and the extension node's alike.
@@ -174,16 +216,75 @@ pub fn plan_remove(
     let reached_before = g.reach(&everything, &BTreeSet::new());
     let stray: BTreeSet<PkgId> =
         remaining.iter().filter(|id| !reached_before.contains(**id)).map(|id| (*id).clone()).collect();
-    let reached_after = g.reach(&remaining, &stray);
-    let orphans = remaining
+    // An orphan that replaced base repos brings them back too, and what they hold is held: the
+    // orphans are found again with them, until the set going settles. Should it come round to a
+    // set already seen instead (an orphan whose returning base holds what keeps it, so going
+    // and staying alternate), the sweep takes the conservative side: a package held in any of
+    // the states seen stays, and only what none of them holds goes.
+    let orphans_of = |going: &BTreeSet<PkgId>| -> BTreeSet<PkgId> {
+        let remaining = after(going);
+        let reached = g.reach(&remaining, &stray);
+        remaining.iter().filter(|id| !back.contains_key(**id) && !reached.contains(**id)).map(|id| (*id).clone()).collect()
+    };
+    let mut seen: Vec<(BTreeSet<PkgId>, BTreeSet<PkgId>)> = Vec::new();
+    let mut going = targets_set.clone();
+    let mut took: BTreeSet<PkgId> = BTreeSet::new();
+    let orphan_nodes: BTreeSet<PkgId> = loop {
+        took.extend(going.iter().cloned());
+        let orphans = orphans_of(&going);
+        let next: BTreeSet<PkgId> = targets_set.iter().cloned().chain(orphans.iter().map(&real)).collect();
+        if next == going {
+            break orphans;
+        }
+        if let Some(at) = seen.iter().position(|(g, _)| *g == next) {
+            // A cycle: what every state of it leaves unheld (held in any, it stays), then checked
+            // against the state that set itself implies (only its bases back), until that holds:
+            // what is held there stays too.
+            let mut cycle = seen[at..].iter().map(|(_, o)| o.clone()).chain([orphans]);
+            let first = cycle.next().unwrap_or_default();
+            let mut kept: BTreeSet<PkgId> = cycle.fold(first, |all, o| all.intersection(&o).cloned().collect());
+            loop {
+                let going: BTreeSet<PkgId> = targets_set.iter().cloned().chain(kept.iter().map(&real)).collect();
+                let narrowed: BTreeSet<PkgId> = kept.intersection(&orphans_of(&going)).cloned().collect();
+                if narrowed == kept {
+                    break;
+                }
+                kept = narrowed;
+            }
+            break kept;
+        }
+        seen.push((going, orphans));
+        going = next;
+    };
+    let orphans = orphan_nodes
         .iter()
-        .filter(|id| !reached_after.contains(**id))
         .map(|id| {
             let real = real(id);
-            Orphan { id: real.clone(), label: label(id, &all), by: added_for.get(&real).map(|a| a.by.clone()).unwrap_or_default() }
+            let by = added_for.get(&real).map(|a| a.by.clone()).unwrap_or_default();
+            Orphan { id: real.clone(), label: label(id, &all), by, caveat: None }
         })
         .collect();
-    Ok(RemovePlan { removed: targets.to_vec(), removed_labels, orphans })
+    Ok(RemovePlan { removed: targets.to_vec(), removed_labels, orphans, took })
+}
+
+/// The packages whose going may bring base packages back in a removal of `targets`, so whose
+/// replaced base repos the removal reads: the targets, and every one of `added` (the added
+/// packages and extensions) that its `added-for` entry does not say the user named. A named
+/// package is a root in every state of the sweep and never goes; any other may.
+///
+/// Not narrowed to what the sweep is found to take with no base back: a base that comes back
+/// takes a dependency over (before a fork or a satisfier of it, and before a later alternative
+/// of an any-of), so it can leave a package unheld that held without it, and that package's own
+/// bases then come back too. Which bases come back depends on what goes and the reverse, so
+/// the bases read are those of every package that could go at all: one round of reads, never
+/// a round per state of the sweep.
+pub fn may_bring_back(
+    targets: &[PkgId],
+    added_for: &BTreeMap<PkgId, AddedFor>,
+    added: impl IntoIterator<Item = PkgId>,
+) -> BTreeSet<PkgId> {
+    let named = |id: &PkgId| added_for.get(id).is_some_and(|a| a.requested);
+    targets.iter().cloned().chain(added.into_iter().filter(|id| !named(id))).collect()
 }
 
 struct Graph<'a> {
@@ -192,15 +293,27 @@ struct Graph<'a> {
     added_for: &'a BTreeMap<PkgId, AddedFor>,
     /// Extension node → (its base package, the extension).
     ext: &'a BTreeMap<PkgId, (PkgId, &'a Extension)>,
+    /// Returning base package node → its package.
+    back: &'a BTreeMap<PkgId, PkgId>,
 }
 
 impl Graph<'_> {
     /// Who in `set` takes a dependency on `target`: the target itself, a package an override
     /// says satisfies it, or a fork of it (identity only: the versions were checked when it was
-    /// added). An extension node shares its base node's claims, but the base node, which sorts
+    /// added, unless what the fork says it is a drop-in for shows it does not: an override that
+    /// let the dependent in may have been removed since). An extension node shares its base node's claims, but the base node, which sorts
     /// before it and never goes, is always found first.
-    fn taker<'s>(&self, target: &str, set: &BTreeSet<&'s PkgId>) -> Option<&'s PkgId> {
+    fn taker<'s>(
+        &self,
+        target: &str,
+        range: Option<&str>,
+        sha: Option<&str>,
+        set: &BTreeSet<&'s PkgId>,
+    ) -> Option<&'s PkgId> {
         if let Some(id) = set.iter().find(|id| id.as_str() == target) {
+            return Some(id);
+        }
+        if let Some(id) = set.iter().find(|id| self.back.get(**id).is_some_and(|b| b.as_str() == target)) {
             return Some(id);
         }
         let t = PkgId::parse(target).ok()?;
@@ -209,15 +322,71 @@ impl Graph<'_> {
                 return Some(id);
             }
         }
-        set.iter().find(|id| forks(&self.all[**id].release, &t)).copied()
+        set.iter().find(|id| forks(&self.all[**id].release, &t) && self.fork_stands_in(&self.all[**id], &t, range, sha)).copied()
     }
 
-    /// The holder of a dependency that `taker` takes, needing `needs` of it: the taker, or
-    /// its extension node when the dependency needs one of the extension's thorns (every thorn,
-    /// when it names none); `None` when that node is not in `set`.
-    fn holder<'s>(&self, taker: &'s PkgId, needs: &[String], set: &BTreeSet<&'s PkgId>) -> Option<&'s PkgId> {
+    /// Whether a fork of `t` may stand in for a dependency asking `range` or `sha` of it. The
+    /// versions `t` has published are not known here: a fork that says it is a drop-in for one
+    /// exact version is judged by that version, and any other fork (a range, a commit) is taken
+    /// to stand in, the safe side for a removal.
+    fn fork_stands_in(&self, fork: &Present, t: &PkgId, range: Option<&str>, sha: Option<&str>) -> bool {
+        let Ok(req) = Req::from_claim(range, sha) else { return true };
+        let Some(dep) = t.slug(&req) else { return true };
+        fork_claims(&fork.release, t).iter().any(|k| {
+            let exact = match k.target.sha.is_none() && k.target.commit_fallback().is_none() {
+                true => k.target.req().ok().and_then(|q| exact_version(&q)),
+                false => None,
+            };
+            match exact {
+                Some(v) => k.stands_in_for(&dep, &[(v, None)]),
+                None => true,
+            }
+        })
+    }
+
+    /// Whether `taker`, when it is a base package coming back, meets a dependency of `dependent`
+    /// asking `range` or `sha` of it and `needs` of its thorns: its release fits, and the base
+    /// enables them. A dependency naming no thorns asks for every thorn of the release, as the
+    /// resolver reads it, when cactup added the dependent; a base package's own claims never
+    /// asked for more than the base it came with (as in [`Graph::holder`]). Any other taker is
+    /// taken as is (its versions were checked when it was added).
+    fn back_fits(
+        &self,
+        dependent: &Present,
+        taker: &PkgId,
+        range: Option<&str>,
+        sha: Option<&str>,
+        needs: &[String],
+    ) -> bool {
+        if !self.back.contains_key(taker) {
+            return true;
+        }
+        let p = &self.all[taker];
+        let fits = super::Req::from_claim(range, sha).is_ok_and(|q| q.fit(&p.release) != super::Fit::No);
+        let enabled = |n: &str| p.enabled.iter().any(|t| t.eq_ignore_ascii_case(n));
+        let thorns = if needs.is_empty() && !matches!(dependent.origin, Origin::Base { .. }) {
+            p.release.thorns.iter().all(|t| enabled(&t.thorn))
+        } else {
+            needs.iter().all(|n| enabled(n))
+        };
+        fits && thorns
+    }
+
+    /// The holder of a dependency of `dependent` that `taker` takes, needing `needs` of it: the
+    /// taker, or its extension node when the dependency needs one of the extension's thorns;
+    /// `None` when that node is not in `set`. A dependency naming no thorns (every thorn) holds
+    /// the extension only for a dependent cactup added: a base package's claims never asked for
+    /// more than the base it came with, which removing the extension gives back.
+    fn holder<'s>(
+        &self,
+        dependent: &Present,
+        taker: &'s PkgId,
+        needs: &[String],
+        set: &BTreeSet<&'s PkgId>,
+    ) -> Option<&'s PkgId> {
         let Some((node, (_, e))) = self.ext.iter().find(|(_, (b, _))| b == taker) else { return Some(taker) };
-        let touches = needs.is_empty() || needs.iter().any(|n| e.thorns.iter().any(|t| t.eq_ignore_ascii_case(n)));
+        let every = needs.is_empty() && !matches!(dependent.origin, Origin::Base { .. });
+        let touches = every || needs.iter().any(|n| e.thorns.iter().any(|t| t.eq_ignore_ascii_case(n)));
         if !touches {
             return Some(taker);
         }
@@ -240,8 +409,8 @@ impl Graph<'_> {
             }
             let label = claim_label(c);
             let held: Vec<&PkgId> = if c.alternatives.is_empty() {
-                let taker = self.taker(&c.target, set);
-                taker.and_then(|t| self.holder(t, &c.needs, set)).into_iter().collect()
+                let taker = self.taker(&c.target, c.range.as_deref(), c.sha.as_deref(), set).filter(|t| self.back_fits(p, t, c.range.as_deref(), c.sha.as_deref(), &c.needs));
+                taker.and_then(|t| self.holder(p, t, &c.needs, set)).into_iter().collect()
             } else {
                 let alternatives: Option<Vec<PkgId>> =
                     c.alternatives.iter().map(|a| PkgId::parse(&a.target).ok()).collect();
@@ -249,7 +418,10 @@ impl Graph<'_> {
                 let dependent = self.ext.get(&p.release.id).map_or_else(|| p.release.id.clone(), |(b, _)| b.clone());
                 let key = alternatives.map(|alternatives| ChoiceKey { dependent, alternatives });
                 let takers: Vec<(&PkgId, &Vec<String>)> = (c.alternatives.iter())
-                    .filter_map(|a| self.taker(&a.target, set).map(|t| (t, &a.needs)))
+                    .filter_map(|a| {
+                        let t = self.taker(&a.target, a.range.as_deref(), a.sha.as_deref(), set)?;
+                        self.back_fits(p, t, a.range.as_deref(), a.sha.as_deref(), &a.needs).then_some((t, &a.needs))
+                    })
                     .collect();
                 let recorded = takers.iter().find(|(id, _)| {
                     let real = self.ext.get(*id).map_or(*id, |(b, _)| b);
@@ -257,7 +429,7 @@ impl Graph<'_> {
                     key.as_ref().is_some_and(|k| choices.contains(k))
                 });
                 let chosen = recorded.or(takers.first());
-                chosen.and_then(|(t, needs)| self.holder(t, needs, set)).into_iter().collect()
+                chosen.and_then(|(t, needs)| self.holder(p, t, needs, set)).into_iter().collect()
             };
             out.push((label, held));
         }
@@ -301,4 +473,15 @@ impl Graph<'_> {
         }
         reached
     }
+}
+
+/// The one version a range holds (`=1.2.3`, with its track), when it is exactly that.
+fn exact_version(q: &cactup_ecosystem_common::version::TrackedReq) -> Option<cactup_ecosystem_common::version::TrackedVersion> {
+    let [alt] = q.alts.as_slice() else { return None };
+    let [c] = alt.req.comparators.as_slice() else { return None };
+    if !q.is_exact() || !c.pre.is_empty() {
+        return None;
+    }
+    let track = alt.track.as_ref().map(|t| format!("{t}:")).unwrap_or_default();
+    format!("{track}{}.{}.{}", c.major, c.minor?, c.patch?).parse().ok()
 }

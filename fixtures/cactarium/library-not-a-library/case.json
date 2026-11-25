@@ -10,7 +10,7 @@
   "expect": {
     "refusal": "NotALibrary",
     "message": [
-      "max/kadath@1.0.0 says where et/carpetx goes (into = \"src/carpetx\")",
+      "max/kadath@1.0.0 places et/carpetx (into = \"src/carpetx\")",
       "et/carpetx is not a library",
       "Pass --ignore-claim max/kadath:dependency:et/carpetx"
     ]

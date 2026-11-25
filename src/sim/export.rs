@@ -7,8 +7,12 @@
 //! parfile — never from the installation as it is now, which may have moved
 //! on since the binary was built (a download's hash included: the build
 //! froze it from the fetch record). The thornlist and parfile go in verbatim;
-//! the pins go in a per-repo table beside them.
+//! the pins go in a per-repo table beside them. Unless `--local`, nothing
+//! goes into one that nobody else could fetch or reproduce
+//! ([`check_and_pin`]).
 
+use super::registered;
+use super::shareable::shown_repo;
 use super::Simulation;
 use crate::args::{SimDescribeArgs, SimExportArgs, SimPackArgs};
 use crate::build::{self, ConfigMeta, OptionlistSource};
@@ -57,33 +61,40 @@ pub fn export_from(ctx: &Ctx, inst: &Installation, args: SimExportArgs) -> Res<(
 
     // The pins, and the checks that decide whether anyone else could fetch them.
     let fetched = FetchState::read(&inst.root)?;
-    // The download hashes the build froze: what it compiled from.
+    // The download hashes the build froze: what it compiled from. A download
+    // whose hash the build did not freeze (built before cactup recorded
+    // download hashes) stays unpinned: hashing it now could pin a file the
+    // binary was never built from.
     let hashes = config.downloads.clone();
-    let repos = repo_pins(
-        &list,
-        |repo| config.sources.as_ref().and_then(|s| s.get(repo)).cloned(),
-        |repo| hashes.get(repo).cloned(),
-    );
-    // A download whose hash the build did not freeze (built before cactup
-    // recorded download hashes) stays unpinned: hashing it now could pin a
-    // file the binary was never built from.
-    for c in list.components().iter().filter(|c| single_download(&list, c) && c.checksum.is_none()) {
-        if !hashes.contains_key(&c.repo) {
-            println!(
-                "{}",
-                format!(
-                    "{} is not pinned: config {} was built before cactup recorded download hashes; rebuild it to pin it",
-                    c.checkout, sim.meta.configuration
-                )
-                .yellow()
-            );
-        }
-    }
-    let checks = check_repos(&sim.meta.sourcedir.join("repos"), &repos, fetched.as_ref())?;
-    refuse_unfetchable(&repos, &checks, args.allow_dirty, args.allow_unpushed, "when the binary was built")?;
+    let pins_of = |list: &thornlist::Thornlist| {
+        repo_pins(
+            list,
+            |repo| config.sources.as_ref().and_then(|s| s.get(repo)).cloned(),
+            |repo| hashes.get(repo).cloned(),
+        )
+    };
+    let repos_dir = sim.meta.sourcedir.join("repos");
+    let fixes = Fixes {
+        when: "when the binary was built",
+        commit: "commit them and rebuild",
+        unhashed: format!("the build recorded no hash; rebuild config {} to pin it", sim.meta.configuration),
+        unpinned: format!("the build recorded no commit; rebuild config {} to pin it", sim.meta.configuration),
+        unlisted: None,
+        unknown_commits: false,
+    };
+    let (source_text, list, repos) = check_and_pin(
+        ctx,
+        &args.describe,
+        Urls::Unchecked,
+        (source_text, list),
+        &pins_of,
+        &|repos| check_repos(&repos_dir, repos, fetched.as_ref()),
+        &fixes,
+    )?;
 
     let processed = std::fs::read_to_string(cfg_dir.join(build::THORNLIST_PROCESSED)).unwrap_or_default();
-    let provenance = provenance(&sim, &config, &list, &processed);
+    let mut provenance = provenance(&sim, &config, &list, &processed);
+    add_overrides(&mut provenance, inst);
     let fallback_summary = format!("{} on {}", super::parfile_stem(&parfile.filename), sim.meta.machine);
     finish(
         ctx,
@@ -124,7 +135,7 @@ fn trimmed(
     parfile: &Parfile,
 ) -> Res<(String, thornlist::Thornlist)> {
     if parfile.kind != ParfileKind::Par {
-        bail!("--trim reads the parfile's ActiveThorns, which a .py parfile only produces when it runs");
+        bail!("--trim does not work with a .py parfile");
     }
     let keep = super::trim::needed(list, cactus_root, &parfile.text)?;
     let trimmed = super::trim::trim_text(&text, list, &keep)?;
@@ -150,36 +161,306 @@ struct Parts {
     knobs: indexmap::IndexMap<String, String>,
 }
 
+/// The §8.9 check of the URLs alone, for `sim pack` without an
+/// installation, before it asks any remote for its tip (unless `--local`):
+/// the thornlist `text` (parsed as `list`) that goes into the `.sim`, and
+/// the input URLs given as flags. A URL refused fails here, with no remote
+/// asked for its tip, in one error naming every URL refused (the ssh
+/// remotes whose https URLs do not answer included) and every component
+/// nobody else could fetch ([`content_problems`]). The text and list come
+/// back with the ssh URLs that answer as https rewritten, so the tips are
+/// asked of the https URLs.
+fn shareable(
+    describe: &SimDescribeArgs,
+    text: String,
+    list: thornlist::Thornlist,
+    fixes: &Fixes,
+) -> Res<(String, thornlist::Thornlist)> {
+    if describe.local {
+        return Ok((text, list));
+    }
+    let checked = super::shareable::classify(&list, &text, &input_urls(describe));
+    // No installation: the only hashes are those the list gives.
+    let more = content_problems(&list, &repo_pins(&list, |_| None, |_| None), fixes, &|r| checked.refuses(r)).lines;
+    match super::shareable::settle(checked, &text, more)? {
+        None => Ok((text, list)),
+        Some(rewritten) => {
+            let list = thornlist::parse(&rewritten).context("The rewritten thornlist does not parse")?;
+            Ok((rewritten, list))
+        }
+    }
+}
+
+/// The input URLs given as flags: (KNOB, URL).
+fn input_urls(describe: &SimDescribeArgs) -> Vec<(String, String)> {
+    describe
+        .input_urls
+        .iter()
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(knob, url)| (knob.to_owned(), url.to_owned()))
+        .collect()
+}
+
+/// Whether [`check_and_pin`] still has the URLs to check, or [`shareable`]
+/// checked them already.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Urls {
+    Unchecked,
+    Checked,
+}
+
+/// How a refusal words its fix, as the command it comes from would.
+pub(crate) struct Fixes {
+    /// When the sources had uncommitted changes.
+    pub when: &'static str,
+    /// The fix for uncommitted changes.
+    pub commit: &'static str,
+    /// Why a download has no hash, and the fix.
+    pub unhashed: String,
+    /// Why a git repo has no commit, and the fix.
+    pub unpinned: String,
+    /// The repos of the installation's own thornlist, and the fix for a git
+    /// repo it lacks (which [`Fixes::unpinned`]'s refetch would not fetch).
+    pub unlisted: Option<Unlisted>,
+    /// No local check places the command's commits (a pack's
+    /// `!REPO_COMMIT`s): one that Cactarium says the package's repo lacks
+    /// is refused.
+    pub unknown_commits: bool,
+}
+
+/// For `sim pack -I`: what [`Fixes::unlisted`] holds.
+pub(crate) struct Unlisted {
+    pub listed: std::collections::BTreeSet<String>,
+    pub fix: String,
+}
+
+/// The §8.9 check that a `.sim` for others holds nothing nobody else could
+/// fetch or reproduce, and the pins of what it holds (unless `--local`,
+/// which takes the list and its pins as they are, asking nothing). The
+/// thornlist `text` (parsed as `list`) and the input URLs given as flags;
+/// `pins_of` pins a list, `published` says which of those pins' commits a
+/// remote has (see [`Fixes::unknown_commits`] for what it cannot tell).
+///
+/// Offline first: URLs refused by their form ([`super::shareable::classify`]),
+/// uncommitted changes, commits on no remote, components nobody else can
+/// fetch. Then the network, all at once: every git remote probed
+/// anonymously, and Cactarium asked, in one lookup, which package each git
+/// pin is and whether each download is reviewed ([`registered::Query`]).
+/// Everything refused fails in one error, a line each. Else the text, its
+/// list, and the pins come back with the ssh URLs that answer as https
+/// rewritten, and each git pin of a registered package labeled with it.
+fn check_and_pin(
+    ctx: &Ctx,
+    describe: &SimDescribeArgs,
+    urls: Urls,
+    (text, list): (String, thornlist::Thornlist),
+    pins_of: &dyn Fn(&thornlist::Thornlist) -> Vec<RepoPin>,
+    published: &dyn Fn(&[RepoPin]) -> Res<Vec<bool>>,
+    fixes: &Fixes,
+) -> Res<(String, thornlist::Thornlist, Vec<RepoPin>)> {
+    if describe.local {
+        let repos = pins_of(&list);
+        for c in list.components().iter().filter(|c| single_download(&list, c)) {
+            if repos.iter().any(|r| r.name == c.repo && r.sha256.is_none()) {
+                println!("{}", format!("{}: {}", c.checkout, fixes.unhashed).yellow());
+            }
+        }
+        return Ok((text, list, repos));
+    }
+    let checked = match urls {
+        Urls::Unchecked => super::shareable::classify(&list, &text, &input_urls(describe)),
+        Urls::Checked => Default::default(),
+    };
+    let repos = pins_of(&list);
+    let mut lines = state_problems(&repos, &published(&repos)?, fixes);
+    let content = content_problems(&list, &repos, fixes, &|r| checked.refuses(r));
+    lines.extend(content.lines);
+    for (knob, url) in input_urls(describe) {
+        if cactup_ecosystem_common::url::download_shareability(&url).download_refusal(&url).is_none()
+            && let Some(why) = fetch::anonymous::private_download(&url)
+        {
+            lines.push(format!("input {knob}: {why}"));
+        }
+    }
+    // Nothing refused offline is sent: a URL may carry a credential, or
+    // name a private host.
+    let query = registered::Query::of(&repos, |pin| match pin.commit {
+        _ if checked.refuses(&pin.name) || content.private.contains(&pin.name) => None,
+        Some(_) if urls == Urls::Unchecked => checked.published_as(&pin.url).map(str::to_owned),
+        _ => Some(pin.url.clone()),
+    });
+    let client = crate::cactarium::Client::new(&ctx.db.read()?).patient();
+    let settled = super::shareable::settle_with(checked, Some((&client, &query)))?;
+    let mut refused = settled.refused.clone();
+    refused.append(&mut lines);
+    // A git repo with no commit, but one with a URL refused (offline or by
+    // its probe): that refusal is its line.
+    refused.extend(unpinned_git(&list, &repos, fixes, &|r| settled.refused_repos.contains(r)));
+    let answer = match settled.looked_up.as_ref() {
+        None => None,
+        Some(Ok(answer)) => Some(answer),
+        // One line among the rest: everything else refused is still said.
+        Some(Err(e)) => {
+            refused.push(registered::lookup_failed(e)?);
+            None
+        }
+    };
+    if let Some(answer) = answer {
+        let refused_url = |repo: &str| settled.refused_repos.iter().any(|r| shown_repo(r) == repo);
+        refused.extend(query.problems(answer, refused_url));
+        if fixes.unknown_commits {
+            refused.extend(query.unknown_commits(answer));
+        }
+    }
+    if !refused.is_empty() {
+        return Err(super::shareable::refusal(&refused));
+    }
+    let (text, list) = match settled.apply(&text)? {
+        None => (text, list),
+        Some(rewritten) => {
+            let list = thornlist::parse(&rewritten).context("The rewritten thornlist does not parse")?;
+            (rewritten, list)
+        }
+    };
+    let mut repos = pins_of(&list);
+    if let Some(answer) = answer {
+        let labels = query.labels(answer);
+        for pin in repos.iter_mut().filter(|p| p.commit.is_some()) {
+            pin.cactarium = labels.get(shown_repo(&pin.name)).cloned();
+        }
+    }
+    Ok((text, list, repos))
+}
+
+/// A line for each pin nobody else could reproduce: sources with
+/// uncommitted edits, and commits no remote has (`published` says which,
+/// pin by pin).
+pub(crate) fn state_problems(repos: &[RepoPin], published: &[bool], fixes: &Fixes) -> Vec<String> {
+    let mut lines = Vec::new();
+    for r in repos.iter().filter(|r| r.dirty) {
+        lines.push(format!("{}: uncommitted changes {}; {}", shown_repo(&r.name), fixes.when, fixes.commit));
+    }
+    for (r, _) in repos.iter().zip(published).filter(|(_, published)| !**published) {
+        lines.push(format!(
+            "{} ({}): commit on no known remote branch or tag; push it, then run `cactup inst refetch`",
+            shown_repo(&r.name),
+            short(r.commit.as_deref().unwrap_or(""))
+        ));
+    }
+    lines
+}
+
+/// A line for each component of `list` (pinned as `repos`) nobody else can
+/// fetch or reproduce: an `ignore` component (on this machine only), a
+/// download with no hash to pin it by (nothing Cactarium could review) or
+/// on a private address, and a repo of another kind than git that nothing
+/// pins (svn, cvs, hg, darcs; several downloads from one
+/// URL).
+pub(super) fn content_problems(
+    list: &thornlist::Thornlist,
+    repos: &[RepoPin],
+    fixes: &Fixes,
+    refused: &dyn Fn(&str) -> bool,
+) -> Content {
+    let mut lines = Vec::new();
+    let mut private = std::collections::BTreeSet::new();
+    for c in list.ignored() {
+        lines.push(format!(
+            "{}: an ignore component, which nobody else can fetch; put it in a repo and register that with Cactarium",
+            c.checkout
+        ));
+    }
+    // A repo with a URL refused already is said once, by that refusal.
+    for c in list.components().iter().filter(|c| single_download(list, c) && !refused(&c.repo)) {
+        if repos.iter().any(|r| r.name == c.repo && r.sha256.is_none()) {
+            lines.push(format!("{}: {}", c.checkout, fixes.unhashed));
+        }
+    }
+    // A download on a private address.
+    let mut asked = std::collections::BTreeSet::new();
+    for c in list.components().iter().filter(|c| matches!(c.ty, ComponentType::Http | ComponentType::Https | ComponentType::Ftp)) {
+        let Some(url) = c.url.as_deref().filter(|u| asked.insert(u.to_owned())) else { continue };
+        if !refused(&c.repo) && let Some(why) = fetch::anonymous::private_download(url) {
+            lines.push(format!("{}: {why}", c.checkout));
+            private.insert(c.repo.clone());
+        }
+    }
+    // Every other repo that nothing pins: a .sim for others is fully
+    // specified. Max's decision 5 (plan §10).
+    for r in repos.iter().filter(|r| r.commit.is_none() && r.sha256.is_none() && !refused(&r.name)) {
+        let Some(c) = list.components().iter().find(|c| c.repo == r.name) else { continue };
+        let line = match c.ty {
+            ComponentType::Git | ComponentType::Ignore => continue,
+            _ if single_download(list, c) => continue,
+            ComponentType::Http | ComponentType::Https | ComponentType::Ftp => format!(
+                "{}: several downloads from one URL, which no hash can pin; give each its own section with !CHECKSUM_SHA256",
+                shown_repo(&r.name)
+            ),
+            ty => format!(
+                "{}: {} repos cannot be pinned; move it to git, or to a download pinned by !CHECKSUM_SHA256",
+                shown_repo(&r.name),
+                format!("{ty:?}").to_ascii_lowercase()
+            ),
+        };
+        lines.push(line);
+    }
+    Content { lines, private }
+}
+
+/// What [`content_problems`] found.
+pub(super) struct Content {
+    /// A line for each problem.
+    pub lines: Vec<String>,
+    /// The repos (as the thornlist names them) of downloads on a private
+    /// address: refused, so never sent to Cactarium.
+    pub private: std::collections::BTreeSet<String>,
+}
+
+/// A line for each git repo of `list` (pinned as `repos`) that no commit
+/// pins: a .sim for others is fully specified (Max's decision 5).
+pub(super) fn unpinned_git(
+    list: &thornlist::Thornlist,
+    repos: &[RepoPin],
+    fixes: &Fixes,
+    refused: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
+    let git = |r: &RepoPin| list.components().iter().any(|c| c.repo == r.name && c.ty == ComponentType::Git);
+    repos
+        .iter()
+        .filter(|r| r.commit.is_none() && r.sha256.is_none() && git(r) && !refused(&r.name))
+        .map(|r| {
+            let fix = match &fixes.unlisted {
+                Some(unlisted) if !unlisted.listed.contains(&r.name) => &unlisted.fix,
+                _ => &fixes.unpinned,
+            };
+            format!("{}: {fix}", shown_repo(&r.name))
+        })
+        .collect()
+}
+
+/// Record the installation's claim overrides in `provenance`, for whoever
+/// reads the `.sim`: informational, since an import never resolves
+/// dependencies.
+// Plan misfit 4.
+fn add_overrides(provenance: &mut Provenance, inst: &Installation) {
+    // Best effort: information only, never worth failing an export over.
+    let meta = match inst.meta() {
+        Ok(meta) => meta,
+        Err(e) => {
+            let why = format!("{e:#}");
+            println!("{}", format!("Claim overrides not recorded: {}", why.lines().next().unwrap_or("")).yellow());
+            return;
+        }
+    };
+    if !meta.claim_overrides.is_empty() {
+        let keys: Vec<&str> = meta.claim_overrides.keys().map(String::as_str).collect();
+        provenance.extra.insert("claims-overrides".to_owned(), keys.join("; "));
+    }
+}
+
 fn refuse_overwrite(file: &Path, describe: &SimDescribeArgs) -> Res<()> {
     if file.exists() && !describe.force {
         bail!("'{}' already exists (use -f to overwrite it)", file.display());
-    }
-    Ok(())
-}
-
-/// Refuse pins nobody else could reproduce: sources with uncommitted edits
-/// (`when` says when they had them), and commits no remote has.
-fn refuse_unfetchable(repos: &[RepoPin], published: &[bool], allow_dirty: bool, allow_unpushed: bool, when: &str) -> Res<()> {
-    let dirty: Vec<&str> = repos.iter().filter(|r| r.dirty).map(|r| r.name.as_str()).collect();
-    if !dirty.is_empty() && !allow_dirty {
-        bail!(
-            "These sources had uncommitted changes {when}, so no commit reproduces them: {}. Commit them (and \
-             rebuild), or pass --allow-dirty to mark them dirty",
-            dirty.join(", ")
-        );
-    }
-    let unpushed: Vec<String> = repos
-        .iter()
-        .zip(published)
-        .filter(|(_, published)| !**published)
-        .map(|(r, _)| format!("{} ({})", r.name, short(r.commit.as_deref().unwrap_or(""))))
-        .collect();
-    if !unpushed.is_empty() && !allow_unpushed {
-        bail!(
-            "These commits are on no remote branch or tag this installation knows of, so nobody else could fetch \
-             them: {}. Push them (and refetch, so cactup sees them), or pass --allow-unpushed",
-            unpushed.join(", ")
-        );
     }
     Ok(())
 }
@@ -212,7 +493,7 @@ fn finish(ctx: &Ctx, describe: &SimDescribeArgs, file: &Path, parts: Parts) -> R
     let license = ask("License (SPDX, empty for none)", &describe.license, license_default.unwrap_or_default())?;
     let contact_default = ctx.db.read().ok().and_then(|db| db.knob("default-contact").map(str::to_owned));
     let contact = Some(ask(
-        "Where to go for help with it (an https:// URL or mailto: address, empty for none)",
+        "Contact (https:// URL or mailto: address, empty for none)",
         &describe.contact,
         contact_default.unwrap_or_default(),
     )?)
@@ -239,7 +520,7 @@ fn finish(ctx: &Ctx, describe: &SimDescribeArgs, file: &Path, parts: Parts) -> R
     for input in &mut inputs {
         if interactive {
             let answer = crate::commands::prompt_with_default(
-                &format!("What does the parfile need in knob {}? (a description for whoever imports it)", input.knob),
+                &format!("Description of input knob {}", input.knob),
                 "",
             )?;
             input.description = Some(answer).filter(|a| !a.is_empty());
@@ -247,12 +528,17 @@ fn finish(ctx: &Ctx, describe: &SimDescribeArgs, file: &Path, parts: Parts) -> R
         let url = match urls.get(&input.knob) {
             Some(url) => Some(url.clone()),
             None if interactive => Some(crate::commands::prompt_with_default(
-                &format!("Where can knob {}'s file be downloaded? (a URL, empty for nowhere)", input.knob),
+                &format!("Download URL for knob {} (empty for none)", input.knob),
                 "",
             )?)
             .filter(|u| !u.is_empty()),
             None => None,
         };
+        if let Some(url) = &url
+            && !describe.local
+        {
+            super::shareable::check_input_url(&input.knob, url)?;
+        }
         let Some(url) = url else {
             if members.contains_key(&input.knob) {
                 bail!("--input-path {} needs an --input-url for that input too", input.knob);
@@ -272,6 +558,20 @@ fn finish(ctx: &Ctx, describe: &SimDescribeArgs, file: &Path, parts: Parts) -> R
         }
     }
     drop(db);
+    // An input's download, once its sha256 is known: reviewed by Cactarium,
+    // as a download component must be.
+    let mut query = registered::Query::default();
+    query.add_inputs(&inputs);
+    if !describe.local && !query.is_empty() {
+        let client = crate::cactarium::Client::new(&ctx.db.read()?).patient();
+        let lines = match registered::ask_alone(&client, &query) {
+            Ok(answer) => query.problems(&answer, |_| false),
+            Err(e) => vec![registered::lookup_failed(&e)?],
+        };
+        if !lines.is_empty() {
+            return Err(super::shareable::refusal(&lines));
+        }
+    }
 
     let sim_file = SimFile {
         format: cactup_ecosystem_common::SIM_FORMAT,
@@ -304,11 +604,10 @@ fn finish(ctx: &Ctx, describe: &SimDescribeArgs, file: &Path, parts: Parts) -> R
     );
     let missing = sim_file.unspecified();
     if !missing.is_empty() {
-        let what: Vec<String> = missing.iter().map(ToString::to_string).collect();
-        println!(
-            "{}",
-            format!("Not fully specified, so it cannot be published to the Cactarium: {}", what.join("; ")).yellow()
-        );
+        println!("{}", "Cannot be published to Cactarium:".yellow());
+        for what in &missing {
+            println!("{}", format!("  {what}").yellow());
+        }
     }
     Ok(())
 }
@@ -330,9 +629,17 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
         .with_context(|| format!("'{}' is not a GetComponents (CRL) list", args.thornlist.display()))?;
 
     if args.trim && ctx.globals.installation.is_none() {
-        bail!("--trim reads the thorns' .ccl files, so it needs an installation that has them: pass -I");
+        bail!("--trim needs an installation; pass -I");
     }
-    let (repos, published, text, list) = if ctx.globals.installation.is_some() {
+    let fixes = Fixes {
+        when: "in the installation",
+        commit: "commit them",
+        unhashed: "download with no hash; add !CHECKSUM_SHA256 to the thornlist".to_owned(),
+        unpinned: "not fetched by the installation; run `cactup inst refetch`".to_owned(),
+        unlisted: None,
+        unknown_commits: false,
+    };
+    let (text, list, repos, provenance) = if ctx.globals.installation.is_some() {
         let inst = Installation::resolve(ctx)?;
         let (text, list) =
             if args.trim { trimmed(text, &list, &inst.cactus_root()?, &parfile)? } else { (text, list) };
@@ -342,24 +649,57 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
         let repos_dir = inst.cactus_root()?.join("repos");
         let states = installed_states(&repos_dir, &list)?;
         let hashes = installed_download_hashes(&inst.root, &list)?;
-        let repos = repo_pins(&list, |repo| states.get(repo).cloned(), |repo| hashes.get(repo).cloned());
-        let published = check_repos(&repos_dir, &repos, FetchState::read(&inst.root)?.as_ref())?;
-        (repos, published, text, list)
+        let pins_of = |list: &thornlist::Thornlist| {
+            repo_pins(list, |repo| states.get(repo).cloned(), |repo| hashes.get(repo).cloned())
+        };
+        let fetched = FetchState::read(&inst.root)?;
+        let published = |repos: &[RepoPin]| check_repos(&repos_dir, repos, fetched.as_ref());
+        // A repo the installation's own list lacks: a plain refetch would
+        // not fetch it, a refetch from the list being packed does.
+        let listed = inst
+            .live_thornlist_to_read()
+            .ok()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|text| thornlist::parse(&text).ok())
+            .map(|own| own.components().iter().map(|c| c.repo.clone()).collect());
+        let shown = args.thornlist.display().to_string();
+        let shown = if shown.contains(char::is_whitespace) { format!("'{shown}'") } else { shown };
+        let unlisted = listed.map(|listed| Unlisted {
+            listed,
+            fix: format!("not in the installation's thornlist; fetch it with `cactup inst refetch {shown}`"),
+        });
+        let fixes = Fixes { unlisted, ..fixes };
+        let (text, list, repos) =
+            check_and_pin(ctx, &args.describe, Urls::Unchecked, (text, list), &pins_of, &published, &fixes)?;
+        let mut provenance = exporter();
+        add_overrides(&mut provenance, &inst);
+        (text, list, repos, provenance)
     } else {
+        // Before any tip is asked: a refused URL fails without asking one,
+        // and the tips are asked of the rewritten https URLs. With every
+        // repo pinned, no tip is asked, and the URLs are checked with the
+        // rest.
+        let (text, list, urls) = if git_repos(&list).iter().any(|r| r.3.is_none()) {
+            let (text, list) = shareable(&args.describe, text, list, &fixes)?;
+            (text, list, Urls::Checked)
+        } else {
+            (text, list, Urls::Unchecked)
+        };
         let tips = remote_tips(&list)?;
         // No installation, so no downloaded file to hash: only checksums the list gives.
-        let repos = repo_pins(&list, |repo| tips.get(repo).map(ToString::to_string), |_| None);
+        let pins_of =
+            |list: &thornlist::Thornlist| repo_pins(list, |repo| tips.get(repo).map(ToString::to_string), |_| None);
+        // Each commit is a remote tip by construction.
+        let published = |repos: &[RepoPin]| Ok(vec![true; repos.len()]);
+        let (text, list, repos) =
+            check_and_pin(ctx, &args.describe, urls, (text, list), &pins_of, &published, &Fixes { unknown_commits: true, ..fixes })?;
         println!(
             "{}",
-            "Pinned each repo to the commit its branch or tag names today (pass -I to pin to what an installation \
-             has instead)."
+            "Pinned each repo to the tip of its branch or tag (-I pins an installation's checkouts instead)."
                 .dimmed()
         );
-        // Each commit is a remote tip by construction.
-        let published = vec![true; repos.len()];
-        (repos, published, text, list)
+        (text, list, repos, exporter())
     };
-    refuse_unfetchable(&repos, &published, args.allow_dirty, args.allow_unpushed, "in the installation")?;
 
     let thornlist_name = thornlist_filename(&args.thornlist.to_string_lossy());
     finish(
@@ -374,7 +714,7 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
             parfile,
             repos,
             run: None,
-            provenance: exporter(),
+            provenance,
             knobs: Default::default(),
         },
     )
@@ -384,14 +724,14 @@ pub fn pack(ctx: &Ctx, args: SimPackArgs) -> Res<()> {
 /// an installation — when it is a checkout of the very repo the list names.
 /// One pointing elsewhere (a fork) is left out, so it is not pinned to a
 /// commit of the wrong repo, and said so.
-fn installed_states(repos_dir: &Path, list: &thornlist::Thornlist) -> Res<std::collections::BTreeMap<String, String>> {
+pub(crate) fn installed_states(repos_dir: &Path, list: &thornlist::Thornlist) -> Res<std::collections::BTreeMap<String, String>> {
     let repos = git_repos(list);
     let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
     let item = progress.add_child("read installed repos");
     item.init(Some(repos.len()), Some(prodash::unit::label("repos")));
     let item = std::sync::Mutex::new(item);
     let read = crate::par::parallel_map(&repos, |(repo, url, _, _)| {
-        let current = item.lock().expect("pack progress poisoned").add_child(repo.clone());
+        let current = item.lock().expect("pack progress poisoned").add_child(shown_repo(repo).to_owned());
         let dir = repos_dir.join(repo);
         let same_repo = gix::open(&dir)
             .ok()
@@ -409,7 +749,8 @@ fn installed_states(repos_dir: &Path, list: &thornlist::Thornlist) -> Res<std::c
     let mut states = std::collections::BTreeMap::new();
     for (repo, elsewhere, state) in read? {
         if elsewhere {
-            println!("{}", format!("{repo}: the installation's checkout is of another repo; left unpinned").yellow());
+            let repo = shown_repo(&repo);
+            println!("{}", format!("{repo}: checkout is of another repo; left unpinned").yellow());
         }
         if let Some(state) = state {
             states.insert(repo, state);
@@ -421,18 +762,18 @@ fn installed_states(repos_dir: &Path, list: &thornlist::Thornlist) -> Res<std::c
 /// Per git repo the list names, the commit it pins (`!REPO_COMMIT`), else
 /// the one its branch or tag (or default branch) names on its remote now.
 /// Any remote that cannot be asked fails the whole pack: a silently unpinned
-/// repo is worse than no file.
+/// repo is worse than no file. Asked on the network fan-out, all within one
+/// [`fetch::git::REMOTE_ASK_TIMEOUT`]; Ctrl-C fails it at once.
 fn remote_tips(list: &thornlist::Thornlist) -> Res<std::collections::BTreeMap<String, gix::ObjectId>> {
     let (pinned, repos): (Vec<_>, Vec<_>) = git_repos(list).into_iter().partition(|r| r.3.is_some());
-    let scratch = tempfile::tempdir().context("Failed to create a scratch directory")?;
-    gix::init_bare(scratch.path()).context("Failed to create a scratch repository")?;
     let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
     let item = progress.add_child("ask remotes for their tips");
     item.init(Some(repos.len()), Some(prodash::unit::label("repos")));
     let item = std::sync::Mutex::new(item);
-    let asked = crate::par::parallel_map(&repos, |(repo, url, git_ref, _)| {
-        let current = item.lock().expect("pack progress poisoned").add_child(repo.clone());
-        let tip = fetch::git::remote_tip(scratch.path(), url, git_ref.as_deref());
+    let window = fetch::git::AskWindow::now();
+    let asked = fetch::git::ask_all(&repos, |(repo, url, git_ref, _)| {
+        let current = item.lock().expect("pack progress poisoned").add_child(shown_repo(repo).to_owned());
+        let tip = fetch::git::ask_remote_tip(url, git_ref.as_deref(), window);
         drop(current);
         item.lock().expect("pack progress poisoned").inc();
         (repo.clone(), tip)
@@ -452,7 +793,7 @@ fn remote_tips(list: &thornlist::Thornlist) -> Res<std::collections::BTreeMap<St
             Ok(tip) => {
                 tips.insert(repo, tip);
             }
-            Err(e) => failed.push(format!("{repo}: {e:#}")),
+            Err(e) => failed.push(format!("{}: {e:#}", shown_repo(&repo))),
         }
     }
     if !failed.is_empty() {
@@ -496,14 +837,14 @@ pub fn unpack(file: &Path, dir: &Path, force: bool) -> Res<()> {
         println!("Wrote '{}'", path.display());
     }
     let unpinned: Vec<&str> =
-        sim.repos.iter().filter(|r| r.pin().is_none()).map(|r| r.name.as_str()).collect();
+        sim.repos.iter().filter(|r| r.pin().is_none()).map(|r| shown_repo(&r.name)).collect();
     if !unpinned.is_empty() {
-        println!("{}", format!("Not pinned, so they follow their branch: {}", unpinned.join(", ")).yellow());
+        println!("{}", format!("Unpinned (following their branch): {}", unpinned.join(", ")).yellow());
     }
     if !unchecked.is_empty() {
         println!(
             "{}",
-            format!("Left unchecked: the recorded hash names no single file: {}", unchecked.join(", ")).yellow()
+            format!("Unchecked (hash names no single file): {}", unchecked.join(", ")).yellow()
         );
     }
     for input in &sim.inputs {
@@ -523,8 +864,8 @@ fn frozen_config(inst: &Installation, sim: &Simulation) -> Res<ConfigMeta> {
     match ConfigMeta::load(&inst.cactus_root()?, &sim.meta.configuration)? {
         Some(config) if config.build_id == sim.meta.build_id => Ok(config),
         _ => bail!(
-            "Simulation \"{}\" was created before cactup recorded the sources of the build it runs, and config \
-             \"{}\" has been rebuilt since, so they are lost. Create a new simulation from it to export",
+            "Simulation \"{}\" predates recorded build sources, and config \"{}\" has been rebuilt since\n\
+             Create a new simulation to export.",
             sim.name,
             sim.meta.configuration
         ),
@@ -536,7 +877,7 @@ fn frozen_config(inst: &Installation, sim: &Simulation) -> Res<ConfigMeta> {
 /// when that state saw local edits; a download by the SHA-256 the list
 /// already gives it, else the one `hash_of` finds for it; a repo with no
 /// state, or anything else, unpinned.
-fn repo_pins(
+pub(crate) fn repo_pins(
     list: &thornlist::Thornlist,
     state_of: impl Fn(&str) -> Option<String>,
     hash_of: impl Fn(&str) -> Option<String>,
@@ -609,13 +950,13 @@ fn single_download(list: &thornlist::Thornlist, c: &thornlist::Component) -> boo
 /// Per pin, whether its commit is on the remote (true for anything unpinned:
 /// there is nothing to check). The repos are walked in parallel, with
 /// progress: on a network filesystem, eighty history walks take a while.
-fn check_repos(repos_dir: &Path, pins: &[RepoPin], fetched: Option<&FetchState>) -> Res<Vec<bool>> {
+pub(crate) fn check_repos(repos_dir: &Path, pins: &[RepoPin], fetched: Option<&FetchState>) -> Res<Vec<bool>> {
     let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
     let item = progress.add_child("check commits are published");
     item.init(Some(pins.len()), Some(prodash::unit::label("repos")));
     let item = std::sync::Mutex::new(item);
     let checked = crate::par::parallel_map(pins, |pin| {
-        let current = item.lock().expect("export progress poisoned").add_child(pin.name.clone());
+        let current = item.lock().expect("export progress poisoned").add_child(shown_repo(&pin.name).to_owned());
         let published = match pin.commit.as_deref().map(|c| gix::ObjectId::from_hex(c.as_bytes())) {
             None => true,
             Some(Err(_)) => false,
@@ -689,8 +1030,7 @@ fn warn_about_paths(parfile: &Parfile) {
                 println!(
                     "{}",
                     format!(
-                        "Line {}: \"{quoted}\" is an absolute path, which whoever imports this simulation will not \
-                         have; consider a knob input such as @KNOB(my-data)@ instead",
+                        "Line {}: \"{quoted}\" is an absolute path; consider a knob input such as @KNOB(my-data)@",
                         n + 1
                     )
                     .yellow()
@@ -803,6 +1143,41 @@ fn short(commit: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A git repo with no commit gets the fix of its case: a repo the
+    /// installation's list lacks the refetch from the packed list, any other
+    /// the plain refetch; one with a URL refused gets no line of its own.
+    #[test]
+    fn an_unpinned_repo_gets_the_fix_that_works() {
+        let section = |name: &str| {
+            format!("!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://h.test/o/{name}.git\n!CHECKOUT = {name}/One\n")
+        };
+        let list = thornlist::parse(&format!("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{}{}{}", section("a"), section("b"), section("c")))
+            .unwrap();
+        let repos = repo_pins(&list, |_| None, |_| None);
+        let fixes = Fixes {
+            when: "",
+            commit: "",
+            unhashed: String::new(),
+            unpinned: "plain".into(),
+            unlisted: Some(Unlisted { listed: ["a".to_owned()].into(), fix: "from the list".into() }),
+            unknown_commits: false,
+        };
+        assert_eq!(unpinned_git(&list, &repos, &fixes, &|r| r == "c"), ["a: plain", "b: from the list"]);
+    }
+
+    /// The claim overrides are information: an installation.toml that does
+    /// not read records none and fails nothing.
+    #[test]
+    fn overrides_are_recorded_at_best() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inst = Installation::new("x", tmp.path());
+        std::fs::create_dir_all(inst.cactup_dir()).unwrap();
+        std::fs::write(inst.cactup_dir().join("installation.toml"), "schema = 5\n[claim-overrides\n").unwrap();
+        let mut provenance = exporter();
+        add_overrides(&mut provenance, &inst);
+        assert!(provenance.extra.is_empty());
+    }
 
     /// A download is pinned by the checksum its list gives, else by the hash
     /// the fetch record kept for it (what a build freezes); a repo of several

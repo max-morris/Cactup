@@ -1,0 +1,108 @@
+{
+  "about": "Orphans that replaced base repos of other packages than themselves (not forks of them): the bases that come back take a base package's any-of from a third orphan and need the very packages that replaced them, so going and staying alternate; the sweep keeps what any state holds, checked against the state it leaves",
+  "packages": [
+    "max--t--needs-y1-y2",
+    "max--y1--fork-of-z1",
+    "max--y2--fork-of-z2",
+    "et--x1--needs-z1",
+    "et--x2--needs-z2",
+    "max--f--fork-of-x3",
+    "et--r--any-of-x1-x2-x3"
+  ],
+  "present": [
+    {
+      "package": "max/t",
+      "version": "1.0.0",
+      "enabled": [
+        "T"
+      ]
+    },
+    {
+      "package": "max/y1",
+      "version": "1.0.0",
+      "enabled": [
+        "Y1"
+      ]
+    },
+    {
+      "package": "max/y2",
+      "version": "1.0.0",
+      "enabled": [
+        "Y2"
+      ]
+    },
+    {
+      "package": "max/f",
+      "version": "1.0.0",
+      "enabled": [
+        "F"
+      ]
+    },
+    {
+      "package": "et/r",
+      "version": "1.0.0",
+      "base": "r",
+      "enabled": [
+        "R"
+      ]
+    }
+  ],
+  "remove": {
+    "targets": [
+      "max/t"
+    ],
+    "added-for": {
+      "max/t": {
+        "requested": true,
+        "for-commit": "current"
+      },
+      "max/y1": {
+        "requested": false,
+        "for-commit": "current",
+        "by": [
+          "max/t@1.0.0"
+        ]
+      },
+      "max/y2": {
+        "requested": false,
+        "for-commit": "current",
+        "by": [
+          "max/t@1.0.0"
+        ]
+      },
+      "max/f": {
+        "requested": false,
+        "for-commit": "current",
+        "by": [
+          "et/r@1.0.0"
+        ]
+      }
+    },
+    "returning": [
+      {
+        "replacer": "max/y1",
+        "package": "et/x1",
+        "version": "1.0.0",
+        "base": "x1",
+        "enabled": [
+          "X1"
+        ]
+      },
+      {
+        "replacer": "max/y2",
+        "package": "et/x2",
+        "version": "1.0.0",
+        "base": "x2",
+        "enabled": [
+          "X2"
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "removed": [
+      "max/t"
+    ],
+    "orphans": []
+  }
+}

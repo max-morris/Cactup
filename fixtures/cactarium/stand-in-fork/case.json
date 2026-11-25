@@ -14,9 +14,7 @@
     {
       "package": "max/carpet-mp",
       "unknown": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
-      "thorns": [
-        "Carpet"
-      ],
+      "thorns": ["Carpet", "CarpetSlab"],
       "base": "carpet-mp",
       "enabled": [
         "Carpet"

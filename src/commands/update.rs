@@ -92,7 +92,7 @@ fn report(me: &Stamp, base: &str) -> Res<()> {
             if let Installability::NotUpdatable(reason) =
                 update::installability(&exe, &crate::CACTUP_ROOT.join("bin"))
             {
-                println!("{}", format!("but this cactup cannot replace itself: {reason}").yellow());
+                println!("{}", format!("This cactup cannot replace itself: {reason}").yellow());
             }
         }
     }
@@ -125,12 +125,8 @@ fn update_binary(me: &Stamp, base: &str) -> Res<()> {
         Decision::NoTarget => {
             eprintln!(
                 "{}",
-                format!(
-                    "cactup {} is published, but not for {}; nothing to install",
-                    latest.build,
-                    build_info::TARGET
-                )
-                .yellow()
+                format!("cactup {} is not published for {}; nothing to install", latest.build, build_info::TARGET)
+                    .yellow()
             );
             return Ok(());
         }
@@ -140,7 +136,7 @@ fn update_binary(me: &Stamp, base: &str) -> Res<()> {
     let bin_dir = crate::CACTUP_ROOT.join("bin");
     let exe = std::env::current_exe().context("Failed to locate the running cactup")?;
     if let Installability::NotUpdatable(reason) = update::installability(&exe, &bin_dir) {
-        bail!("cactup {} is available, but this cactup cannot replace itself: {reason}", latest.build);
+        bail!("Cannot update to cactup {}: {reason}", latest.build);
     }
     let path = match update::apply(base, &latest, &entry, &bin_dir, me)? {
         Applied::Installed(path) => path,
@@ -148,25 +144,20 @@ fn update_binary(me: &Stamp, base: &str) -> Res<()> {
         Applied::Busy => {
             eprintln!(
                 "{}",
-                "another cactup is installing an update right now; run `cactup update` again in a moment"
-                    .yellow()
+                "Another cactup is installing an update; run `cactup update` again in a moment".yellow()
             );
             return Ok(());
         }
         Applied::NotYet => {
             eprintln!(
                 "{}",
-                format!(
-                    "cactup {} is announced, but its download is not available yet; try again in a \
-                     few minutes",
-                    latest.build
-                )
-                .yellow()
+                format!("The download of cactup {} is not available yet; try again in a few minutes", latest.build)
+                    .yellow()
             );
             return Ok(());
         }
         Applied::NotUpdatable(reason) => {
-            bail!("cactup {} is available, but cannot be installed: {reason}", latest.build)
+            bail!("Cannot update to cactup {}: {reason}", latest.build)
         }
     };
     // The same command line, so global flags (-K, --mdb-path) carry over.

@@ -139,8 +139,8 @@ pub fn validate_knob_name(name: &str) -> Res<()> {
         && bytes.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-');
     if !ok {
         bail!(
-            "\"{name}\" is not a valid knob name: lowercase letters a-z, digits after the first \
-             character, and dashes anywhere but first or last"
+            "\"{name}\" is not a valid knob name; use lowercase letters, digits and dashes, \
+             starting with a letter and not ending with a dash"
         );
     }
     // `cactup knob <subcommand>` shares the positional slot with knob names,
@@ -192,7 +192,7 @@ pub fn knob_overrides() -> &'static IndexMap<String, String> {
     KNOB_OVERRIDES.get().unwrap_or(&EMPTY)
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct CactusInstallation {
     pub alias: String,
@@ -216,7 +216,7 @@ pub struct CactusInstallation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stack: Option<String>,
     /// Where to report problems with the stack release the tree is on now
-    /// (installed, or refetched to), as the Cactarium gave it: the stack's
+    /// (installed, or refetched to), as Cactarium gave it: the stack's
     /// declared contact, else its repo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stack_contact: Option<String>,
@@ -238,6 +238,12 @@ pub struct CactusInstallation {
     /// refetch that fetches every repo the list names (e.g. `refetch -f`).
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub unfetched_repos: IndexMap<String, UnfetchedRepo>,
+    /// For an installation made by `installation cp`: the alias of the one it
+    /// was copied from, at the time of the copy. Provenance only, like
+    /// `release`: the copy owns every file of its tree, and the source may
+    /// since have been deleted or replaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copied_from: Option<String>,
 }
 
 /// A repo the last refetch did not fetch, and why: a deliberate skip (the
@@ -701,6 +707,7 @@ mod tests {
                 stack: Some("et/et-stack@2026.5.0".to_owned()),
                 stack_contact: Some("https://github.com/EinsteinToolkit/manifest/issues".to_owned()),
                 unfetched_repos,
+                copied_from: Some("et-old".to_owned()),
             },
         );
         let mut knobs = IndexMap::new();
@@ -960,6 +967,7 @@ mod tests {
                     current_thornlist: None,
                     stack_contact: None,
                     unfetched_repos: IndexMap::new(),
+                    copied_from: None,
                 },
             );
             Ok(())
@@ -1016,6 +1024,7 @@ mod tests {
                     current_thornlist: None,
                     stack_contact: None,
                     unfetched_repos: unfetched,
+                    copied_from: None,
                 },
             );
             Ok(())
@@ -1056,6 +1065,7 @@ mod tests {
                     current_thornlist: None,
                     stack_contact: None,
                     unfetched_repos: IndexMap::new(),
+                    copied_from: None,
                 },
             );
             Ok(())

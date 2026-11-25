@@ -8,7 +8,7 @@
   ],
   "present": [
     {
-      "package": "repo:cactusbase",
+      "package": "local:cactusbase",
       "unknown": "5555555555555555555555555555555555555555",
       "thorns": [
         {

@@ -11,7 +11,7 @@
     "plan": [
       "add max/z4c@1.2.0 Z4c, Z4cTest named",
       "add et/carpetx@2026.6.0 CarpetX needed by max/z4c@1.2.0, ^2026.6",
-      "et/carpetx@2026.6.0 is awaiting review: nobody has approved it"
+      "et/carpetx@2026.6.0 awaits review"
     ],
     "pending": [
       "et/carpetx@2026.6.0"

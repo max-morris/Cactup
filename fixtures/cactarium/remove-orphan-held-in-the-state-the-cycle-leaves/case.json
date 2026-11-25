@@ -1,0 +1,108 @@
+{
+  "about": "Orphans that replaced base repos of other packages than themselves (--replace, a thorn name in common): w1's base takes an any-of from v1 while w2's base is back, and both take a base package's any-of from g, so v1 and v2 go and stay in turn and g goes in every state of the cycle; with only what the cycle sweeps going, no base comes back and g holds the any-of again, so it stays",
+  "packages": [
+    "max--u--needs-v1-v2",
+    "max--v1",
+    "max--v2",
+    "max--g",
+    "et--w1--any-of-w2-v1",
+    "et--w2--needs-v2",
+    "et--s--any-of-w1-w2-g"
+  ],
+  "present": [
+    {
+      "package": "max/u",
+      "version": "1.0.0",
+      "enabled": [
+        "U"
+      ]
+    },
+    {
+      "package": "max/v1",
+      "version": "1.0.0",
+      "enabled": [
+        "V1"
+      ]
+    },
+    {
+      "package": "max/v2",
+      "version": "1.0.0",
+      "enabled": [
+        "V2"
+      ]
+    },
+    {
+      "package": "max/g",
+      "version": "1.0.0",
+      "enabled": [
+        "G"
+      ]
+    },
+    {
+      "package": "et/s",
+      "version": "1.0.0",
+      "base": "s",
+      "enabled": [
+        "S"
+      ]
+    }
+  ],
+  "remove": {
+    "targets": [
+      "max/u"
+    ],
+    "added-for": {
+      "max/u": {
+        "requested": true,
+        "for-commit": "current"
+      },
+      "max/v1": {
+        "requested": false,
+        "for-commit": "current",
+        "by": [
+          "max/u@1.0.0"
+        ]
+      },
+      "max/v2": {
+        "requested": false,
+        "for-commit": "current",
+        "by": [
+          "max/u@1.0.0"
+        ]
+      },
+      "max/g": {
+        "requested": false,
+        "for-commit": "current",
+        "by": [
+          "max/h@1.0.0"
+        ]
+      }
+    },
+    "returning": [
+      {
+        "replacer": "max/v1",
+        "package": "et/w1",
+        "version": "1.0.0",
+        "base": "w1",
+        "enabled": [
+          "W1"
+        ]
+      },
+      {
+        "replacer": "max/v2",
+        "package": "et/w2",
+        "version": "1.0.0",
+        "base": "w2",
+        "enabled": [
+          "W2"
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "removed": [
+      "max/u"
+    ],
+    "orphans": []
+  }
+}

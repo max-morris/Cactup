@@ -10,7 +10,7 @@
     "refusal": "NamedLibrary",
     "message": [
       "et/fuka is a library",
-      "Add the package that builds against it"
+      "Add a package that builds against it"
     ]
   }
 }

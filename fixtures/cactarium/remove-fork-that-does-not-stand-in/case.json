@@ -1,0 +1,49 @@
+{
+  "about": "A fork installed beside a dependent whose range it is no drop-in for (the override that let the dependent in is gone) is held by nothing: it can be removed",
+  "packages": [
+    "max--z4c--carpetx-loop",
+    "et--carpetx",
+    "max--carpetx-mp--covers-2026-4"
+  ],
+  "present": [
+    {
+      "package": "max/z4c",
+      "version": "1.2.0",
+      "enabled": [
+        "Z4c",
+        "Z4cTest"
+      ]
+    },
+    {
+      "package": "max/carpetx-mp",
+      "version": "1.0.0",
+      "enabled": [
+        "CarpetX",
+        "Loop"
+      ]
+    }
+  ],
+  "remove": {
+    "targets": [
+      "max/carpetx-mp"
+    ],
+    "added-for": {
+      "max/z4c": {
+        "requested": true,
+        "for-commit": "current"
+      },
+      "max/carpetx-mp": {
+        "requested": true,
+        "for-commit": "current"
+      }
+    }
+  },
+  "expect": {
+    "removed": [
+      "max/carpetx-mp"
+    ],
+    "plan": [
+      "remove max/carpetx-mp@1.0.0 named"
+    ]
+  }
+}

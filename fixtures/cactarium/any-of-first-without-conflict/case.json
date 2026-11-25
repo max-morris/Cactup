@@ -10,7 +10,7 @@
   ],
   "present": [
     {
-      "package": "repo:carpet-legacy",
+      "package": "local:carpet-legacy",
       "unknown": "1111111111111111111111111111111111111111",
       "thorns": [
         "CarpetSlab"

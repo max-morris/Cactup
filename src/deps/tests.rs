@@ -1,7 +1,7 @@
 //! Table tests: every directory under `fixtures/cactarium/` holding a `case.json` is one case.
 //!
 //! - `fixtures/cactarium/pool/*.json`: `GET /packages/{o}/{n}/versions` answers
-//!   (`PackageVersions`), as the Cactarium serves them, shared by the cases; `pool/snapshots/`
+//!   (`PackageVersions`), as Cactarium serves them, shared by the cases; `pool/snapshots/`
 //!   holds `GET …/versions/{commit|head|master}` answers as `{"slug", "at", "untrusted",
 //!   "served"}`. `fixtures/cactarium/generate.py` writes the pool. A version may carry
 //!   `"review": "pending"` (S6, plan §6), read as the crate's `VersionInfo.review`.
@@ -44,6 +44,12 @@ struct FixtureFacts {
     waves: Vec<Vec<PkgId>>,
     /// The progress ticks heard.
     ticks: Vec<usize>,
+    /// Each snapshot asked for, `owner/name@at`, in order.
+    reads: Vec<String>,
+    /// How many had been asked for when the search started.
+    reads_at_search: Option<usize>,
+    /// Packages whose reads Cactarium does not answer, with why.
+    unanswered: BTreeMap<PkgId, Unanswered>,
 }
 
 impl Facts for FixtureFacts {
@@ -58,8 +64,21 @@ impl Facts for FixtureFacts {
     }
 
     fn snapshot(&mut self, id: &PkgId, at: &str) -> Res<Option<Snapshot>> {
+        self.reads.push(format!("{id}@{}", at.get(..12).unwrap_or(at)));
+        if self.unanswered.contains_key(id) {
+            return Ok(None);
+        }
         let found = self.snapshots.iter().find(|((i, a), _)| i == id && (a == at || a.starts_with(at)));
         Ok(found.map(|(_, s)| s.clone()))
+    }
+
+    fn unanswered(&self, id: &PkgId, _at: &str) -> Option<Unanswered> {
+        self.unanswered.get(id).cloned()
+    }
+
+    fn searching(&mut self) {
+        assert!(self.reads_at_search.is_none(), "the search started twice");
+        self.reads_at_search = Some(self.reads.len());
     }
 
     fn providers(&mut self, r: &Requirement) -> Res<Vec<Provider>> {
@@ -76,7 +95,7 @@ impl Facts for FixtureFacts {
 struct Case {
     #[allow(dead_code)]
     about: String,
-    /// Pool files (`pool/<name>.json`) whose packages the Cactarium serves.
+    /// Pool files (`pool/<name>.json`) whose packages Cactarium serves.
     packages: Vec<String>,
     #[serde(default)]
     snapshots: Vec<String>,
@@ -96,6 +115,10 @@ struct Case {
     providers: BTreeMap<String, Vec<ProviderSpec>>,
     #[serde(default)]
     remove: Option<RemoveSpec>,
+    /// Packages whose reads at a commit Cactarium does not answer: `retry` (its read limit,
+    /// the server failing), `untrusted`, `invalid` (a 400).
+    #[serde(default)]
+    unanswered: BTreeMap<String, String>,
     expect: Expect,
 }
 
@@ -214,6 +237,19 @@ struct RemoveSpec {
     added_for: BTreeMap<String, AddedForSpec>,
     #[serde(default)]
     no_deps: bool,
+    /// Base packages that come back when their replacer goes.
+    #[serde(default)]
+    returning: Vec<ReturningSpec>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct ReturningSpec {
+    replacer: String,
+    package: String,
+    version: String,
+    base: String,
+    enabled: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -258,10 +294,16 @@ struct Expect {
     /// Text the refusal's message must contain (spaces collapsed).
     #[serde(default)]
     message: Vec<String>,
+    /// Text it must not.
+    #[serde(default)]
+    not_in_message: Vec<String>,
     #[serde(default)]
     removed: Option<Vec<String>>,
     #[serde(default)]
     orphans: Option<Vec<String>>,
+    /// The snapshots read, `owner/name@<12 hex>`, in order (checked whatever the outcome).
+    #[serde(default)]
+    reads: Option<Vec<String>>,
 }
 
 fn cases_dir() -> PathBuf {
@@ -326,6 +368,16 @@ fn load(dir: &Path) -> Loaded {
             .collect();
         facts.providers.insert(key.clone(), providers);
     }
+    for (id, kind) in &case.unanswered {
+        let kind = match kind.as_str() {
+            "retry" => UnreadKind::Retry,
+            "untrusted" => UnreadKind::Untrusted,
+            "invalid" => UnreadKind::Invalid,
+            other => panic!("{}: {other} is no kind of unanswered read", dir.display()),
+        };
+        let why = format!("a {kind:?} answer");
+        facts.unanswered.insert(PkgId::parse(id).unwrap(), Unanswered { kind, why });
+    }
     let mut present = Vec::new();
     for p in &case.present {
         let id = PkgId::parse(&p.package).unwrap();
@@ -347,6 +399,7 @@ fn load(dir: &Path) -> Loaded {
                 yanked: false,
                 yank_reason: None,
                 pending: false,
+                recorded: None,
                 usable: true,
                 thorns: p.thorns.iter().map(ThornSpec::info).collect(),
                 claims: Vec::new(),
@@ -417,12 +470,20 @@ fn check_refusal(expect: &Expect, refusal: Option<&Refusal>, other: Option<Strin
                     errors.push(format!("the message lacks \"{m}\": {text}"));
                 }
             }
+            for m in &expect.not_in_message {
+                if text.contains(&collapse(m)) {
+                    errors.push(format!("the message has \"{m}\": {text}"));
+                }
+            }
             if text.contains('§') {
                 errors.push(format!("a spec ref in user-visible text: {text}"));
             }
-            // Until P4 adds the command, no refusal may name it.
-            if text.contains("claims override") {
-                errors.push(format!("names a command that does not exist yet: {text}"));
+            // Every command a refusal names is one the command line reads.
+            for command in commands_in(&text) {
+                use clap::Parser;
+                if let Err(e) = crate::args::Args::try_parse_from(command.split(' ')) {
+                    errors.push(format!("names a command that does not parse (`{command}`): {e}"));
+                }
             }
         }
         (Some(want), None) => errors.push(format!("expected a {want} refusal, got {}", other.unwrap_or("a plan".into()))),
@@ -433,6 +494,11 @@ fn check_refusal(expect: &Expect, refusal: Option<&Refusal>, other: Option<Strin
             }
         }
     }
+}
+
+/// The commands (`cactup …` in backticks) a text names.
+fn commands_in(text: &str) -> Vec<String> {
+    text.split('`').skip(1).step_by(2).filter(|c| c.starts_with("cactup ")).map(str::to_owned).collect()
 }
 
 fn record_text(r: &Record) -> String {
@@ -508,12 +574,47 @@ fn run(dir: &Path) -> Vec<String> {
                 Extension { id, thorns: thorns.clone(), label, commit: p.release.commit.clone() }
             })
             .collect();
-        match plan_remove(&present, &added_for, &targets, &rules, rm.no_deps, &extensions) {
+        let returning: Vec<(PkgId, Present)> = (rm.returning.iter())
+            .map(|r| {
+                let id = PkgId::parse(&r.package).unwrap();
+                let release = facts.releases[&id]
+                    .iter()
+                    .find(|x| x.at.version().is_some_and(|v| v.to_string() == r.version))
+                    .unwrap_or_else(|| panic!("no {id}@{} among the case's packages", r.version))
+                    .clone();
+                let present = Present {
+                    release,
+                    enabled: r.enabled.iter().cloned().collect(),
+                    origin: Origin::Base { repo: r.base.clone() },
+                    libraries: Vec::new(),
+                    stand_in: false,
+                };
+                (PkgId::parse(&r.replacer).unwrap(), present)
+            })
+            .collect();
+        // As `remove` reads them: only the bases of what may bring one back. Reading every
+        // base the case lists must come to the same plan.
+        let added = (present.iter())
+            .filter(|p| p.origin == Origin::Added)
+            .map(|p| p.release.id.clone())
+            .chain(extensions.iter().map(|e| e.id.clone()));
+        let bringing = may_bring_back(&targets, &added_for, added);
+        let read: Vec<(PkgId, Present)> = returning.iter().filter(|(r, _)| bringing.contains(r)).cloned().collect();
+        let every = plan_remove(&present, &added_for, &targets, &rules, rm.no_deps, &extensions, &returning);
+        match plan_remove(&present, &added_for, &targets, &rules, rm.no_deps, &extensions, &read) {
             Ok(plan) => {
                 check_refusal(&case.expect, None, None, &mut errors);
                 compare("removed", &case.expect.removed, plan.removed.iter().map(ToString::to_string).collect(), &mut errors);
                 let orphans = plan.orphans.iter().map(|o| format!("{}: {}", o.label, o.why())).collect();
                 compare("orphans", &case.expect.orphans, orphans, &mut errors);
+                // What a removal reads the returning bases of covers whatever any state of the
+                // sweep takes along, so every package whose bases it counts back.
+                for id in plan.took.iter().filter(|id| !bringing.contains(*id)) {
+                    errors.push(format!("{id} goes in a state of the sweep but is not among what may bring a base back {bringing:?}"));
+                }
+                if every.as_ref().ok() != Some(&plan) {
+                    errors.push(format!("reading only the bases of {bringing:?} plans otherwise than reading all: {every:?}"));
+                }
                 let rendered = plan.render("cactup remove");
                 compare("plan", &case.expect.plan, rendered.lines().skip(1).map(str::to_owned).collect(), &mut errors);
             }
@@ -523,7 +624,13 @@ fn run(dir: &Path) -> Vec<String> {
     }
     let specs = specs_of(&case);
     let request = Request { specs: &specs, present: &present, rules: &rules, options: options_of(&case) };
-    match resolve(&request, &mut facts) {
+    let result = resolve(&request, &mut facts);
+    compare("reads", &case.expect.reads, facts.reads.clone(), &mut errors);
+    // Every read is made before the search starts (and none after, checking ways past).
+    if facts.reads_at_search.is_some_and(|n| n != facts.reads.len()) {
+        errors.push(format!("read during the search: {:?}", &facts.reads[facts.reads_at_search.unwrap()..]));
+    }
+    match result {
         Ok(plan) => {
             check_refusal(&case.expect, None, None, &mut errors);
             let rendered = plan.render(&command);
@@ -674,6 +781,8 @@ fn plan_lines_say_what_they_are() {
     let lines = plan_of("pending-when-nothing-approved-fits").lines("cactup add max/z4c");
     let kinds: Vec<LineKind> = lines.iter().map(|(k, _)| *k).collect();
     assert_eq!(kinds, [LineKind::Header, LineKind::Step, LineKind::Step, LineKind::Pending]);
+    let pending = lines.iter().find(|(k, _)| *k == LineKind::Pending).unwrap();
+    assert!(pending.1.ends_with(" awaits review"), "{}", pending.1);
     let lines = plan_of("flesh-replace").lines("x");
     assert!(lines.iter().any(|(k, _)| *k == LineKind::Rebuild));
     let lines = plan_of("unknown-meets-range-with-note").lines("x");
@@ -784,7 +893,7 @@ fn tips_and_commits_are_read_from_the_version() {
     let pending = read_json(&cases_dir().join("pool/et--c--pending.json"))["versions"][0].clone();
     let pv: PackageVersion = serde_json::from_value(pending).unwrap();
     assert!(Release::from_served(&PkgId::parse("et/c").unwrap(), &pv, None).unwrap().pending, "review: pending");
-    assert_eq!(PkgId::repo("carpetx").as_str(), "repo:carpetx");
+    assert_eq!(PkgId::repo("carpetx").as_str(), "local:carpetx");
 }
 
 /// A tip that moves shows the commits, not "head -> head".
@@ -869,12 +978,13 @@ fn remove_plans_render() {
     let plan = RemovePlan {
         removed: vec![PkgId::parse("max/z4c").unwrap()],
         removed_labels: vec!["max/z4c@1.2.0".into()],
-        orphans: vec![Orphan { id: PkgId::parse("et/a").unwrap(), label: "et/a@1.0.0".into(), by: vec!["max/z4c@1.2.0".into()] }],
+        orphans: vec![Orphan { id: PkgId::parse("et/a").unwrap(), label: "et/a@1.0.0".into(), by: vec!["max/z4c@1.2.0".into()], caveat: None }],
+        took: std::collections::BTreeSet::new(),
     };
     assert!(plan.beyond_named());
     let lines = plan.lines("cactup remove max/z4c");
     assert_eq!(lines[0], (LineKind::Header, "Plan for cactup remove max/z4c:".to_owned()));
-    assert_eq!(collapse(&lines[2].1), "remove et/a@1.0.0 brought in by max/z4c@1.2.0, nothing else needs it");
+    assert_eq!(collapse(&lines[2].1), "remove et/a@1.0.0 brought in by max/z4c@1.2.0, no longer needed");
 }
 
 #[test]
@@ -1019,6 +1129,22 @@ fn decisions(plan: &Plan, back: &dyn Fn(&PkgId) -> PkgId) -> std::collections::B
         out.insert(format!("library {} {} {}", back(&l.release.id), at(&l.release), ps.join(",")));
     }
     out.extend(plan.untrusted.iter().map(|u| format!("untrusted {} {}", back(&u.id), u.commit)));
+    // The notes on releases left out for want of a read, every package named in them put back
+    // (`et/x#…`, `max/y@1.0.0`, `et/x:`): which releases, and why, never depend on ids.
+    let token = |t: &str| {
+        let end = t.trim_end_matches([':', ';', ',']);
+        let (id, rest) = match end.find(['#', '@']) {
+            Some(i) => end.split_at(i),
+            None => (end, ""),
+        };
+        match PkgId::parse(id) {
+            Ok(id) if id.as_str().contains('/') => format!("{}{rest}{}", back(&id), &t[end.len()..]),
+            _ => t.to_owned(),
+        }
+    };
+    for n in &plan.skipped {
+        out.insert(format!("skipped {}", n.split(' ').map(token).collect::<Vec<_>>().join(" ")));
+    }
     out
 }
 
@@ -1171,6 +1297,7 @@ fn synthetic_release(id: &str, version: &str, thorns: &[(String, ThornFacts)], c
         yanked: false,
         yank_reason: None,
         pending: false,
+        recorded: None,
         usable: true,
         thorns: thorns
             .iter()
@@ -1391,4 +1518,211 @@ fn not_a_library_names_a_usable_way_past() {
     assert!(with.ends_with("Pass --ignore-claim max/kadath:dependency:et/carpetx (and tell the package's authors)"), "{with}");
     let without = refusal(None).to_string();
     assert!(!without.contains("--ignore-claim") && without.ends_with("Tell the package's authors"), "{without}");
+}
+
+/// The refusal of a flesh with dependents ends with a sentence, naming one
+/// dependent as "it" and several as "them".
+#[test]
+fn a_flesh_with_dependents_says_how_past() {
+    let refusal = |n: usize, no_deps: bool| {
+        let dependents = (0..n).map(|i| (format!("installed max/u{i}@1.0.0"), "max/mp ^1.0".to_owned())).collect();
+        let (flesh, by) = ("max/mp@1.0.0".to_owned(), "max/mx@1.0.0".to_owned());
+        Refusal::FleshHasDependents { flesh, by, dependents, no_deps }.to_string()
+    };
+    assert!(refusal(1, true).ends_with("\nRemove it first, or pass --no-deps to replace the flesh anyway."), "{}", refusal(1, true));
+    assert!(refusal(2, true).ends_with("\nRemove them first, or pass --no-deps to replace the flesh anyway."));
+    assert!(refusal(2, false).ends_with("\nRemove them first."));
+}
+
+// ---- `check`: the installation as it is (`cactup claims check`) ----
+
+fn installed(id: &str, version: &str, thorns: &[(&str, &str)], claims: Vec<ClaimInfo>, origin: Origin) -> Present {
+    let facts: Vec<(String, ThornFacts)> = thorns.iter().map(|(n, f)| (n.to_string(), ThornFacts::scan(f, None))).collect();
+    let release = synthetic_release(id, version, &facts, claims);
+    let enabled = thorns.iter().map(|(n, _)| n.to_string()).collect();
+    Present { release, enabled, origin, libraries: vec![], stand_in: false }
+}
+
+fn claim(kind: &str, target: &str, range: &str) -> ClaimInfo {
+    ClaimInfo { kind: kind.into(), range: Some(range.into()), ..dependency(target, range, &[]) }
+}
+
+fn checked(present: &[Present], rules: &Rules, providers: &[(&str, &str, &str)]) -> Vec<String> {
+    let mut facts = FixtureFacts::default();
+    for (need, package, thorn) in providers {
+        let p = Provider {
+            package: PkgId::parse(package).unwrap(),
+            version: "1.0.0".into(),
+            arrangement: "Arr".into(),
+            thorn: thorn.to_string(),
+        };
+        facts.providers.entry(need.to_string()).or_default().push(p);
+    }
+    check(present, rules, &mut facts).unwrap()
+}
+
+/// What `claims check` finds in an installation: forks beside their upstream, incompatibilities
+/// in either direction, one thorn name enabled twice, requirements nothing meets (with the
+/// providers that could meet them): one line each, ending in the way past; and an override that
+/// drops the claim drops the problem.
+#[test]
+fn check_reports_each_problem_with_its_way_past() {
+    let base = || Origin::Base { repo: "x".into() };
+    let none = Rules::default();
+    let clean = [
+        installed("et/a", "1.0.0", &[("A", "IMPLEMENTS: a\n")], vec![], base()),
+        installed("et/b", "1.0.0", &[("B", "IMPLEMENTS: b\nINHERITS: a\n")], vec![], Origin::Added),
+    ];
+    assert!(checked(&clean, &none, &[]).is_empty());
+
+    // A fork beside its upstream.
+    let fork = installed("max/a-mp", "1.0.0", &[("AMP", "IMPLEMENTS: amp\n")], vec![claim("fork-of", "et/a", "=1.0.0")], Origin::Added);
+    let present = [clean[0].clone(), fork];
+    assert_eq!(
+        checked(&present, &none, &[]),
+        ["max/a-mp@1.0.0 is a fork of et/a@1.0.0, also installed. Remove one of them, or run `cactup claims override drop max/a-mp:fork-of:et/a`."]
+    );
+    let drop_it = Rules { overrides: vec![Override::drop_claim("max/a-mp:fork-of:et/a").unwrap()], ..Rules::default() };
+    assert!(checked(&present, &drop_it, &[]).is_empty());
+
+    // Incompatible, declared by either side; one line per declaring side.
+    let hates = installed("et/b", "1.0.0", &[("B", "IMPLEMENTS: b\n")], vec![claim("incompatible-with", "et/a", "<2")], Origin::Added);
+    let present = [clean[0].clone(), hates];
+    assert_eq!(
+        checked(&present, &none, &[]),
+        ["et/b@1.0.0 is incompatible with et/a@1.0.0. Run `cactup claims override drop et/b:incompatible-with:et/a`."]
+    );
+    let drop_it = Rules { overrides: vec![Override::drop_claim("et/b:incompatible-with:et/a").unwrap()], ..Rules::default() };
+    assert!(checked(&present, &drop_it, &[]).is_empty());
+
+    // One thorn name twice: an added package can go, two base repos cannot.
+    let twin = |origin| installed("max/a2", "1.0.0", &[("a", "IMPLEMENTS: a2\n")], vec![], origin);
+    let present = [clean[0].clone(), twin(Origin::Added)];
+    assert_eq!(
+        checked(&present, &none, &[]),
+        ["The thorn A is enabled by et/a@1.0.0 and max/a2@1.0.0. Run `cactup remove max/a2`."]
+    );
+    let present = [clean[0].clone(), twin(Origin::Base { repo: "y".into() })];
+    assert_eq!(
+        checked(&present, &none, &[]),
+        ["The thorn A is enabled by et/a@1.0.0 and max/a2@1.0.0. Remove one from the thornlist."]
+    );
+    // A fork shares its upstream's thorn names: said once, as a fork.
+    let fork = installed("max/a-mp", "1.0.0", &[("A", "IMPLEMENTS: a\n")], vec![claim("fork-of", "et/a", "=1.0.0")], Origin::Added);
+    let lines = checked(&[clean[0].clone(), fork], &none, &[]);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("is a fork of"), "{lines:?}");
+
+    // A requirement nothing meets, with and without a provider; asked once per requirement.
+    let needy = |n: &str| installed(n, "1.0.0", &[(&n[3..].to_uppercase(), "IMPLEMENTS: n\nINHERITS: grid\n")], vec![], Origin::Added);
+    let present = [needy("et/n1"), needy("et/n2")];
+    assert_eq!(
+        checked(&present, &none, &[]),
+        [
+            "N1 (et/n1@1.0.0) inherits or befriends grid; no installed thorn provides it. No registered package provides it.",
+            "N2 (et/n2@1.0.0) inherits or befriends grid; no installed thorn provides it. No registered package provides it.",
+        ]
+    );
+    let lines = checked(&present, &none, &[("implementation:grid", "et/carpet", "CarpetSlab")]);
+    assert!(lines.iter().all(|l| l.ends_with("Run `cactup add et/carpet/CarpetSlab`.")), "{lines:?}");
+    let met = installed("et/grid", "1.0.0", &[("Grid", "IMPLEMENTS: grid\n")], vec![], base());
+    assert!(checked(&[needy("et/n1"), met], &none, &[]).is_empty());
+}
+
+fn needing(id: &str, thorn: &str, claims: Vec<ClaimInfo>) -> Present {
+    installed(id, "1.0.0", &[(thorn, "IMPLEMENTS: x\n")], claims, Origin::Added)
+}
+
+fn depends_on(target: &str, range: &str, needs: &[&str]) -> ClaimInfo {
+    dependency(target, range, needs)
+}
+
+/// `claims check` meets each installed package's dependencies with what is installed: the package
+/// in range with the thorns enabled; a package an override says stands in, or a fork that does, with
+/// no version check; one alternative of an any-of. What is not met is one line with its ways past.
+#[test]
+fn check_meets_dependencies_with_what_is_installed() {
+    let none = Rules::default();
+    let dep = |needs: &[&str]| vec![depends_on("et/lib", "^1.0", needs)];
+    let user = |claims| needing("max/user", "User", claims);
+    let lib = |version: &str, thorns: &[(&str, &str)]| installed("et/lib", version, thorns, vec![], Origin::Added);
+    let drop = "`cactup claims override drop max/user:dependency:et/lib`";
+
+    // Met, with and without the thorns it needs.
+    let l = lib("1.2.0", &[("A", "IMPLEMENTS: a\n"), ("B", "IMPLEMENTS: b\n")]);
+    assert!(checked(&[user(dep(&["A", "b"])), l.clone()], &none, &[]).is_empty());
+    assert_eq!(
+        checked(&[user(dep(&["A"])), installed("et/lib", "1.2.0", &[("B", "IMPLEMENTS: b\n")], vec![], Origin::Added)], &none, &[]),
+        [format!("max/user@1.0.0 needs A of et/lib@1.2.0, not enabled. Run `cactup add et/lib/A`, or {drop}.")]
+    );
+    // Not installed, and outside the range.
+    assert_eq!(
+        checked(&[user(dep(&[]))], &none, &[]),
+        [format!("max/user@1.0.0 needs et/lib ^1.0, which is not installed. Run `cactup add et/lib`, or {drop}.")]
+    );
+    let old = lib("2.0.0", &[("A", "IMPLEMENTS: a\n")]);
+    assert_eq!(
+        checked(&[user(dep(&[])), old.clone()], &none, &[]),
+        [format!("max/user@1.0.0 needs et/lib ^1.0, and et/lib@2.0.0 is installed. Run `cactup add --upgrade et/lib`, or {drop}.")]
+    );
+    // Overrides: dropping the claim, and a package standing in (no version check).
+    let dropped = Rules { overrides: vec![Override::drop_claim("max/user:dependency:et/lib").unwrap()], ..Rules::default() };
+    assert!(checked(&[user(dep(&[]))], &dropped, &[]).is_empty());
+    let sat = Rules { overrides: vec![Override::satisfies("max/other", "et/lib").unwrap()], ..Rules::default() };
+    let other = installed("max/other", "9.0.0", &[("A", "IMPLEMENTS: o\n")], vec![], Origin::Added);
+    assert!(checked(&[user(dep(&["A"])), other.clone()], &sat, &[]).is_empty());
+    let lines = checked(&[user(dep(&["Z"])), other], &sat, &[]);
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].contains("needs Z of max/other@9.0.0, not enabled"), "{lines:?}");
+    // An override that adds a dependency, and one that adds a thorn to it.
+    let add = Rules {
+        overrides: vec![Override::add_dependency("max/user", "et/lib@^1.0", &["A".to_owned()], &[]).unwrap()],
+        ..Rules::default()
+    };
+    assert_eq!(checked(&[user(vec![])], &add, &[]).len(), 1);
+    assert!(checked(&[user(vec![]), l.clone()], &add, &[]).is_empty());
+    let needs = Rules { overrides: vec![Override::add_needs("max/user:dependency:et/lib", &["C".to_owned()]).unwrap()], ..Rules::default() };
+    assert_eq!(checked(&[user(dep(&["A"])), l.clone()], &needs, &[]).len(), 1);
+
+    // A fork standing in takes it (the upstream's versions are asked for); one that does not does not.
+    let fork_claim = |range: &str| vec![claim("fork-of", "et/lib", range)];
+    let fork = |range: &str| installed("max/lib-mp", "1.0.0", &[("A", "IMPLEMENTS: a\n")], fork_claim(range), Origin::Added);
+    let mut facts = FixtureFacts::default();
+    facts.releases.insert(PkgId::parse("et/lib").unwrap(), vec![synthetic_release("et/lib", "1.2.0", &[], vec![])]);
+    assert!(check(&[user(dep(&["A"])), fork("=1.2.0")], &Rules::default(), &mut facts).unwrap().is_empty());
+    assert_eq!(check(&[user(dep(&["A"])), fork("=0.5.0")], &Rules::default(), &mut facts).unwrap().len(), 1);
+
+    // An installed fork that is no drop-in for the range blocks adding the target: the way past
+    // is the override, or removing the fork.
+    let blocked = check(&[user(dep(&["A"])), fork("=0.5.0")], &Rules::default(), &mut facts).unwrap();
+    assert_eq!(
+        blocked,
+        ["max/user@1.0.0 needs et/lib ^1.0, which is not installed; the fork max/lib-mp@1.0.0 does not stand in. Run `cactup claims override satisfies max/lib-mp et/lib`, `cactup remove max/lib-mp`, or `cactup claims override drop max/user:dependency:et/lib`."]
+    );
+    // Any-of: one alternative is enough; none says so.
+    let alt = |t: &str| cactup_ecosystem_common::api::AlternativeInfo { target: t.into(), range: None, sha: None, needs: vec![] };
+    let any = ClaimInfo { alternatives: vec![alt("et/a"), alt("et/b")], ..depends_on("et/a", "*", &[]) };
+    let b = installed("et/b", "1.0.0", &[("B", "IMPLEMENTS: b\n")], vec![], Origin::Added);
+    assert!(checked(&[user(vec![any.clone()]), b], &none, &[]).is_empty());
+    assert_eq!(
+        checked(&[user(vec![any])], &none, &[]),
+        ["max/user@1.0.0 needs one of et/a, et/b, and none is met. Run `cactup add et/a`, or `cactup claims override drop max/user:dependency:et/a`."]
+    );
+    // A dependency for a thorn that is not enabled is no need; a library is placement.
+    let for_other = ClaimInfo { needed_by: vec!["Else".into()], ..depends_on("et/lib", "^1.0", &[]) };
+    let library = ClaimInfo { into: Some("src/lib".into()), ..depends_on("et/lib", "^1.0", &[]) };
+    assert!(checked(&[user(vec![for_other, library])], &none, &[]).is_empty());
+}
+
+/// A `satisfies local:X` for a repo that is not installed says so, with the way to be rid of it.
+#[test]
+fn check_flags_a_satisfies_override_for_a_missing_repo() {
+    let rules = Rules { overrides: vec![Override::satisfies("local:gone", "et/lib").unwrap()], ..Rules::default() };
+    let here = installed("local:here", "1.0.0", &[("H", "IMPLEMENTS: h\n")], vec![], Origin::Base { repo: "here".into() });
+    assert_eq!(
+        checked(&[here.clone()], &rules, &[]),
+        ["The override 'satisfies local:gone et/lib' names a repo that is not installed. Remove it with `cactup claims override --remove 'satisfies local:gone et/lib'`."]
+    );
+    let gone = installed("local:gone", "1.0.0", &[("G", "IMPLEMENTS: g\n")], vec![], Origin::Base { repo: "gone".into() });
+    assert!(checked(&[here, gone], &rules, &[]).is_empty());
 }

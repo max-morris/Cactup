@@ -1,0 +1,57 @@
+{
+  "about": "Stand-ins are read named first, then those a need names a thorn of, each group by id: et/zzs, named, before et/zzq, which an installed package needs a thorn of",
+  "packages": [
+    "et--zzw--needs-zzq",
+    "et--zzs"
+  ],
+  "snapshots": [
+    "et--zzq--at-3434",
+    "et--zzs--at-5656"
+  ],
+  "specs": [
+    "et/zzs/S2"
+  ],
+  "present": [
+    {
+      "package": "et/zzq",
+      "unknown": "3434343434343434343434343434343434343434",
+      "thorns": [
+        "A1",
+        "A2",
+        "A3"
+      ],
+      "base": "zzq",
+      "enabled": [
+        "A1"
+      ],
+      "stand_in": true
+    },
+    {
+      "package": "et/zzs",
+      "unknown": "5656565656565656565656565656565656565656",
+      "thorns": [
+        "S1",
+        "S2"
+      ],
+      "base": "zzs",
+      "enabled": [
+        "S1"
+      ],
+      "stand_in": true
+    },
+    {
+      "package": "et/zzw",
+      "version": "1.0.0",
+      "base": "zzw",
+      "enabled": [
+        "W"
+      ]
+    }
+  ],
+  "expect": {
+    "reads": [
+      "et/zzs@565656565656",
+      "et/zzq@343434343434"
+    ]
+  }
+}

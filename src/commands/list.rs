@@ -52,6 +52,14 @@ pub fn dispatch(ctx: &Ctx) -> Res<()> {
                 print!("{}", format!(", partial ({skipped} repo(s) not fetched)").yellow());
             }
         }
+        // A symbolic copy reads its source's files (`inst cp -s`).
+        if let Some(source) = &installation.copied_from
+            && crate::installation::Installation::new(&installation.alias, &installation.path)
+                .meta()
+                .is_ok_and(|m| m.linked_to.is_some())
+        {
+            print!(", symbolic copy of {}", source.bold());
+        }
         if let Some(active_installation) = &database.active_installation && *active_installation == installation.alias {
             print!("{}", " (active)".bold().bright_green());
         }

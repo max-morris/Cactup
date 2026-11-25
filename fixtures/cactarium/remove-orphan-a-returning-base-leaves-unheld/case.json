@@ -1,0 +1,111 @@
+{
+  "about": "A base that comes back takes a dependency over and leaves an orphan the sweep finds only with it back: rn replaced base repo rw (--replace, not a fork of et/rw), and once it goes, et/rw takes et/rs's any-of from rg; rg replaced base repo rb, whose package needs rk, so rb's base must be read too, though with no base back rg is held and only rn and rk would go: read, it keeps rk",
+  "packages": [
+    "max--rt--needs-rn-rk",
+    "max--rn",
+    "et--rw",
+    "et--rs--any-of-rw-rg",
+    "max--rg",
+    "et--rb--needs-rk",
+    "max--rk"
+  ],
+  "present": [
+    {
+      "package": "max/rt",
+      "version": "1.0.0",
+      "enabled": [
+        "RT"
+      ]
+    },
+    {
+      "package": "max/rn",
+      "version": "1.0.0",
+      "enabled": [
+        "RN"
+      ]
+    },
+    {
+      "package": "max/rg",
+      "version": "1.0.0",
+      "enabled": [
+        "RG"
+      ]
+    },
+    {
+      "package": "max/rk",
+      "version": "1.0.0",
+      "enabled": [
+        "RK"
+      ]
+    },
+    {
+      "package": "et/rs",
+      "version": "1.0.0",
+      "base": "rs",
+      "enabled": [
+        "RS"
+      ]
+    }
+  ],
+  "remove": {
+    "targets": [
+      "max/rt"
+    ],
+    "added-for": {
+      "max/rt": {
+        "requested": true,
+        "for-commit": "current"
+      },
+      "max/rn": {
+        "requested": false,
+        "for-commit": "current",
+        "by": [
+          "max/rt@1.0.0"
+        ]
+      },
+      "max/rg": {
+        "requested": false,
+        "for-commit": "current",
+        "by": [
+          "max/rh@1.0.0"
+        ]
+      },
+      "max/rk": {
+        "requested": false,
+        "for-commit": "current",
+        "by": [
+          "max/rt@1.0.0"
+        ]
+      }
+    },
+    "returning": [
+      {
+        "replacer": "max/rn",
+        "package": "et/rw",
+        "version": "1.0.0",
+        "base": "rw",
+        "enabled": [
+          "RW"
+        ]
+      },
+      {
+        "replacer": "max/rg",
+        "package": "et/rb",
+        "version": "1.0.0",
+        "base": "rb",
+        "enabled": [
+          "RB"
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "removed": [
+      "max/rt"
+    ],
+    "orphans": [
+      "max/rg@1.0.0: brought in by max/rh@1.0.0, no longer needed",
+      "max/rn@1.0.0: brought in by max/rt@1.0.0, no longer needed"
+    ]
+  }
+}

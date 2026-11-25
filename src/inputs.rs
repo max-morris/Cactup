@@ -95,8 +95,7 @@ pub fn fetch(dir: &Path, input: &Input, policy: &SizePolicy, repo: Option<&RepoS
     if let Some(file) = &input.repo_file {
         let repo = repo.ok_or_else(|| {
             anyhow!(
-                "Input {} is a file of the simulation's own repository ({file}); cactup fetches it only for a \
-                 simulation the Cactarium publishes from its repository: import it as owner/name",
+                "Input {} is a file in the simulation's own repository ({file})\nImport the simulation as owner/name.",
                 input.knob
             )
         })?;
@@ -118,7 +117,7 @@ pub fn fetch(dir: &Path, input: &Input, policy: &SizePolicy, repo: Option<&RepoS
             line.phase("checking");
             let actual = crate::update::sha256_hex_counting(archive.path(), line)?;
             if !actual.eq_ignore_ascii_case(expected) {
-                bail!("The download of {url} has SHA-256 {actual}, but the .sim records {expected}; nothing was unpacked");
+                bail!("The download of {} has SHA-256 {actual}, but the .sim records {expected}; nothing was unpacked", crate::fetch::git::redacted(url));
             }
             Ok(archive.into_temp_path())
         })
@@ -132,13 +131,13 @@ pub fn fetch(dir: &Path, input: &Input, policy: &SizePolicy, repo: Option<&RepoS
     renderer.shutdown_and_wait();
     let (value, _) = fetched?;
     if input.sha256.is_none() {
-        println!("{}", format!("The .sim records no hash for {url}, so the download could not be checked").yellow());
+        println!("{}", format!("The .sim records no hash for {}; download not checked", crate::fetch::git::redacted(url)).yellow());
     }
     Ok(value)
 }
 
-/// Where a simulation's `repo-file` inputs come from: the repository the
-/// Cactarium publishes it from, at the version's commit.
+/// Where a simulation's `repo-file` inputs come from: the repository
+/// that Cactarium publishes it from, at the version's commit.
 pub struct RepoSource {
     pub url: String,
     pub commit: String,
@@ -230,7 +229,7 @@ fn fetch_file(
     if let Some(expected) = sha256
         && !expected.eq_ignore_ascii_case(&actual)
     {
-        bail!("The download of {url} has SHA-256 {actual}, but the .sim records {expected}");
+        bail!("The download of {} has SHA-256 {actual}, but the .sim records {expected}", crate::fetch::git::redacted(url));
     }
     let hash_dir = dir.join(&actual);
     std::fs::create_dir_all(&hash_dir).with_context(|| format!("Failed to create '{}'", hash_dir.display()))?;
@@ -278,7 +277,7 @@ fn unpacked(
         let (file, meta) = within(staging.path(), Path::new(&fixup.file))
             .with_context(|| format!("A fixup cannot edit {}", fixup.file))?;
         if !meta.is_file() {
-            bail!("{} in the archive is not a regular file, so no fixup can edit it", fixup.file);
+            bail!("Fixup target {} is not a regular file in the archive", fixup.file);
         }
         let text = std::fs::read(&file).with_context(|| format!("Failed to read '{}'", file.display()))?;
         let (edited, n) = replace_all(&text, fixup.replace.as_bytes(), fixup.replacement(tree_str).as_bytes());
@@ -296,7 +295,7 @@ fn unpacked(
     }
     if let Some(path) = &input.path {
         within(staging.path(), Path::new(path))
-            .with_context(|| format!("The archive has no usable {path}, which the .sim points input {} at", input.knob))?;
+            .with_context(|| format!("The archive has no usable {path} for input {}", input.knob))?;
     }
     // Written new: an archive member of that name (a link, say) is refused,
     // not written through.
@@ -354,7 +353,10 @@ fn download(
 ) -> Res<tempfile::NamedTempFile> {
     let mut temp = tempfile::NamedTempFile::new_in(dir).context("Failed to create a download file")?;
     line.phase("downloading");
-    crate::fetch::download::download_to_limited(crate::fetch::download::client(), url, temp.as_file_mut(), line, limit)?;
+    // Its words with the URL's credentials hidden (a --local export may
+    // keep them in the URL).
+    crate::fetch::download::download_to_limited(crate::fetch::download::client(), url, temp.as_file_mut(), line, limit)
+        .map_err(|e| anyhow!(crate::fetch::git::scrub(&format!("{e:#}"), url)))?;
     Ok(temp)
 }
 
@@ -376,7 +378,7 @@ fn confirm_size(url: &str, policy: &SizePolicy) -> Res<Option<u64>> {
         .and_then(|r| r.headers().get(reqwest::header::CONTENT_LENGTH)?.to_str().ok()?.parse::<u64>().ok());
     if policy.yes {
         if let Some(size) = size.filter(|s| *s > policy.confirm_above) {
-            println!("Downloading {url} ({}).", crate::progress::bytes(size as usize));
+            println!("Downloading {} ({}).", crate::fetch::git::redacted(url), crate::progress::bytes(size as usize));
         }
         return Ok(Some(MAX_DOWNLOAD));
     }
@@ -386,6 +388,7 @@ fn confirm_size(url: &str, policy: &SizePolicy) -> Res<Option<u64>> {
         return Ok(limit);
     }
     let shown = crate::progress::bytes(size as usize);
+    let url = crate::fetch::git::redacted(url);
     if !policy.interactive {
         bail!("{url} is {shown}; pass -y to download it without asking");
     }
@@ -448,7 +451,7 @@ fn make_links(dest: &Path, links: Links, progress: &mut impl prodash::Progress) 
         }
         if !resolves_inside(&root, &dest.join(rel), target) {
             bail!(
-                "The archive links {} to {}, which leads outside its own tree or round in a loop",
+                "The archive links {} to {}, outside its own tree or in a loop",
                 rel.display(),
                 target.display()
             );
@@ -645,7 +648,7 @@ fn write_file(path: &Path, body: &mut impl Read, mode: Option<u32>, budget: &mut
         budget.bytes = budget
             .bytes
             .checked_sub(n as u64)
-            .ok_or_else(|| anyhow!("The archive unpacks to more than the size cactup allows for it"))?;
+            .ok_or_else(|| anyhow!("The archive unpacks to more than cactup allows"))?;
         out.write_all(&buf[..n]).with_context(|| format!("Failed to write '{}'", path.display()))?;
     }
     if let Some(mode) = mode {
@@ -758,7 +761,7 @@ fn unpack_tar(reader: impl Read, dest: &Path, budget: &mut Budget) -> Res<(u64, 
         } else if matches!(ty, tar::EntryType::XGlobalHeader | tar::EntryType::XHeader | tar::EntryType::GNULongName | tar::EntryType::GNULongLink) {
             n -= 1;
         } else {
-            bail!("The archive has {} of a kind cactup does not unpack (a device, FIFO or similar)", rel.display());
+            bail!("The archive has a device, FIFO or other special file at {}", rel.display());
         }
     }
     Ok((n, links))
@@ -886,7 +889,7 @@ pub fn author(dir: &Path, input: &mut Input, how: &Authoring, policy: &SizePolic
     let members = regular_members(&tree)?;
     let member = match how.member {
         Some(m) => {
-            within(&tree, Path::new(m)).with_context(|| format!("The archive at {url} has no usable {m}"))?;
+            within(&tree, Path::new(m)).with_context(|| format!("The archive at {} has no usable {m}", crate::fetch::git::redacted(url)))?;
             Some(m.to_owned())
         }
         None => how
@@ -915,7 +918,7 @@ pub fn author(dir: &Path, input: &mut Input, how: &Authoring, policy: &SizePolic
     };
     input.path = member;
     let Some(root) = root else {
-        notes.push(format!("Knob {}'s value here is not inside an unpacked copy of the archive; no fixups looked for", input.knob));
+        notes.push(format!("The value of knob {} is not inside an unpacked copy of the archive; no fixups looked for", input.knob));
         return Ok(notes);
     };
     let root_str = root.to_string_lossy().into_owned();

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # Rewrites fixtures/cactarium/pool/ from the definitions below: python3 fixtures/cactarium/generate.py
+# Not every pool file is defined below: some, the remove cases' among them, were written by hand,
+# and running this script deletes them with the rest of pool/. Define them here before running it.
 """The package pool the resolver's table tests read (src/deps/tests.rs).
 
 Each pool file is one `GET /packages/{o}/{n}/versions` answer (`PackageVersions`, every field as
-the Cactarium serves it), or under pool/snapshots/ one `GET .../versions/{commit|head|master}`
+Cactarium serves it), or under pool/snapshots/ one `GET .../versions/{commit|head|master}`
 answer wrapped as {"slug", "at", "untrusted", "served"}. A case's case.json names the pool files
 it uses ("packages", "snapshots"); case.json files are edited by hand, never generated.
 
@@ -107,10 +109,10 @@ def served(slug, v):
     return out
 
 
-def snapshot(slug, at, found, thorns=(), claims=(), untrusted=True):
+def snapshot(slug, at, found, thorns=(), claims=(), untrusted=True, library=False):
     """The package read at `at` (a commit, or head/master), found at commit `found`: the server
     answers a commit read with the full commit as the version, a tip read with the tip's name."""
-    pv = served(slug, V(at if at in ("head", "master") else found, thorns, claims))
+    pv = served(slug, V(at if at in ("head", "master") else found, thorns, claims, library=library))
     pv["tag"] = None
     pv["commit"] = found
     pv["track"] = None
@@ -125,6 +127,7 @@ CX = ["CarpetX", "Loop", "Arith"]
 C551 = commit("et/carpetx", "2026.5.1")
 CX_SNAP = "4444444444444444444444444444444444444444"
 
+FUKA_SNAP = "9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a"
 POOL = {
     # Packages many cases share.
     "et--carpetx": ("et/carpetx", [V("2026.5.1", CX), V("2026.5.0", CX), V("2026.4.0", CX)]),
@@ -329,7 +332,56 @@ POOL = {
     "et--kadath--extra-needs-fuka": ("et/kadath", [V("1.0.0", ["Kadath", "KadathExtra"],
                                                      [dep("et/fuka", "^1", into="src/fuka", needed_by=["KadathExtra"])])]),
     "max--needs-kx": ("max/needs-kx", [V("1.0.0", ["NeedsKX"], [dep("et/kadath", None, ["KadathExtra"])])]),
+    # Exact reads of base packages at unfrozen commits.
+    "max--x--old-needs-adm": ("max/x", [V("2.0.0", ["X"]), V("1.0.0", ["X"], [dep("et/admbase", None, ["StaticConformal"])])]),
+    "max--y--anyof-carpet-adm": ("max/y", [V("1.0.0", ["Y"], [dep("et/carpet", any_of=[
+        ("et/carpet", None, ["CarpetSlab"]), ("et/admbase", None, ["StaticConformal"])])])]),
+    "max--newcarpet": ("max/newcarpet", [V("1.0.0", ["Carpet"])]),
+    "max--n10": ("max/n10", [V("1.0.0", ["N10"], [dep("et/p10", None, ["P10b"])])]),
+    "et--p10": ("et/p10", [V("1.0.0", ["P10a", "P10b", "P10c"])]),
+    "et--p11": ("et/p11", [V("1.0.0", ["Q0", "Q"])]),
+    "et--p12": ("et/p12", [V("1.0.0", ["R0", "R"])]),
+    "max--needs-adm-all": ("max/needs-adm-all", [V("1.0.0", ["NA"], [dep("et/admbase", None, [])])]),
     "max--kadath--into-carpetx": ("max/kadath", [V("1.0.0", ["Kadath"], [dep("et/carpetx", "^2026.5", into="src/carpetx")])]),
+    # What an unread base package means: only its claims are unknown (the zz cases of the
+    # fifth review).
+    "max--zza": ("max/zza", [V("2.0.0", ["ZA"], [dep("et/admbase", None, ["StaticConformal"])]), V("1.0.0", ["ZA"])]),
+    "max--zzf--forks-adm": ("max/zzf", [V("2.0.0", ["ADMBase", "FX"], [fork_of("et/admbase")]), V("1.0.0", ["FX"])]),
+    "max--zzx": ("max/zzx", [V("1.0.0", ["ZX"], [dep("et/admbase", None, ["StaticConformal"]), dep("max/zzy", None, ["ZY"])])]),
+    "max--zzy": ("max/zzy", [V("1.0.0", ["ZY"], [dep("et/admbase", "=2026.5.0", ["ADMBase"])])]),
+    "et--zzf": ("et/zzf", [V("1.0.0", ["F1", "F2"], [dep("et/zzs", None, ["S2"], needed_by=["F2"])])]),
+    "et--zzf--needs-every-zzs": ("et/zzf", [V("1.0.0", ["F1", "F2"], [dep("et/zzs", None, (), needed_by=["F2"])])]),
+    "max--zzn": ("max/zzn", [V("1.0.0", ["N"], [dep("et/zzf", None, ["F2"])])]),
+    "et--zzs": ("et/zzs", [V("1.0.0", ["S1", "S2"])]),
+    "max--zzn2": ("max/zzn2", [V("1.0.0", ["N2"], [dep("et/zzq", None, ["A2"]), dep("max/zzy2", None, ["Y2"])])]),
+    "max--zzy2": ("max/zzy2", [V("1.0.0", ["Y2"], [dep("et/zzq", None, ["A3"])])]),
+    "max--zzg": ("max/zzg", [V("2.0.0", ["G"], [dep("et/admbase", None, ["StaticConformal"])]), V("1.0.0", ["G"])]),
+    "max--zzh": ("max/zzh", [V("2.0.0", ["H"], [dep("max/zzg", "^1.0", ["G"])]), V("1.0.0", ["H"])]),
+    "max--zzp--admbase-thorn": ("max/zzp", [V("1.0.0", ["ADMBase"])]),
+    "max--needs-zzp": ("max/needs-zzp", [V("1.0.0", ["NP"], [dep("max/zzp", None, ["ADMBase"])])]),
+    "max--zzc": ("max/zzc", [V("1.0.0", ["C"])]),
+    "et--zzw--needs-zzq": ("et/zzw", [V("1.0.0", ["W"], [dep("et/zzq", None, ["A2"])])]),
+    # A requirement a declared dependency would meet if it moved is that dependency's conflict.
+    "max--fieldlib": ("max/fieldlib", [V("3.0.0", ["FieldA", "FieldD"]), V("mp:1.0.0", ["FieldA", "FieldMP"]),
+                                       V("1.0.0", ["FieldA"])]),
+    "max--duser": ("max/duser", [V("1.0.0", [T("DUser", requires_thorns=["FieldD"])],
+                                   [dep("max/fieldlib", "^3", ["FieldD"], needed_by=["DUser"])])]),
+    "max--mpuser": ("max/mpuser", [V("1.0.0", [T("MPUser", requires_thorns=["FieldMP"])],
+                                     [dep("max/fieldlib", "mp:^1", ["FieldMP"], needed_by=["MPUser"])])]),
+    "max--symuser": ("max/symuser", [V("1.0.0", [T("SymUser", requires_thorns=["SymBase"])],
+                                       [dep("et/cactusbase", None, ["SymBase"], needed_by=["SymUser"])])]),
+    "et--cactusbase": ("et/cactusbase", [V("2026.5.0", ["Boundary", "SymBase"])]),
+    # Notes on releases left out for want of a read: from what each asks itself.
+    "et--zpx": ("et/zpx", [V("2.0.0", ["ZX"], [dep("et/admbase", None, ["StaticConformal"])]), V("1.0.0", ["ZX"])]),
+    "max--zpapp": ("max/zpapp", [V("2.0.0", ["ZP"], [dep("et/zpx", "^2", ["ZX"])]),
+                                 V("1.0.0", ["ZP"], [dep("et/zpx", "^1", ["ZX"])])]),
+    # A fork standing in for a base package --replace takes out of play.
+    "max--zprobe": ("max/zprobe", [V("1.0.0", ["ZProbe"], [dep("et/carpetx", "^2026.5", ["CarpetX"]),
+                                                          dep("max/carpetx-mp", None, ["CarpetX"])])]),
+    "max--zpapq": ("max/zpapq", [V("2.0.0", ["ZQ"], [dep("et/admbase", None, ["StaticConformal"]),
+                                                    dep("et/cactusbase", None, ["SymBase"])]),
+                                 V("1.0.0", ["ZQ"])]),
+    "max--kadath--fuka-at-commit": ("max/kadath", [V("1.0.0", ["Kadath"], [dep("et/fuka", sha=FUKA_SNAP, into="src/fuka")])]),
 
     # Remove.
     "max--z4c--carpetx-plain": (Z4C, [V("1.2.0", Z4C_THORNS, [dep("et/carpetx", "^2026.5", ["CarpetX"])])]),
@@ -343,15 +395,36 @@ POOL = {
 }
 
 ADM_SNAP = "abababababababababababababababababababab"
+ADM2_SNAP = "efefefefefefefefefefefefefefefefefefefef"
+P10_SNAP = "1010101010101010101010101010101010101010"
+P11_SNAP = "1111111111111111111111111111111111111111"
+P12_SNAP = "1212121212121212121212121212121212121212"
 MP_SNAP = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+ZZQ_SNAP = "3434343434343434343434343434343434343434"
+ZZC_SNAP = "7878787878787878787878787878787878787878"
+ZZS_SNAP = "5656565656565656565656565656565656565656"
 SNAPSHOTS = {
     "et--carpetx--at-4444": snapshot("et/carpetx", CX_SNAP, CX_SNAP, ["CarpetX", "Loop"]),
     # Base packages at commits no version froze, read when a plan depends on them.
     "et--admbase--at-abab": snapshot("et/admbase", ADM_SNAP, ADM_SNAP, ["ADMBase", "ADMCoupling", "StaticConformal"],
                                      untrusted=False),
+    "et--admbase--at-efef": snapshot("et/admbase", ADM2_SNAP, ADM2_SNAP, ["ADMBase", "StaticConformal"], untrusted=False),
+    "et--p10--at-1010": snapshot("et/p10", P10_SNAP, P10_SNAP, ["P10a", "P10b", "P10c"],
+                                 [dep("et/p11", None, ["Q"], needed_by=["P10b"]), dep("et/p12", None, ["R"], needed_by=["P10c"])],
+                                 untrusted=False),
+    "et--p11--at-1111": snapshot("et/p11", P11_SNAP, P11_SNAP, ["Q0", "Q"], untrusted=False),
+    "et--p12--at-1212": snapshot("et/p12", P12_SNAP, P12_SNAP, ["R0", "R"], untrusted=False),
     "max--carpet-mp--at-cdcd": snapshot("max/carpet-mp", MP_SNAP, MP_SNAP, ["Carpet", "CarpetSlab"],
                                         [fork_of("et/carpet", "=2026.5.0")], untrusted=False),
     "et--carpetx--at-head": snapshot("et/carpetx", "head", CX_SNAP, ["CarpetX", "Loop"]),
+    "et--zzq--at-3434": snapshot("et/zzq", ZZQ_SNAP, ZZQ_SNAP, ["A1", "A2", "A3"],
+                                 [dep("et/zzs", None, ["S2"], needed_by=["A3"])], untrusted=False),
+    "et--zzs--at-5656": snapshot("et/zzs", ZZS_SNAP, ZZS_SNAP, ["S1", "S2"], untrusted=False),
+    "et--zzq--at-3434--a3-needs-zzc-commit": snapshot("et/zzq", ZZQ_SNAP, ZZQ_SNAP, ["A1", "A2", "A3"],
+                                                      [dep("max/zzc", sha=ZZC_SNAP, needs=["C"], needed_by=["A3"])],
+                                                      untrusted=False),
+    "max--zzc--at-7878": snapshot("max/zzc", ZZC_SNAP, ZZC_SNAP, ["C"], untrusted=False),
+    "et--fuka--at-9a9a": snapshot("et/fuka", FUKA_SNAP, FUKA_SNAP, untrusted=False, library=True),
 }
 
 

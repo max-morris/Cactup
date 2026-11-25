@@ -1,0 +1,59 @@
+{
+  "about": "An orphan whose own returning base holds it (a fork of what the base depends on): going and staying alternate, and the sweep keeps it rather than decide by the round",
+  "packages": [
+    "max--t--needs-o",
+    "max--o--fork-of-x",
+    "et--b--needs-x"
+  ],
+  "present": [
+    {
+      "package": "max/t",
+      "version": "1.0.0",
+      "enabled": [
+        "T"
+      ]
+    },
+    {
+      "package": "max/o",
+      "version": "1.0.0",
+      "enabled": [
+        "O"
+      ]
+    }
+  ],
+  "remove": {
+    "targets": [
+      "max/t"
+    ],
+    "added-for": {
+      "max/t": {
+        "requested": true,
+        "for-commit": "current"
+      },
+      "max/o": {
+        "requested": false,
+        "for-commit": "current",
+        "by": [
+          "max/t@1.0.0"
+        ]
+      }
+    },
+    "returning": [
+      {
+        "replacer": "max/o",
+        "package": "et/b",
+        "version": "1.0.0",
+        "base": "b",
+        "enabled": [
+          "B"
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "removed": [
+      "max/t"
+    ],
+    "orphans": []
+  }
+}

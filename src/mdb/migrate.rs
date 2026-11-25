@@ -655,8 +655,7 @@ impl std::fmt::Display for OverlayGenerationError {
                 if let Some(kept) = kept {
                     write!(
                         f,
-                        "\n  A copy as it was for generation {want}, from before a newer cactup brought it \
-                         forward, is in '{}'.",
+                        "\n  A copy for generation {want} is in '{}'.",
                         kept.display()
                     )?;
                 }
@@ -664,8 +663,8 @@ impl std::fmt::Display for OverlayGenerationError {
             }
             Why::Unsupported => write!(
                 f,
-                "user-MDB machine \"{name}\" is MDB generation {found}, which cactup does not update \
-                 automatically (this cactup reads {want})."
+                "user-MDB machine \"{name}\" is MDB generation {found}; this cactup reads {want} and \
+                 does not update it automatically."
             )?,
             Why::Stopped { finding, from: None } => write!(
                 f,
@@ -682,8 +681,7 @@ impl std::fmt::Display for OverlayGenerationError {
                     f,
                     "user-MDB machine \"{name}\" is MDB generation {found}, and this cactup reads {want}. \
                      It could not be updated just now: {reason}.\n  \
-                     Nothing needs editing by hand: once that is cleared, run the command again and cactup \
-                     finishes the update."
+                     Clear that and run the command again."
                 );
             }
         }
@@ -691,7 +689,7 @@ impl std::fmt::Display for OverlayGenerationError {
         let next = (*found).max(1) + 1;
         write!(
             f,
-            "\n  To fix by hand: follow {}, then set `mdb-generation = {next}` in '{}'; cactup does the rest.",
+            "\n  To fix by hand, follow {}, then set `mdb-generation = {next}` in '{}'.",
             guide_section(guide, next),
             path.display()
         )?;
@@ -701,7 +699,7 @@ impl std::fmt::Display for OverlayGenerationError {
         let dir = path.parent().unwrap_or(path);
         write!(
             f,
-            "\n  Or start over without your edits, keeping the old files: mv '{}' '{}' && {recreate}",
+            "\n  Or start over without your edits: mv '{}' '{}' && {recreate}",
             dir.display(),
             aside.display()
         )
@@ -1366,7 +1364,7 @@ pub(crate) mod tests {
         assert!(lines[1].contains(&format!("mdb-generation = {next}")), "{text}");
         assert!(lines[1].contains(&format!("{name}/meta.toml")), "{text}");
         // Starting over keeps the old files: moved aside, never deleted.
-        assert!(lines[2].contains("without your edits") && lines[2].contains("keeping the old files"), "{text}");
+        assert!(lines[2].contains("without your edits"), "{text}");
         assert!(lines[2].contains(&format!("/.{name}.old'")), "{text}");
         assert!(lines[2].contains(": mv '") && !lines[2].contains("delete"), "{text}");
         assert!(lines[2].contains(&format!("cactup machine create {name}")), "{text}");
@@ -1381,7 +1379,7 @@ pub(crate) mod tests {
         let e = home.mdb.load("old").unwrap_err();
         assert_eq!(overlay_error(&e).why, Why::Unsupported);
         assert_older_refusal_shape(&e.to_string(), "old", 1, 2);
-        assert!(e.to_string().contains("does not update automatically"), "{e}");
+        assert!(e.to_string().contains("does not update it automatically"), "{e}");
         let brief = overlay_error(&e).brief();
         assert!(!brief.contains('\n') && brief.contains("cactup machine show old"), "{brief}");
         // Refused before anything was written: no backup, no lock left.

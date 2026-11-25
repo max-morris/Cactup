@@ -24,7 +24,7 @@
       "add et/zf@1.0.0 Z needed by max/n2@1.0.0",
       "add et/newflesh@1.0.0 needed by et/zf@1.0.0",
       "replace et/pflesh with et/newflesh",
-      "The flesh changes: every config of this installation needs a rebuild"
+      "The flesh changes; every config needs a rebuild"
     ]
   },
   "options": {

@@ -1,0 +1,39 @@
+{
+  "slug": "max/zzc",
+  "at": "7878787878787878787878787878787878787878",
+  "untrusted": false,
+  "served": {
+    "version": "7878787878787878787878787878787878787878",
+    "track": null,
+    "tag": null,
+    "commit": "7878787878787878787878787878787878787878",
+    "tree": "0000000000000000000000000000000000000000",
+    "yanked": false,
+    "yank-reason": null,
+    "state": "ok",
+    "curated": false,
+    "published": 1793000000,
+    "url": "https://github.com/max/zzc.git",
+    "thorns": [
+      {
+        "arrangement": "Zzc",
+        "thorn": "C",
+        "repo-path": "$1/$2",
+        "facts": {
+          "implements": "C",
+          "inherits": [],
+          "friends": [],
+          "requires-functions": [],
+          "uses-functions": [],
+          "provides-functions": [],
+          "uses-includes": [],
+          "requires": [],
+          "requires-thorns": [],
+          "optional": [],
+          "provides": []
+        }
+      }
+    ],
+    "claims": []
+  }
+}

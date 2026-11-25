@@ -25,7 +25,7 @@
   "expect": {
     "refusal": "ReplacementLacksThorns",
     "message": [
-      "max/carpetx-mp@1.0.0 would take the place of base repo carpetx, but has no Arith, Loop",
+      "max/carpetx-mp@1.0.0 would replace base repo carpetx, but lacks its enabled thorns Arith, Loop",
       "Pass --ignore-claim max/carpetx-mp:fork-of:et/carpetx"
     ]
   }

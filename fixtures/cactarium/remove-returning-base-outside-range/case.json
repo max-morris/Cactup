@@ -1,0 +1,48 @@
+{
+  "about": "Removing a package that replaced a base repo brings the base's release back; one outside a dependent's range does not hold it: the dependent stays one",
+  "packages": [
+    "et--carpet--two",
+    "max--other--carpet-2026-6"
+  ],
+  "present": [
+    {
+      "package": "et/carpet",
+      "version": "2026.6.0",
+      "enabled": [
+        "Carpet",
+        "CarpetSlab"
+      ]
+    },
+    {
+      "package": "max/other",
+      "version": "1.0.0",
+      "enabled": [
+        "Other"
+      ]
+    }
+  ],
+  "remove": {
+    "targets": [
+      "et/carpet"
+    ],
+    "returning": [
+      {
+        "replacer": "et/carpet",
+        "package": "et/carpet",
+        "version": "2026.5.0",
+        "base": "carpet",
+        "enabled": [
+          "Carpet",
+          "CarpetSlab"
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "refusal": "HasDependents",
+    "message": [
+      "Other packages depend on et/carpet",
+      "max/other@1.0.0"
+    ]
+  }
+}

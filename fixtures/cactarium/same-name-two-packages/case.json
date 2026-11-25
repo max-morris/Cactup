@@ -13,7 +13,8 @@
     "refusal": "SameThorn",
     "message": [
       "both have a thorn CarpetSlab",
-      "or pass --ignore-claim max/z4c:dependency:et/carpet"
+      "or pass --ignore-claim max/z4c:dependency:et/carpet",
+      "or `cactup claims override satisfies"
     ]
   }
 }

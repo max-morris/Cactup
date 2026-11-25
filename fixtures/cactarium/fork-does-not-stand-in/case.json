@@ -21,8 +21,9 @@
   "expect": {
     "refusal": "ForkDoesNotStandIn",
     "message": [
-      "max/z4c@1.2.0 needs et/carpetx ^2026.5, and max/carpetx-mp@1.0.0, a fork of it, does not stand in",
-      "Pass --ignore-claim max/z4c:dependency:et/carpetx"
+      "max/z4c@1.2.0 needs et/carpetx ^2026.5, and the fork max/carpetx-mp@1.0.0 does not stand in",
+      "Pass --ignore-claim max/z4c:dependency:et/carpetx",
+      "`cactup claims override satisfies max/carpetx-mp et/carpetx`"
     ]
   }
 }

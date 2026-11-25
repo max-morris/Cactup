@@ -156,9 +156,8 @@ your build keeps using the last revision of its own generation and says so,
 loudly, on every command:
 
 ```
-the machine database has moved to generation 3; this cactup (generation 2)
-keeps using the last generation-2 revision. Run `cactup update` (if that
-reports up to date, a release is still propagating; retry later)
+The machine database has moved to generation 3; this cactup stays on generation 2.
+Run `cactup update`; retry later if it reports up to date.
 ```
 
 Nothing breaks while you see this; your machines simply stop receiving
@@ -283,7 +282,7 @@ that binary from where it was built.
 ## Uninstalling
 
 1. Optionally remove the Einstein Toolkit installations first with `cactup
-   list` and `cactup uninstall <alias>`, so nothing is left behind outside
+   list` and `cactup inst delete <alias>`, so nothing is left behind outside
    `~/.cactup` (installation, simulation and test directories can live
    elsewhere, as set by your machine definition).
 2. Remove cactup's home. **This also removes anything else under it**: your
