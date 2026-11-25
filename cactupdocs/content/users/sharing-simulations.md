@@ -565,8 +565,10 @@ needed: those brought in as dependencies, never named by you, that no
 remaining package depends on, down the chain. A package that you named at any
 time is never removed this way, nor is one added by a cactup that did not
 record why. Any base repository that a removed package replaced is restored at
-the commit that the base names, and what a returning base package needs counts
-too. When Cactarium cannot read a returning base repo, `remove` prints
+the commit that the base names, or on its branch, and what a returning base
+package needs counts too. When only that repository's remote can name its
+branch and the remote does not answer, `remove` changes nothing and says to run
+it again once the remote answers. When Cactarium cannot read a returning base repo, `remove` prints
 `Not checked (unreadable): what these returning base repos need:` and a list,
 and each package that it would sweep says `unless a returning base repo needs
 it` in the plan, so the confirmation covers that risk.
