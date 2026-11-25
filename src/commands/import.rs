@@ -315,7 +315,71 @@ pub(crate) fn simfile_cache_path(
 /// `~/.cactup/simfiles` (see [`simfile_cache_path`]); see [`fetch_published`].
 pub(crate) fn download_published(ctx: &Ctx, req: &str) -> Res<PathBuf> {
     let client = crate::cactarium::Client::for_command(ctx)?;
-    fetch_published(&client, &crate::CACTUP_ROOT.join("simfiles"), req)
+    let named = || -> Vec<PathBuf> {
+        // Best effort: a database that cannot be read names nothing, and nothing is swept.
+        let Ok(db) = ctx.db.read() else { return Vec::new() };
+        db.installations.values().filter_map(|i| i.simfile.as_deref()).map(PathBuf::from).collect()
+    };
+    fetch_and_sweep(&client, &crate::CACTUP_ROOT.join("simfiles"), req, named)
+}
+
+/// [`fetch_published`], then [`sweep_unreviewed`] over the sim files returned by `named` (called
+/// only after a download that worked), with the one just downloaded kept.
+fn fetch_and_sweep(
+    client: &crate::cactarium::Client,
+    root: &Path,
+    req: &str,
+    named: impl FnOnce() -> Vec<PathBuf>,
+) -> Res<PathBuf> {
+    let path = fetch_published(client, root, req)?;
+    let mut named = named();
+    named.push(path.clone());
+    sweep_unreviewed(root, &named);
+    Ok(path)
+}
+
+/// How long an unnamed `.unreviewed.sim` is kept: an import between its download and the
+/// installation that records it (prompts, a long fetch) must not lose it to a sweep by another.
+const UNREVIEWED_GRACE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+
+/// Delete every `<version>.unreviewed.sim` under `root` that is not among `named` (the
+/// installations' provenance) and that is older than [`UNREVIEWED_GRACE`] by the fileserver's
+/// clock. Nothing reads such a copy after the import that downloaded it (the offline fallback
+/// and a failed download never take one), so it is kept exactly while an installation names it.
+/// Best effort and silent: an error leaves a file where it is, and Ctrl-C stops the walk.
+/// Returns how many it deleted.
+fn sweep_unreviewed(root: &Path, named: &[PathBuf]) -> usize {
+    let Ok(now) = crate::lock::fileserver_now(root) else { return 0 };
+    let same = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let named: std::collections::BTreeSet<PathBuf> = named.iter().map(|p| same(p)).collect();
+    let mut deleted = 0;
+    // owner/name/<file> or owner/name/<sim>/<file>: the depths written by `simfile_cache_path`.
+    let mut dirs = vec![(root.to_path_buf(), 0)];
+    while let Some((dir, depth)) = dirs.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for entry in rd.flatten() {
+            if gix::interrupt::is_triggered() {
+                return deleted;
+            }
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+            if meta.is_dir() {
+                if depth < 3 {
+                    dirs.push((path, depth + 1));
+                }
+                continue;
+            }
+            let unreviewed = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(".unreviewed.sim"));
+            if !meta.is_file() || depth < 2 || !unreviewed || named.contains(&same(&path)) {
+                continue;
+            }
+            let old = meta.modified().ok().and_then(|m| now.duration_since(m).ok()).is_some_and(|age| age >= UNREVIEWED_GRACE);
+            if old && std::fs::remove_file(&path).is_ok() {
+                deleted += 1;
+            }
+        }
+    }
+    deleted
 }
 
 /// The one version `slug` names exactly (`@=1.0.1`, or `@1.0.1` written out
@@ -460,10 +524,6 @@ fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) ->
                 .yellow()
         ),
         Some(_) => {}
-    }
-    // A reviewed copy now stands for this version: one kept while it awaited review is stale.
-    if !unreviewed {
-        let _ = std::fs::remove_file(simfile_cache_path(root, owner, name, sim, &version, true));
     }
     Ok(dest)
 }
@@ -1433,24 +1493,69 @@ pub(crate) mod tests {
         }
     }
 
-    /// Once a version is reviewed, its download takes the place of the copy kept while it awaited
-    /// review: that one is deleted. The copy of another version is not touched.
+    /// The sweep after a download deletes an unreviewed copy named by no installation once it is
+    /// past the grace period, whether or not its version was reviewed since. It keeps a copy named
+    /// by an installation, one still within the grace, the one just downloaded, reviewed copies,
+    /// and files at depths never written by the cache.
     #[test]
-    fn a_reviewed_download_deletes_the_copy_kept_while_it_awaited_review() {
+    fn the_sweep_keeps_unreviewed_copies_only_while_named() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("max/bbh");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("1.2.0.unreviewed.sim"), stamped("max/bbh@1.2.0")).unwrap();
-        std::fs::write(dir.join("1.3.0.unreviewed.sim"), stamped("max/bbh@1.3.0")).unwrap();
-        let (client, heads) = cactarium(
-            2,
-            |_| ("200 OK", resolved("max/bbh@1.2.0", "1.2.0", None, None)),
-            |_| stamped("max/bbh@1.2.0"),
-        );
-        assert_eq!(fetch_published(&client, tmp.path(), "max/bbh@=1.2.0").unwrap(), dir.join("1.2.0.sim"));
-        heads.join().unwrap();
-        assert!(!dir.join("1.2.0.unreviewed.sim").exists());
-        assert!(dir.join("1.3.0.unreviewed.sim").exists());
+        let root = tmp.path();
+        let old = std::time::SystemTime::now() - UNREVIEWED_GRACE - std::time::Duration::from_secs(3600);
+        let file = |rel: &str, aged: bool| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "x").unwrap();
+            if aged {
+                std::fs::File::options().write(true).open(&path).unwrap().set_modified(old).unwrap();
+            }
+            path
+        };
+        let reviewed_since = file("max/bbh/1.2.0.unreviewed.sim", true);
+        file("max/bbh/1.2.0.sim", true);
+        let rejected = file("max/bbh/1.3.0.unreviewed.sim", true);
+        let one_of_several = file("et/sims/qc0/2026.5.1.unreviewed.sim", true);
+        let named = file("max/bbh/1.4.0.unreviewed.sim", true);
+        let fresh = file("max/bbh/1.5.0.unreviewed.sim", false);
+        let shallow = file("max/1.0.0.unreviewed.sim", true);
+        let deep = file("et/sims/qc0/x/1.0.0.unreviewed.sim", true);
+
+        assert_eq!(sweep_unreviewed(root, &[named.clone(), root.join("elsewhere.sim")]), 3);
+        for gone in [&reviewed_since, &rejected, &one_of_several] {
+            assert!(!gone.exists(), "{}", gone.display());
+        }
+        for kept in [&named, &fresh, &shallow, &deep, &root.join("max/bbh/1.2.0.sim")] {
+            assert!(kept.exists(), "{}", kept.display());
+        }
+        // An installation's record names it by another spelling of the same path.
+        let named2 = file("max/bbh/1.6.0.unreviewed.sim", true);
+        assert_eq!(sweep_unreviewed(root, &[root.join("max/./bbh/1.6.0.unreviewed.sim")]), 1);
+        assert!(named2.exists());
+        assert!(!named.exists(), "no longer named");
+    }
+
+    /// A download sweeps after it worked: an old unnamed copy goes, and the copy just written,
+    /// named by no installation yet, stays.
+    #[test]
+    fn a_download_sweeps_and_keeps_its_own_copy() {
+        use std::sync::{atomic::AtomicBool, Arc};
+        let tmp = tempfile::tempdir().unwrap();
+        let old = std::time::SystemTime::now() - UNREVIEWED_GRACE - std::time::Duration::from_secs(3600);
+        let stale = tmp.path().join("max/bbh/1.1.0.unreviewed.sim");
+        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        std::fs::write(&stale, "x").unwrap();
+        std::fs::File::options().write(true).open(&stale).unwrap().set_modified(old).unwrap();
+        let (client, _heads) = unreviewed_cactarium("bbh", 4, true, false, Arc::new(AtomicBool::new(false)));
+        let mut asked = false;
+        let path = fetch_and_sweep(&client, tmp.path(), "max/bbh@1", || {
+            asked = true;
+            Vec::new()
+        })
+        .unwrap();
+        assert!(asked);
+        assert_eq!(path, tmp.path().join("max/bbh/1.2.0.unreviewed.sim"));
+        assert!(path.is_file());
+        assert!(!stale.exists());
     }
 
     /// The inputs' repository is read from a version awaiting review with a warning, and a

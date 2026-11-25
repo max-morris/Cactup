@@ -398,8 +398,9 @@ A sim awaiting review downloads to
 `~/.cactup/simfiles/<owner>/<name>/[<sim>/]<version>.unreviewed.sim`
 (`<sim>/` only for one sim of a multi-sim entry).
 When Cactarium cannot be asked, `cactup import` uses the cached copy of an
-approved version and never one of these. Once the version is approved, its next
-download replaces the unreviewed copy.
+approved version and never one of these. An unreviewed copy is kept while an
+installation made from it exists; once none does, a later sim download deletes
+it (after a week, so an import in progress keeps its copy).
 
 A stack release is installed as it was frozen: nothing is resolved. After
 `install` and `inst refetch --release` to a stack, once their own output is
