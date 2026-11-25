@@ -89,10 +89,12 @@ how many there are.
 - **A flesh fork in use**: these thorns may need it, which no CCL can say.
   The dependency on it is written out, commented.
 - **A fork** that lacks some of the upstream version's thorns (see below).
-- **A shallow clone**: cactup clones at depth 1, so the history cannot show
-  whether the repository forks a package. cactup prints the commands:
+- **A shallow clone whose history could not be fetched**: cactup clones at
+  depth 1, and such a history cannot show whether the repository forks a
+  package. When some registered package could be forked by it, `package init`
+  fetches the clone's history first; it adds history only, and leaves the
+  checkout as it is. If that fetch fails, cactup prints the commands:
   `git -C <clone> fetch --unshallow`, then `cactup package init <repo> -f`.
-  It never changes the clone itself.
 
 The installation's claim overrides (`cactup claims`, see
 [Sharing Simulations](sharing-simulations.html#when-a-claim-is-wrong)) are

@@ -669,23 +669,54 @@ fn shared_names_without_shared_history_are_no_fork() {
     assert!(m.fork_of.is_empty() && !text.contains("fork-of"), "{text}");
 }
 
-/// A shallow clone (as cactup fetches) cannot tell a fork: said as a TODO.
-#[test]
-fn a_shallow_clone_says_it_cannot_tell_a_fork() {
+/// The repos for the shallow-clone tests: et/carpet registered at 1.0.0, and carpetmp, either a
+/// fork of it (its history holds carpet's 1.0.0) or a repo of its own, both in the base and
+/// fetched by cactup at depth 1, with carpet's thorn built.
+fn shallow_world(fork: bool) -> World {
     let tmp = tempfile::tempdir().unwrap();
     let carpet = [("Carpet/interface.ccl", "IMPLEMENTS: driver\n")];
     let (curl, c) = upstream(tmp.path(), "carpet", &carpet);
+    if fork {
+        copy_tree(&tmp.path().join("up/carpet"), &tmp.path().join("up/carpetmp"));
+    }
     let (murl, m) = upstream(tmp.path(), "carpetmp", &[("Carpet/interface.ccl", "IMPLEMENTS: driver\n# mp\n")]);
     let (cactarium, _) = Fake::default()
         .package("et/carpet", vec![version("1.0.0", &c, &curl, &[("Carpet", "Carpet")], json!([]))])
         .pin(&curl, "et/carpet")
         .serve();
-    // Fetched by cactup, depth 1, then replacing carpet.
     let w = World::new(tmp, &(section(&curl, &c, &["Carpet/Carpet"]) + &section(&murl, &m, &["MP/Carpet"])), &cactarium, None);
     assert!(gix::open(w.repo("carpetmp")).unwrap().is_shallow(), "cactup's clones are shallow");
     w.built(&["Carpet/Carpet"], &[]);
+    w
+}
+
+/// A fork fetched by cactup (depth 1) is told by its history all the same: init fetches the
+/// clone's history (objects only, HEAD and the work tree as they were) and writes the fork-of.
+#[test]
+fn a_shallow_clone_gets_its_history_and_shows_a_fork() {
+    let w = shallow_world(true);
+    let dir = w.repo("carpetmp");
+    let head = crate::fetch::git::head_of(&dir).unwrap();
+    w.init("carpetmp", false, false).unwrap_or_else(|e| panic!("{e:#}"));
+    let (text, m) = w.manifest("carpetmp");
+    assert_eq!(m.fork_of.len(), 1, "{text}");
+    assert_eq!(m.fork_of[0].target.to_string(), "et/carpet@=1.0.0", "{text}");
+    assert!(!text.contains("shallow"), "{text}");
+    assert!(!gix::open(&dir).unwrap().is_shallow());
+    assert_eq!(crate::fetch::git::head_of(&dir).unwrap(), head, "HEAD stays");
+    assert_eq!(std::fs::read_to_string(dir.join("Carpet/interface.ccl")).unwrap(), "IMPLEMENTS: driver\n# mp\n");
+}
+
+/// When the history cannot be fetched (the remote is gone), the fork stays a TODO with the way
+/// past, and the clone is left as it was.
+#[test]
+fn a_shallow_clone_whose_history_cannot_be_fetched_says_so() {
+    let w = shallow_world(true);
+    let dir = w.repo("carpetmp");
+    std::fs::remove_dir_all(w.tmp.path().join("up/carpetmp")).unwrap();
     w.init("carpetmp", false, false).unwrap();
-    let (text, _) = w.manifest("carpetmp");
+    let (text, m) = w.manifest("carpetmp");
+    assert!(m.fork_of.is_empty(), "{text}");
     assert!(
         text.contains(
             "# TODO: the clone of repo carpetmp is shallow.\n# Its history cannot show whether it forks et/carpet.\n\
@@ -693,8 +724,7 @@ fn a_shallow_clone_says_it_cannot_tell_a_fork() {
         ),
         "{text}"
     );
-    assert!(gix::open(w.repo("carpetmp")).unwrap().is_shallow(), "cactup's clone is left as it was");
-    let dir = w.repo("carpetmp");
+    assert!(gix::open(&dir).unwrap().is_shallow(), "left as it was");
     assert_eq!(
         shallow_notice("carpetmp", &dir),
         [
@@ -703,6 +733,18 @@ fn a_shallow_clone_says_it_cannot_tell_a_fork() {
             "Then run `cactup package init carpetmp -f`.".to_owned(),
         ]
     );
+}
+
+/// With a history of its own, the fetched history shows no fork, and no TODO is written. A repo
+/// that no registered package could be forked by (carpet is et/carpet's own) fetches nothing.
+#[test]
+fn a_shallow_clone_of_no_fork_says_nothing_of_forks() {
+    let w = shallow_world(false);
+    w.init("carpetmp", false, false).unwrap();
+    let (text, m) = w.manifest("carpetmp");
+    assert!(m.fork_of.is_empty() && !text.contains("fork-of") && !text.contains("shallow"), "{text}");
+    w.init("carpet", false, false).unwrap_or_else(|e| panic!("{e:#}"));
+    assert!(gix::open(w.repo("carpet")).unwrap().is_shallow(), "nothing fetched");
 }
 
 /// A flesh fork in use is a TODO naming it, with the dependency commented out.
