@@ -5148,8 +5148,13 @@ What uses it, all on the login node (D11):
   downloads to `<v>.unreviewed.sim` (`import::simfile_cache_path`), which the
   offline fallback never reads, and a failed download of one fails instead of
   falling back to an older copy; `download_sim` fails when the download says
-  unreviewed where `/resolve` did not. A reviewed download of a version deletes
-  that version's `.unreviewed.sim`.
+  unreviewed where `/resolve` did not. Nothing reads an `.unreviewed.sim` after
+  the import that downloaded it, so it is kept exactly while an installation's
+  provenance (`simfile` in the database) names it: every sim download that
+  works sweeps the cache (`import::sweep_unreviewed`) and deletes each one named
+  by no installation, other than the one just downloaded, once it is older than
+  7 days by the fileserver's clock (an import between its download and the
+  installation that records it keeps its copy). Silent and best effort.
 - The dependency endpoints (`/lookup`, `/providers`, `POST /packages/read`,
   `/whoami`, `POST /repos`) and what `add`, `remove`, `claims`, `package init`
   and `stack init` do with them are §8.12.
@@ -5785,8 +5790,6 @@ in DIR and calls `publish_stack` as `<owner>/<name>@V`.
 - An override redirects every checkout of a base repo; `compose` drops only the
   checkouts that a package claims, so `stack init` overrides only when the package
   takes all of them.
-- An `.unreviewed.sim` whose version is never downloaded again once reviewed
-  (or is rejected) stays in the cache.
 - A restoring remote that does not answer leaves the clone on the pinned label,
   said on its line.
 
