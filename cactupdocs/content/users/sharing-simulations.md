@@ -43,10 +43,10 @@ Export refuses what nobody else could reproduce:
   `cactup package init <repo> --publish` (see
   [Publishing Packages](publishing-packages.html)) or on Cactarium's site, or
   fork a registered package.
-- **A thorn nobody else can fetch**: a `!TYPE = ignore` component, which
+- **A thorn that nobody else can fetch**: a `!TYPE = ignore` component, which
   exists only on this machine.
-- **A download Cactarium has not approved.** A download (a tarball the
-  thornlist fetches, or an input's file) passes once Cactarium has reviewed
+- **A download that Cactarium has not approved.** A download (a tarball
+  fetched by the thornlist, or an input's file) passes once Cactarium has reviewed
   that URL with that SHA-256. Submit one for review with
   `cactup download submit <url>` (see below). Until an admin approves it,
   export says whether Cactarium is still verifying it or it awaits review;
@@ -54,12 +54,12 @@ Export refuses what nobody else could reproduce:
   failed), export says why, and submitting it again retries the check.
   A download on a loopback, private or link-local address
   (`http://127.0.0.1/…`, `http://10.0.0.5/…`) is refused outright: nobody
-  outside your network could fetch it. A host your machine cannot look up
+  outside your network could fetch it. A host that your machine cannot look up
   is left to Cactarium to check.
 - **A download with no hash**, which nothing could review: the build
   recorded none (built before cactup recorded download hashes; rebuild the
   config), or, for `sim pack`, the thornlist gives none.
-- **A repository nothing pins**: a git repository with no commit (the
+- **A repository that nothing pins**: a git repository with no commit (the
   build recorded none: rebuild the config; or, for `sim pack -I`, the
   installation never fetched it: run `cactup inst refetch`, or, when the
   installation's own thornlist lacks it, `cactup inst refetch <the list>`,
@@ -69,12 +69,12 @@ Export refuses what nobody else could reproduce:
   or to downloads each pinned by a `!CHECKSUM_SHA256` line. For `sim pack`
   without an installation, a `!REPO_COMMIT` that Cactarium says the
   package's repository lacks is refused too.
-- **Repository URLs nobody else can fetch, or that carry credentials.** A
+- **Repository URLs that nobody else can fetch, or that carry credentials.** A
   local path or `file://` URL, a URL with a user name, password or token in
   it (`https://TOKEN@host/…`), a query string (`?private_token=…`), or a
   `git://` URL (it can't be checked, and has no encryption) is refused, as
   Cactarium refuses it. Remove the credentials, or push the repository
-  somewhere others can reach and use its https URL.
+  somewhere that others can reach and use its https URL.
 - **Every git remote is checked.** Export asks each one over the network,
   as a stranger would, with no credentials of any kind: one small request
   per repository, all at once, within 30 seconds. A remote that asks for
@@ -82,7 +82,7 @@ Export refuses what nobody else could reproduce:
   that says it is busy or failing (try again later); one that redirects
   to another path has moved, and export names where to. A remote
   whose host resolves to a private address (a machine on your own network)
-  is refused too: nobody outside could reach it. (A host your machine
+  is refused too: nobody outside could reach it. (A host that your machine
   cannot look up itself, as on a login node that goes out through a proxy,
   is still asked.)
 - **ssh URLs** (`git@github.com:me/thorns.git`) need an account on the
@@ -107,9 +107,9 @@ never sent to Cactarium, and is named once, for that. The claim overrides of the
 recorded in the `.sim`'s provenance, for information only: `import` never
 resolves dependencies.
 
-A user name, password or token in a line nothing fetches (a comment, an
+A user name, password or token in a line that nothing fetches (a comment, an
 unused `!DEFINE`, an overridden `!URL`) is not refused but hidden: the
-`.sim` gets `***` in its place, and export prints each line it changed.
+`.sim` gets `***` in its place, and export prints each line that it changed.
 This covers URLs, `user:password@host:path` remotes and cvs roots with a
 password. A download's URL, and an input's
 (`--input-url`), may carry a query (`?download=1` is how many download links
@@ -158,7 +158,7 @@ deleted but turned into `#DISABLED Arrangement/Thorn` lines, so they are
 neither fetched nor built, yet one edit brings any of them back.
 
 Trimmed or not, `export` (and `pack -I`) refuses a thornlist that builds a
-thorn without what it needs, the same check `cactup build` makes before it
+thorn without what it needs, the same check that `cactup build` makes before it
 builds: a `.sim` like that would fail every import's build.
 
 ## Packing loose files
@@ -281,8 +281,8 @@ cactup sim publish bbh.sim me/bbh
 
 Only a **fully specified** file can be published: every repository pinned,
 nothing dirty. Before anything is sent, publish checks the file as export
-checks what it writes: URLs nobody else can fetch or that carry
-credentials, `ignore` components, repositories nothing pins, downloads on a
+checks what it writes: URLs that nobody else can fetch or that carry
+credentials, `ignore` components, repositories that nothing pins, downloads on a
 private address. Then it checks that you have a token, then asks Cactarium
 about every pin: a repository that is no registered package's, or a
 download (an input's file included) that Cactarium has not approved, is
@@ -293,7 +293,7 @@ cactup says so when it does.
 
 ### Submitting a download for review
 
-A `.sim` for others may pin a download (a tarball its thornlist fetches,
+A `.sim` for others may pin a download (a tarball fetched by its thornlist,
 an input's file) only once Cactarium has approved it:
 
 ```sh
@@ -403,9 +403,9 @@ done, cactup runs `cactup claims check` over the result and prints what it
 finds as warnings, each naming a way past (`cactup add --upgrade <pkg>`, or
 a `cactup claims override …`). They never fail the command. The check is
 quick by design: it gives up after about 20 seconds, saying Cactarium did
-not answer in time, and does not read base packages at commits no version
-froze (it says how many it left unchecked). Ctrl-C ends the check alone:
-the install or refetch it followed stays a success. Run
+not answer in time, and does not read base packages at commits not frozen
+by any version (it says how many it left unchecked). Ctrl-C ends the check alone:
+the install or refetch that it followed stays a success. Run
 `cactup claims check` for the full check.
 
 ### Adding a package
@@ -479,7 +479,7 @@ Proceed? [Y/n]
 
 Each step is one of `add`, `re-add`, `upgrade`, `downgrade`, `replace` or
 `keep`, with the reason at the end of its line. A package brought in for a
-dependency gets only the thorns that dependency needs, and only when the
+dependency gets only the thorns needed by that dependency, and only when the
 thorns of the dependent that need it are enabled. Each is an ordinary added
 package afterward: `inst refetch` keeps it, and `remove` takes it out.
 
@@ -511,12 +511,12 @@ What the plan decides:
   `--ignore-claim`, or a `cactup claims override` (see below). A **fork**
   (a package that declares `fork-of`) takes the place of its upstream for
   every dependency on it that the declared range covers.
-- **Requirements nobody declared are refused.** After the plan, every CCL
+- **Requirements that nobody declared are refused.** After the plan, every CCL
   requirement of a thorn that it enables must be met by the final set. cactup
   never adds a package that nobody declared as a dependency; it lists the
   registered providers as `cactup add` lines, or says that none provides it.
 - **Libraries** are placed as above, also under `--no-deps`.
-- **Awaiting review.** A version nobody has approved is taken only when named
+- **Awaiting review.** A version that nobody has approved is taken only when named
   exactly or when no approved version fits (see the flag above). The plan
   lists each in red.
 

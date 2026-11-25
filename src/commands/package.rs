@@ -1084,7 +1084,7 @@ fn flesh_fork(input: &Input, infos: &Pins, exact: bool) -> Option<String> {
     let shown = comment(&package);
     let mut s = match &version {
         Some(v) => format!("# TODO: the flesh here is {shown}@{}{of}.\n", comment(v)),
-        None => format!("# TODO: the flesh here is {shown}, at a commit no version froze{of}.\n"),
+        None => format!("# TODO: the flesh here is {shown}, at a commit not frozen by any version{of}.\n"),
     };
     match version.as_deref().and_then(|v| v.parse::<TrackedVersion>().ok()) {
         Some(v) => s.push_str(&format!(

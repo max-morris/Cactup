@@ -388,7 +388,7 @@ pub(crate) enum Commands {
         /// Add even if the thornlist has hand edits (they are overwritten).
         #[clap(short, long)]
         force: bool,
-        /// Move installed packages to the versions the plan needs
+        /// Move installed packages to the versions needed by the plan
         ///
         /// Without it, a plan that needs an installed package at another
         /// version is refused.
@@ -1234,7 +1234,7 @@ pub(crate) enum ClaimsCommand {
     ///   incompatibilities
     ///   forks installed beside their upstream
     ///   unmet dependency claims
-    ///   CCL requirements no installed thorn meets
+    ///   CCL requirements not met by any installed thorn
     ///   `satisfies` overrides naming a missing repo
     /// Changes nothing. Fails when it finds a problem.
     Check,
@@ -1265,7 +1265,7 @@ pub(crate) enum OverrideAction {
         #[clap(long)]
         note: Option<String>,
     },
-    /// Add a dependency the package's manifest lacks
+    /// Add a dependency that the package's manifest lacks
     ///
     ///   cactup claims override add max/foo --dependency et/carpet --needs CarpetSlab
     #[clap(verbatim_doc_comment)]
@@ -1273,10 +1273,10 @@ pub(crate) enum OverrideAction {
         /// The package that depends: OWNER/PKG
         #[clap(value_name = "OWNER/PKG")]
         package: String,
-        /// The package it depends on: OWNER/PKG, or OWNER/PKG@RANGE.
+        /// The package that it depends on: OWNER/PKG, or OWNER/PKG@RANGE.
         #[clap(long, value_name = "TARGET")]
         dependency: String,
-        /// Thorns of the target it needs (comma separated).
+        /// Thorns of the target that it needs (comma separated).
         #[clap(long, required = true, value_delimiter = ',', value_name = "A,B")]
         needs: Vec<String>,
         /// Thorns of the package that need it (default: all).
@@ -1307,7 +1307,7 @@ pub(crate) enum OverrideAction {
         /// The package that stands in: OWNER/PKG or local:NAME
         #[clap(value_name = "X")]
         by: String,
-        /// The package it stands in for: OWNER/PKG
+        /// The package that it stands in for: OWNER/PKG
         #[clap(value_name = "Y")]
         target: String,
     },
@@ -1346,7 +1346,7 @@ pub(crate) struct PackageInitArgs {
     /// organizations (default: your own).
     #[clap(long, value_name = "OWNER")]
     pub owner: Option<String>,
-    /// Depend on exactly the version built with (=X.Y.Z, not ~X.Y.Z).
+    /// Depend on exactly the version used by the build (=X.Y.Z, not ~X.Y.Z).
     #[clap(long, conflicts_with = "publish")]
     pub exact: bool,
     /// Overwrite an existing cactarium.toml.
@@ -1582,11 +1582,11 @@ pub(crate) struct SimDescribeArgs {
     /// Without it, these are refused:
     ///   uncommitted changes; commits on no remote branch or tag
     ///   repos of no package registered with Cactarium
-    ///   repos nothing pins: svn, cvs, hg, darcs, git with no commit,
+    ///   repos that nothing pins: svn, cvs, hg, darcs, git with no commit,
     ///     several downloads in one section
     ///   ignore components
     ///   downloads with no hash, on a private address, or not approved
-    ///   URLs nobody else can fetch, or with credentials
+    ///   URLs that nobody else can fetch, or with credentials
     /// Each git remote and Cactarium are asked once, without credentials.
     #[clap(long, verbatim_doc_comment)]
     pub local: bool,
