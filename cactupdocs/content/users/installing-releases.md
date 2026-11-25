@@ -5,7 +5,7 @@ description = "Install Einstein Toolkit releases with flexible paths and naming"
 
 # Installing Einstein Toolkit Releases
 
-This guide covers everything you need to know about installing and managing Einstein Toolkit releases with cactup.
+This guide covers everything that you need to know about installing and managing Einstein Toolkit releases with cactup.
 
 ## Listing releases
 
@@ -59,8 +59,8 @@ cactup install master --alias et-master
 ```
 
 cactup fetches the manifest before resolving `master`, so this is always the
-latest commit on that branch, never a stale local copy. The commit it resolved
-to is printed with the success message.
+latest commit on that branch, never a stale local copy. The commit that it
+resolved to is printed with the success message.
 
 `master` is never a default. `cactup install` with no argument still installs
 the most recent release, and so does the default offered by the interactive
@@ -186,8 +186,8 @@ cactup inst cp myrelease experiment
 The copy lands in `~/.cactup/cacti/experiment` (or wherever your
 `install-home` says); pass `--install-prefix` to put it somewhere else. It
 gets the whole source tree, with every repo's history, local changes and
-commits, the live thornlist and anything else you keep in the Cactus
-directory, and the packages `cactup add` put there.
+commits, the live thornlist and anything else that you keep in the Cactus
+directory, and the packages put there by `cactup add`.
 
 It does not get the configs and their builds: a build records where its
 sources were, so a copied one would keep reading the original's files. Build
@@ -209,22 +209,22 @@ cactup inst cp -s myrelease experiment
 ```
 
 Each file in it is a link to the same file in `myrelease`, until something
-changes it. A refetch or `cactup add` in `experiment`, or a `git checkout` you
-run there, gives each file it changes a copy of its own and leaves the rest
+changes it. A refetch or `cactup add` in `experiment`, or a `git checkout` that
+you run there, gives each file that it changes a copy of its own and leaves the rest
 as links, so `myrelease` is never touched. `cactup inst list` and
 `cactup inst show` say which installations are symbolic copies, and of what.
 
 Two things to know:
 
 - **Edit by hand only what is its own.** An editor may write through a link
-  into the original's file. Make the files you are about to edit its own
+  into the original's file. Make the files that you are about to edit its own
   first, by path (relative to the Cactus directory, or to where you are):
 
   ```sh
   cactup inst reify experiment repos/carpetx
   ```
 
-- **It follows the original.** A file `experiment` has not made its own
+- **It follows the original.** A file not made its own by `experiment`
   changes when `myrelease`'s does, for example when you refetch
   `myrelease`. cactup says so when you do. To keep the copy as it is, make it
   wholly its own first:
@@ -299,7 +299,7 @@ cactup inst refetch
   backing their modified files up to
   `~/.cactup/refetch-backups/<alias>/<timestamp>/`. `--overwrite <NAMES>`
   does the same for just the named repos — a repo directory under
-  `Cactus/repos/`, a full thorn checkout it provides, or a bare thorn name
+  `Cactus/repos/`, a full thorn checkout that it provides, or a bare thorn name
   (case-insensitive; space- or comma-separated, repeatable) — leaving every
   other skipped repo's local state untouched.
 - A repo skipped for a changed remote URL is compared canonically, so
@@ -332,8 +332,8 @@ to do by hand.)
 
 ### Pruning removed thorns
 
-`--prune` removes repos and arrangement symlinks the (new) thornlist no
-longer mentions — but only repos cactup itself fetched, as recorded in
+`--prune` removes repos and arrangement symlinks no longer mentioned by the
+(new) thornlist — but only repos fetched by cactup itself, as recorded in
 `<installation root>/.cactup/fetch-state.toml`. Anything hand-placed is
 reported and never touched. cactup asks for confirmation once (`-f` skips
 it); dirty or untracked orphans additionally require `-f` and are backed up
@@ -390,14 +390,14 @@ quietly either — it prints a "Partial adoption" block naming the same repos
 at the moment it happens, with the same FAILED/skipped split.
 
 The marker clears itself the next time a refetch manages to fetch every repo
-the thornlist names — `cactup inst refetch -f` backs up the dirty repos'
+named by the thornlist — `cactup inst refetch -f` backs up the dirty repos'
 modified files first and then fetches over them, or you can clean the repos
 by hand and refetch normally.
 
 > [!NOTE]
 > Refetching does not rebuild anything by itself, but it does not have to be
-> followed by `-f` either. Every build records the commit each of that config's
-> repos was on, so a plain `cactup build <name>` afterwards notices that the
+> followed by `-f` either. Every build records the commit that each of that
+> config's repos was on, so a plain `cactup build <name>` afterward notices that the
 > sources moved and recompiles what that affects. Moving the Cactus flesh —
 > which a release change always does — is classified as a from-scratch rebuild
 > automatically. A config built with a custom `--thornlist` still builds the
@@ -413,8 +413,8 @@ cactup inst delta myrelease    # a named one
 ```
 
 `cactup installation delta` compares the source trees against what the last
-fetch left behind: repos now on a different branch or commit, files you have
-modified, and untracked files (which builds ignore but `--prune` does not).
+fetch left behind: repos now on a different branch or commit, files that you
+have modified, and untracked files (which builds ignore but `--prune` does not).
 It only reads — nothing is fetched, locked, or written — so it is the quickest
 way to see what a refetch would have to contend with before running one.
 

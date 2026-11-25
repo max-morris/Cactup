@@ -735,7 +735,7 @@ fn thorn_fix(raw: &Raw, file: Option<&Path>, config_dir: &Path, values: &BTreeMa
     let generated = file.is_some_and(|file| file.starts_with(config_dir.join("bindings")));
     let capability = file.is_some_and(|file| file.starts_with(config_dir.join("bindings/Configuration/Capabilities")));
     let r#where = match (file, capability, generated) {
-        (None, _, _) => "change it in the thorn's make files (make.code.defn, make.code.deps, or what they include) or in an option-list variable they read".to_owned(),
+        (None, _, _) => "change it in the thorn's make files (make.code.defn, make.code.deps, or what they include) or in an option-list variable that they read".to_owned(),
         (Some(_), true, _) => "change it in the thorn that provides the capability (for an ExternalLibraries thorn, in its configuration or the option-list variables for that library)".to_owned(),
         (Some(_), false, true) => "change it in the thorn's configuration.ccl, which generates the file named".to_owned(),
         (Some(_), false, false) => "change it in the file named, not in the option list".to_owned(),
@@ -839,7 +839,7 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
             // Shell syntax the recipe's shell would expand first (`echo`
             // in backquotes): what the compile gets is not known here.
             Err(_) => {
-                found.push(raw(Severity::Unchecked, Some(variable), format!("{variable} has shell syntax (a command substitution, ~ or pattern) this check does not expand")));
+                found.push(raw(Severity::Unchecked, Some(variable), format!("{variable} has shell syntax (a command substitution, ~ or pattern) that this check does not expand")));
                 continue;
             }
         };
@@ -1718,7 +1718,7 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, writte
             _ if variable == "TMPDIR" && raw.reason.contains("a relative path") => "set TMPDIR to an absolute path (a quoted ~ is not expanded; use $HOME)".to_owned(),
             _ if variable == "TMPDIR" => "set TMPDIR to an existing, writable directory, or create the one it names".to_owned(),
             _ if raw.reason.contains("is set") || variable == "LD_AUDIT" => format!("unset {variable} for the build"),
-            _ if variable == "LD_PRELOAD" => "name each library LD_PRELOAD loads by its absolute path".to_owned(),
+            _ if variable == "LD_PRELOAD" => "name each library that LD_PRELOAD loads by its absolute path".to_owned(),
             _ => format!("give {variable} absolute directories only, e.g. export {variable}=\"/dir${{{variable}:+:${variable}}}\""),
         };
         return (from, Some(fix));

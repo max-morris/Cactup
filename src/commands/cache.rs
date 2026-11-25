@@ -713,7 +713,7 @@ fn summary(events: &[Event]) -> String {
     // The rest are keyed with this installation's and configuration's own
     // paths in the key: sound, and of use to later builds of this one only.
     let relocatable = keyed.iter().filter(|e| e.relocatable == Some(true)).count();
-    out.push_str(&format!("    with a key another installation or configuration can share: {relocatable} of {}\n", keyed.len()));
+    out.push_str(&format!("    with a key that another installation or configuration can share: {relocatable} of {}\n", keyed.len()));
     let mut reasons = BTreeMap::new();
     for reason in events.iter().filter_map(|e| e.not_cached.as_deref()) {
         *reasons.entry(reason.to_owned()).or_default() += 1;
@@ -1012,7 +1012,7 @@ mod tests {
         let text = summary(&events);
         assert!(text.contains("compiles recorded: 4\n"), "{text}");
         assert!(text.contains("keyed: 2 of 4 (50%)\n"), "{text}");
-        assert!(text.contains("with a key another installation or configuration can share: 2 of 2\n"), "{text}");
+        assert!(text.contains("with a key that another installation or configuration can share: 2 of 2\n"), "{text}");
         assert!(text.contains("     2  Fortran is not cached yet\n"), "{text}");
         assert!(text.contains("Fortran       2 compiles,      0 keyed,     1.0 s compiling (20% of the build's)"), "{text}");
         assert!(text.contains("compiling 5.0 s; keying 0.0 s (1%)"), "{text}");

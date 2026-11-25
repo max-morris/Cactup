@@ -6,7 +6,7 @@ description = "How cactup keeps itself and its machine database current, and how
 # Updating cactup
 
 cactup is one self-contained program plus a copy of the machine database
-(MDB) it downloads for you. Both stay current on their own: cactup checks
+(MDB) that it downloads for you. Both stay current on their own: cactup checks
 for a newer build once a day and, by default, installs it; it refreshes the
 machine database every few hours. This page explains what happens, how to
 change it, and what to do on hosts with no network access.
@@ -15,15 +15,15 @@ change it, and what to do on hosts with no network access.
 
 Every release is published at `https://max-morris.github.io/Cactup/`, where a
 small file, `latest.json`, names the newest build, its date, the machine
-database generation it uses (see [below](#machine-database-generations)), and
+database generation that it uses (see [below](#machine-database-generations)), and
 a download with its SHA-256 checksum for each supported platform.
 
-At most **once every 24 hours**, at the start of a command you type, cactup
+At most **once every 24 hours**, at the start of a command that you type, cactup
 fetches `latest.json` and compares it with its own build. The check:
 
 - only happens in an **interactive** session (when cactup's error output is a
   terminal), never when output is piped into a script;
-- **never happens in a batch job**: the commands a submit script runs on a
+- **never happens in a batch job**: the commands run by a submit script on a
   compute node (`sim run --sim-dir …`, `test run --test-dir …`, `build run
   --config-dir …`) neither check for updates nor touch the network;
 - is not made before `cactup knob` (you are configuring cactup, so nothing
@@ -41,7 +41,7 @@ What happens when a newer build exists depends on the `autoupdate` knob.
 
 | Value | What cactup does when a newer build is published |
 |---|---|
-| `auto` (default) | Downloads it, verifies its size and checksum, confirms it runs, installs it, and re-runs the command you typed with the new build |
+| `auto` (default) | Downloads it, verifies its size and checksum, confirms it runs, installs it, and re-runs the command that you typed with the new build |
 | `notify` | Prints one line, ``cactup <new> is available (you have <old>); run `cactup update` `` and carries on |
 | `off` | Nothing; cactup never checks on its own (`cactup update` still works) |
 
@@ -55,7 +55,7 @@ cactup -K autoupdate=off install      # skip the check for this one command
 An automatic update only replaces a cactup that the installer put in
 `~/.cactup/bin`. If you run a copy from somewhere else, or `~/.cactup/bin` is
 read-only, cactup tells you why it cannot update and keeps going with the
-build you have.
+build that you have.
 
 A download is checked against the published size and SHA-256 **before**
 anything runs it. If the file is not there yet or the checksum does not match,
@@ -91,7 +91,7 @@ propagating, wait a few minutes and run it again.
 
 ## Where builds live, and why jobs are safe
 
-Each build has an id: the short hash of the source commit it was built from.
+Each build has an id: the short hash of the source commit that it was built from.
 `cactup --version` shows it with the build date and the machine database
 generation, for example `cactup 0.1.0 (a1b2c3d 2026-09-24, mdb generation 2)`.
 
@@ -108,14 +108,14 @@ symbolic link to the current one:
 
 When you submit a simulation, test run, or queued build, the job script calls
 cactup by that versioned path (it is what the `@CACTUP@` template variable
-expands to), so **a job always runs the exact build it was submitted with**,
+expands to), so **a job always runs the exact build that it was submitted with**,
 even if cactup updates itself while the job waits in the queue. Installing an
 update swaps the link in one step and never modifies a file that a running
 cactup is using.
 
 Old builds are **never deleted automatically**: a restart chain can keep
-re-submitting itself under the build it started with for months, and every
-submit script it writes names that file. Each build costs about 11 MB. When
+re-submitting itself under the build that it started with for months, and
+every submit script that it writes names that file. Each build costs about 11 MB. When
 you know nothing is still running under old builds, `cactup update --prune`
 removes every build that was retired more than 30 days ago (never the
 current one, never the one that is running) and prints what it removed. A
@@ -149,7 +149,7 @@ cactup keeps its own git clone of the machine database under `~/.cactup/mdb`:
 ### Machine database generations
 
 The machine database format evolves with cactup. Each cactup build
-understands exactly one **generation** of it (the number `--version` shows),
+understands exactly one **generation** of it (the number shown by `--version`),
 and uses the newest revision of the database published for that generation.
 When the database moves to a newer generation that your build cannot read,
 your build keeps using the last revision of its own generation and says so,
@@ -164,7 +164,7 @@ Nothing breaks while you see this; your machines simply stop receiving
 fixes. `cactup update` installs a build of the new generation. With
 `autoupdate = auto` you will rarely see the message at all.
 
-Machines in your overlay record the generation they were written for, as
+Machines in your overlay record the generation that they were written for, as
 `mdb-generation` under `[cactup]` in their `meta.toml`
 (`cactup machine create` fills it in):
 
@@ -180,21 +180,21 @@ Machines in your overlay record the generation they were written for, as
   `cactup machine list` still lists such a machine, marked in yellow;
 - a machine written for a **newer** generation asks you to run `cactup update`.
 
-What the automatic update does and how to finish one it stopped is described in
+What the automatic update does and how to finish one that it stopped is described in
 [MDB Generations](../authors/mdb-generations.html#updating-an-overlay-machine).
 An optionlist file of your own that you build from with `--optionlist` follows
-the same format: if its `[cactup]` header uses keys a newer generation moved,
+the same format: if its `[cactup]` header uses keys moved by a newer generation,
 the next rebuild of that config stops and says where each key went.
 
 ## Files written by another cactup
 
 cactup's own files (the installation list, simulation and build records, your
 configs) each carry a format version. A newer cactup reads every older file
-it ever wrote, and does not touch a file it only reads; the file is upgraded
+that it ever wrote, and does not touch a file that it only reads; the file is upgraded
 the next time cactup saves it (a record that queued jobs read may be saved in
 an older format that still holds its content, so those jobs keep working). A
-cactup that is older than the one that wrote a file keeps the keys it does not
-know when it saves (cactup releases from before November 2026 do not), but
+cactup that is older than the one that wrote a file keeps the keys that it does
+not know when it saves (cactup releases from before November 2026 do not), but
 refuses a file whose format it cannot read at all:
 
 ```
@@ -202,12 +202,12 @@ refuses a file whose format it cannot read at all:
 ```
 
 Nothing is overwritten when you see this. Run `cactup update` (or use the
-newer cactup that wrote the file). A queued job runs the build it was
+newer cactup that wrote the file). A queued job runs the build that it was
 submitted with, so it is not affected by an update in between.
 
 `~/.cactup/credentials`, which holds your Cactarium token, is always readable
 only by you (mode 0600), however cactup rewrites it. Other files keep the
-permissions they have, so a shared Cactus tree stays readable by its group.
+permissions that they have, so a shared Cactus tree stays readable by its group.
 
 ## Offline hosts and firewalls
 
@@ -216,7 +216,7 @@ permissions they have, so a shared Cactus tree stays readable by its group.
 - **Machine database refreshes** give up after about five seconds without a
   connection (longer when the connection goes through a proxy, whether set in
   the environment or in git config), and after 30 seconds in which the server
-  sends nothing (five minutes at most in all). cactup then uses the copy it
+  sends nothing (five minutes at most in all). cactup then uses the copy that it
   already has, with one line saying it `could not reach` the server and how
   old that copy is, and does not retry for 6 hours. Ctrl-C abandons a refresh
   within a second, however it is going.
@@ -252,7 +252,7 @@ cactup knob mdb-url https://mirror.example.org/Cactup.git
 
 `autoupdate`, `update-url` and `mdb-url` describe your cactup installation,
 not a simulation: unlike the other knobs, they are not recorded with the
-simulations, builds and test runs you submit.
+simulations, builds and test runs that you submit.
 
 The installer takes the same site from its environment:
 `CACTUP_UPDATE_ROOT=https://mirror.example.org/cactup`.
@@ -267,16 +267,16 @@ installer honors it too:
 curl --proto '=https' --tlsv1.2 -sSf https://max-morris.github.io/Cactup/cactup-init.sh | CACTUP_HOME=/work/me/cactup sh
 ```
 
-Set it in your shell profile, next to the `PATH` line the installer added,
-so that every cactup you run agrees on where its home is.
+Set it in your shell profile, next to the `PATH` line added by the installer,
+so that every cactup that you run agrees on where its home is.
 
 ## Building cactup from source
 
-A cactup you build yourself with `cargo build` (debug or release) is a
+A cactup that you build yourself with `cargo build` (debug or release) is a
 **development build**: `--version` says `dev build`, it never checks for
 updates or updates itself, it reads the machine database straight from the
 `mdb/` directory of your source tree, and `cactup update` refuses with a
-reminder to use `git pull` and `cargo build`. Jobs you submit with it run
+reminder to use `git pull` and `cargo build`. Jobs that you submit with it run
 that binary from where it was built.
 
 ## Uninstalling
@@ -297,7 +297,7 @@ that binary from where it was built.
 
    To remove only the program and keep your data, delete `~/.cactup/bin`
    and `~/.cactup/mdb` instead.
-3. Remove the two lines the installer appended to each of `~/.profile`,
+3. Remove the two lines appended by the installer to each of `~/.profile`,
    `~/.bashrc`, `~/.bash_profile` and `~/.zshrc` that existed at the time:
 
    ```sh

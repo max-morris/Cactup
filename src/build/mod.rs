@@ -664,7 +664,7 @@ fn warn_disabled_overrides(
     println!(
         "{}",
         format!(
-            "warning: the mdb disables {} thorn(s) the thornlist enables; they will not be built:",
+            "warning: the mdb disables {} thorn(s) enabled by the thornlist; they will not be built:",
             overrides.len(),
         )
         .yellow()
@@ -765,7 +765,7 @@ pub enum RebuildDecision {
 /// state by ceasing to be readable as a git repo at all (`SourceChange`'s
 /// `vanished`), and a reason line that named the wrong cause would be worse
 /// than a general one.
-const FLESH_NOT_AS_BUILT: &str = "the Cactus flesh is not the commit this was built from";
+const FLESH_NOT_AS_BUILT: &str = "the Cactus flesh is not the commit that this was built from";
 
 /// How the source trees under a config differ from what it was built with
 /// (§7.4). A refetch is only one of the ways this happens — editing a thorn in
@@ -1353,7 +1353,7 @@ pub fn rebuild_decision(
             RebuildDecision::Incremental("thorn contents changed")
         }
         Some(_) if sources == SourceDelta::Thorns => {
-            RebuildDecision::Incremental("thorn sources are not the commits this was built from")
+            RebuildDecision::Incremental("thorn sources are not the commits that this was built from")
         }
         Some(_) if sources == SourceDelta::Edited => {
             RebuildDecision::Incremental("the source tree has local edits")
@@ -1442,7 +1442,7 @@ fn up_to_date_message(
             Some(format!("Config {name} is up to date ({same}, same tracked sources).")),
             Some(NO_STAMPS.to_owned()),
             untracked_line(untracked),
-            Some(format!("If files git does not track were regenerated since the last build, {AGAIN}.")),
+            Some(format!("If files not tracked by git were regenerated since the last build, {AGAIN}.")),
         ]);
     }
     let tracked = if untracked.is_empty() { "same sources" } else { "same tracked sources" };

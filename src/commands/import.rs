@@ -397,7 +397,7 @@ fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) ->
         (Some(_), None) => return Err(predates_multi_sim(client, &shown, "its answer names no sim")),
         (Some(want), Some(got)) => bail!("Asked Cactarium for the sim {want} of {owner}/{name}, and it answered with {got}"),
         (None, Some(got)) => bail!(
-            "Cactarium answered {req} with the sim {got}; name the sim you want, as {owner}/{name}/{got}"
+            "Cactarium answered {req} with the sim {got}; name the sim that you want, as {owner}/{name}/{got}"
         ),
         (None, None) => {}
     }
@@ -1605,7 +1605,7 @@ pub(crate) mod tests {
         let err = format!("{:#}", fetch_published(&client, tmp.path(), "et/s/a").unwrap_err());
         assert!(err.contains("the sim a of et/s, and it answered with b"), "{err}");
         let err = format!("{:#}", fetch_published(&client, tmp.path(), "et/s@1").unwrap_err());
-        assert!(err.contains("with the sim b; name the sim you want, as et/s/b"), "{err}");
+        assert!(err.contains("with the sim b; name the sim that you want, as et/s/b"), "{err}");
         assert!(!tmp.path().join("et").exists(), "nothing downloaded");
     }
 

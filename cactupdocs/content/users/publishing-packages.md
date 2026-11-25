@@ -49,8 +49,8 @@ needed-by = ["Z4c"]
   `Arrangement/Thorn/`, or in folders that do not name the arrangement
   used by the build.
 - **A dependency** is written for each requirement of the thorns' CCL files
-  (an implementation they inherit from, a capability, a function, a thorn,
-  a header they cannot compile without) that no thorn of the repository
+  (an implementation that they inherit from, a capability, a function,
+  a thorn, a header that they cannot compile without) that no thorn of the repository
   meets and exactly one installed thorn does: the one in the config's
   build, when the build has it. Its package is the dependency's target,
   its thorn is in `needs`, and the repository's thorns that require it are
@@ -76,16 +76,16 @@ how many there are.
 - **Several providers.** Carpet and PUGH both implement `driver`. The TODO
   lists them as a commented `any-of`; keep the one needed by your thorns,
   or all of them.
-- **A provider that is no released package**: in a repository nobody
-  registered, or at a commit no version froze, or at a version cactup
-  cannot read.
+- **A provider that is no released package**: in a repository that nobody
+  registered, or at a commit not frozen by any version, or at a version
+  that cactup cannot read.
 - **Nothing provides it** in the installation.
-- **Thorns the config does not build**, with a commented `exclude-thorns`:
+- **Thorns that the config does not build**, with a commented `exclude-thorns`:
   Cactarium publishes only what builds.
 - **An `#include` into another thorn's directory**
-  (`#include "../../Loop/src/loop.hxx"`): code the CCL does not declare.
-- **A thorn that inherits the generic `driver`** but includes a header only
-  one driver provides (`carpet.hh`): it may need that driver.
+  (`#include "../../Loop/src/loop.hxx"`): code that the CCL does not declare.
+- **A thorn that inherits the generic `driver`** but includes a header provided by
+  only one driver (`carpet.hh`): it may need that driver.
 - **A flesh fork in use**: these thorns may need it, which no CCL can say.
   The dependency on it is written out, commented.
 - **A fork** that lacks some of the upstream version's thorns (see below).
@@ -170,7 +170,7 @@ and `--owner` its owner (default: your Cactarium user). The stack:
   alone, as the installation does;
 - adds every other added package as a pinned section of
   `cactarium-stack.th`, written beside it. A package added at a branch
-  tip, at a commit no version froze, or with commits on top of its version
+  tip, at a commit not frozen by any version, or with commits on top of its version
   is pinned at the commit installed, never at a version;
 - lists, as `[[dependency]]` entries, the dependencies declared by the
   installed packages, each with a comment naming the package declaring

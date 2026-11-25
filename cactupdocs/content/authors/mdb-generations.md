@@ -13,7 +13,7 @@ need to catch up after a generation change.
 
 ## Why generations exist
 
-cactup reads `meta.toml` with a **closed schema**: a key it does not know is
+cactup reads `meta.toml` with a **closed schema**: a key that it does not know is
 an error, not something to skip. That strictness is what catches typos, but
 it also means an MDB that starts using a new key, even an optional one,
 cannot be read by a cactup built before that key existed. Other changes
@@ -65,18 +65,18 @@ change can break one direction and not the other; either is enough.
 
 | Area | Breaking changes |
 |---|---|
-| `meta.toml` schema | Any key or table the MDB starts using that the generation's first binary lacks, **even an optional one**; renaming, removing or retyping a key; a new required key; a changed default or meaning; stricter validation |
+| `meta.toml` schema | Any key or table that the MDB starts using and that the generation's first binary lacks, **even an optional one**; renaming, removing or retyping a key; a new required key; a changed default or meaning; stricter validation |
 | Scripts and flavors | The shape of a route in `[submitscripts]`, `[runscripts]` or `[buildsubmitscripts]`; the script-kind directories (`submitscripts/`, `runscripts/`, `buildsubmitscripts/`); how `.sh` and `.py` scripts are found; how flavors are discovered in `optionlists/` |
 | Templates | A new, renamed, removed or re-meant `@VAR@`; the `@ENV(…)@` and `@KNOB(…)@` forms (`-OPTIONAL`, `-OR-DROP-LINE`, and any new one); `@@`; how comments pass through; where the environment setup is placed |
 | `.py` scripts | The preamble and the calling protocol |
-| Re-invocations | The flags generated scripts pass back to cactup: `sim run --sim-dir/--restart-id`, `test run --test-dir/--results-id`, `build run --config-dir/--attempt-id` |
+| Re-invocations | The flags that generated scripts pass back to cactup: `sim run --sim-dir/--restart-id`, `test run --test-dir/--results-id`, `build run --config-dir/--attempt-id` |
 | Discovery | What `hostname.regexp` and `discover.py` mean |
 | Optionlists | Keys in the `[cactup]` header or its `[cactup.runs-on]` table (both are closed, like `meta.toml`); the render and `VERSION` rules |
 | Universes | `wrapper-argv`, `wrapper` and `@COMMAND@` |
 
 **Not breaking:** adding a machine, or editing values in an existing one,
-using only constructs the generation already has; comments; and cactup
-gaining support for something the MDB does not use yet.
+using only constructs that the generation already has; comments; and cactup
+gaining support for something that the MDB does not use yet.
 
 ## Bumping the generation
 
@@ -103,7 +103,7 @@ Do all of this in **one commit**:
    edits, notes a change that can only show up later as a loud error, and
    stops where the machine could quietly do something different. It never
    applies an optional change, never edits a script, and never writes a key
-   the new generation's first binary lacks. Its checks read the files as
+   that the new generation's first binary lacks. Its checks read the files as
    generation N wrote them, never through today's schema, which a later
    generation may change.
 4. Migrate every machine under `mdb/` in the repository to the new
@@ -131,7 +131,7 @@ generation.
 ## Overlay machines
 
 A machine in a user's overlay (`~/.cactup/machines/<name>/`) records the
-generation it was written for in its `meta.toml`:
+generation that it was written for in its `meta.toml`:
 
 ```toml
 [cactup]
@@ -156,7 +156,7 @@ the machine does without saying so, it stops instead and keeps whatever
 earlier steps it finished. The message names the machine and file, what
 stopped it, and the next step on a line of its own: the entry of
 `GENERATIONS.md` to follow by hand. Make that change, set `mdb-generation` to
-the generation the message names, and run any cactup command again; cactup
+the generation named by the message, and run any cactup command again; cactup
 carries on from there. If it says it could not update the machine just now
 (another cactup held it too long, or a file could not be read or written),
 nothing needs editing: clear that and run the command again. Notes the update prints (such as a setup that may now
@@ -166,7 +166,7 @@ not.
 An overlay written for generation 1 is not updated automatically: cactup
 refuses it untouched, and the recipe under Generation 2 is followed by hand.
 A machine whose `meta.toml` has no `mdb-generation` is assumed current and
-never rewritten (the warning says so, and names the generation its keys look
+never rewritten (the warning says so, and names the generation that its keys look
 like when they give it away).
 
 If the message offers to start over, it gives a command that moves the
