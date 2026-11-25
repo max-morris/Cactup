@@ -427,6 +427,9 @@ fn bounded_check(client: Client, inst: Installation, meta: InstallationMeta) -> 
             break Bounded::TimedOut;
         }
         match receive.recv_timeout(std::time::Duration::from_millis(50)) {
+            // A Ctrl-C between this loop's look at the flag and the answer: the check failed
+            // because it was stopped, and says so as one the loop saw first would.
+            Ok(Err(_)) if gix::interrupt::is_triggered() => break Bounded::Interrupted,
             Ok(found) => break Bounded::Done(found),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
