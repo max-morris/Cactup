@@ -113,8 +113,10 @@ pub(super) fn conflicts(
     None
 }
 
-/// A thorn's hard requirements, header includes left out: those are
-/// feature/include-closure's, and this branch checks as before the crate produced them.
+/// A thorn's hard requirements, header includes left out: what `claims check` reads. Whether a
+/// header counts depends on the thorns the check knows (`ccl::counts`), and Cactarium's
+/// providers answer names packages, not thorn facts; the closure check (`crate::closure`)
+/// refuses an unmet header where it matters, before a build.
 pub(super) fn needs_of(facts: &ThornFacts) -> Vec<Requirement> {
     ccl::needs_of(facts).into_iter().filter(|r| !matches!(r, Requirement::Include(_))).collect()
 }
@@ -130,9 +132,11 @@ fn enabled_facts(chosen: &BTreeMap<PkgId, Entry>) -> Vec<(&str, &ThornFacts)> {
 
 /// Every hard requirement of every thorn this command enables (a package brought in or moved:
 /// all its enabled thorns; a present one: the thorns new to it) that no enabled thorn of the
-/// set meets: (thorn, its package, the requirement), in plan order.
+/// set meets: (thorn, its package, the requirement), in plan order. Only requirements that
+/// `counts` (`Resolver::counts`: a header no known thorn provides is a hook, never unmet).
 pub(super) fn unmet_requirements(
     chosen: &BTreeMap<PkgId, Entry>,
+    counts: &dyn Fn(&ThornFacts, &Requirement) -> bool,
 ) -> Vec<(String, PkgId, Requirement)> {
     let enabled = enabled_facts(chosen);
     let mut entries: Vec<(&PkgId, &Entry)> = chosen.iter().collect();
@@ -141,8 +145,8 @@ pub(super) fn unmet_requirements(
     for (id, e) in entries {
         for name in e.enabled.iter().filter(|t| e.thorn_is_new(t)) {
             let Some(thorn) = e.release.thorn(name) else { continue };
-            for r in needs_of(&thorn.facts) {
-                if !enabled.iter().any(|(n, f)| ccl::meets(n, f, &r)) {
+            for r in ccl::needs_of(&thorn.facts) {
+                if !enabled.iter().any(|(n, f)| ccl::meets(n, f, &r)) && counts(&thorn.facts, &r) {
                     out.push((thorn.thorn.clone(), id.clone(), r));
                 }
             }
@@ -153,6 +157,7 @@ pub(super) fn unmet_requirements(
 
 /// The requirements of thorns the installation keeps that `before` (the thorns it had) met and
 /// the set no longer does: what replacing a base repo's checkouts, or the flesh, takes away.
+/// (A header `before` provided is one a known thorn provides, so it always counts.)
 pub(super) fn broken_requirements(
     chosen: &BTreeMap<PkgId, Entry>,
     before: &[(String, ThornFacts)],
@@ -162,7 +167,7 @@ pub(super) fn broken_requirements(
     for (id, e) in chosen.iter().filter(|(_, e)| !e.is_new()) {
         for name in e.enabled.iter().filter(|t| !e.thorn_is_new(t)) {
             let Some(thorn) = e.release.thorn(name) else { continue };
-            for r in needs_of(&thorn.facts) {
+            for r in ccl::needs_of(&thorn.facts) {
                 let now = enabled.iter().any(|(n, f)| ccl::meets(n, f, &r));
                 if !now && before.iter().any(|(n, f)| ccl::meets(n, f, &r)) {
                     out.push((thorn.thorn.clone(), id.clone(), r));
@@ -175,8 +180,8 @@ pub(super) fn broken_requirements(
 
 #[cfg(test)]
 mod tests {
-    /// A header a thorn includes is no requirement on this branch (feature/include-closure's);
-    /// every other kind is as the crate gives it.
+    /// A header a thorn includes is no requirement to `claims check`; every other kind is as
+    /// the crate gives it.
     #[test]
     fn includes_are_left_out() {
         let mut facts = cactup_ecosystem_common::ccl::ThornFacts::scan("IMPLEMENTS: z\nINHERITS: grid", None);

@@ -30,7 +30,6 @@ fn requirement_key(r: &Requirement) -> String {
         Requirement::Capability(n) => ("capability", n),
         Requirement::Thorn(n) => ("thorn", n),
         Requirement::Function(n) => ("function", n),
-        // feature/include-closure's: never produced on this branch (see `conflict::needs_of`).
         Requirement::Include(n) => ("include", n),
     };
     format!("{kind}:{}", name.to_ascii_lowercase())

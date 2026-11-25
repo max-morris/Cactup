@@ -2133,6 +2133,13 @@ fn prepare_with_cache(
         }
         return Ok(Prepared::UpToDate(stored));
     }
+    // A list that builds a thorn without what it needs fails here, in
+    // seconds and before any queue, naming the thorn — not in `make`,
+    // possibly an hour later (§7.5). Only a list cactup can read is checked:
+    // one it cannot is `make`'s to judge, as it always was.
+    if let Some(list) = &parsed_list {
+        crate::closure::refuse_unmet(list, &cactus_root, &format!("Not building config {name}"))?;
+    }
     if let Some(why) = &no_sources
         && stamping
     {
