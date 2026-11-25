@@ -1,0 +1,29 @@
+{
+  "about": "An any-of takes an alternative the installation has",
+  "packages": [
+    "max--z4c--anyof",
+    "et--carpet",
+    "et--cactuspugh"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "present": [
+    {
+      "package": "et/cactuspugh",
+      "version": "2026.5.0",
+      "enabled": [
+        "PUGH",
+        "PUGHSlab"
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named"
+    ],
+    "choices": [
+      "any of et/carpet, et/cactuspugh: already installed"
+    ]
+  }
+}

@@ -61,6 +61,9 @@ hostname    = "rostam1.rostam.cct.lsu.edu"
 [paths]
 install-home    = "/work/@USER@/cactup"
 simulation-home = "/work/@USER@/simulations"
+# Where `cactup import` keeps the downloaded and unpacked inputs of shared
+# simulations: big, so beside the simulations, not in the home quota.
+inputs-home = "/work/@USER@/inputs"
 test-home       = "/work/@USER@/tests"
 
 # The login node; each queue below overrides what differs on its nodes.
@@ -177,8 +180,9 @@ fi
 submit          = "sbatch @SCRIPTFILE@ 2>&1"
 blocking-submit = "sbatch --wait @SCRIPTFILE@ 2>&1"
 get-status      = "squeue -j @JOB_ID@"
-# What squeue says (on stderr) of a job Slurm no longer knows.
-unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'
+# What squeue says of a job it no longer lists: the error (on stderr) once
+# Slurm has forgotten it, or only its header line just after it ended.
+unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified|^ *JOBID '
 # One-call form `sim list` uses so it needn't ask job by job; `%i %t (%r)`
 # is what keeps the patterns below matching.
 get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"

@@ -146,7 +146,7 @@ The same engine expands submit/run scripts, build submit scripts, optionlists,
     every character is scanned.
 
 Two **computed** token families read values that are not variables. Each has a
-required form and two optional forms:
+required form, two optional forms and a drop-line form:
 
 | Token | Expands to |
 |---|---|
@@ -156,11 +156,47 @@ required form and two optional forms:
 | `@KNOB(name)@` | the knob `name`; **error** if unset or empty |
 | `@KNOB-OPTIONAL(name)@` | the knob, or the empty string |
 | `@KNOB-OPTIONAL(name, default)@` | the knob, or `default` |
+| `@ENV-OR-DROP-LINE(NAME)@` | `NAME`; if unset or empty, the **whole line** is removed |
+| `@KNOB-OR-DROP-LINE(name)@` | the knob; if unset or empty, the **whole line** is removed |
 
 Environment variable names are `UPPER_SNAKE`; knob names are kebab-case
 (lowercase letters, digits after the first character, dashes inside). The
-required forms take no default — that would defeat them — and blanks around
-the pieces are fine.
+required and drop-line forms take no default — that would defeat them — and
+blanks around the pieces are fine.
+
+**Drop-line tokens** are for a line that must not go out with an empty value.
+A scheduler reads `#SBATCH -A ` with nothing after it as "the account is the
+next directive", so a machine where an account is optional writes:
+
+```bash
+#SBATCH -A @KNOB-OR-DROP-LINE(allocation)@
+```
+
+With an allocation set (`cactup knob allocation ACCOUNT`, or `-a ACCOUNT` for
+one command) the line reads `#SBATCH -A ACCOUNT`; with none, it is not there at
+all. A machine that requires an account writes `@KNOB(allocation)@` instead,
+and a submit with none refuses before anything is queued. The rules:
+
+- If a line has several drop-line tokens and any of them is empty, the line
+  goes. The other tokens on it are still checked (an unknown `@NAME@` is
+  still an error).
+- A drop-line token in a comment does nothing, like any token there.
+- They work in `.sh` scripts, optionlists and parfiles. They are an error in
+  a single command (the `[scheduler]` commands, `[build].make`, a universe
+  `wrapper`), where dropping the line would leave no command at all, and in
+  `[paths]` values and `wrapper-argv` words, which have no lines.
+- They are an error on a line that runs on into the next, or on a line that
+  continues one. In a shell script that is a line ending in a backslash, a
+  line ending inside a quoted string, a line ending in `|`, `&&` or `||`,
+  and a line that opens a heredoc (a heredoc's body lines may go). In an
+  optionlist it is a line ending in a backslash; in a parfile, a `"…"`
+  string spanning lines. Dropping half a command breaks the rest, so give
+  the token a line of its own.
+- A value in the middle of a line, such as `srun -A` inside a quoted command,
+  can't use one. Use a shell expansion there instead:
+  `alloc='@KNOB-OPTIONAL(allocation)@'`, then `${alloc:+-A "$alloc"}`.
+
+Drop-line tokens need MDB generation 5 or later.
 
 The **default value** is written one of three ways:
 
@@ -369,6 +405,39 @@ knob refuses the run with the same message cactup would print for the token.
 `knob(name, default)` mirrors `@KNOB-OPTIONAL(name, default)@`, and the raw
 `knobs` dict is there when you want `in`/`.get()`. Environment variables are
 plain `os.environ`. The same conventions hold for a `.py` **parfile**.
+
+An account directive never goes out empty: `#SBATCH -A ` with nothing after it
+makes sbatch read the next directive as the account. Read the allocation from
+the `allocation` knob: `-a ACCOUNT` sets it for one command, and it already
+holds a simulation's own value where there is one. (`ALLOCATION` and
+`@ALLOCATION@` still work, as aliases of that knob, but new scripts should not
+need them.) In a `.sh` script, where the site does not require an account:
+
+```bash
+#SBATCH -A @KNOB-OR-DROP-LINE(allocation)@
+```
+
+and where it does, `#SBATCH -A @KNOB(allocation)@`, which refuses the submit
+when none is set and says to pass `-a` or set the knob. In a `.py` script:
+
+```python
+allocation = knob("allocation", "")
+if allocation:
+    lines.append(f"#SBATCH -A {allocation}")
+```
+
+or, where the site rejects a job without one, a refusal that names both ways
+to give it:
+
+```python
+allocation = knob("allocation", "")
+if not allocation:
+    raise CactupError(
+        f"{MACHINE} needs an allocation: pass -a ACCOUNT, or set it once with "
+        "`cactup knob allocation ACCOUNT`"
+    )
+lines.append(f"#SBATCH -A {allocation}")
+```
 
 Python is useful for complex script generation, but shell is simpler for most machines.
 

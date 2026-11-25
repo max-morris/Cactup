@@ -20,8 +20,9 @@ lines.append("#SBATCH --ntasks-per-node={0}".format(TASKS_PER_NODE))
 lines.append("#SBATCH --cpus-per-task={0}".format(CPUS_PER_TASK))
 if typed['GPU']:
     lines.append("#SBATCH --gpus-per-task={0}".format(GPUS_PER_TASK))
-if ALLOCATION:
-    lines.append("#SBATCH --account={0}".format(ALLOCATION))
+allocation = knob("allocation", "")
+if allocation:
+    lines.append("#SBATCH --account={0}".format(allocation))
 if MAIL:
     lines.append("#SBATCH --mail-user={0}".format(MAIL))
     lines.append("#SBATCH --mail-type={0}".format(MAIL_TYPE.upper()))

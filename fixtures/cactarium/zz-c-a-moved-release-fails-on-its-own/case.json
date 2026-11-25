@@ -1,0 +1,39 @@
+{
+  "about": "Under --upgrade an unread base package moves to a release; a failure at a release is no unread failure: the release that fits",
+  "packages": [
+    "max--zzx",
+    "max--zzy",
+    "et--admbase"
+  ],
+  "specs": [
+    "max/zzx"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "unknown": "abababababababababababababababababababab",
+      "thorns": [
+        "ADMBase",
+        "ADMCoupling",
+        "StaticConformal"
+      ],
+      "base": "admbase",
+      "enabled": [
+        "ADMBase"
+      ],
+      "stand_in": true
+    }
+  ],
+  "options": {
+    "upgrade": true
+  },
+  "expect": {
+    "plan": [
+      "add max/zzx@1.0.0 ZX named",
+      "upgrade et/admbase #abababababab -> 2026.5.0 ADMBase, StaticConformal needed by max/zzx@1.0.0 (--upgrade)",
+      "replace base repo admbase with et/admbase",
+      "add max/zzy@1.0.0 ZY needed by max/zzx@1.0.0",
+      "note: keeping et/admbase#abababababab was not considered: max/zzx@1.0.0 needs StaticConformal of et/admbase#abababababab, and Cactarium did not read et/admbase there: et/admbase is at a commit unknown to Cactarium (is it pushed?)"
+    ]
+  }
+}

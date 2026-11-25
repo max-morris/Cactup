@@ -23,7 +23,7 @@ pub fn trash_dir(sim_home: &Path) -> PathBuf {
 /// frequently on different filesystems, §8.1). Returns the cache entry path.
 pub fn ensure_cached(sim_home: &Path, build_id: &str, exe_src: &Path) -> Res<PathBuf> {
     let dir = cache_dir(sim_home);
-    fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+    fs::create_dir_all(&dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
     let entry = dir.join(build_id);
     if entry.is_file() {
         return Ok(entry);
@@ -33,12 +33,12 @@ pub fn ensure_cached(sim_home: &Path, build_id: &str, exe_src: &Path) -> Res<Pat
         // name so a concurrent create never sees a half-written binary.
         let temp = dir.join(format!(".{build_id}.{}", std::process::id()));
         fs::copy(exe_src, &temp)
-            .with_context(|| format!("Failed to copy {} into the cache", exe_src.display()))?;
+            .with_context(|| format!("Failed to copy '{}' into the cache", exe_src.display()))?;
         if let Err(e) = fs::rename(&temp, &entry) {
             let _ = fs::remove_file(&temp);
             // A concurrent create may have won the rename; that's fine.
             if !entry.is_file() {
-                return Err(e).with_context(|| format!("Failed to move {} into place", entry.display()));
+                return Err(e).with_context(|| format!("Failed to move '{}' into place", entry.display()));
             }
         }
     }
@@ -50,16 +50,16 @@ pub fn ensure_cached(sim_home: &Path, build_id: &str, exe_src: &Path) -> Res<Pat
 /// Ensures the result is executable.
 pub fn link_into(cache_entry: &Path, dst: &Path) -> Res<()> {
     if dst.exists() {
-        fs::remove_file(dst).with_context(|| format!("Failed to replace {}", dst.display()))?;
+        fs::remove_file(dst).with_context(|| format!("Failed to replace '{}'", dst.display()))?;
     }
     if fs::hard_link(cache_entry, dst).is_err() {
         fs::copy(cache_entry, dst)
-            .with_context(|| format!("Failed to copy {} to {}", cache_entry.display(), dst.display()))?;
+            .with_context(|| format!("Failed to copy '{}' to '{}'", cache_entry.display(), dst.display()))?;
     }
     let mut perms = fs::metadata(dst)?.permissions();
     perms.set_mode(perms.mode() | 0o755);
     fs::set_permissions(dst, perms)
-        .with_context(|| format!("Failed to make {} executable", dst.display()))?;
+        .with_context(|| format!("Failed to make '{}' executable", dst.display()))?;
     Ok(())
 }
 
@@ -72,7 +72,7 @@ pub fn gc(sim_home: &Path, keep: Option<&str>) -> Res<Vec<String>> {
     let mut reaped = Vec::new();
     let entries = match fs::read_dir(&dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(reaped),
-        other => other.with_context(|| format!("Failed to read {}", dir.display()))?,
+        other => other.with_context(|| format!("Failed to read '{}'", dir.display()))?,
     };
     for entry in entries {
         let entry = entry?;
@@ -92,8 +92,8 @@ pub fn gc(sim_home: &Path, keep: Option<&str>) -> Res<Vec<String>> {
 
 /// Recursive copy for the cross-filesystem trash fallback (§8.7).
 fn copy_dir_all(src: &Path, dst: &Path) -> Res<()> {
-    fs::create_dir_all(dst).with_context(|| format!("Failed to create {}", dst.display()))?;
-    for entry in fs::read_dir(src).with_context(|| format!("Failed to read {}", src.display()))? {
+    fs::create_dir_all(dst).with_context(|| format!("Failed to create '{}'", dst.display()))?;
+    for entry in fs::read_dir(src).with_context(|| format!("Failed to read '{}'", src.display()))? {
         let entry = entry?;
         let ty = entry.file_type()?;
         let to = dst.join(entry.file_name());
@@ -104,7 +104,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Res<()> {
             std::os::unix::fs::symlink(target, &to)?;
         } else {
             fs::copy(entry.path(), &to)
-                .with_context(|| format!("Failed to copy {}", entry.path().display()))?;
+                .with_context(|| format!("Failed to copy '{}'", entry.path().display()))?;
         }
     }
     Ok(())
@@ -115,12 +115,12 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Res<()> {
 /// filesystems. Returns the trash destination.
 pub fn move_to_trash(sim_home: &Path, sim_dir: &Path, simulation_id: &str) -> Res<PathBuf> {
     let trash = trash_dir(sim_home);
-    fs::create_dir_all(&trash).with_context(|| format!("Failed to create {}", trash.display()))?;
+    fs::create_dir_all(&trash).with_context(|| format!("Failed to create '{}'", trash.display()))?;
     let dst = trash.join(simulation_id);
     if fs::rename(sim_dir, &dst).is_err() {
         copy_dir_all(sim_dir, &dst)?;
         fs::remove_dir_all(sim_dir)
-            .with_context(|| format!("Failed to remove {} after trashing", sim_dir.display()))?;
+            .with_context(|| format!("Failed to remove '{}' after trashing", sim_dir.display()))?;
     }
     Ok(dst)
 }

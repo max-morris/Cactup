@@ -1,0 +1,46 @@
+{
+  "slug": "max/bbfork",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "a1fef86caf8b302f9833abcf8bc9b499be6c2807",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/bbfork.git",
+      "thorns": [
+        {
+          "arrangement": "Bbfork",
+          "thorn": "BB",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "BB",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "fork-of",
+          "target": "et/bb",
+          "range": "=1.0.0",
+          "note": null
+        }
+      ]
+    }
+  ]
+}

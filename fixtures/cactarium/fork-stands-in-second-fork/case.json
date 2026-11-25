@@ -1,0 +1,36 @@
+{
+  "about": "Of two forks in play, the one that stands in takes the need, whichever sorts first",
+  "packages": [
+    "max--z4c--carpetx-loop",
+    "et--carpetx",
+    "max--carpetx-mp--covers-2026-4",
+    "max--carpetx-xp--covers-2026-5-1"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "present": [
+    {
+      "package": "max/carpetx-mp",
+      "version": "1.0.0",
+      "enabled": [
+        "CarpetX",
+        "Loop"
+      ]
+    },
+    {
+      "package": "max/carpetx-xp",
+      "version": "1.0.0",
+      "enabled": [
+        "CarpetX",
+        "Loop"
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named",
+      "keep max/carpetx-xp max/carpetx-xp@1.0.0 stands in for et/carpetx"
+    ]
+  }
+}

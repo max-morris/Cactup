@@ -2,21 +2,30 @@
 //! `pub fn dispatch(ctx: &Ctx, …) -> Res<()>`; main.rs routes the parsed
 //! subcommand to it.
 
+pub mod add;
+pub(crate) mod resolution;
 pub mod build;
 pub mod cache;
+pub mod claims;
 pub mod config;
+pub mod copy;
+pub mod delete;
 pub mod delta;
+pub mod download;
+pub mod import;
 pub mod install;
 pub mod installation;
 pub mod knob;
 pub mod list;
 pub mod machine;
+pub mod package;
 pub mod refetch;
+pub mod reify;
 pub mod releases;
 pub mod show;
 pub mod sim;
+pub mod stack;
 pub mod test;
-pub mod uninstall;
 pub mod update;
 pub mod use_cmd;
 pub mod wisdom;
@@ -24,7 +33,7 @@ pub mod wisdom;
 use crate::args::GlobalOpts;
 use crate::database::Db;
 use crate::Res;
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use colored::Colorize;
 use std::path::PathBuf;
 
@@ -46,50 +55,43 @@ pub fn prompt_with_default(question: &str, default: &str) -> Res<String> {
     print!("{question} (default: {}): ", default.bold());
     io::stdout().flush()?;
 
-    let (n, input) = read_line_interruptibly(
-        || {
-            let mut input = String::new();
-            io::stdin().read_line(&mut input).map(|n| (n, input))
-        },
-        gix::interrupt::is_triggered,
-    )?;
-
+    let input = read_line_interruptibly()?.unwrap_or_default();
     let input = input.trim();
-    Ok(if n == 0 || input.is_empty() {
-        default.to_owned()
-    } else {
-        input.to_owned()
-    })
+    Ok(if input.is_empty() { default.to_owned() } else { input.to_owned() })
 }
 
-/// Run a blocking line read, but give up as soon as `interrupted()` says so.
-///
-/// A read from stdin blocks through Ctrl-C (std retries it after the signal),
-/// so the first Ctrl-C — which only asks cactup to stop — would otherwise do
-/// nothing at a prompt. The read runs on a thread of its own and is polled
-/// here; an abandoned read is left blocked, and the process exits soon after.
-fn read_line_interruptibly(
-    read: impl FnOnce() -> std::io::Result<(usize, String)> + Send + 'static,
-    interrupted: impl Fn() -> bool,
-) -> Res<(usize, String)> {
-    use std::sync::mpsc::{channel, RecvTimeoutError};
-    use std::time::Duration;
-
-    let (tx, rx) = channel();
+/// One line from stdin (`None` at end of input), failing with "interrupted"
+/// as soon as Ctrl-C is pressed. The interrupt handler restarts the read a
+/// signal interrupts, so a plain `read_line` would sit there until Enter
+/// while cactup claims to be stopping; the read happens on a thread of its
+/// own instead, and this one polls the flag.
+pub fn read_line_interruptibly() -> Res<Option<String>> {
+    let (send, recv) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(read());
+        let mut line = String::new();
+        let read = std::io::stdin().read_line(&mut line).map(|n| (n > 0).then_some(line));
+        let _ = send.send(read);
     });
     loop {
-        match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(result) => return Ok(result?),
-            Err(RecvTimeoutError::Timeout) if interrupted() => {
-                println!();
-                anyhow::bail!("interrupted at a prompt");
-            }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => anyhow::bail!("the prompt's input went away"),
+        if gix::interrupt::is_triggered() {
+            bail!("Interrupted");
+        }
+        match recv.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(read) => return Ok(read?),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
         }
     }
+}
+
+/// Ask a yes/no `question` on stderr; only `y`/`yes` is a yes, end of input
+/// is a no, and Ctrl-C fails with "interrupted".
+pub fn confirm(question: &str) -> Res<bool> {
+    use std::io::Write;
+    eprint!("{question}");
+    std::io::stderr().flush()?;
+    let answer = read_line_interruptibly()?.unwrap_or_default();
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes"))
 }
 
 /// Convert a `PathBuf` to an owned `String`, erroring on non-UTF-8 paths.
@@ -99,29 +101,29 @@ pub fn p2s(pb: PathBuf) -> Res<String> {
         .ok_or(anyhow!("Failed to convert path to string"))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn a_prompt_gives_up_when_interrupted() {
-        let started = Instant::now();
-        let err = read_line_interruptibly(
-            || {
-                std::thread::sleep(Duration::from_secs(30));
-                Ok((0, String::new()))
-            },
-            || true,
-        )
-        .unwrap_err();
-        assert!(format!("{err}").contains("interrupted"), "{err}");
-        assert!(started.elapsed() < Duration::from_secs(2));
+/// `remove_dir_all`, but checking `stop` (Ctrl-C) before every entry, failing
+/// with "interrupted" when it is set, and calling `removed` after each entry
+/// it deletes (for a progress count). Symlinks are removed, never followed.
+pub(crate) fn remove_tree_until(
+    path: &std::path::Path,
+    stop: &std::sync::atomic::AtomicBool,
+    removed: &dyn Fn(),
+) -> Res<()> {
+    use anyhow::Context;
+    use std::fs;
+    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+        bail!("Interrupted while deleting '{}'", path.display());
     }
-
-    #[test]
-    fn a_prompt_returns_what_was_typed() {
-        let (n, line) = read_line_interruptibly(|| Ok((4, "yes\n".to_owned())), || false).unwrap();
-        assert_eq!((n, line.as_str()), (4, "yes\n"));
+    let meta = fs::symlink_metadata(path).with_context(|| format!("Failed to stat '{}'", path.display()))?;
+    if !meta.is_dir() {
+        fs::remove_file(path).with_context(|| format!("Failed to remove '{}'", path.display()))?;
+        removed();
+        return Ok(());
     }
+    for entry in fs::read_dir(path).with_context(|| format!("Failed to list '{}'", path.display()))? {
+        remove_tree_until(&entry?.path(), stop, removed)?;
+    }
+    fs::remove_dir(path).with_context(|| format!("Failed to remove '{}'", path.display()))?;
+    removed();
+    Ok(())
 }

@@ -37,7 +37,7 @@ impl serde::Serialize for Walltime {
 
 fn parse_field(s: &str, what: &str, original: &str) -> Res<u64> {
     if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
-        bail!("invalid walltime '{original}': {what} is not a number (expected (DD-)?HH:MM:SS)");
+        bail!("Invalid walltime '{original}': {what} is not a number (expected (DD-)?HH:MM:SS)");
     }
     Ok(s.parse::<u64>()?)
 }
@@ -69,18 +69,18 @@ impl Walltime {
                 (0, parse_field(mm, "the MM field", s)?, parse_field(ss, "the SS field", s)?)
             }
             [ss] if !has_day_prefix => (0, 0, parse_field(ss, "the SS field", s)?),
-            _ => bail!("invalid walltime '{s}': expected (DD-)?HH:MM:SS"),
+            _ => bail!("Invalid walltime '{s}': expected (DD-)?HH:MM:SS"),
         };
 
         if has_day_prefix && hh > 23 {
-            bail!("invalid walltime '{s}': HH must be < 24 when a DD- day prefix is present");
+            bail!("Invalid walltime '{s}': HH must be < 24 when a DD- day prefix is present");
         }
         // Trailing fields are bounded; the most-significant present field may
         // overflow (it absorbs the elided components' magnitude).
         let ss_bounded = fields.len() >= 2;
         let mm_bounded = fields.len() >= 3;
         if (mm_bounded && mm > 59) || (ss_bounded && ss > 59) {
-            bail!("invalid walltime '{s}': trailing MM/SS fields must be < 60");
+            bail!("Invalid walltime '{s}': trailing MM/SS fields must be < 60");
         }
 
         Ok(Walltime(days * 86400 + hh * 3600 + mm * 60 + ss))

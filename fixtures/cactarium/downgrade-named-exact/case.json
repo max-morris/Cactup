@@ -1,0 +1,23 @@
+{
+  "about": "a named exact version below the present one is a downgrade, said so",
+  "packages": [
+    "et--carpetx--pending"
+  ],
+  "specs": [
+    "et/carpetx@=2026.5.1"
+  ],
+  "present": [
+    {
+      "package": "et/carpetx",
+      "version": "2026.6.0",
+      "enabled": [
+        "CarpetX"
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "downgrade et/carpetx 2026.6.0 -> 2026.5.1 CarpetX, Loop named"
+    ]
+  }
+}

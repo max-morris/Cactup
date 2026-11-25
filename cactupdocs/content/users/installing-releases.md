@@ -146,21 +146,99 @@ You can also override the active installation for a single command:
 cactup --installation myrelease config list
 ```
 
-## Uninstalling
+## Deleting an installation
 
-Remove an installation:
+Delete an installation:
 
 ```sh
-cactup uninstall myrelease
+cactup inst delete myrelease
 ```
 
 cactup will ask for confirmation. Skip the prompt:
 
 ```sh
-cactup uninstall myrelease --force
+cactup inst delete myrelease --force
 ```
 
-This removes the installation directory and any symlinks, but preserves simulation data under `simulation-home`.
+This deletes the Cactus tree, with its configs and builds, and what cactup
+keeps beside it in the installation directory; the directory itself goes too
+once that leaves it empty. Anything else in it is kept, so an installation
+made with `--install-prefix ~/src` takes only `~/src/Cactus` and cactup's own
+files with it. The symlink at the default place (`~/Cactus`) is removed while
+it still points at the deleted tree; a symlink made elsewhere with
+`--symlink-prefix` or `--symlink-name` is left for you to remove. Simulation
+and test output under `simulation-home` and `test-home` is kept, but cactup
+no longer lists those simulations and test runs.
+
+cactup refuses while a build of one of the installation's configs is running
+or queued; stop it first with `cactup build stop`, or pass `--force`. If you
+interrupt the deletion, run the same command again to finish it.
+
+## Copying an installation
+
+Copy an installation to a new one, to try something without touching the
+original:
+
+```sh
+cactup inst cp myrelease experiment
+```
+
+The copy lands in `~/.cactup/cacti/experiment` (or wherever your
+`install-home` says); pass `--install-prefix` to put it somewhere else. It
+gets the whole source tree, with every repo's history, local changes and
+commits, the live thornlist and anything else you keep in the Cactus
+directory, and the packages `cactup add` put there.
+
+It does not get the configs and their builds: a build records where its
+sources were, so a copied one would keep reading the original's files. Build
+them again in the copy (`cactup -I experiment build sim`); the build cache
+spares most of the compiling. The copy also starts with no simulations or
+test runs, and with simulation and test homes of its own, named for its
+alias.
+
+If you interrupt the copy, nothing is registered; running the same command
+again starts over.
+
+### Symbolic copies
+
+A symbolic copy takes seconds and almost no space, whatever the size of the
+original:
+
+```sh
+cactup inst cp -s myrelease experiment
+```
+
+Each file in it is a link to the same file in `myrelease`, until something
+changes it. A refetch or `cactup add` in `experiment`, or a `git checkout` you
+run there, gives each file it changes a copy of its own and leaves the rest
+as links, so `myrelease` is never touched. `cactup inst list` and
+`cactup inst show` say which installations are symbolic copies, and of what.
+
+Two things to know:
+
+- **Edit by hand only what is its own.** An editor may write through a link
+  into the original's file. Make the files you are about to edit its own
+  first, by path (relative to the Cactus directory, or to where you are):
+
+  ```sh
+  cactup inst reify experiment repos/carpetx
+  ```
+
+- **It follows the original.** A file `experiment` has not made its own
+  changes when `myrelease`'s does, for example when you refetch
+  `myrelease`. cactup says so when you do. To keep the copy as it is, make it
+  wholly its own first:
+
+  ```sh
+  cactup inst reify experiment
+  ```
+
+  After that it no longer depends on `myrelease`. Until then cactup refuses
+  to delete `myrelease`.
+
+Inside a symbolic copy, `git status` shows each linked file as a type change
+(`T`); cactup's own checks (`inst delta`, a refetch's check for local changes)
+know a link stands for its file.
 
 ## Updating an installation (refetch)
 
@@ -287,7 +365,7 @@ conformance:
 cactup inst show myrelease
 # release:      ET_2026_05
 # now on:       ET_2026_11 (refetched)
-# conformance:  INCOMPLETE — 1 repo(s) FAILED to fetch and 1 repo(s) were skipped; 4 thorn(s) on disk do not match the thornlist above.
+# conformance:  INCOMPLETE: 1 repo(s) FAILED to fetch, 1 skipped; 4 thorn(s) differ from the thornlist.
 #                 Failed:
 #                   carpetx — connection reset by peer
 #                     CarpetX/Algo, CarpetX/BoxUtils
@@ -295,11 +373,12 @@ cactup inst show myrelease
 #                   mclachlan — local commits
 #                     McLachlan/ML_BSSN, McLachlan/ML_ADMConstraints
 #                 Retry the failed repo(s) with `cactup inst refetch`.
-#                 Fetch over the skipped ones with `cactup inst refetch -f` (modified files are backed up first); `cactup inst delta` shows what differs.
+#                 Fetch over the skipped ones with `cactup inst refetch -f` (backs up modified files).
+#                 See what differs with `cactup inst delta`.
 ```
 
-When nothing failed the header softens to `PARTIAL — N repo(s) were
-skipped, …` and only the yellow skipped group appears. At most six thorns
+When nothing failed the header softens to `PARTIAL: N repo(s)
+skipped; …` and only the yellow skipped group appears. At most six thorns
 are named per repo and eight repos in total, each capped with a `+N more`
 tail; `cactup inst delta` has the unabridged picture.
 
@@ -346,6 +425,12 @@ rebuilding would cost — use `cactup config delta`.
 
 {{cactup:cli command="installation delta"}}
 
+{{cactup:cli command="installation delete"}}
+
+{{cactup:cli command="installation cp"}}
+
+{{cactup:cli command="installation reify"}}
+
 ## Global flags for installation commands
 
 {{cactup:cli command="install"}}
@@ -355,8 +440,6 @@ rebuilding would cost — use `cactup config delta`.
 {{cactup:cli command="installation show"}}
 
 {{cactup:cli command="use"}}
-
-{{cactup:cli command="uninstall"}}
 
 ## Installation locations
 

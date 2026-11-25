@@ -1,0 +1,49 @@
+{
+  "slug": "et/lib-c",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "cee87feb973252d81f039bee259c57cd0c521c9b",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/lib-c.git",
+      "thorns": [
+        {
+          "arrangement": "Lib-c",
+          "thorn": "C",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "C",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/lib-d",
+          "range": null,
+          "needs": [
+            "D"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

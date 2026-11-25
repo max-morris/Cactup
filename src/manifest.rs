@@ -6,7 +6,7 @@ use anyhow::{anyhow, Context};
 use gix::protocol::fetch::Tags;
 use gix::refs::transaction::{Change, PreviousValue, RefEdit, RefLog};
 use gix::remote::Direction;
-use prodash::render::line::{JoinHandle, StreamKind};
+use prodash::render::line::StreamKind;
 use prodash::Root;
 use crate::Res;
 
@@ -34,31 +34,164 @@ pub(crate) fn setup_prodash_if_tty() -> (ProgressHandle, Option<JoinHandle>) {
 /// Like [`setup_prodash`], but lets a caller cap which tree levels the
 /// renderer draws (e.g. hiding gix's per-thread delta-resolution children)
 /// and opt into throughput display (needed for byte-unit progress like
-/// downloads). Every renderer gets a 500ms initial delay regardless — a run
-/// that finishes (or finds nothing to do) inside that window never flashes a
-/// bar at all.
+/// downloads). Every renderer starts drawing after a 500ms delay regardless
+/// — a run that finishes (or finds nothing to do) inside that window never
+/// flashes a bar at all — and draws the whole tree as it is then.
 pub(crate) fn setup_prodash_with(
     level_filter: Option<std::ops::RangeInclusive<prodash::progress::key::Level>>,
     throughput: bool,
 ) -> (ProgressHandle, JoinHandle) {
-    let progress = prodash::tree::Root::new();
-
-    let progress_renderer_options = prodash::render::line::Options {
+    let progress = new_root();
+    let options = prodash::render::line::Options {
         frames_per_second: 6.0,
         hide_cursor: true, // signal-hook feature restores cursor on exit
         level_filter,
         throughput,
-        initial_delay: Some(std::time::Duration::from_millis(500)),
+        // The delay is ours (see `JoinHandle`): prodash's draws a frame only
+        // when the tree changed, and counts changes during its delay as
+        // seen, so a line that settled in the first 500ms was never drawn.
+        initial_delay: None,
         ..Default::default()
-    }.auto_configure(StreamKind::Stderr);
+    }
+    .auto_configure(StreamKind::Stderr);
+    let renderer = JoinHandle::start(&progress, options, std::time::Duration::from_millis(500), Arc::new(stderr));
+    (progress, renderer)
+}
 
-    let progress_renderer = prodash::render::line::render(
-        std::io::stderr(),
-        progress.downgrade(),
-        progress_renderer_options
-    );
+/// How many scrollback messages (`done`, `info`, `fail`) the tree keeps
+/// between two frames: prodash's default of 20 loses the start of a burst (a
+/// refetch pinning 80 repos), and a frame drains only what is still there.
+const MESSAGES: usize = 1000;
 
-    (progress, progress_renderer)
+/// A progress tree that keeps [`MESSAGES`] messages.
+fn new_root() -> ProgressHandle {
+    prodash::tree::root::Options { initial_capacity: 100, message_buffer_capacity: MESSAGES }.into()
+}
+
+/// The renderer of a phase's progress, started only once the phase has run
+/// for `delay`. prodash's own initial delay cannot stand in for this: its
+/// renderer draws a frame only when the tree has changed since the last
+/// tick, and the ticks during its delay count, so whatever settled before
+/// the delay was over (a request that takes a minute, the line of a wait)
+/// stayed blank until something moved. Started late, its first frame draws
+/// the whole tree. Shut down before it started, it starts nothing, but
+/// prints the messages items left (the renderer prints those, terminal or
+/// not).
+pub(crate) struct JoinHandle {
+    out: Output,
+    state: Arc<std::sync::Mutex<Started>>,
+    starter: Option<std::thread::JoinHandle<()>>,
+    stop: Option<std::sync::mpsc::Sender<()>>,
+    progress: std::sync::Weak<prodash::tree::Root>,
+    options: Option<prodash::render::line::Options>,
+}
+
+/// Where a renderer draws: stderr, but for a test.
+type Output = Arc<dyn Fn() -> Box<dyn std::io::Write + Send> + Send + Sync>;
+
+fn stderr() -> Box<dyn std::io::Write + Send> {
+    Box::new(std::io::stderr())
+}
+
+#[derive(Default)]
+struct Started {
+    renderer: Option<prodash::render::line::JoinHandle>,
+    /// The phase is over: never start.
+    done: bool,
+}
+
+impl JoinHandle {
+    fn start(
+        progress: &ProgressHandle,
+        options: prodash::render::line::Options,
+        delay: std::time::Duration,
+        out: Output,
+    ) -> JoinHandle {
+        let state = Arc::new(std::sync::Mutex::new(Started::default()));
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let weak = Arc::downgrade(progress);
+        let starter = {
+            let (state, weak, options, out) = (state.clone(), weak.clone(), copy_options(&options), out.clone());
+            std::thread::Builder::new()
+                .name("progress delay".into())
+                .spawn(move || {
+                    // Woken early (or orphaned) by a shutdown: nothing to draw.
+                    if !matches!(stopped.recv_timeout(delay), Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
+                        return;
+                    }
+                    let mut state = state.lock().expect("progress renderer poisoned");
+                    if !state.done {
+                        state.renderer = Some(prodash::render::line::render(out(), weak, options));
+                    }
+                })
+                .expect("failed to spawn the progress delay thread")
+        };
+        JoinHandle { out, state, starter: Some(starter), stop: Some(stop), progress: weak, options: Some(options) }
+    }
+
+    /// Stop drawing, clear the bars, and wait for the renderer to finish.
+    pub(crate) fn shutdown_and_wait(mut self) {
+        self.finish();
+    }
+
+    fn finish(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(starter) = self.starter.take() {
+            let _ = starter.join();
+        }
+        let renderer = {
+            let mut state = self.state.lock().expect("progress renderer poisoned");
+            state.done = true;
+            state.renderer.take()
+        };
+        match renderer {
+            Some(renderer) => {
+                renderer.shutdown_and_wait();
+                // It printed the messages: the drop that follows
+                // `shutdown_and_wait` must not print them again.
+                self.options = None;
+            }
+            None => self.print_messages(),
+        }
+    }
+
+    /// The messages a phase that ended before drawing left, printed as the
+    /// renderer prints them, and no bar.
+    fn print_messages(&mut self) {
+        let (Some(progress), Some(mut options)) = (self.progress.upgrade(), self.options.take()) else { return };
+        let mut messages = Vec::new();
+        progress.copy_messages(&mut messages);
+        if messages.is_empty() {
+            return;
+        }
+        options.output_is_terminal = false;
+        options.hide_cursor = false;
+        prodash::render::line::render((self.out)(), Arc::downgrade(&progress), options).shutdown_and_wait();
+    }
+}
+
+impl Drop for JoinHandle {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+/// prodash's options are not `Clone`.
+fn copy_options(o: &prodash::render::line::Options) -> prodash::render::line::Options {
+    prodash::render::line::Options {
+        output_is_terminal: o.output_is_terminal,
+        colored: o.colored,
+        timestamp: o.timestamp,
+        terminal_dimensions: o.terminal_dimensions,
+        hide_cursor: o.hide_cursor,
+        level_filter: o.level_filter.clone(),
+        initial_delay: o.initial_delay,
+        frames_per_second: o.frames_per_second,
+        throughput: o.throughput,
+        keep_running_if_progress_is_empty: o.keep_running_if_progress_is_empty,
+    }
 }
 
 /// `1..=default_max`, overridable via `CACTUP_PROGRESS_DEPTH` (any `u8 >=
@@ -108,23 +241,43 @@ pub fn ensure_manifest_repo(cactup_root: &Path, manifest_url: &str) -> Res<Repos
     if need_clone {
         headline.phase("fetching for the first time");
 
-        fs::create_dir_all(&manifest_dir)
-           .with_context(|| "Failed to create manifest directory")?;
+        // Retried from the top on a transient failure: gix deletes the
+        // (empty) directory it cloned into when the clone does not finish.
+        // Watched (Ctrl-C, a remote gone quiet): one given up on, whose gix
+        // may never return, is deleted here instead — only when it is this
+        // process's own: the directory was empty when this attempt began and
+        // its clone got going there (a first run racing this one may have
+        // started its clone in it first, and gix refuses a non-empty one).
+        let repo = crate::fetch::retry::with_backoff(&mut headline, |headline| {
+            let fresh = manifest_dir.read_dir().map_or(true, |mut entries| entries.next().is_none());
+            fs::create_dir_all(&manifest_dir)
+               .with_context(|| "Failed to create manifest directory")?;
 
-        let mut prepare =
-            gix::prepare_clone(manifest_url, &manifest_dir)?
-                .configure_remote(|r| {
-                    Ok(r.with_fetch_tags(Tags::All))
-                });
+            let ours = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (url, dir, started) = (manifest_url.to_owned(), manifest_dir.clone(), ours.clone());
+            let fetched = crate::fetch::git::watched(manifest_url, headline, move |headline, cancel| {
+                let mut prepare =
+                    gix::prepare_clone(url.as_str(), &dir)?
+                        .configure_remote(|r| {
+                            Ok(r.with_fetch_tags(Tags::All))
+                        });
+                started.store(true, std::sync::atomic::Ordering::SeqCst);
 
-        // gix renames whatever item it's given as the fetch moves through
-        // phases and hangs its own bars off it; the Line keeps all of that
-        // on the one headline, so the label follows the phase and the bar
-        // never splits in two.
-        let (repo, _) = prepare.fetch_only(
-            &mut headline,
-            &gix::interrupt::IS_INTERRUPTED
-        ).with_context(|| "Failed to fetch manifest")?;
+                // gix renames whatever item it's given as the fetch moves through
+                // phases and hangs its own bars off it; the Line keeps all of that
+                // on the one headline, so the label follows the phase and the bar
+                // never splits in two.
+                let (repo, _) = prepare.fetch_only(&mut *headline, cancel)
+                    .with_context(|| "Failed to fetch manifest")?;
+                Ok(repo)
+            });
+            if fetched.is_err() && fresh && ours.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = fs::remove_dir_all(&manifest_dir);
+            }
+            fetched
+        })
+        // A transport's own words may quote the URL, credentials and all.
+        .map_err(|e| anyhow!(crate::fetch::git::scrub(&format!("{e:#}"), manifest_url)))?;
 
         headline.succeeded("fetched");
         progress_renderer.shutdown_and_wait();
@@ -159,13 +312,27 @@ pub fn ensure_manifest_repo(cactup_root: &Path, manifest_url: &str) -> Res<Repos
 
         repo.edit_references(tag_deletions)?;
 
-        let remote =
-            repo.find_fetch_remote(None)? // origin
-                .with_fetch_tags(Tags::All);
+        let url = repo.find_fetch_remote(None)? // origin
+            .url(Direction::Fetch)
+            .map_or_else(|| manifest_url.to_owned(), |u| u.to_bstring().to_string());
 
-        remote.connect(Direction::Fetch)?
-              .prepare_fetch(&mut headline, Default::default())?
-              .receive(&mut headline, &gix::interrupt::IS_INTERRUPTED)?;
+        // Nothing moves until the pack is in, so a transient failure is
+        // retried from the connect. Watched: Ctrl-C, a remote gone quiet.
+        crate::fetch::retry::with_backoff(&mut headline, |headline| {
+            let repo = repo.clone();
+            crate::fetch::git::watched(&url, headline, move |headline, cancel| {
+                repo.find_fetch_remote(None)? // origin
+                    .with_fetch_tags(Tags::All)
+                    .connect(Direction::Fetch)?
+                    .prepare_fetch(&mut *headline, Default::default())?
+                    .receive(&mut *headline, cancel)?;
+                Ok(())
+            })
+        })
+        .map_err(|e| {
+            let said = crate::fetch::git::scrub(&format!("{e:#}"), &url);
+            anyhow!(crate::fetch::git::scrub(&said, manifest_url))
+        })?;
 
         headline.succeeded("up to date");
         progress_renderer.shutdown_and_wait();
@@ -242,7 +409,7 @@ impl<'repo> Release<'repo> {
     /// see [`MASTER_REF`].
     fn master(repo: &'repo Repository) -> Res<Self> {
         let master = repo.find_reference(MASTER_REF)
-                         .with_context(|| format!("the manifest repository has no {MASTER_REF}"))?;
+                         .with_context(|| format!("The manifest repository has no {MASTER_REF}"))?;
         Self::at(repo, MASTER.to_owned(), master)
     }
 
@@ -289,13 +456,147 @@ impl<'repo> Release<'repo> {
             tree.lookup_entry_by_path(&path)?
                 .ok_or({
                     let path_name = path.as_ref().to_str().ok_or(anyhow!("Invalid path"))?;
-                    anyhow!("File {} not found", path_name)
+                    anyhow!("File '{}' not found", path_name)
                 })?
                 .object()?
                 .into_blob()
                 .data
                 .clone()
         )
+    }
+}
+
+#[cfg(test)]
+mod renderer_tests {
+    use super::*;
+
+    /// What a renderer wrote, shared with the test.
+    #[derive(Clone, Default)]
+    struct Sink(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Sink {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn renderer(progress: &ProgressHandle, sink: &Sink) -> JoinHandle {
+        renderer_on(progress, sink, true)
+    }
+
+    fn renderer_on(progress: &ProgressHandle, sink: &Sink, terminal: bool) -> JoinHandle {
+        let options = prodash::render::line::Options {
+            output_is_terminal: terminal,
+            colored: false,
+            frames_per_second: 20.0,
+            terminal_dimensions: (100, 20),
+            ..Default::default()
+        };
+        let sink = sink.clone();
+        let out: Output = Arc::new(move || Box::new(sink.clone()) as Box<dyn std::io::Write + Send>);
+        JoinHandle::start(progress, options, std::time::Duration::from_millis(300), out)
+    }
+
+    /// A line that settled before the renderer's delay was over (a request
+    /// that takes a minute, started at once) is drawn once the delay is
+    /// over, not when something next moves.
+    #[test]
+    fn a_line_that_settled_early_is_drawn() {
+        let progress = prodash::tree::Root::new();
+        let sink = Sink::default();
+        let renderer = renderer(&progress, &sink);
+        let layout = crate::progress::Layout::for_names(["a request"]);
+        let mut headline = crate::progress::Headline::over(progress.add_child("ask"), "ask", 1, "requests", layout.clone());
+        let line = crate::progress::Line::over(headline.add_child("a request"), "a request", layout);
+        line.phase("waiting for the answer".to_owned());
+        std::thread::sleep(std::time::Duration::from_millis(900));
+        let drawn = String::from_utf8_lossy(&sink.0.lock().unwrap()).into_owned();
+        assert!(drawn.contains("waiting for the answer"), "{drawn:?}");
+        drop(line);
+        headline.inc();
+        renderer.shutdown_and_wait();
+    }
+
+    /// A burst of a hundred messages, before the renderer starts and while
+    /// it runs, all reach the scrollback, in order (not a terminal: only the
+    /// messages are written).
+    #[test]
+    fn a_burst_of_messages_is_printed_whole_and_in_order() {
+        for after_start in [false, true] {
+            let progress = new_root();
+            let sink = Sink::default();
+            let renderer = renderer_on(&progress, &sink, false);
+            if after_start {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            let mut item = progress.add_child("refetch");
+            for i in 0..100 {
+                item.done(format!("message {i:03}"));
+            }
+            drop(item);
+            if after_start {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            renderer.shutdown_and_wait();
+            let drawn = String::from_utf8_lossy(&sink.0.lock().unwrap()).into_owned();
+            let seen: Vec<usize> = (0..100).filter_map(|i| drawn.find(&format!("message {i:03}"))).collect();
+            assert_eq!(seen.len(), 100, "after start {after_start}: {drawn:?}");
+            assert!(seen.windows(2).all(|w| w[0] < w[1]), "after start {after_start}: out of order");
+        }
+    }
+
+    /// Each message is printed once, whether it came before the renderer
+    /// started or while it ran (not a terminal, as in a job log); the drop
+    /// that follows a shutdown prints nothing more.
+    #[test]
+    fn a_message_is_printed_once() {
+        for after_start in [false, true] {
+            let progress = new_root();
+            let sink = Sink::default();
+            let renderer = renderer_on(&progress, &sink, false);
+            if after_start {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            let layout = crate::progress::Layout::for_names(["fetch", "repo"]);
+            let mut headline = crate::progress::Headline::over(progress.add_child("fetch"), "fetch", 1, "components", layout.clone());
+            let line = crate::progress::Line::counting(headline.add_child("repo"), "repo", layout);
+            line.succeeded("cloned it");
+            drop(line);
+            headline.inc();
+            if after_start {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+            drop(headline);
+            renderer.shutdown_and_wait();
+            let drawn = String::from_utf8_lossy(&sink.0.lock().unwrap()).into_owned();
+            assert_eq!(drawn.matches("cloned it").count(), 1, "after start {after_start}: {drawn:?}");
+        }
+    }
+
+    /// A phase over before the delay draws nothing at all (no bar flashes,
+    /// not even the cursor escapes); one that left a message prints it.
+    #[test]
+    fn a_short_phase_draws_nothing_but_its_messages() {
+        for message in [false, true] {
+            let progress = prodash::tree::Root::new();
+            let sink = Sink::default();
+            let renderer = renderer(&progress, &sink);
+            let mut item = progress.add_child("quick");
+            if message {
+                item.info("something worth saying".to_owned());
+            }
+            drop(item);
+            renderer.shutdown_and_wait();
+            let drawn = String::from_utf8_lossy(&sink.0.lock().unwrap()).into_owned();
+            assert_eq!(drawn.contains("something worth saying"), message, "{drawn:?}");
+            if !message {
+                assert!(drawn.is_empty(), "{drawn:?}");
+            }
+        }
     }
 }
 

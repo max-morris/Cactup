@@ -1,0 +1,32 @@
+{
+  "about": "An unmapped base repo has the thorn name of a package a dependency brings in: `satisfies` is named, as that is what stands in for a dependency",
+  "packages": [
+    "max--z4c--carpetx",
+    "et--carpetx"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "present": [
+    {
+      "package": "local:carpetx",
+      "unknown": "2222222222222222222222222222222222222222",
+      "thorns": [
+        "CarpetX",
+        "Loop"
+      ],
+      "base": "carpetx",
+      "enabled": [
+        "CarpetX",
+        "Loop"
+      ]
+    }
+  ],
+  "expect": {
+    "refusal": "SameThorn",
+    "message": [
+      "both have a thorn CarpetX",
+      "Pass --replace to use et/carpetx in place of base repo carpetx, or `cactup claims override satisfies local:carpetx et/carpetx`"
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "about": "Named et/d takes its newest once et/p's move takes the ^1 away (no endless restarts)",
+  "packages": [
+    "et--p--needs-d",
+    "et--d"
+  ],
+  "specs": [
+    "et/d",
+    "et/p"
+  ],
+  "present": [
+    {
+      "package": "et/p",
+      "version": "1.0.0",
+      "enabled": [
+        "P"
+      ]
+    },
+    {
+      "package": "et/d",
+      "version": "1.5.0",
+      "enabled": [
+        "D"
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "upgrade et/d 1.5.0 -> 2.0.0 D named",
+      "upgrade et/p 1.0.0 -> 2.0.0 P named"
+    ]
+  }
+}

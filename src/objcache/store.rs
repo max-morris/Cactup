@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 
 /// The entry format, and the name of the directory its entries live in. A
 /// cactup with another format writes beside this one and never reads it
-/// (no backward compatibility, §2.4).
+/// (a cache: a fresh namespace, §2.5).
 pub const FORMAT: u32 = 4;
 
 /// An entry's first line.

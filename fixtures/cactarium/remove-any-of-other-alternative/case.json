@@ -1,0 +1,69 @@
+{
+  "about": "An any-of still met by another present alternative does not block the removal",
+  "packages": [
+    "max--z4c--anyof",
+    "et--carpet",
+    "et--cactuspugh"
+  ],
+  "present": [
+    {
+      "package": "max/z4c",
+      "version": "1.2.0",
+      "enabled": [
+        "Z4c",
+        "Z4cTest"
+      ]
+    },
+    {
+      "package": "et/carpet",
+      "version": "2026.5.0",
+      "enabled": [
+        "CarpetSlab"
+      ]
+    },
+    {
+      "package": "et/cactuspugh",
+      "version": "2026.5.0",
+      "enabled": [
+        "PUGHSlab"
+      ]
+    }
+  ],
+  "remove": {
+    "targets": [
+      "et/carpet"
+    ],
+    "added-for": {
+      "max/z4c": {
+        "requested": true,
+        "for-commit": "current"
+      },
+      "et/carpet": {
+        "requested": false,
+        "by": [
+          "max/z4c@1.2.0"
+        ],
+        "for-commit": "current",
+        "choices": [
+          {
+            "dependent": "max/z4c",
+            "alternatives": [
+              "et/carpet",
+              "et/cactuspugh"
+            ]
+          }
+        ]
+      },
+      "et/cactuspugh": {
+        "requested": false,
+        "for-commit": "current"
+      }
+    }
+  },
+  "expect": {
+    "removed": [
+      "et/carpet"
+    ],
+    "orphans": []
+  }
+}

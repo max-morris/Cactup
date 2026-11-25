@@ -9,7 +9,10 @@
 # env-setup after the leading directive/comment block (design §6.1), so the
 # #PBS lines stay on top. (This was a .py script back when env-setup was
 # inserted right after the shebang.)
-#PBS -A @ALLOCATION@
+# Account required: LSU/LONI clusters reject a job without an allocation. The
+# allocation knob, which -a sets for one command; with none, cactup refuses
+# before submitting.
+#PBS -A @KNOB(allocation)@
 #PBS -q @QUEUE@
 #PBS -r n
 #PBS -l walltime=@WALLTIME@

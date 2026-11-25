@@ -1,0 +1,80 @@
+{
+  "slug": "et/zf",
+  "versions": [
+    {
+      "version": "2.0.0",
+      "track": null,
+      "tag": "v2.0.0",
+      "commit": "47fe4f8feb1fc6370bf31ecf7291b05e69849ee8",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/zf.git",
+      "thorns": [
+        {
+          "arrangement": "Zf",
+          "thorn": "Z",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Z",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    },
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "e93a275c60a5d14fc424ad05f0e25a501cf82095",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/zf.git",
+      "thorns": [
+        {
+          "arrangement": "Zf",
+          "thorn": "Z",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Z",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/newflesh",
+          "range": null,
+          "note": null
+        }
+      ]
+    }
+  ]
+}

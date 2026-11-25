@@ -1,0 +1,20 @@
+{
+  "about": "Two constraints no single release meets",
+  "packages": [
+    "max--z4c--carpetx-grhydro",
+    "et--carpetx",
+    "max--grhydro"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "expect": {
+    "refusal": "NoReleaseFits",
+    "message": [
+      "No release of et/carpetx meets every constraint on it",
+      "et/carpetx ^2026.5 (from max/z4c@1.2.0)",
+      "et/carpetx ~2026.4 (from max/grhydro@1.0.0)",
+      "Pass --ignore-claim with one of: max/grhydro:dependency:et/carpetx, max/z4c:dependency:et/carpetx"
+    ]
+  }
+}

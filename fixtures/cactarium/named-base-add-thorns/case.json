@@ -1,0 +1,27 @@
+{
+  "about": "A named base package gets more thorns at the release the base has",
+  "packages": [
+    "et--admbase"
+  ],
+  "specs": [
+    "et/admbase/StaticConformal"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "version": "2026.4.0",
+      "base": "admbase",
+      "enabled": [
+        "ADMBase"
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add et/admbase@2026.4.0 StaticConformal named"
+    ],
+    "records": [
+      "et/admbase requested by []"
+    ]
+  }
+}

@@ -50,6 +50,12 @@ cactup build run myconfig       # always foreground, even if the machine can sub
 cactup build submit myconfig    # always submit — errors if the machine can't
 ```
 
+On a workstation (the built-in `generic` machine, or one `cactup machine
+create` made from it) there is no batch system: `build submit` starts the
+build in the background on this host, as `sim submit` does a simulation, and
+prints its process id as the job id. Log out and it keeps going; `build log`
+and `build stop` work on it as on any queued build.
+
 `build submit` accepts `--follow` to stream the build's output and block
 until it finishes, instead of returning as soon as the job is queued:
 
@@ -59,7 +65,10 @@ cactup build submit myconfig --follow
 
 It also accepts `--block`, which waits for the queued build to finish
 before returning but — unlike `--follow` — prints no build output along the
-way; just the job id up front and the final verdict. Use `--block` in a
+way; just the job id, a line showing the job's state and how long it has
+waited (on a terminal), and the final verdict. On a machine whose
+`blocking-submit` is `sbatch --wait`, the job id may only show once the
+build is over. Use `--block` in a
 script that must not continue until the build is done, and `--follow` when
 you want to watch it happen. The two are mutually exclusive. Either way,
 Ctrl-C only detaches your terminal — the queued build keeps running and you
@@ -901,13 +910,13 @@ installation rather than a job.
 
 **"has several optionlist flavors (…) and none is marked default = true; pick one with --flavor"**: Your machine has multiple optionlist flavors and none is the default. Use `cactup machine show --flavors` to list them, then `--flavor <name>`.
 
-**"no optionlist flavor named \<name\> (known: …)"**: Check the spelling against the list in the message, or `cactup machine show --flavors`.
+**"No optionlist flavor named \<name\> (known: …)"**: Check the spelling against the list in the message, or `cactup machine show --flavors`.
 
-**"was built with optionlist flavor \<name\>, which machine \<m\> no longer has"**: this config records a flavor the machine definition has since renamed or dropped, so a rebuild has nothing to build. The message lists what the machine does offer now — pick one with `--flavor`, or build from your own file with `--optionlist`.
+**"was built with flavor \<name\>, which machine \<m\> no longer has"**: this config records a flavor the machine definition has since renamed or dropped, so a rebuild has nothing to build. The message lists what the machine does offer now — pick one with `--flavor`, or build from your own file with `--optionlist`.
 
-**"mixes quoted and unquoted values"**: an `--optionlist` file has to be written in one of the three accepted formats, not a blend of two. Either quote every string (the TOML forms) or quote none of them (the native `.cfg` form) — the message names the two lines that disagree.
+**"Optionlist mixes TOML and native-Cactus values"**: an `--optionlist` file has to be written in one of the three accepted formats, not a blend of two. Either quote every string (the TOML forms) or quote none of them (the native `.cfg` form) — the message names the two lines that disagree.
 
-**"was built from optionlist \<path\>, which is no longer readable"**: the file you built this config from was moved or deleted, and the config has no snapshot to fall back on. Pass `--optionlist` with the file's new location, or `--flavor` to switch to one of the machine's own.
+**"Optionlist \<path\> of config \<name\> is unreadable and has no snapshot"**: the file you built this config from was moved or deleted, and the config has no snapshot to fall back on. Pass `--optionlist` with the file's new location, or `--flavor` to switch to one of the machine's own.
 
 **Build fails**: `cactup build show myconfig` reports the most recent attempt's outcome, and `cactup build log myconfig` shows its output. Both find the right attempt automatically — there's no build log path to remember (see "Where build output goes" above).
 

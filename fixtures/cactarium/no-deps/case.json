@@ -1,0 +1,22 @@
+{
+  "about": "--no-deps adds only what was named; libraries are still placed",
+  "packages": [
+    "max--z4c--carpetx-fuka",
+    "et--carpetx",
+    "et--fuka"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "options": {
+    "no-deps": true
+  },
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named"
+    ],
+    "libraries": [
+      "et/fuka@1.2.0: src/fuka by max/z4c"
+    ]
+  }
+}

@@ -1,0 +1,165 @@
+[machine]
+name = "qbd"
+nickname = "fixture"
+location = "LONI"
+description = "Auto-configured"
+status = "personal"
+hostname = "fixture.example.org"
+
+[paths]
+install-home = "/scratch/fixture-home/cacti"
+simulation-home = "/scratch/fixture-home/simulations"
+test-home = "/work/@USER@/tests"
+
+[hardware]
+max-cpus-per-node = 16
+default-cpus-per-task = 32
+memory = 65536
+
+[build]
+make = "make -j@MAKEJOBS@"
+make-jobs = 64
+default-action = "submit"
+queue = "single"
+walltime = "4:00:00"
+nodes = 1
+tasks = 1
+cpus-per-task = 64
+
+[environment]
+env-setup = """
+  module purge &&
+  module load cuda/12.2.1 gcc/11.4.0
+  export PATH="/ddnB/project/sbrandt/externals-qbd/install/mpi/bin:$PATH"
+  export LD_LIBRARY_PATH="/usr/local/packages/compilers/gcc/13.2.0/lib64:/ddnB/project/sbrandt/externals-qbd/install/mpi/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+"""
+
+[scheduler]
+submit = "sbatch @SCRIPTFILE@ 2>&1"
+blocking-submit = "sbatch --wait @SCRIPTFILE@ 2>&1"
+allocation-env = "SLURM_JOB_ID"
+get-status = "squeue -j @JOB_ID@"
+unknown-job-pattern = "slurm_load_jobs error: Invalid job id specified"
+get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
+stop = "scancel @JOB_ID@"
+submit-pattern = 'Submitted batch job (\d+)'
+status-pattern = "@JOB_ID@ "
+queued-pattern = " PD "
+running-pattern = " (CF|CG|R|TO) "
+holding-pattern = '\(JobHeldUser\)'
+exec-host = "hostname -s"
+exec-host-pattern = '(\S+)'
+max-walltime = "24:00:00"
+
+[queues.gpu2]
+gpu = true
+default = true
+max-gpus-per-node = 2
+max-walltime = "3-00:00:00"
+
+[queues.gpu4]
+gpu = true
+max-gpus-per-node = 4
+max-walltime = "3-00:00:00"
+default-cpus-per-task = 16
+
+[queues.single]
+gpu = false
+max-walltime = "7-00:00:00"
+default-cpus-per-task = 8
+
+[queues.workq]
+gpu = false
+max-walltime = "3-00:00:00"
+default-cpus-per-task = 8
+
+[queues.checkpt]
+gpu = false
+max-walltime = "3-00:00:00"
+default-cpus-per-task = 8
+
+[queues.bigmem]
+gpu = false
+max-walltime = "3-00:00:00"
+default-cpus-per-task = 8
+
+[submitscripts.default]
+queues = [
+    "gpu2",
+    "gpu4",
+]
+
+[submitscripts.cpu]
+queues = [
+    "single",
+    "workq",
+    "checkpt",
+    "bigmem",
+]
+
+[submitscripts.test]
+queues = [
+    "gpu2",
+    "gpu4",
+]
+test = true
+
+[submitscripts.test-cpu]
+queues = [
+    "single",
+    "workq",
+    "checkpt",
+    "bigmem",
+]
+test = true
+
+[runscripts.default]
+queues = [
+    "gpu2",
+    "gpu4",
+]
+
+[runscripts.cpu]
+queues = [
+    "single",
+    "workq",
+    "checkpt",
+    "bigmem",
+]
+
+[runscripts.test]
+queues = [
+    "gpu2",
+    "gpu4",
+]
+test = true
+
+[runscripts.test-cpu]
+queues = [
+    "single",
+    "workq",
+    "checkpt",
+    "bigmem",
+]
+test = true
+
+[buildsubmitscripts.gpu-partition]
+queues = [
+    "gpu2",
+    "gpu4",
+]
+
+[buildsubmitscripts.cpu-partition]
+queues = [
+    "single",
+    "workq",
+    "checkpt",
+    "bigmem",
+]
+
+[cactup]
+mdb-generation = 3
+
+[cactup.origin]
+from = "qbd"
+hash = "017b34924b081436"

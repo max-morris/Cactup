@@ -1,0 +1,28 @@
+{
+  "about": "q 2.0.0 needs p ^1, which needs q ^1: the search goes on to q 1.0.0, which moves p to 2.0.0",
+  "packages": [
+    "et--p--n1",
+    "et--q--n1"
+  ],
+  "specs": [
+    "et/q"
+  ],
+  "present": [
+    {
+      "package": "et/p",
+      "version": "1.0.0",
+      "enabled": [
+        "P"
+      ]
+    }
+  ],
+  "options": {
+    "upgrade": true
+  },
+  "expect": {
+    "plan": [
+      "add et/q@1.0.0 Q named",
+      "upgrade et/p 1.0.0 -> 2.0.0 P needed by et/q@1.0.0, ^2 (--upgrade)"
+    ]
+  }
+}

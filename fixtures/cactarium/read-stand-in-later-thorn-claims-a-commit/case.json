@@ -1,0 +1,43 @@
+{
+  "about": "A read stand-in's thorn wanted only by a package of a later wave claims a commit: its claims are followed again, so the commit is read before the search",
+  "packages": [
+    "max--zzn2",
+    "max--zzy2",
+    "max--zzc"
+  ],
+  "snapshots": [
+    "et--zzq--at-3434--a3-needs-zzc-commit",
+    "max--zzc--at-7878"
+  ],
+  "specs": [
+    "max/zzn2"
+  ],
+  "present": [
+    {
+      "package": "et/zzq",
+      "unknown": "3434343434343434343434343434343434343434",
+      "thorns": [
+        "A1",
+        "A2",
+        "A3"
+      ],
+      "base": "zzq",
+      "enabled": [
+        "A1"
+      ],
+      "stand_in": true
+    }
+  ],
+  "expect": {
+    "reads": [
+      "et/zzq@343434343434",
+      "max/zzc@787878787878"
+    ],
+    "plan": [
+      "add max/zzn2@1.0.0 N2 named",
+      "add et/zzq#343434343434 A2, A3 needed by max/zzn2@1.0.0",
+      "add max/zzy2@1.0.0 Y2 needed by max/zzn2@1.0.0",
+      "add max/zzc#787878787878 C needed by et/zzq#343434343434 (A3), #787878787878"
+    ]
+  }
+}

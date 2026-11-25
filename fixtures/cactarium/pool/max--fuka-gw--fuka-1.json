@@ -1,0 +1,47 @@
+{
+  "slug": "max/fuka-gw",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "ccd5c4f51d829f6fd9e84a094f31e1dc23e12a57",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/fuka-gw.git",
+      "thorns": [
+        {
+          "arrangement": "Fuka-gw",
+          "thorn": "FukaGW",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "FukaGW",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/fuka",
+          "range": "^1",
+          "into": "lib/fuka",
+          "note": null
+        }
+      ]
+    }
+  ]
+}

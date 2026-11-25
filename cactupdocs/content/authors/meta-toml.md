@@ -66,7 +66,7 @@ max-walltime = "24:00:00"
 # Overlay machines only (~/.cactup/machines/<name>/): the MDB generation
 # this file was written for. `cactup machine create` fills it in.
 [cactup]
-mdb-generation = 3
+mdb-generation = 5
 ```
 
 See [MDB Generations](mdb-generations.html) for what `mdb-generation` means
@@ -74,7 +74,10 @@ and how to update a machine written for an older generation.
 
 A `[paths]` key may also be `build-cache-home`, where the build cache keeps
 its objects; no machine needs it, since the cache's default is beside the
-installations in `install-home`. Every `[paths]` key is a default for each
+installations in `install-home`. And `inputs-home` is where `cactup import`
+keeps the files and unpacked archives a shared simulation needs (default
+`~/.cactup/inputs`); on a cluster, put it on the same work or scratch
+filesystem as `simulation-home`, since inputs are often large. Every `[paths]` key is a default for each
 user: a knob of the same name, an absolute path, wins over it.
 
 ## Detailed field reference
@@ -119,7 +122,7 @@ blocking-submit = "sbatch --wait @SCRIPTFILE@"
 allocation-env = "SLURM_JOB_ID"
 get-status = "squeue -j @JOB_ID@"
 get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
-unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'
+unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified|^ *JOBID '
 stop = "scancel @JOB_ID@"
 submit-pattern = "Submitted batch job ([0-9]+)"
 status-pattern = "@JOB_ID@ "
@@ -260,7 +263,7 @@ blocking-submit = "sbatch --wait @SCRIPTFILE@"
 allocation-env = "SLURM_JOB_ID"
 get-status = "squeue -j @JOB_ID@"
 get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
-unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'
+unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified|^ *JOBID '
 stop = "scancel @JOB_ID@"
 submit-pattern = "Submitted batch job ([0-9]+)"
 status-pattern = "@JOB_ID@ "
@@ -282,9 +285,13 @@ delete`; every other command asks job by job with `get-status`.
 `unknown-job-pattern` (optional) is a regular expression matching a line of
 `get-status`'s output, stdout or stderr, that says the scheduler does not
 know the job, `@JOB_ID@` substituted as in the other patterns. For Slurm's
-`squeue -j` that is `slurm_load_jobs error: Invalid job id specified`; for
-Torque's `qstat`, `Unknown Job Id`; for PBS Pro's, `Unknown Job Id|Job has
-finished` (the second for a finished job, when job history is on).
+`squeue -j` that is
+`slurm_load_jobs error: Invalid job id specified|^ *JOBID `: the error once
+the controller has forgotten the job, and the
+header line, which is all `squeue -j` prints (exiting 0) for a job that
+ended a few minutes ago and is not yet forgotten. For Torque's `qstat`, it is
+`Unknown Job Id`; for PBS Pro's, `Unknown Job Id|Job has finished` (the
+second for a finished job, when job history is on).
 
 With it set, cactup tells a job the scheduler has forgotten from a status
 query that failed: output with no line for the job (no line matching
@@ -588,9 +595,9 @@ rather than a job — `autoupdate`, `update-url` and `mdb-url` (see
 `build-cache-relocate`, `build-cache-size` and
 `build-cache-preserve-exact-warnings` (see
 [Building Configs](../users/building-configs.html)), and one per `[paths]`
-key, `install-home`, `simulation-home`, `test-home`, `scratch-home` and
-`build-cache-home`, an absolute path that wins over the machine's value;
-those twelve are never recorded with a simulation as knobs (the paths a job
+key, `install-home`, `simulation-home`, `test-home`, `scratch-home`,
+`build-cache-home` and `inputs-home`, an absolute path that wins over the
+machine's value; those thirteen are never recorded with a simulation as knobs (the paths a job
 needs are recorded as the paths they are). Users can also create
 **custom knobs**
 (`cactup knob -c my-name value`, removed with `cactup knob delete my-name`) and

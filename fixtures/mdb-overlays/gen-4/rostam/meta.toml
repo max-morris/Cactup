@@ -1,0 +1,343 @@
+[machine]
+name = "rostam"
+nickname = "fixture"
+location = "LSU CCT"
+description = "LSU CCT Rostam cluster (Slurm): x86 CPU, A100, V100 and DGX Spark GPU nodes"
+status = "personal"
+hostname = "fixture.example.org"
+
+[paths]
+install-home = "/scratch/fixture-home/cacti"
+simulation-home = "/scratch/fixture-home/simulations"
+inputs-home = "/work/@USER@/inputs"
+test-home = "/work/@USER@/tests"
+
+[hardware]
+max-cpus-per-node = 16
+memory = 65536
+
+[build]
+make = "make -j@MAKEJOBS@"
+make-jobs = 16
+
+[universes.cactus-cuda]
+kind = "apptainer"
+wrapper-argv = [
+    "apptainer",
+    "exec",
+    "--nv",
+    "--no-pid",
+    "--bind",
+    "/work",
+    "--bind",
+    "/dev/shm",
+    "docker://stevenrbrandt/cactus-cuda",
+]
+env-setup = """
+export MPI_FLAVOR=mpich
+export PATH=/opt/mpi/mpich/bin:$PATH
+"""
+
+[universes.cactus-cpu]
+kind = "apptainer"
+wrapper-argv = [
+    "apptainer",
+    "exec",
+    "--no-pid",
+    "--bind",
+    "/work",
+    "--bind",
+    "/dev/shm",
+    "docker://stevenrbrandt/cactus",
+]
+env-setup = """
+export MPI_FLAVOR=mpich
+export PATH=/opt/mpi/mpich/bin:$PATH
+export LANG=C.UTF-8
+"""
+
+[universes.x86-modules]
+env-setup = """
+export MODULEPATH=/opt/apps/modulefiles
+. /usr/share/lmod/lmod/init/bash
+module purge
+module load openmpi/5.0.7 hdf5/1.14.6
+export PATH=/usr/local/cuda-12.8/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+"""
+build-env-setup = """
+export PERL5LIB=$HOME/.cache/cactup-rostam-perl5${PERL5LIB:+:$PERL5LIB}
+"""
+build-provision = """
+perl_stub=$HOME/.cache/cactup-rostam-perl5
+if [ ! -e "$perl_stub/diagnostics.pm" ]; then
+    mkdir -p "$perl_stub"
+    printf 'package diagnostics;
+sub import {}
+sub unimport {}
+1;
+' > "$perl_stub/diagnostics.pm"
+fi
+"""
+
+[universes.arm-conda]
+env-setup = """
+export PATH=/work/$USER/spark-deps/env/bin:/usr/local/cuda/bin:$PATH
+export LD_LIBRARY_PATH=/work/$USER/spark-deps/env/lib:/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+"""
+build-provision = """
+deps=/work/$USER/spark-deps
+spec='gcc=13 gxx=13 gfortran=13 mpich hdf5=1.14.*=mpi_mpich* gsl fftw openblas liblapack yaml-cpp zlib libboost-devel libhwloc openssl libjpeg-turbo cmake make perl pkg-config'
+if [ "$(cat $deps/env/.cactup-spec 2>/dev/null)" != "$spec" ]; then
+    mkdir -p $deps || exit 1
+    (
+        flock 9
+        [ "$(cat $deps/env/.cactup-spec 2>/dev/null)" = "$spec" ] && exit 0
+        if [ ! -x $deps/bin/micromamba ]; then
+            curl -fsSL https://micro.mamba.pm/api/micromamba/linux-aarch64/latest | tar -xj -C $deps bin/micromamba || exit 1
+        fi
+        if [ -d $deps/env/conda-meta ]; then verb=install; else verb=create; fi
+        echo "Setting up the conda-forge environment $deps/env ($verb; a few minutes)..."
+        MAMBA_ROOT_PREFIX=$deps/mamba $deps/bin/micromamba $verb -y -q -p $deps/env -c conda-forge $spec || exit 1
+        printf '%s' "$spec" > $deps/env/.cactup-spec
+    ) 9> $deps/.cactup-lock || exit 1
+fi
+"""
+
+[scheduler]
+submit = "sbatch @SCRIPTFILE@ 2>&1"
+blocking-submit = "sbatch --wait @SCRIPTFILE@ 2>&1"
+get-status = "squeue -j @JOB_ID@"
+unknown-job-pattern = "slurm_load_jobs error: Invalid job id specified"
+get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
+stop = "scancel @JOB_ID@"
+submit-pattern = 'Submitted batch job (\d+)'
+status-pattern = "@JOB_ID@ "
+queued-pattern = " PD "
+running-pattern = " (CF|CG|R|TO) "
+holding-pattern = '\(JobHeldUser\)'
+exec-host = "hostname -s"
+exec-host-pattern = '(\S+)'
+max-walltime = "72:00:00"
+allocation-env = "SLURM_JOB_ID"
+
+[queues.cuda-A100]
+gpu = true
+default = true
+max-walltime = "3-00:00:00"
+build-universes = [
+    "cactus-cuda",
+    "x86-modules",
+]
+max-cpus-per-node = 64
+max-gpus-per-node = 2
+default-cpus-per-task = 32
+memory = 252763
+
+[queues.cuda-A100-amd]
+gpu = true
+max-walltime = "3-00:00:00"
+build-universes = [
+    "cactus-cuda",
+    "x86-modules",
+]
+max-cpus-per-node = 128
+max-gpus-per-node = 2
+default-cpus-per-task = 64
+memory = 506849
+
+[queues.cuda-A100-intel]
+gpu = true
+max-walltime = "3-00:00:00"
+build-universes = [
+    "cactus-cuda",
+    "x86-modules",
+]
+max-cpus-per-node = 64
+max-gpus-per-node = 4
+default-cpus-per-task = 16
+memory = 252763
+
+[queues.cuda]
+gpu = true
+max-walltime = "1-00:00:00"
+build-universes = [
+    "cactus-cuda",
+    "x86-modules",
+]
+max-cpus-per-node = 20
+max-gpus-per-node = 2
+default-cpus-per-task = 10
+memory = 124200
+
+[queues.cuda-V100]
+gpu = true
+max-walltime = "3-00:00:00"
+build-universes = [
+    "cactus-cuda",
+    "x86-modules",
+]
+max-cpus-per-node = 20
+max-gpus-per-node = 2
+default-cpus-per-task = 10
+memory = 124200
+
+[queues.sc15]
+gpu = true
+max-walltime = "3-00:00:00"
+build-universes = [
+    "cactus-cuda",
+    "x86-modules",
+]
+max-cpus-per-node = 20
+max-gpus-per-node = 2
+default-cpus-per-task = 10
+memory = 124200
+
+[queues.DGX-A100]
+gpu = true
+max-walltime = "3-00:00:00"
+build-universes = [
+    "cactus-cuda",
+    "x86-modules",
+]
+max-cpus-per-node = 256
+max-gpus-per-node = 8
+default-cpus-per-task = 32
+threads-per-cpu = 2
+memory = 2030746
+
+[queues.spark]
+gpu = true
+max-walltime = "3-00:00:00"
+build-universes = ["arm-conda"]
+max-cpus-per-node = 20
+max-gpus-per-node = 1
+default-cpus-per-task = 20
+memory = 120000
+
+[queues.medusa]
+gpu = false
+max-walltime = "3-00:00:00"
+build-universes = ["cactus-cpu"]
+max-cpus-per-node = 40
+default-cpus-per-task = 10
+memory = 92697
+
+[queues.buran]
+gpu = false
+max-walltime = "3-00:00:00"
+build-universes = ["cactus-cpu"]
+max-cpus-per-node = 48
+default-cpus-per-task = 12
+memory = 252909
+
+[submitscripts.default]
+queues = [
+    "cuda-A100",
+    "cuda-A100-amd",
+    "cuda-A100-intel",
+    "cuda",
+    "cuda-V100",
+    "DGX-A100",
+    "sc15",
+    "spark",
+    "medusa",
+    "buran",
+]
+
+[submitscripts.test]
+queues = [
+    "cuda-A100",
+    "cuda-A100-amd",
+    "cuda-A100-intel",
+    "cuda",
+    "cuda-V100",
+    "DGX-A100",
+    "sc15",
+    "spark",
+    "medusa",
+    "buran",
+]
+test = true
+
+[runscripts.x86-cuda-image]
+queues = [
+    "cuda-A100",
+    "cuda-A100-amd",
+    "cuda-A100-intel",
+    "cuda",
+    "cuda-V100",
+    "DGX-A100",
+    "sc15",
+]
+build-universes = ["cactus-cuda"]
+
+[runscripts.x86-cuda-native]
+queues = [
+    "cuda-A100",
+    "cuda-A100-amd",
+    "cuda-A100-intel",
+    "cuda",
+    "cuda-V100",
+    "DGX-A100",
+    "sc15",
+]
+build-universes = ["x86-modules"]
+
+[runscripts.arm-cuda-native]
+queues = ["spark"]
+build-universes = ["arm-conda"]
+
+[runscripts.x86-cpu-image]
+queues = [
+    "medusa",
+    "buran",
+]
+build-universes = ["cactus-cpu"]
+
+[runscripts.test-x86-cuda-image]
+queues = [
+    "cuda-A100",
+    "cuda-A100-amd",
+    "cuda-A100-intel",
+    "cuda",
+    "cuda-V100",
+    "DGX-A100",
+    "sc15",
+]
+build-universes = ["cactus-cuda"]
+test = true
+
+[runscripts.test-x86-cuda-native]
+queues = [
+    "cuda-A100",
+    "cuda-A100-amd",
+    "cuda-A100-intel",
+    "cuda",
+    "cuda-V100",
+    "DGX-A100",
+    "sc15",
+]
+build-universes = ["x86-modules"]
+test = true
+
+[runscripts.test-arm-cuda-native]
+queues = ["spark"]
+build-universes = ["arm-conda"]
+test = true
+
+[runscripts.test-x86-cpu-image]
+queues = [
+    "medusa",
+    "buran",
+]
+build-universes = ["cactus-cpu"]
+test = true
+
+[cactup]
+mdb-generation = 4
+
+[cactup.origin]
+from = "rostam"
+hash = "1cfce8c0444c8728"

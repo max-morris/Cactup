@@ -198,7 +198,7 @@ impl Event {
 /// (the format is not kept between versions). The rest is still worth
 /// reading, as long as the reader is told.
 pub fn read(path: &Path) -> Res<(Vec<Event>, usize)> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let text = std::fs::read_to_string(path).with_context(|| format!("Failed to read '{}'", path.display()))?;
     let lines = text.lines().count();
     let events: Vec<Event> = text.lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
     let unreadable = lines - events.len();

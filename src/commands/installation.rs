@@ -7,7 +7,7 @@ use crate::args::InstallationCommand;
 use crate::database::{CactusInstallation, UnfetchedRepo, UnfetchedReason};
 use crate::installation::Installation;
 use crate::Res;
-use anyhow::bail;
+use anyhow::{anyhow, bail};
 use colored::Colorize;
 
 /// How loudly a `conformance_lines` line should be reported. A skip is a
@@ -45,7 +45,7 @@ fn push_group(
 ) {
     for (repo, info) in repos.iter().take(repos_shown) {
         let repo_line = match &info.detail {
-            Some(detail) => format!("                  {repo} — {}", truncate_detail(detail)),
+            Some(detail) => format!("                  {repo}: {}", truncate_detail(detail)),
             None => format!("                  {repo}"),
         };
         lines.push((tone, repo_line));
@@ -67,9 +67,9 @@ fn push_group(
 
 /// The `show` conformance block: the lines describing thorns whose on-disk
 /// contents do not match the installation's recorded thornlist. Empty when
-/// the tree fully conforms. Colourless strings on purpose (so they stay
+/// the tree fully conforms. Colorless strings on purpose (so they stay
 /// testable) paired with a per-line [`Tone`]; `show_installation` applies the
-/// colour.
+/// color.
 ///
 /// A failed repo is an error the user did not ask for and did not get — it is
 /// reported first, in [`Tone::Alarm`], ahead of a merely-skipped one (a
@@ -94,17 +94,16 @@ pub(crate) fn conformance_lines(entry: &CactusInstallation) -> Vec<(Tone, String
         if failed_count > 0 { ("INCOMPLETE", Tone::Alarm) } else { ("PARTIAL", Tone::Warn) };
     let header = match (failed_count > 0, skipped_count > 0) {
         (true, true) => format!(
-            "  conformance:  {word} — {failed_count} repo(s) FAILED to fetch and \
-             {skipped_count} repo(s) were skipped; {thorn_count} thorn(s) on disk do not match \
-             the thornlist above."
+            "  conformance:  {word}: {failed_count} repo(s) FAILED to fetch, {skipped_count} \
+             skipped; {thorn_count} thorn(s) differ from the thornlist."
         ),
         (true, false) => format!(
-            "  conformance:  {word} — {failed_count} repo(s) FAILED to fetch; {thorn_count} \
-             thorn(s) on disk do not match the thornlist above."
+            "  conformance:  {word}: {failed_count} repo(s) FAILED to fetch; {thorn_count} \
+             thorn(s) differ from the thornlist."
         ),
         (false, true) => format!(
-            "  conformance:  {word} — {skipped_count} repo(s) were skipped, so {thorn_count} \
-             thorn(s) on disk do not match the thornlist above."
+            "  conformance:  {word}: {skipped_count} repo(s) skipped; {thorn_count} thorn(s) \
+             differ from the thornlist."
         ),
         (false, false) => unreachable!(
             "a non-empty unfetched_repos always has at least one Failed or Skipped entry"
@@ -143,10 +142,10 @@ pub(crate) fn conformance_lines(entry: &CactusInstallation) -> Vec<(Tone, String
     if !skipped.is_empty() {
         lines.push((
             Tone::Plain,
-            "                Fetch over the skipped ones with `cactup inst refetch -f` \
-             (modified files are backed up first); `cactup inst delta` shows what differs."
-                .to_owned(),
+            "                Fetch over the skipped ones with `cactup inst refetch -f` (backs up \
+             modified files).".to_owned(),
         ));
+        lines.push((Tone::Plain, "                See what differs with `cactup inst delta`.".to_owned()));
     }
     lines
 }
@@ -158,33 +157,46 @@ pub fn dispatch(ctx: &Ctx, cmd: InstallationCommand) -> Res<()> {
         InstallationCommand::Use { alias } => super::use_cmd::dispatch(ctx, alias),
         InstallationCommand::Refetch(args) => super::refetch::dispatch(ctx, args),
         InstallationCommand::Delta { alias } => super::delta::installation_delta(ctx, alias),
+        InstallationCommand::Delete { alias, force } => super::delete::dispatch(ctx, alias, force),
+        InstallationCommand::Cp { source, new_name, install_prefix, symbolic } => {
+            super::copy::dispatch(ctx, &source, &new_name, install_prefix.as_deref(), symbolic)
+        }
+        InstallationCommand::Reify { alias, paths } => super::reify::dispatch(ctx, &alias, &paths),
     }
 }
 
-/// Which installation `show` is about: the one named, else the one `-I`
-/// names, else the active one.
-fn shown_alias(named: Option<String>, dash_i: Option<&str>, active: Option<&str>) -> Option<String> {
-    named.or_else(|| dash_i.map(str::to_owned)).or_else(|| active.map(str::to_owned))
-}
 
 /// `cactup installation show [alias]`: the active installation, or a named
 /// one, in detail. Listing every installation is `cactup installation list`.
 pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     let database = ctx.db.read()?;
 
-    let Some(alias) =
-        shown_alias(alias, ctx.globals.installation.as_deref(), database.active_installation.as_deref())
-    else {
-        bail!(
-            "no active installation; run `cactup install`, or `cactup use <alias>` \
-             to activate an existing one (see `cactup list`)"
-        );
+    // No alias → the contextually-relevant installation: `-I`, else the
+    // active one (the same choice `Installation::resolve` makes).
+    let alias = match alias.or_else(|| ctx.globals.installation.clone()) {
+        Some(alias) => alias,
+        None => database.active_installation.clone().ok_or_else(|| {
+            anyhow!(
+                "No active installation; run `cactup install` or `cactup use <alias>`"
+            )
+        })?,
     };
 
     let Some(entry) = database.installations.get(&alias) else {
-        bail!("no installation named \"{alias}\" (see `cactup list`)");
+        bail!("No installation named \"{alias}\" (see `cactup list`)");
     };
     let active = database.active_installation.as_deref() == Some(&alias);
+    let inst = Installation::new(entry.alias.clone(), &entry.path);
+    // Lenient: the registry's view above is still worth showing when
+    // installation.toml cannot be read. Except a newer cactup's file: that
+    // is not "no homes, no packages" but "upgrade cactup", so say that.
+    let meta = match inst.meta() {
+        Ok(meta) => Some(meta),
+        Err(e) if e.downcast_ref::<crate::format::Newer>().is_some() => return Err(e),
+        Err(_) => None,
+    };
+    // Asked before anything is printed, so its progress never splits the output.
+    let yanked = yanked_since(&database, entry, meta.as_ref().map_or(&[][..], |m| &m.added[..]))?;
 
     print!("{}", entry.alias.bold());
     if active {
@@ -193,6 +205,10 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     println!();
     match (&entry.release, &entry.thornlist) {
         (Some(release), _) => println!("  release:      {release}"),
+        (None, _) if let Some(simfile) = &entry.simfile => {
+            println!("  release:      (installed from the .sim file {simfile})")
+        }
+        (None, _) if let Some(stack) = &entry.stack => println!("  release:      stack {stack}"),
         // A custom installation is identified by the thornlist it was built
         // from — that is the only thing distinguishing it from any other.
         (None, Some(thornlist)) => {
@@ -204,13 +220,32 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     // tree below (§2.1 current-release / current-thornlist). Shown only
     // when it actually differs.
     match (&entry.current_release, &entry.current_thornlist) {
-        (Some(current), _) if Some(current) != entry.release.as_ref() => {
+        (Some(current), _) if Some(current) != entry.release.as_ref() && Some(current) != entry.stack.as_ref() => {
             println!("  now on:       {current} (refetched)")
         }
         (None, Some(current)) if Some(current) != entry.thornlist.as_ref() => {
             println!("  now on:       thornlist {current} (refetched)")
         }
         _ => {}
+    }
+    match (&entry.copied_from, meta.as_ref().and_then(|m| m.linked_to.as_ref())) {
+        (Some(source), Some(_)) => println!("  copied from:  {source} (symbolic)"),
+        (None, Some(home)) => println!("  linked to:    {}", home.display()),
+        (Some(source), None) => println!("  copied from:  {source}"),
+        (None, None) => {}
+    }
+    let dependents = super::copy::dependents(&database, &inst.root);
+    if !dependents.is_empty() {
+        println!("  symbolic copies: {}", dependents.join(", "));
+    }
+    // §8.10: where to take problems with the stack the tree is on.
+    if let Some(contact) = &entry.stack_contact {
+        println!("  problems?     {contact}");
+    }
+    if let Some(slug) = current_stack(entry)
+        && let Some(why) = yanked.get(slug)
+    {
+        println!("{}", format!("  yanked:       {slug} is yanked on Cactarium{}", reason(why)).yellow());
     }
     for (tone, line) in conformance_lines(entry) {
         match tone {
@@ -221,8 +256,7 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     }
     println!("  path:         {}", entry.path);
 
-    let inst = Installation::new(entry.alias.clone(), &entry.path);
-    if let Ok(meta) = inst.meta() {
+    if let Some(meta) = meta {
         match &meta.active_config {
             Some(config) => println!("  active-config: {config}"),
             None => println!("  active-config: {}", "(null-config)".yellow()),
@@ -232,6 +266,31 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
         }
         if let Some(test_home) = &meta.test_home {
             println!("  test-home:    {}", test_home.display());
+        }
+        // §8.11: what `cactup add` put on the base, and where to take
+        // problems with it.
+        // The base repos the base still has (a refetch may have dropped
+        // one a package replaced); unreadable, all are taken as there.
+        let pristine = std::fs::read_to_string(inst.source_thornlist_to_read()).ok();
+        let base = pristine.as_deref().and_then(|text| crate::thornlist::parse(text).ok());
+        let base_repos: Option<std::collections::BTreeSet<&str>> =
+            base.as_ref().map(|list| list.components().iter().map(|c| c.repo.as_str()).collect());
+        for (i, package) in meta.added.iter().enumerate() {
+            let label = if i == 0 { "added:" } else { "" };
+            println!("  {label:<13} {}", added_line(package, base_repos.as_ref()));
+            println!("  {:<13}   problems? {}", "", package.contact.as_deref().unwrap_or(&package.url));
+            for library in &package.libraries {
+                let what = crate::commands::add::describe(&library.package, &library.version);
+                println!("  {:<13}   library {what} at {}/{}", "", library.inside, library.into);
+            }
+            if let Some(why) = yanked.get(&format!("{}@{}", package.package, package.version)) {
+                println!("{}", format!("  {:<13}   yanked on Cactarium{}", "", reason(why)).yellow());
+            }
+        }
+        // `cactup claims override`: one line each, the first labeled.
+        for (i, key) in meta.claim_overrides.keys().enumerate() {
+            let label = if i == 0 { "overrides:" } else { "" };
+            println!("  {label:<13} {key}");
         }
     }
     if let Ok(sims) = inst.simulations() {
@@ -244,11 +303,146 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     Ok(())
 }
 
+/// The stack release the tree is on, `owner/stack@version`: where a refetch
+/// took it, else what was installed. `None` for anything else, and for a
+/// branch tip (`@head`/`@master`), which has no release to yank.
+fn current_stack(entry: &CactusInstallation) -> Option<&str> {
+    // A refetch records where it took the tree: a stack (`owner/name@…`), a
+    // manifest release, or a thornlist; only before any is the install-time
+    // stack still the one it is on.
+    let slug = match (&entry.current_release, &entry.current_thornlist) {
+        (Some(current), _) => Some(current.as_str()).filter(|c| c.contains('/'))?,
+        (None, Some(_)) => return None,
+        (None, None) => entry.stack.as_deref()?,
+    };
+    let version = slug.rsplit_once('@')?.1;
+    (version != "head" && version != "master").then_some(slug)
+}
+
+/// `: <reason>`, or nothing for a yank that gave none.
+fn reason(why: &str) -> String {
+    if why.is_empty() { String::new() } else { format!(": {why}") }
+}
+
+/// One added package as `inst show` lists it: what it is, its thorns (or
+/// "the flesh"), what it replaces of the base repos still in `base_repos`
+/// (every one, when unknown), and whether it follows a branch.
+fn added_line(
+    package: &crate::installation::AddedPackage,
+    base_repos: Option<&std::collections::BTreeSet<&str>>,
+) -> String {
+    let flesh = package.is_flesh().then_some("the flesh");
+    let thorns: Vec<&str> = flesh.into_iter().chain(package.thorns.iter().map(|t| t.checkout.as_str())).collect();
+    let repos: Vec<String> = (package.replaces.iter())
+        .filter(|r| base_repos.is_none_or(|base| base.contains(r.as_str())))
+        .map(|r| format!("base repo {r}"))
+        .collect();
+    let replaces = if repos.is_empty() { String::new() } else { format!(", in place of {}", repos.join(", ")) };
+    let follows = if crate::commands::add::is_tip(&package.version) { ", follows its default branch" } else { "" };
+    let what = crate::commands::add::describe(&package.package, &package.version);
+    format!("{what} ({}){replaces}{follows}", thorns.join(", "))
+}
+
+/// What Cactarium says is yanked now: the installation's stack
+/// release and each added package version, by `owner/name@version`. Only
+/// asked when there is something to ask about; asked in parallel, with
+/// progress. An entry that cannot be asked is left out, with one note, since
+/// `inst show` must still show what it knows offline.
+fn yanked_since(
+    db: &crate::database::Database,
+    entry: &CactusInstallation,
+    added: &[crate::installation::AddedPackage],
+) -> Res<std::collections::BTreeMap<String, String>> {
+    use crate::cactarium::EntryKind;
+    let mut asks: Vec<(EntryKind, String)> = Vec::new();
+    if let Some(slug) = current_stack(entry) {
+        asks.push((EntryKind::Stack, slug.to_owned()));
+    }
+    // A branch tip or a bare commit has no version to yank.
+    for package in added
+        .iter()
+        .filter(|p| !crate::commands::add::is_tip(&p.version) && !crate::commands::add::is_commit(&p.version))
+    {
+        asks.push((EntryKind::Package, format!("{}@{}", package.package, package.version)));
+    }
+    if asks.is_empty() {
+        return Ok(Default::default());
+    }
+    // Asked in passing: a registry that cannot be reached costs seconds, not
+    // the default half minute.
+    let client = crate::cactarium::Client::new(db).with_timeout(std::time::Duration::from_secs(5));
+    // One line per entry while it is asked; none stays behind (what is
+    // yanked is said in the output itself).
+    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+    let layout = crate::progress::Layout::for_names(asks.iter().map(|(_, slug)| slug.as_str()));
+    let answers = crate::par::parallel_map(&asks, |(kind, slug)| {
+        let line = crate::progress::Line::over(progress.add_child(slug.clone()), slug, layout.clone());
+        line.phase("asking Cactarium whether it is yanked");
+        let answer = (|| {
+            let (entry, version) = slug.rsplit_once('@').ok_or_else(|| anyhow!("{slug} names no version"))?;
+            let (owner, name) = entry.split_once('/').ok_or_else(|| anyhow!("{entry} is not owner/name"))?;
+            client.yanked_since(*kind, owner, name, version)
+        })();
+        drop(line);
+        (slug.clone(), answer)
+    });
+    if let Some(renderer) = renderer {
+        renderer.shutdown_and_wait();
+    }
+    let mut yanked = std::collections::BTreeMap::new();
+    let mut failed = None;
+    for (slug, answer) in answers? {
+        match answer {
+            Ok(Some(why)) => {
+                yanked.insert(slug, why);
+            }
+            Ok(None) => {}
+            Err(e) => failed = failed.or(Some(format!("{e:#}"))),
+        }
+    }
+    if let Some(e) = failed {
+        println!("{}", format!("Could not ask Cactarium whether anything was yanked: {e}").dimmed());
+    }
+    Ok(yanked)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::database::{CactusInstallation, UnfetchedReason, UnfetchedRepo};
     use indexmap::IndexMap;
+
+    /// `inst show` names a flesh package "the flesh", beside any thorns it
+    /// has, and what it replaces as base repos, those the base still has.
+    #[test]
+    fn a_flesh_package_is_listed_as_the_flesh() {
+        let package = crate::installation::AddedPackage {
+            package: "max/mp".into(),
+            version: "1.0.0".into(),
+            tag: None,
+            commit: "a".repeat(40),
+            url: "https://x/cactus-mp.git".into(),
+            repo: "cactus-mp".into(),
+            thorns: Vec::new(),
+            replaces: vec!["flesh".into()],
+            contact: None,
+            libraries: Vec::new(),
+            flesh: vec!["Makefile".into(), "lib".into(), "src".into()],
+        };
+        assert_eq!(added_line(&package, None), "max/mp@1.0.0 (the flesh), in place of base repo flesh");
+        // After a refetch to a base with no repo flesh: nothing it is in place of.
+        let base = std::collections::BTreeSet::from(["tb"]);
+        assert_eq!(added_line(&package, Some(&base)), "max/mp@1.0.0 (the flesh)");
+        let base = std::collections::BTreeSet::from(["tb", "flesh"]);
+        assert_eq!(added_line(&package, Some(&base)), "max/mp@1.0.0 (the flesh), in place of base repo flesh");
+        let thorns = crate::installation::AddedPackage {
+            thorns: vec![crate::installation::AddedThorn { checkout: "A/T".into(), repo_path: String::new() }],
+            flesh: Vec::new(),
+            replaces: Vec::new(),
+            ..package
+        };
+        assert_eq!(added_line(&thorns, None), "max/mp@1.0.0 (A/T)");
+    }
 
     fn entry(unfetched_repos: IndexMap<String, UnfetchedRepo>) -> CactusInstallation {
         CactusInstallation {
@@ -256,9 +450,13 @@ mod tests {
             release: Some("ET_2026_05".into()),
             path: "/inst".into(),
             thornlist: None,
+            simfile: None,
+            stack: None,
             current_release: None,
             current_thornlist: None,
+            stack_contact: None,
             unfetched_repos,
+            copied_from: None,
         }
     }
 
@@ -268,15 +466,6 @@ mod tests {
 
     fn failed(thorns: Vec<String>, detail: &str) -> UnfetchedRepo {
         UnfetchedRepo { reason: UnfetchedReason::Failed, thorns, detail: Some(detail.to_owned()) }
-    }
-
-    #[test]
-    fn show_is_about_the_named_then_the_dash_i_then_the_active_installation() {
-        let s = |v: &str| Some(v.to_owned());
-        assert_eq!(shown_alias(s("a"), Some("b"), Some("c")), s("a"));
-        assert_eq!(shown_alias(None, Some("b"), Some("c")), s("b"));
-        assert_eq!(shown_alias(None, None, Some("c")), s("c"));
-        assert_eq!(shown_alias(None, None, None), None);
     }
 
     #[test]
@@ -327,8 +516,8 @@ mod tests {
         }
         let lines = conformance_lines(&entry(unfetched));
         // Header line, the "skipped (...)" group header, 8 repo lines,
-        // "+2 more repo(s)", and the trailing remedy line.
-        assert_eq!(lines.len(), 1 + 1 + 8 + 1 + 1);
+        // "+2 more repo(s)", and the two trailing remedy lines.
+        assert_eq!(lines.len(), 1 + 1 + 8 + 1 + 2);
         assert!(lines[10].1.contains("+2 more repo(s)"), "{}", lines[10].1);
     }
 
@@ -389,7 +578,7 @@ mod tests {
         assert_eq!(lines[0].0, Tone::Alarm);
         assert!(lines[0].1.contains("INCOMPLETE"), "{}", lines[0].1);
         assert!(lines[0].1.contains("FAILED"), "{}", lines[0].1);
-        assert!(lines[0].1.contains("were skipped"), "{}", lines[0].1);
+        assert!(lines[0].1.contains("2 skipped"), "{}", lines[0].1);
 
         let failed_pos = lines.iter().position(|(_, l)| l.contains("Failed:")).unwrap();
         let skipped_pos = lines.iter().position(|(_, l)| l.contains("Skipped:")).unwrap();
@@ -416,8 +605,123 @@ mod tests {
         let repo_line = &lines[2].1;
         assert!(repo_line.contains('…'), "{repo_line}");
         assert!(!repo_line.contains(&long), "{repo_line}");
-        let detail_part = repo_line.split(" — ").nth(1).unwrap();
+        let detail_part = repo_line.split(": ").nth(1).unwrap();
         // 97 chars of the original detail plus the ellipsis.
         assert_eq!(detail_part.chars().count(), 98, "{detail_part}");
+    }
+
+    /// `-I` picks what `show` shows when no alias is given: with an active
+    /// installation present, `-I nope` must fail on "nope" rather than quietly
+    /// show the active one.
+    #[test]
+    fn show_without_alias_honors_the_installation_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::database::Db::in_dir(dir.path());
+        db.update(|d| {
+            d.installations.insert("et".to_owned(), entry(IndexMap::new()));
+            d.active_installation = Some("et".to_owned());
+            Ok(())
+        })
+        .unwrap();
+        let ctx = Ctx {
+            globals: crate::args::GlobalOpts {
+                verbose: false,
+                trace: false,
+                manifest_url: String::new(),
+                mdb_path: None,
+                machine: None,
+                installation: Some("nope".to_owned()),
+                hostname: None,
+                knob: Vec::new(),
+                risky_allow_untrusted_artifacts: false,
+            },
+            db,
+        };
+        let err = show_installation(&ctx, None).unwrap_err().to_string();
+        assert!(err.contains("\"nope\""), "{err}");
+    }
+
+    /// An active installation "et" whose installation.toml holds `toml`:
+    /// the scratch directory, the installation home, and a `Ctx` over them.
+    fn with_installation_toml(toml: &str) -> (tempfile::TempDir, std::path::PathBuf, Ctx) {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("inst");
+        std::fs::create_dir_all(home.join(".cactup")).unwrap();
+        std::fs::write(home.join(".cactup/installation.toml"), toml).unwrap();
+        let db = crate::database::Db::in_dir(dir.path());
+        db.update(|d| {
+            let mut et = entry(IndexMap::new());
+            et.path = home.display().to_string();
+            d.installations.insert("et".to_owned(), et);
+            d.active_installation = Some("et".to_owned());
+            Ok(())
+        })
+        .unwrap();
+        let ctx = Ctx {
+            globals: crate::args::GlobalOpts {
+                verbose: false,
+                trace: false,
+                manifest_url: String::new(),
+                mdb_path: None,
+                machine: None,
+                installation: None,
+                hostname: None,
+                knob: Vec::new(),
+                risky_allow_untrusted_artifacts: false,
+            },
+            db,
+        };
+        (dir, home, ctx)
+    }
+
+    /// An installation.toml a newer cactup wrote is refused with the upgrade
+    /// message on every path, not read around: with a custom `!DEFINE ROOT`
+    /// in it, guessing `Cactus` would send the user hunting for a tree that
+    /// was never there, and `show` would print no homes and no packages.
+    #[test]
+    fn a_newer_installation_toml_asks_for_an_upgrade() {
+        let current = crate::installation::INSTALLATION.current;
+        let (_dir, home, ctx) =
+            with_installation_toml(&format!("schema = {}\nroot-dir = \"CactusMin\"\n", current + 1));
+        let newer = |err: anyhow::Error| {
+            assert!(err.downcast_ref::<crate::format::Newer>().is_some(), "{err:#}");
+            assert!(format!("{err:#}").contains("upgrade cactup"), "{err:#}");
+        };
+        let inst = Installation::new("et", &home);
+        newer(inst.cactus_root().unwrap_err());
+        newer(inst.live_thornlist_to_read().unwrap_err());
+        // A failure is not cached as the default root.
+        newer(inst.cactus_root().unwrap_err());
+        // Every command that resolves the installation (build, sim, config,
+        // ...), and `installation show`, which reads it leniently otherwise.
+        newer(Installation::resolve(&ctx).err().unwrap());
+        newer(show_installation(&ctx, None).unwrap_err());
+        newer(show_installation(&ctx, Some("et".to_owned())).unwrap_err());
+    }
+
+    /// Any other unreadable installation.toml (a typo in a hand edit) fails
+    /// only what needs the tree: the installation still resolves, so `sim
+    /// stop`, `sim list`, `test log` and the like keep working; the tree
+    /// accessors report the parse error instead of guessing `Cactus`; and
+    /// `show` prints the registry's view.
+    #[test]
+    fn a_corrupt_installation_toml_fails_only_what_needs_the_tree() {
+        let (_dir, home, ctx) = with_installation_toml("schema = 1\nroot-dir = \"CactusMin\n");
+        std::fs::write(home.join("einsteintoolkit.th"), "A/B\n").unwrap();
+
+        let inst = Installation::resolve(&ctx).unwrap();
+        assert_eq!(inst.alias, "et");
+        // What `sim list`/`sim stop`/`test list` read.
+        assert!(inst.simulations().unwrap().simulations.is_empty());
+        assert!(inst.tests().unwrap().tests.is_empty());
+        // The thornlist-name migration was skipped, not run under a guess.
+        assert!(home.join("einsteintoolkit.th").exists());
+
+        let err = inst.cactus_root().unwrap_err();
+        assert!(err.downcast_ref::<crate::format::Newer>().is_none(), "{err:#}");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("installation.toml") && !msg.contains("upgrade cactup"), "{msg}");
+        show_installation(&ctx, None).unwrap();
+        show_installation(&ctx, Some("et".to_owned())).unwrap();
     }
 }

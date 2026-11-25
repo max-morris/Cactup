@@ -1,0 +1,46 @@
+{
+  "about": "The same where the base's release fits, but the base does not enable the thorn the dependent needs",
+  "packages": [
+    "et--carpet--two",
+    "max--d--carpetslab"
+  ],
+  "present": [
+    {
+      "package": "et/carpet",
+      "version": "2026.6.0",
+      "enabled": [
+        "Carpet",
+        "CarpetSlab"
+      ]
+    },
+    {
+      "package": "max/d",
+      "version": "1.0.0",
+      "enabled": [
+        "D"
+      ]
+    }
+  ],
+  "remove": {
+    "targets": [
+      "et/carpet"
+    ],
+    "returning": [
+      {
+        "replacer": "et/carpet",
+        "package": "et/carpet",
+        "version": "2026.5.0",
+        "base": "carpet",
+        "enabled": [
+          "Carpet"
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "refusal": "HasDependents",
+    "message": [
+      "max/d@1.0.0"
+    ]
+  }
+}

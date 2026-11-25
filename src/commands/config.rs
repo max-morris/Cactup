@@ -18,8 +18,8 @@ pub fn dispatch(ctx: &Ctx, cmd: ConfigCommand) -> Res<()> {
         ConfigCommand::List => list(&installation),
         ConfigCommand::Show { name } => show(ctx, &installation, name.as_deref()),
         ConfigCommand::Use { name } => {
-            if ConfigMeta::load(&installation.cactus_root(), &name)?.is_none() {
-                bail!("no config named \"{name}\" in this installation (see `cactup config list`)");
+            if ConfigMeta::load(&installation.cactus_root()?, &name)?.is_none() {
+                bail!("No config named \"{name}\" in this installation (see `cactup config list`)");
             }
             let locked = installation.locked()?;
             let mut meta = locked.meta()?;
@@ -84,7 +84,7 @@ fn list_suffix(cactus_root: &Path, name: &str, meta: Option<&ConfigMeta>) -> Str
 /// `cactup config list`: every config in the active installation (port of
 /// list-configurations, §7.1).
 fn list(installation: &Installation) -> Res<()> {
-    let cactus_root = installation.cactus_root();
+    let cactus_root = installation.cactus_root()?;
     let configs = list_configs(&cactus_root)?;
     if configs.is_empty() {
         println!("{}", "No configs in this installation.".bright_red());
@@ -114,8 +114,13 @@ fn live_thornlist_source(entry: &crate::database::CactusInstallation) -> String 
     } else {
         (entry.release.as_deref(), entry.thornlist.as_deref())
     };
+    let simfile = entry.simfile.as_deref().filter(|_| entry.current_release.is_none() && entry.current_thornlist.is_none());
     let mut source = match (release, from_list) {
         (Some(release), _) => format!("release {release}"),
+        (None, _) if let Some(simfile) = simfile => format!("from the .sim file {simfile}"),
+        (None, _) if let Some(stack) = entry.stack.as_deref().filter(|_| simfile.is_none() && entry.current_thornlist.is_none()) => {
+            format!("stack {stack}")
+        }
         (None, Some(list)) => format!("custom, from {list}"),
         (None, None) => "custom installation".to_owned(),
     };
@@ -135,22 +140,19 @@ fn live_thornlist_source(entry: &crate::database::CactusInstallation) -> String 
 
 /// `cactup config show [name]`: the active config, or a named one, in detail.
 pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -> Res<()> {
-    let cactus_root = installation.cactus_root();
+    let cactus_root = installation.cactus_root()?;
 
     // No name → the contextually-relevant config: the active one.
     let name = match name {
         Some(name) => name.to_owned(),
         None => installation.meta()?.active_config.ok_or_else(|| {
-            anyhow::anyhow!(
-                "this installation has no active config (null-config state); \
-                 see `cactup config list`"
-            )
+            anyhow::anyhow!("No active config; see `cactup config list`")
         })?,
     };
     let name = name.as_str();
 
     let Some(meta) = ConfigMeta::load(&cactus_root, name)? else {
-        bail!("no config named \"{name}\" in this installation (see `cactup config list`)");
+        bail!("No config named \"{name}\" in this installation (see `cactup config list`)");
     };
     println!("{}", meta.name.bold());
     // Labeled for what it actually is: "flavor" would misdescribe a config
@@ -165,14 +167,14 @@ pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -
     // the path alone can't say whether it's stock or custom. Say which
     // resolution rule produced the path and, for the live list, what it
     // actually holds.
-    let provenance = if installation.is_live_thornlist(&meta.thornlist) {
+    let provenance = if installation.is_live_thornlist(&meta.thornlist)? {
         let source = ctx
             .db
             .read()
             .ok()
             .and_then(|db| db.installations.get(&installation.alias).map(live_thornlist_source));
         match source {
-            Some(source) => format!("the installation's live list — {source}"),
+            Some(source) => format!("the installation's live list: {source}"),
             None => "the installation's live list".to_owned(),
         }
     } else if Path::new(&meta.thornlist).is_file() {
@@ -182,7 +184,7 @@ pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -
         // silently uses the config's snapshot — worth surfacing here.
         format!(
             "recorded from --thornlist; {}",
-            "no longer readable — builds fall back to this config's snapshot".yellow()
+            "unreadable; builds use the snapshot".yellow()
         )
     };
     println!("  thornlist: {} ({provenance})", meta.thornlist);
@@ -211,7 +213,7 @@ pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -
         // recorded metadata is what answers §7.9's "in flight?" here.
         let config_dir = cactus_root.join("configs").join(name);
         match build_cmd::in_flight_build(&config_dir, name, None) {
-            Some(phrase) => println!("  status: incomplete — {phrase}"),
+            Some(phrase) => println!("  status: incomplete; {phrase}"),
             None => println!("  status: incomplete"),
         }
     }
@@ -219,10 +221,10 @@ pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -
 }
 
 fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
-    let cactus_root = installation.cactus_root();
+    let cactus_root = installation.cactus_root()?;
     let config_dir = cactus_root.join("configs").join(name);
     if !config_dir.is_dir() {
-        bail!("no config named \"{name}\" in this installation");
+        bail!("No config named \"{name}\" in this installation");
     }
     // §7.1: warn+refuse when simulations were built from this config.
     let registry = installation.simulations()?;
@@ -234,9 +236,8 @@ fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
         .collect();
     if !dependents.is_empty() && !force {
         bail!(
-            "{} simulation(s) were built from config \"{name}\": {} — they keep working \
-             (each holds its own frozen exe), but their config metadata will be gone. \
-             Pass -f to delete anyway.",
+            "{} simulation(s) were built from config \"{name}\": {}\nPass -f to delete anyway; \
+             they keep working, without config metadata.",
             dependents.len(),
             dependents.join(", ")
         );
@@ -253,8 +254,8 @@ fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
         .collect();
     if !test_dependents.is_empty() && !force {
         bail!(
-            "{} test run(s) reference config \"{name}\": {} — their results stay readable, \
-             but re-running them needs the config rebuilt. Pass -f to delete anyway.",
+            "{} test run(s) use config \"{name}\": {}\nPass -f to delete anyway; rerunning them \
+             needs the config rebuilt.",
             test_dependents.len(),
             test_dependents.join(", ")
         );
@@ -270,8 +271,7 @@ fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
         && !force
     {
         bail!(
-            "{phrase} — deleting this config out from under it would fail the build in a \
-             confusing way; `cactup build stop {name}` first, or pass -f to delete anyway."
+            "{phrase}; run `cactup build stop {name}` first, or pass -f to delete anyway"
         );
     }
 
@@ -295,8 +295,8 @@ fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
             .map(|(n, _)| n.clone());
         locked.set_meta(&meta)?;
         match &meta.active_config {
-            Some(next) => println!("Active config switched to {} (most recently built).", next.bold()),
-            None => println!("The last config is gone; this installation is now in the null-config state."),
+            Some(next) => println!("Active config switched to {}.", next.bold()),
+            None => println!("No configs left."),
         }
     }
     drop(locked);
@@ -333,9 +333,13 @@ mod tests {
                 release: release.map(str::to_owned),
                 path: "/inst".into(),
                 thornlist: thornlist.map(str::to_owned),
+                simfile: None,
+                stack: None,
+                stack_contact: None,
                 current_release: current_release.map(str::to_owned),
                 current_thornlist: current_thornlist.map(str::to_owned),
                 unfetched_repos: Default::default(),
+                copied_from: None,
             }
         };
         // Install-time provenance, never refetched.
@@ -371,9 +375,13 @@ mod tests {
             release: Some("ET_2026_05".into()),
             path: "/inst".into(),
             thornlist: None,
+            simfile: None,
+            stack: None,
             current_release: None,
             current_thornlist: None,
+            stack_contact: None,
             unfetched_repos: Default::default(),
+            copied_from: None,
         };
         assert_eq!(live_thornlist_source(&partial), "release ET_2026_05");
 
@@ -421,7 +429,7 @@ mod tests {
             locked.set_meta(&meta).unwrap();
         }
 
-        let root = inst.cactus_root();
+        let root = inst.cactus_root().unwrap();
         let cfg_dir = root.join("configs").join("bbh");
         fs::create_dir_all(&cfg_dir).unwrap();
         fs::write(
@@ -465,7 +473,6 @@ mod tests {
     /// reproduced in `commands::build::tests` instead of exported.
     fn make_in_flight_attempt(config_dir: &Path, cactus_root: &Path, config: &str, job_id: &str) {
         let meta = crate::build::attempt::BuildMeta {
-            schema: crate::database::SCHEMA,
             attempt_id: 0,
             config: config.to_owned(),
             optionlist_source: OptionlistSource::Flavor("default".to_owned()),
@@ -520,7 +527,7 @@ mod tests {
     fn delete_refuses_while_a_build_is_live_and_succeeds_with_force() {
         let tmp = tempfile::tempdir().unwrap();
         let inst = Installation::new("et", tmp.path().join("et"));
-        let root = inst.cactus_root();
+        let root = inst.cactus_root().unwrap();
         let config_dir = root.join("configs").join("mp");
         fs::create_dir_all(&config_dir).unwrap();
         make_in_flight_attempt(&config_dir, &root, "mp", "JOB-1");

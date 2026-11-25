@@ -16,19 +16,23 @@ pub fn dispatch(ctx: &Ctx) -> Res<()> {
         print!("- {}", installation.alias.bold());
         match (&installation.release, &installation.thornlist) {
             (Some(release), _) => print!(" (release {})", release.bold()),
+            (None, _) if let Some(simfile) = &installation.simfile => {
+                print!(" (from {})", format!("'{simfile}'").bold())
+            }
+            (None, _) if let Some(stack) = &installation.stack => print!(" (stack {})", stack.bold()),
             // Symmetric with the release case: name what it was built from.
-            (None, Some(thornlist)) => print!(" (custom thornlist {})", thornlist.bold()),
+            (None, Some(thornlist)) => print!(" (custom thornlist {})", format!("'{thornlist}'").bold()),
             (None, None) => print!(" (custom)"),
         }
         // A refetch with an explicit source moved the tree off its
         // install-time provenance (§2.1). Shown only when it actually
         // differs — refetching the same release back is not news.
         match (&installation.current_release, &installation.current_thornlist) {
-            (Some(current), _) if Some(current) != installation.release.as_ref() => {
+            (Some(current), _) if Some(current) != installation.release.as_ref() && Some(current) != installation.stack.as_ref() => {
                 print!(", now on {}", current.bold())
             }
             (None, Some(current)) if Some(current) != installation.thornlist.as_ref() => {
-                print!(", now on thornlist {}", current.bold())
+                print!(", now on thornlist {}", format!("'{current}'").bold())
             }
             _ => {}
         }
@@ -47,6 +51,14 @@ pub fn dispatch(ctx: &Ctx) -> Res<()> {
             } else {
                 print!("{}", format!(", partial ({skipped} repo(s) not fetched)").yellow());
             }
+        }
+        // A symbolic copy reads its source's files (`inst cp -s`).
+        if let Some(source) = &installation.copied_from
+            && crate::installation::Installation::new(&installation.alias, &installation.path)
+                .meta()
+                .is_ok_and(|m| m.linked_to.is_some())
+        {
+            print!(", symbolic copy of {}", source.bold());
         }
         if let Some(active_installation) = &database.active_installation && *active_installation == installation.alias {
             print!("{}", " (active)".bold().bright_green());

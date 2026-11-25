@@ -1,0 +1,51 @@
+{
+  "slug": "max/n",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "083f4477b9464145b50280865f6a243cc3f7cf19",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/n.git",
+      "thorns": [
+        {
+          "arrangement": "N",
+          "thorn": "N",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "N",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [
+              "C"
+            ],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/x4",
+          "range": null,
+          "needs": [
+            "X"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

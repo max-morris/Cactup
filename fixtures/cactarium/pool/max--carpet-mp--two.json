@@ -1,0 +1,87 @@
+{
+  "slug": "max/carpet-mp",
+  "versions": [
+    {
+      "version": "2.0.0",
+      "track": null,
+      "tag": "v2.0.0",
+      "commit": "b12d20f7e088bff39838d5bb12a1c8b72dfc1a93",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/carpet-mp.git",
+      "thorns": [
+        {
+          "arrangement": "Carpet-mp",
+          "thorn": "CarpetSlab",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "CarpetSlab",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "fork-of",
+          "target": "et/carpet",
+          "range": "=2026.6.0",
+          "note": null
+        }
+      ]
+    },
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "efcdb8af0f9b18c698ece949c7a3d591cdabdac1",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/carpet-mp.git",
+      "thorns": [
+        {
+          "arrangement": "Carpet-mp",
+          "thorn": "CarpetSlab",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "CarpetSlab",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "fork-of",
+          "target": "et/carpet",
+          "range": "=2026.5.0",
+          "note": null
+        }
+      ]
+    }
+  ]
+}

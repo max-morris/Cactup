@@ -1,0 +1,37 @@
+{
+  "about": "A released version of a thorn of an unread base package named without --upgrade: the base package stays, so no plan; --upgrade is the way past",
+  "packages": [
+    "et--admbase"
+  ],
+  "specs": [
+    "et/admbase/StaticConformal@=2026.5.1"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "unknown": "abababababababababababababababababababab",
+      "thorns": [
+        "ADMBase",
+        "ADMCoupling",
+        "StaticConformal"
+      ],
+      "base": "admbase",
+      "enabled": [
+        "ADMBase"
+      ],
+      "stand_in": true
+    }
+  ],
+  "expect": {
+    "refusal": "Unreadable",
+    "message": [
+      "the command line needs StaticConformal of et/admbase#abababababab",
+      "Cactarium did not read et/admbase there: et/admbase is at a commit unknown to Cactarium (is it pushed?)",
+      "Pass --upgrade to move it to a release"
+    ],
+    "not_in_message": [
+      "--no-deps",
+      "name a released version"
+    ]
+  }
+}

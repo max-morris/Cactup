@@ -1,0 +1,95 @@
+[machine]
+name = "qbc.loni.org"
+nickname = "fixture"
+location = "LSU"
+description = "LSU's Queen Bee 3 Cluster"
+status = "personal"
+hostname = "fixture.example.org"
+
+[paths]
+install-home = "/scratch/fixture-home/cacti"
+simulation-home = "/scratch/fixture-home/simulations"
+test-home = "/work/@USER@/tests"
+
+[hardware]
+max-cpus-per-node = 16
+memory = 65536
+
+[build]
+make = "make -j@MAKEJOBS@"
+universe = "et-sing"
+
+[universes.et-sing]
+wrapper-argv = [
+    "srun",
+    "-u",
+    "-A",
+    "@ALLOCATION@",
+    "-p",
+    "checkpt",
+    "-n",
+    "1",
+    "--cpus-per-task",
+    "48",
+    "singularity",
+    "exec",
+    "--bind",
+    "/ddnA",
+    "--bind",
+    "/ddnB",
+    "--bind",
+    "/var/spool",
+    "--bind",
+    "/project",
+    "--bind",
+    "/etc/ssh/ssh_known_hosts",
+    "--bind",
+    "/work",
+    "/work/sbrandt/images/etworkshop2.simg",
+]
+
+[environment]
+env-setup = """
+module purge
+"""
+
+[scheduler]
+submit = "sbatch @SCRIPTFILE@ 2>&1"
+blocking-submit = "sbatch --wait @SCRIPTFILE@ 2>&1"
+allocation-env = "SLURM_JOB_ID"
+get-status = "squeue -j @JOB_ID@"
+get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
+stop = "scancel @JOB_ID@"
+submit-pattern = 'Submitted batch job (\d+)'
+status-pattern = "@JOB_ID@ "
+queued-pattern = " PD "
+running-pattern = " (CF|CG|R|TO) "
+holding-pattern = '\(JobHeldUser\)'
+exec-host = "hostname -s"
+exec-host-pattern = '(\S+)'
+max-walltime = "72:00:00"
+
+[queues.checkpt]
+gpu = false
+default = true
+
+[submitscripts.default]
+queues = ["checkpt"]
+
+[submitscripts.test]
+queues = ["checkpt"]
+test = true
+
+[runscripts.default]
+queues = ["checkpt"]
+
+[runscripts.test]
+queues = ["checkpt"]
+test = true
+
+[cactup]
+mdb-generation = 2
+
+[cactup.origin]
+from = "qbc.loni.org"
+hash = "c255a424946e4862"

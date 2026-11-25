@@ -1,0 +1,33 @@
+{
+  "about": "The first listed alternative conflicts with a base repo's thorn, so the next one is taken",
+  "packages": [
+    "max--z4c--anyof",
+    "et--carpet",
+    "et--cactuspugh"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "present": [
+    {
+      "package": "local:carpet-legacy",
+      "unknown": "1111111111111111111111111111111111111111",
+      "thorns": [
+        "CarpetSlab"
+      ],
+      "base": "carpet-legacy",
+      "enabled": [
+        "CarpetSlab"
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named",
+      "add et/cactuspugh@2026.5.0 PUGHSlab max/z4c@1.2.0: any of et/carpet, et/cactuspugh (the first listed that conflicts with nothing)"
+    ],
+    "choices": [
+      "any of et/carpet, et/cactuspugh: the first listed that conflicts with nothing"
+    ]
+  }
+}

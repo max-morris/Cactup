@@ -1,0 +1,15 @@
+schema = 1
+machine = "workstation"
+simulation-id = "simulation-bbh-workstation-host-user-20260501-120000-4242"
+sourcedir = "/scratch/cacti/et/Cactus"
+configuration = "sim"
+config-id = "cfg-0123"
+build-id = "build-0001"
+executable = "/scratch/sims/et/bbh/.cactup/exe"
+optionlist = "cactup-optionlist.cfg"
+thornlist = "thornlist.th"
+parfile = "bbh.par"
+alias = "et"
+
+[knobs]
+queue = "workq"

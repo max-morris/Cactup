@@ -1,0 +1,31 @@
+{
+  "about": "A present package at an unknown commit meets a commit need only at that commit",
+  "packages": [
+    "max--z4c--carpetx-sha",
+    "et--carpetx"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "present": [
+    {
+      "package": "et/carpetx",
+      "unknown": "3333333333333333333333333333333333333333",
+      "thorns": [
+        "CarpetX",
+        "Loop"
+      ],
+      "base": "carpetx",
+      "enabled": [
+        "CarpetX",
+        "Loop"
+      ]
+    }
+  ],
+  "expect": {
+    "refusal": "PresentOutsideRange",
+    "message": [
+      "The installation has et/carpetx#333333333333, outside #ba20bf7e830f"
+    ]
+  }
+}

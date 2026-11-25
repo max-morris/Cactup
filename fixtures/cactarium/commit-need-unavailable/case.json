@@ -1,0 +1,17 @@
+{
+  "about": "A commit unreadable by Cactarium is a candidate that fails, and the refusal when nothing else works",
+  "packages": [
+    "max--z4c--carpetx-missing-commit",
+    "et--carpetx"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "expect": {
+    "refusal": "NotAvailable",
+    "message": [
+      "max/z4c@1.2.0 needs et/carpetx at 5555555555, which Cactarium cannot read",
+      "Pass --ignore-claim max/z4c:dependency:et/carpetx"
+    ]
+  }
+}

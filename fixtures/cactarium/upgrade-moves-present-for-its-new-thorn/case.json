@@ -1,0 +1,30 @@
+{
+  "about": "z4c 1.0.0 needs et/arith ^1 for the thorn now asked of it, and et/arith has only 2.x: under --upgrade z4c moves to 2.0.0 (it is decided before what its needs bring in)",
+  "packages": [
+    "max--new--needs-z4ctest",
+    "max--z4c--two-arith",
+    "et--arith--two-only"
+  ],
+  "specs": [
+    "max/new"
+  ],
+  "present": [
+    {
+      "package": "max/z4c",
+      "version": "1.0.0",
+      "enabled": [
+        "Z4c"
+      ]
+    }
+  ],
+  "options": {
+    "upgrade": true
+  },
+  "expect": {
+    "plan": [
+      "add max/new@1.0.0 New named",
+      "upgrade max/z4c 1.0.0 -> 2.0.0 Z4c, Z4cTest needed by max/new@1.0.0 (--upgrade)",
+      "add et/arith@2.0.0 Arith needed by max/z4c@2.0.0 (Z4cTest), ^2"
+    ]
+  }
+}

@@ -1,0 +1,83 @@
+{
+  "slug": "et/zr",
+  "versions": [
+    {
+      "version": "2.0.0",
+      "track": null,
+      "tag": "v2.0.0",
+      "commit": "87efbcbe05f314d3af2aac9a679891dd2a2bea1d",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/zr.git",
+      "thorns": [
+        {
+          "arrangement": "Zr",
+          "thorn": "Z",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Z",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    },
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "b78f49d3f66de9ae89d37c016bc29f436d39e223",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/zr.git",
+      "thorns": [
+        {
+          "arrangement": "Zr",
+          "thorn": "Z",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Z",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "max/bbfork",
+          "range": null,
+          "needs": [
+            "BB"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

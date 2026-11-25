@@ -1,0 +1,39 @@
+{
+  "about": "x 2.0.0 leaves et/p3 untouched, whose installed ^1 the move of et/t breaks; x 1.0.0 moves et/p3 too. No jump back past x",
+  "packages": [
+    "max--n--c3",
+    "et--t--c3",
+    "et--x--c3",
+    "et--p3"
+  ],
+  "specs": [
+    "max/n"
+  ],
+  "present": [
+    {
+      "package": "et/t",
+      "version": "1.0.0",
+      "enabled": [
+        "T"
+      ]
+    },
+    {
+      "package": "et/p3",
+      "version": "1.0.0",
+      "enabled": [
+        "P"
+      ]
+    }
+  ],
+  "options": {
+    "upgrade": true
+  },
+  "expect": {
+    "plan": [
+      "add max/n@1.0.0 N named",
+      "upgrade et/t 1.0.0 -> 2.0.0 T needed by max/n@1.0.0, ^2 (--upgrade)",
+      "add et/x@1.0.0 X needed by max/n@1.0.0",
+      "upgrade et/p3 1.0.0 -> 2.0.0 P needed by et/x@1.0.0, ^2 (--upgrade)"
+    ]
+  }
+}

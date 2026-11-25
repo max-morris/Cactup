@@ -4,8 +4,12 @@
 # `cactup test run` on the compute node.
 
 lines = ["#! /bin/bash"]
-if ALLOCATION:
-    lines.append("#SBATCH -A {0}".format(ALLOCATION))
+# Account optional: not known to be required here. The allocation knob, which
+# -a sets for one command; with none, the line is left out (an empty one makes
+# the scheduler read the next directive as the account).
+allocation = knob("allocation", "")
+if allocation:
+    lines.append("#SBATCH -A {0}".format(allocation))
 lines.append("#SBATCH -p {0}".format(QUEUE))
 lines.append("#SBATCH -t {0}".format(WALLTIME))
 lines.append("#SBATCH -N {0} -n {1}".format(NODES, TASKS))

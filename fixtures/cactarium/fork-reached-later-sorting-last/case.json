@@ -1,0 +1,24 @@
+{
+  "about": "The same with the package that brings the fork sorting after the upstream: whether the upstream was decided first does not matter",
+  "packages": [
+    "max--app--b-then-c-zz",
+    "et--lib-b",
+    "et--lib-c-zz",
+    "et--zz-d",
+    "et--upstream",
+    "max--fork"
+  ],
+  "specs": [
+    "max/app"
+  ],
+  "expect": {
+    "plan": [
+      "add max/app@1.0.0 App named",
+      "add et/lib-b@1.0.0 B needed by max/app@1.0.0",
+      "add et/lib-c-zz@1.0.0 C needed by max/app@1.0.0",
+      "add max/fork@1.0.0 Up needed by et/lib-b@1.0.0",
+      "add et/zz-d@1.0.0 D needed by et/lib-c-zz@1.0.0",
+      "note: max/fork@1.0.0 stands in for et/upstream"
+    ]
+  }
+}

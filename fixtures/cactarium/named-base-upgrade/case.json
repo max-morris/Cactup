@@ -1,0 +1,28 @@
+{
+  "about": "Under --upgrade a named base package moves to its newest release, replacing the base repo",
+  "packages": [
+    "et--admbase"
+  ],
+  "specs": [
+    "et/admbase/StaticConformal"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "version": "2026.4.0",
+      "base": "admbase",
+      "enabled": [
+        "ADMBase"
+      ]
+    }
+  ],
+  "options": {
+    "upgrade": true
+  },
+  "expect": {
+    "plan": [
+      "upgrade et/admbase 2026.4.0 -> 2026.5.1 ADMBase, StaticConformal named",
+      "replace base repo admbase with et/admbase"
+    ]
+  }
+}

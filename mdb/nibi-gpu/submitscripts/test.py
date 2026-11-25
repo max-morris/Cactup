@@ -16,7 +16,13 @@ exclusive = "--exclusive " if ppn_used == 112 else " "
 
 lines = ["#! /bin/bash"]
 lines.append("#SBATCH -t {0}".format(WALLTIME))
-lines.append("#SBATCH --account={0}".format(ALLOCATION))
+# Account optional: the Alliance charges a user's only account by default. The
+# allocation knob, which -a sets for one command; with none, the line is left
+# out (an empty one makes the scheduler read the next directive as the
+# account).
+allocation = knob("allocation", "")
+if allocation:
+    lines.append("#SBATCH --account={0}".format(allocation))
 lines.append("#SBATCH --partition={0}".format(QUEUE))
 lines.append("#SBATCH --nodes={0}".format(NODES))
 lines.append("#SBATCH {0}--mem={1}M".format(exclusive, mem_mb))

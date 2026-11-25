@@ -70,9 +70,17 @@ fi
 echo "Starting:"
 CACTUS_STARTTIME=$(date +%s)
 export CACTUS_STARTTIME
+# srun runs inside the job, which already charges an account: pass -A only
+# when an allocation is set. An empty `-A` would take the next flag as the
+# account.
+# The -A sits mid-line (inside a quoted command, for the testsuite), so a
+# @KNOB-OR-DROP-LINE@ token, which removes its whole line, does not fit; the
+# shell drops just the flag. The value is the allocation knob, which -a sets
+# for one command.
+alloc='@KNOB-OPTIONAL(allocation)@'
 if which srun 2>/dev/null
 then
-time srun -u -A @ALLOCATION@ -p gpu \
+time srun -u ${alloc:+-A "$alloc"} -p gpu \
     -N @NODES@ -n @TASKS@ \
     --cpus-per-task @CPUS_PER_TASK@ \
     --gres=gpu:$GRES \

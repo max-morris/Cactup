@@ -12,7 +12,7 @@
 // Consumed by the Phase-3 CFG/SIM/TEST streams; unused until then.
 
 use crate::commands::Ctx;
-use crate::database::SCHEMA;
+use crate::format::{self, Format, Toml};
 use crate::lock::LinkLock;
 use crate::mdb::Machine;
 use crate::Res;
@@ -20,21 +20,189 @@ use anyhow::{anyhow, bail, Context};
 use chrono::{DateTime, Utc};
 use colored::Colorize;
 use indexmap::IndexMap;
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-fn default_schema() -> u32 {
-    SCHEMA
+/// `installation.toml`'s format. Only login binaries write it (D11), so it is
+/// not `frozen_read`. `added` is an array, which put-back never enters. An
+/// `added-for` entry that `add` or `remove` rebuilds (for the commit its
+/// package ends up at) is replaced whole by that write
+/// ([`LockedInstallation::set_meta_rebuilding`]): a key a newer binary put in
+/// it said something about the old entry. Every other write, and every entry
+/// those two leave alone, keeps such keys.
+///
+/// `added-for` (why each added package is there) is additive: a top-level map,
+/// so an older binary that does not model it puts it back on a rewrite, and an
+/// entry it could no longer vouch for reads as "named by the user", which is
+/// what its absence means. An entry is believed only beside an `[[added]]`
+/// entry at the commit it was written for (`for-commit`): an older binary that
+/// re-adds or upgrades the package leaves it stale, and one that removes the
+/// package leaves it without one; both read as named, so no orphan pass ever
+/// removes a package the user may have named.
+///
+/// Version 2 added `[[added.libraries]]`. Inside an array element, an older
+/// writer would drop it, and losing it is not harmless: which links to
+/// remove is decided by comparing the placements recorded before and after
+/// a command (`unplace_dropped`, `dropped`), and `PutBack` undoes only what
+/// the run recorded, so a library link a v1 rewrite forgot (and its
+/// `.git/info/exclude` entry) would never be cleaned up, and prune's
+/// hidden-files check would keep flagging its path. So the bump: a file is
+/// written as v2 once some package has libraries, and it stays v2 thereafter
+/// even if they are removed (versions are sticky); an older binary refuses
+/// it rather than corrupts it. A file that never had libraries stays v1 (the
+/// down-step), so an older binary keeps reading those installations.
+///
+/// Version 3 added `linked-to`, which makes the installation a symbolic copy
+/// whose unchanged files are links into another installation. An older
+/// binary ignoring it would write through those links into the other
+/// installation's tree (a refetch, an add), so a symbolic copy's record is
+/// written as v3 and an older binary refuses it; every other record keeps
+/// the version it had (the down-step).
+///
+/// Version 4 added `flesh` to an `[[added]]` element: a flesh package, which
+/// takes the place of the base's flesh. An older binary would drop the key
+/// (put-back never enters arrays) and compose the package as one with no
+/// thorns, putting the base's flesh back beside it. So, as for libraries: a
+/// record with a flesh package is written as v4, sticky afterward, and an
+/// older binary refuses it; every other record keeps the version it had.
+///
+/// Version 5 added `claim-overrides`. A top-level map, so an older binary's
+/// rewrite would put it back, but that binary resolves without the overrides:
+/// `remove` sweeps as an orphan a package that only an added dependency holds,
+/// and a `satisfies` or `drop` no longer shapes a plan. So, as for libraries,
+/// a record with an override is written as v5, sticky afterward, and an older
+/// binary refuses it; every other record keeps the version it had.
+// Spec §2.5 matrix; the v1 shape is fixtures/formats/installation/v1.toml.
+pub static INSTALLATION: Format<Toml> = Format {
+    name: "installation record",
+    key: "schema",
+    current: 5,
+    upgrades: &[installation_up_1, installation_up_2, installation_up_3, installation_up_4],
+    downgrades: &[installation_down_2, installation_down_3, installation_down_4, installation_down_5],
+    down_floor: 1,
+    frozen_read: false,
+    legacy: None,
+    replace_whole: &[],
+};
+
+/// v1 → v2: nothing to change (v1 has no libraries).
+fn installation_up_1(_doc: &mut Toml) -> Res<()> {
+    Ok(())
 }
 
+/// v2 → v3: nothing to change (v2 has no `linked-to`).
+fn installation_up_2(_doc: &mut Toml) -> Res<()> {
+    Ok(())
+}
+
+/// v3 → v4: nothing to change (v3 has no flesh package).
+fn installation_up_3(_doc: &mut Toml) -> Res<()> {
+    Ok(())
+}
+
+/// v4 → v5: nothing to change (v4 has no claim overrides).
+fn installation_up_4(_doc: &mut Toml) -> Res<()> {
+    Ok(())
+}
+
+/// v5 → v4: unchanged, unless some claim override is recorded.
+fn installation_down_5(doc: &mut Toml) -> Result<(), format::CannotExpress> {
+    let overrides = match doc.get("claim-overrides") {
+        None => false,
+        Some(toml::Value::Table(overrides)) => !overrides.is_empty(),
+        // Not a table: nothing v4 can hold either.
+        Some(_) => true,
+    };
+    match overrides {
+        true => Err(format::CannotExpress),
+        false => Ok(()),
+    }
+}
+
+/// v4 → v3: unchanged, unless some added package is a flesh package.
+fn installation_down_4(doc: &mut Toml) -> Result<(), format::CannotExpress> {
+    let uses_flesh = doc
+        .get("added")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_table)
+        .any(|package| match package.get("flesh") {
+            None => false,
+            Some(toml::Value::Array(items)) => !items.is_empty(),
+            // Not an array: nothing v3 can hold either.
+            Some(_) => true,
+        });
+    match uses_flesh {
+        true => Err(format::CannotExpress),
+        false => Ok(()),
+    }
+}
+
+/// v3 → v2: unchanged, unless the installation is a symbolic copy.
+fn installation_down_3(doc: &mut Toml) -> Result<(), format::CannotExpress> {
+    match doc.get("linked-to") {
+        Some(_) => Err(format::CannotExpress),
+        None => Ok(()),
+    }
+}
+
+/// v2 → v1: unchanged, unless some added package has libraries, which v1
+/// cannot hold.
+fn installation_down_2(doc: &mut Toml) -> Result<(), format::CannotExpress> {
+    let uses_libraries = doc
+        .get("added")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_table)
+        .any(|package| match package.get("libraries") {
+            None => false,
+            Some(toml::Value::Array(libraries)) => !libraries.is_empty(),
+            // Not an array: nothing v1 can hold either.
+            Some(_) => true,
+        });
+    if uses_libraries {
+        return Err(format::CannotExpress);
+    }
+    Ok(())
+}
+
+/// `simulations.toml`'s format. Entries are added and removed, never
+/// rewritten in place: `sim create` inserts a new name, `sim delete` removes
+/// one, and `sim create -f` records the removal of the old entry before it
+/// inserts the new one of the same name. So a key a newer binary put on an
+/// entry stays with that entry, and nothing is replaced whole.
+pub static SIM_REGISTRY: Format<Toml> = Format {
+    name: "simulation registry",
+    key: "schema",
+    current: 1,
+    upgrades: &[],
+    downgrades: &[],
+    down_floor: 1,
+    frozen_read: false,
+    legacy: None,
+    replace_whole: &[],
+};
+
+/// `tests.toml`'s format; entries behave like `simulations.toml`'s.
+pub static TEST_REGISTRY: Format<Toml> = Format {
+    name: "test registry",
+    key: "schema",
+    current: 1,
+    upgrades: &[],
+    downgrades: &[],
+    down_floor: 1,
+    frozen_read: false,
+    legacy: None,
+    replace_whole: &[],
+};
+
 /// `installation.toml` (§8.1, §11.8).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct InstallationMeta {
-    #[serde(default = "default_schema")]
-    pub schema: u32,
     /// The active config; absent = the §7.1 null-config state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_config: Option<String>,
@@ -49,18 +217,177 @@ pub struct InstallationMeta {
     /// missing value means the historical default, `Cactus`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_dir: Option<String>,
+    /// Cactarium packages `cactup add` put on top of the base thornlist
+    /// (§8.11). The live thornlist is the pristine base with these composed
+    /// onto it, so a refetch of a new base (a stack upgrade) re-applies them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added: Vec<AddedPackage>,
+    /// Why each added package is there, by `owner/name`: named on a command
+    /// line, or brought in as another's dependency. A map rather than a key
+    /// of each `[[added]]` element, so an older binary's rewrite keeps it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub added_for: BTreeMap<String, AddedFor>,
+    /// The claims the installation overrides (`cactup claims override`), by
+    /// the override's canonical text (`Override::key`). A map, so an older
+    /// binary's rewrite keeps it; see [`INSTALLATION`] for why it still needs
+    /// a version of its own.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub claim_overrides: BTreeMap<String, ClaimOverride>,
+    /// For a symbolic copy (`installation cp --symbolic`, §3.1): the
+    /// installation home its unchanged files are links into. Each file of the
+    /// copy's tree is an absolute link to the same file there until cactup
+    /// writes to it (`crate::cow`), or `installation reify` makes it the
+    /// copy's own; reify of the whole copy removes this key. The source must
+    /// outlive the copy, so `installation delete` refuses it while this names
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_to: Option<PathBuf>,
 }
 
-impl Default for InstallationMeta {
-    fn default() -> Self {
-        InstallationMeta {
-            schema: SCHEMA,
-            active_config: None,
-            sim_home: None,
-            test_home: None,
-            root_dir: None,
-        }
+/// One `added-for` entry. Believed only beside the package's `[[added]]`
+/// entry at `for-commit` (see [`INSTALLATION`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AddedFor {
+    /// Named on a command line (`true`), or brought in by another package's
+    /// dependency. Missing reads as named, the safe side.
+    #[serde(default = "named")]
+    pub requested: bool,
+    /// The dependents (`owner/name@version`) whose dependencies brought it
+    /// in. Informational: what depends on it is read from the current claims.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by: Vec<String>,
+    /// The `[[added]]` commit this entry was written for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub for_commit: Option<String>,
+    /// The any-of dependencies that chose it, each by its dependent and its
+    /// alternatives.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<AddedForChoice>,
+}
+
+fn named() -> bool {
+    true
+}
+
+/// One `claim-overrides` entry. What the override does is its key's text; `kind`
+/// repeats the key's first word, for a reader of the file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ClaimOverride {
+    /// `drop`, `add`, `needs` or `satisfies`.
+    pub kind: String,
+    /// Why the override is there, as the user said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// An any-of dependency, by the package declaring it and its alternatives in
+/// the order declared.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AddedForChoice {
+    pub dependent: String,
+    pub alternatives: Vec<String>,
+}
+
+impl InstallationMeta {
+    /// The `added-for` entries a reader may believe: only those of packages
+    /// that have an `[[added]]` entry (one an older binary's `remove` left
+    /// behind is no entry). Whether each still holds for the commit the
+    /// package is at is the reader's call (`for-commit`).
+    pub fn added_for_present(&self) -> impl Iterator<Item = (&AddedPackage, Option<&AddedFor>)> {
+        self.added.iter().map(|a| (a, self.added_for.get(&a.package)))
     }
+}
+
+/// One package `cactup add` added (§8.11), frozen at the commit the registry
+/// served for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AddedPackage {
+    /// `owner/name`.
+    pub package: String,
+    /// The exact version, `[track:]X.Y.Z`.
+    pub version: String,
+    /// The tag the version was cut from: a label; `commit` is what is fetched.
+    /// For a branch tip (`version` `head`/`master`), the default branch it
+    /// follows: no commit is pinned, and a refetch moves along that branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    pub commit: String,
+    pub url: String,
+    /// The repo's name in the thornlist (its URL's basename).
+    pub repo: String,
+    /// The checkouts enabled, each `Arrangement/Thorn` with the `!REPO_PATH` it is written with.
+    pub thorns: Vec<AddedThorn>,
+    /// Base repos this package stands in for (`--replace`): their checkouts
+    /// are dropped from the composed list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replaces: Vec<String>,
+    /// Where to report problems with the package, as Cactarium gave it
+    /// (its declared contact, else its repo).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<String>,
+    /// The libraries the package builds against (dependencies on a package
+    /// with `library = true`, which has no thorns), each checked out where
+    /// the dependency's `into` says: inside the package's clone, or, for a
+    /// library's own library, inside that library's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub libraries: Vec<AddedLibrary>,
+    /// For a flesh package (`flesh` on Cactarium): its items at the Cactus
+    /// root, those of the base's flesh when the package was added
+    /// (`Makefile`, `lib`, `src`, …). It takes the place of every component
+    /// of the base's flesh, whatever its name or URL. Empty: not the flesh.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flesh: Vec<String>,
+}
+
+impl AddedPackage {
+    /// Whether the package is the installation's flesh.
+    pub fn is_flesh(&self) -> bool {
+        !self.flesh.is_empty()
+    }
+}
+
+/// One library an added package builds against, frozen at the commit the
+/// registry served for the version its dependency resolved to. Its clone is
+/// `repos/<the last part of into>`, linked in at `repos/<inside>/<into>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AddedLibrary {
+    /// `owner/name`.
+    pub package: String,
+    /// The exact version, or a full commit id for a dependency on a commit.
+    pub version: String,
+    /// The tag the version was cut from: a label beside the pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    pub commit: String,
+    pub url: String,
+    /// The clone it goes inside: the package's own, or another library's.
+    pub inside: String,
+    /// Where, relative to that clone's root: the dependency's `into`.
+    pub into: String,
+}
+
+impl AddedLibrary {
+    /// The library's own clone (and the name it is linked in under): the
+    /// last part of `into`.
+    pub fn clone_name(&self) -> &str {
+        self.into.rsplit('/').next().unwrap_or(&self.into)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AddedThorn {
+    pub checkout: String,
+    /// The `!REPO_PATH` written in its section, verbatim:
+    /// Cactarium's (derived from where the thorn sits in the repository), or
+    /// the base list's own when the base already clones the repository.
+    /// Empty: no `!REPO_PATH`.
+    pub repo_path: String,
 }
 
 impl InstallationMeta {
@@ -68,8 +395,8 @@ impl InstallationMeta {
     pub fn active_config(&self) -> Res<&str> {
         self.active_config.as_deref().ok_or_else(|| {
             anyhow!(
-                "this installation has no active config (null-config state); \
-                 build one with `cactup build <name>` or select one with `cactup config use <name>`"
+                "This installation has no active config.\n\
+                 Build one with `cactup build <name>` or select one with `cactup config use <name>`."
             )
         })
     }
@@ -77,13 +404,13 @@ impl InstallationMeta {
     pub fn sim_home(&self) -> Res<&Path> {
         self.sim_home
             .as_deref()
-            .ok_or_else(|| anyhow!("installation.toml records no sim-home; `cactup use <alias>` backfills it"))
+            .ok_or_else(|| anyhow!("installation.toml records no sim-home; run `cactup use <alias>` to set it"))
     }
 
     pub fn test_home(&self) -> Res<&Path> {
         self.test_home
             .as_deref()
-            .ok_or_else(|| anyhow!("installation.toml records no test-home; `cactup use <alias>` backfills it"))
+            .ok_or_else(|| anyhow!("installation.toml records no test-home; run `cactup use <alias>` to set it"))
     }
 }
 
@@ -109,30 +436,26 @@ pub struct TestEntry {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct SimRegistry {
-    #[serde(default = "default_schema")]
-    pub schema: u32,
     #[serde(default)]
     pub simulations: IndexMap<String, SimEntry>,
 }
 
 impl Default for SimRegistry {
     fn default() -> Self {
-        SimRegistry { schema: SCHEMA, simulations: IndexMap::new() }
+        SimRegistry { simulations: IndexMap::new() }
     }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct TestRegistry {
-    #[serde(default = "default_schema")]
-    pub schema: u32,
     #[serde(default)]
     pub tests: IndexMap<String, TestEntry>,
 }
 
 impl Default for TestRegistry {
     fn default() -> Self {
-        TestRegistry { schema: SCHEMA, tests: IndexMap::new() }
+        TestRegistry { tests: IndexMap::new() }
     }
 }
 
@@ -181,9 +504,8 @@ pub fn validate_root_dir(root: &str) -> Res<()> {
     let path = Path::new(root);
     if root.is_empty() || root == "." {
         bail!(
-            "this thornlist does not name a source directory (its !DEFINE ROOT is absent or \"\
-             .\"); cactup needs the Cactus tree in a subdirectory of the installation home, so \
-             add a !DEFINE ROOT line naming one"
+            "This thornlist does not name a source directory; add a line such as \
+             \"!DEFINE ROOT = Cactus\""
         );
     }
     // `Path::components()` yields a leading `Component::CurDir` only for a
@@ -191,15 +513,14 @@ pub fn validate_root_dir(root: &str) -> Res<()> {
     // triggers this) — see `leading_curdir_component_is_only_from_a_leading_dot_slash`.
     if path.components().next() == Some(std::path::Component::CurDir) {
         bail!(
-            "thornlist !DEFINE ROOT \"{root}\" starts with \"./\"; write the plain directory \
-             name instead (e.g. \"Cactus\", not \"./Cactus\")"
+            "Thornlist !DEFINE ROOT \"{root}\" starts with \"./\"; remove the \"./\""
         );
     }
     if path.is_absolute() {
-        bail!("thornlist !DEFINE ROOT \"{root}\" is an absolute path; it must be relative to the installation home");
+        bail!("Thornlist !DEFINE ROOT \"{root}\" is an absolute path; it must be relative to the installation home");
     }
     if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-        bail!("thornlist !DEFINE ROOT \"{root}\" contains \"..\"; it must stay inside the installation home");
+        bail!("Thornlist !DEFINE ROOT \"{root}\" contains \"..\"; it must stay inside the installation home");
     }
     Ok(())
 }
@@ -242,35 +563,53 @@ impl Installation {
             Some(alias) => alias.clone(),
             None => db.active_installation.clone().ok_or_else(|| {
                 anyhow!(
-                    "no active installation; run `cactup install`, or `cactup use <alias>` \
-                     to activate an existing one"
+                    "No active installation; run `cactup install` or `cactup use <alias>`"
                 )
             })?,
         };
         let entry = db
             .installations
             .get(&alias)
-            .ok_or_else(|| anyhow!("no installation named \"{alias}\" (see `cactup list`)"))?;
+            .ok_or_else(|| anyhow!("No installation named \"{alias}\" (see `cactup list`)"))?;
         let inst = Installation::new(alias, &entry.path);
-        // Upgrade a pre-rename installation on first use, whatever the command
-        // is: every path that reads a thornlist then sees one set of names.
-        inst.upgrade_thornlist_names();
+        match inst.cactus_root() {
+            // Upgrade a pre-rename installation on first use, whatever the
+            // command is: every path that reads a thornlist then sees one set
+            // of names.
+            Ok(_) => inst.upgrade_thornlist_names(),
+            // An installation.toml a newer cactup wrote fails every command
+            // here, with the upgrade message: nothing this binary does to that
+            // installation can be trusted to keep what it does not know.
+            Err(e) if e.downcast_ref::<format::Newer>().is_some() => return Err(e),
+            // Any other unreadable file (a typo in a hand edit) fails only the
+            // commands that need the tree, where they ask for it: `sim stop`
+            // of a running job, `sim list`, `test log` and the like never read
+            // installation.toml and must keep working. Nothing guesses at the
+            // root meanwhile; the migration is skipped until it can be read.
+            Err(_) => {}
+        }
         Ok(inst)
     }
 
     /// The recorded `!DEFINE ROOT` directory name, read from
     /// installation.toml once per `Installation` (a missing file or field
-    /// means `Cactus`).
-    fn root_dir_name(&self) -> &str {
-        self.root_dir.get_or_init(|| {
-            self.meta().ok().and_then(|m| m.root_dir).unwrap_or_else(|| DEFAULT_ROOT_DIR.to_owned())
-        })
+    /// means `Cactus`). An unreadable file is an error, not `Cactus`: above
+    /// all one a newer cactup wrote, whose upgrade message must reach the
+    /// user instead of a "no Cactus tree" under a guessed root. Only a
+    /// success is cached.
+    fn root_dir_name(&self) -> Res<&str> {
+        if let Some(root_dir) = self.root_dir.get() {
+            return Ok(root_dir);
+        }
+        let root_dir = self.meta()?.root_dir.unwrap_or_else(|| DEFAULT_ROOT_DIR.to_owned());
+        Ok(self.root_dir.get_or_init(|| root_dir))
     }
 
     /// The Cactus source root of this installation: the installation home
     /// joined with the `!DEFINE ROOT` recorded at install time (§8.1).
-    pub fn cactus_root(&self) -> PathBuf {
-        cactus_root_of(&self.root, self.root_dir_name())
+    /// Fails when installation.toml cannot be read (see `root_dir_name`).
+    pub fn cactus_root(&self) -> Res<PathBuf> {
+        Ok(cactus_root_of(&self.root, self.root_dir_name()?))
     }
 
     /// The installation's live thornlist ([`LIVE_THORNLIST`]) — the canonical
@@ -278,19 +617,19 @@ impl Installation {
     /// was installed, so for a custom installation this file holds the custom
     /// list's content; `config show` says as much rather than leaving the name
     /// to imply it.
-    pub fn live_thornlist(&self) -> PathBuf {
-        self.cactus_root().join("thornlists").join(LIVE_THORNLIST)
+    pub fn live_thornlist(&self) -> Res<PathBuf> {
+        Ok(self.cactus_root()?.join("thornlists").join(LIVE_THORNLIST))
     }
 
     /// The live thornlist under its pre-rename name ([`LEGACY_THORNLIST`]).
-    pub fn legacy_live_thornlist(&self) -> PathBuf {
-        self.cactus_root().join("thornlists").join(LEGACY_THORNLIST)
+    pub fn legacy_live_thornlist(&self) -> Res<PathBuf> {
+        Ok(self.cactus_root()?.join("thornlists").join(LEGACY_THORNLIST))
     }
 
     /// The live thornlist to *read*: the current name, falling back to the
     /// pre-rename one on an installation the migration has not reached.
-    pub fn live_thornlist_to_read(&self) -> PathBuf {
-        prefer_existing(self.live_thornlist(), self.legacy_live_thornlist())
+    pub fn live_thornlist_to_read(&self) -> Res<PathBuf> {
+        Ok(prefer_existing(self.live_thornlist()?, self.legacy_live_thornlist()?))
     }
 
     /// The installation's pristine as-fetched thornlist ([`SOURCE_THORNLIST`])
@@ -317,14 +656,14 @@ impl Installation {
     /// `--thornlist`. The pre-rename name counts too: a config recorded before
     /// the rename was still built from the live list, and must not start
     /// reading as `--thornlist`.
-    pub fn is_live_thornlist(&self, recorded: &str) -> bool {
+    pub fn is_live_thornlist(&self, recorded: &str) -> Res<bool> {
         let same = |candidate: PathBuf| {
             if recorded == candidate.display().to_string() {
                 return true;
             }
             std::fs::canonicalize(&candidate).is_ok_and(|c| recorded == c.display().to_string())
         };
-        same(self.live_thornlist()) || same(self.legacy_live_thornlist())
+        Ok(same(self.live_thornlist()?) || same(self.legacy_live_thornlist()?))
     }
 
     /// [`Installation::migrate_thornlist_names`], reported and best-effort: a
@@ -332,22 +671,32 @@ impl Installation {
     /// actually ran, since reads fall back to the pre-rename names on their
     /// own. The notice goes to stderr — it is out-of-band with respect to
     /// whatever that command is printing.
+    ///
+    /// An installation.toml that cannot be read skips the migration silently:
+    /// the command's own read of it reports the error, once (`cactup use`
+    /// reads it right after).
     pub fn upgrade_thornlist_names(&self) {
+        if self.cactus_root().is_err() {
+            return;
+        }
         match self.migrate_thornlist_names() {
-            Ok(true) => eprintln!(
-                "{}",
-                format!(
-                    "Renamed this installation's thornlists: the pristine as-fetched copy is now \
-                     {}, and the live, editable one is {}.",
-                    self.source_thornlist().display(),
-                    self.live_thornlist().display()
+            Ok(true) => {
+                // The migration resolved the root, so this cannot fail now.
+                let live = self.live_thornlist().unwrap_or_default();
+                eprintln!(
+                    "{}",
+                    format!(
+                        "Renamed the thornlists to '{}' (pristine) and '{}' (live).",
+                        self.source_thornlist().display(),
+                        live.display()
+                    )
+                    .dimmed()
                 )
-                .dimmed()
-            ),
+            }
             Ok(false) => {}
             Err(e) => eprintln!(
                 "{}",
-                format!("Warning: could not rename this installation's thornlists: {e:#}").yellow()
+                format!("Warning: could not rename the thornlists: {e:#}").yellow()
             ),
         }
     }
@@ -370,13 +719,13 @@ impl Installation {
         let mut moved = false;
         for (legacy, current) in [
             (self.legacy_source_thornlist(), self.source_thornlist()),
-            (self.legacy_live_thornlist(), self.live_thornlist()),
+            (self.legacy_live_thornlist()?, self.live_thornlist()?),
         ] {
             if !legacy.exists() || current.exists() {
                 continue;
             }
             std::fs::rename(&legacy, &current).with_context(|| {
-                format!("Failed to rename {} to {}", legacy.display(), current.display())
+                format!("Failed to rename '{}' to '{}'", legacy.display(), current.display())
             })?;
             moved = true;
         }
@@ -384,15 +733,22 @@ impl Installation {
             return Ok(false);
         }
         crate::build::retarget_recorded_thornlist(
-            &self.cactus_root(),
-            &self.legacy_live_thornlist(),
-            &self.live_thornlist(),
+            &self.cactus_root()?,
+            &self.legacy_live_thornlist()?,
+            &self.live_thornlist()?,
         )?;
         Ok(true)
     }
 
     pub fn cactup_dir(&self) -> PathBuf {
         self.root.join(".cactup")
+    }
+
+    /// The fetch lock (§2.3 item 6): held by whatever rewrites the source
+    /// tree's repos (`installation refetch`), and by `installation cp` while
+    /// it reads them.
+    pub fn fetch_lock_path(&self) -> PathBuf {
+        self.cactup_dir().join(".cactup-fetch.lock")
     }
 
     fn meta_path(&self) -> PathBuf {
@@ -409,15 +765,15 @@ impl Installation {
 
     /// Lock-free read (writes are atomic). Missing file = defaults.
     pub fn meta(&self) -> Res<InstallationMeta> {
-        read_toml(&self.meta_path())
+        Ok(format::read(&self.meta_path(), &INSTALLATION)?.unwrap_or_default())
     }
 
     pub fn simulations(&self) -> Res<SimRegistry> {
-        read_toml(&self.simulations_path())
+        Ok(format::read(&self.simulations_path(), &SIM_REGISTRY)?.unwrap_or_default())
     }
 
     pub fn tests(&self) -> Res<TestRegistry> {
-        read_toml(&self.tests_path())
+        Ok(format::read(&self.tests_path(), &TEST_REGISTRY)?.unwrap_or_default())
     }
 
     /// Acquire the per-installation lock (§2.3 item 5) for a mutation. Keep
@@ -425,7 +781,7 @@ impl Installation {
     /// calls (the lock is not reentrant).
     pub fn locked(&self) -> Res<LockedInstallation<'_>> {
         std::fs::create_dir_all(self.cactup_dir())
-            .with_context(|| format!("Failed to create {}", self.cactup_dir().display()))?;
+            .with_context(|| format!("Failed to create '{}'", self.cactup_dir().display()))?;
         let lock = LinkLock::acquire(&self.cactup_dir().join(".cactup-install.lock"))?;
         Ok(LockedInstallation { inst: self, _lock: lock })
     }
@@ -502,8 +858,27 @@ impl LockedInstallation<'_> {
         self.inst.meta()
     }
 
+    /// Writes the record. An `added-for` entry of a package with no
+    /// `[[added]]` entry (an older binary's `remove` left it) is dropped:
+    /// no reader believes it, and a package added again later must not
+    /// inherit it.
     pub fn set_meta(&self, meta: &InstallationMeta) -> Res<()> {
-        write_toml(&self.inst.meta_path(), meta)
+        self.set_meta_rebuilding(meta, &[])
+    }
+
+    /// [`LockedInstallation::set_meta`], where the `added-for` entries of
+    /// `rebuilt` (package names) were made anew by this command: they are
+    /// written whole, without what a newer binary had put in the old ones.
+    pub fn set_meta_rebuilding(&self, meta: &InstallationMeta, rebuilt: &[String]) -> Res<()> {
+        let stray = |name: &String| !meta.added.iter().any(|a| &a.package == name);
+        let whole: Vec<Vec<String>> = rebuilt.iter().map(|name| vec!["added-for".to_owned(), name.clone()]).collect();
+        let path = self.inst.meta_path();
+        if meta.added_for.keys().any(stray) {
+            let mut kept = meta.clone();
+            kept.added_for.retain(|name, _| !stray(name));
+            return format::write_replacing_keys(&path, &kept, &INSTALLATION, &whole);
+        }
+        format::write_replacing_keys(&path, meta, &INSTALLATION, &whole)
     }
 
     pub fn simulations(&self) -> Res<SimRegistry> {
@@ -511,7 +886,7 @@ impl LockedInstallation<'_> {
     }
 
     pub fn set_simulations(&self, registry: &SimRegistry) -> Res<()> {
-        write_toml(&self.inst.simulations_path(), registry)
+        format::write(&self.inst.simulations_path(), registry, &SIM_REGISTRY)
     }
 
     pub fn tests(&self) -> Res<TestRegistry> {
@@ -519,48 +894,8 @@ impl LockedInstallation<'_> {
     }
 
     pub fn set_tests(&self, registry: &TestRegistry) -> Res<()> {
-        write_toml(&self.inst.tests_path(), registry)
+        format::write(&self.inst.tests_path(), registry, &TEST_REGISTRY)
     }
-}
-
-/// Read a schema-guarded cactup TOML, defaulting when the file is absent.
-/// (Shared with the SIM/TEST metadata files — same §9.3 schema policy.)
-pub(crate) fn read_toml<T: DeserializeOwned + Default>(path: &Path) -> Res<T> {
-    #[derive(Deserialize)]
-    struct SchemaOnly {
-        #[serde(default = "default_schema")]
-        schema: u32,
-    }
-
-    let text = match std::fs::read_to_string(path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
-        other => other.with_context(|| format!("Failed to read {}", path.display()))?,
-    };
-    let probe: SchemaOnly =
-        toml::from_str(&text).with_context(|| format!("Failed to parse {}", path.display()))?;
-    if probe.schema > SCHEMA {
-        bail!(
-            "{} has schema {} but this cactup understands at most schema {SCHEMA}; please upgrade cactup",
-            path.display(),
-            probe.schema
-        );
-    }
-    toml::from_str(&text).with_context(|| format!("Failed to parse {}", path.display()))
-}
-
-/// Atomic (temp + rename) TOML write, so readers never see a torn file.
-pub(crate) fn write_toml<T: Serialize>(path: &Path, value: &T) -> Res<()> {
-    let dir = path.parent().expect("cactup TOML paths have parents");
-    std::fs::create_dir_all(dir).with_context(|| format!("Failed to create {}", dir.display()))?;
-    let text = toml::to_string_pretty(value).context("Failed to serialize TOML")?;
-    let mut temp = tempfile::NamedTempFile::new_in(dir)
-        .with_context(|| format!("Failed to create temp file in {}", dir.display()))?;
-    temp.write_all(text.as_bytes())
-        .and_then(|()| temp.as_file().sync_all())
-        .with_context(|| format!("Failed to write {}", path.display()))?;
-    temp.persist(path)
-        .with_context(|| format!("Failed to move {} into place", path.display()))?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -577,17 +912,17 @@ mod tests {
     /// The pre-rename layout: both copies named `einsteintoolkit.th`, and a
     /// config recording the live one as the file it was built from.
     fn legacy_layout(inst: &Installation) {
-        std::fs::create_dir_all(inst.cactus_root().join("thornlists")).unwrap();
+        std::fs::create_dir_all(inst.cactus_root().unwrap().join("thornlists")).unwrap();
         std::fs::write(inst.legacy_source_thornlist(), "A/B\n").unwrap();
-        std::fs::write(inst.legacy_live_thornlist(), "A/B\nC/D\n").unwrap();
-        let cfg = inst.cactus_root().join("configs/sim");
+        std::fs::write(inst.legacy_live_thornlist().unwrap(), "A/B\nC/D\n").unwrap();
+        let cfg = inst.cactus_root().unwrap().join("configs/sim");
         std::fs::create_dir_all(&cfg).unwrap();
         std::fs::write(
             cfg.join("cactup-config.toml"),
             format!(
                 "name = \"sim\"\nflavor = \"default\"\nthornlist = \"{}\"\nmachine = \"fake\"\n\
                  config-id = \"c1\"\nbuild-id = \"b1\"\n",
-                inst.legacy_live_thornlist().display()
+                inst.legacy_live_thornlist().unwrap().display()
             ),
         )
         .unwrap();
@@ -601,9 +936,10 @@ mod tests {
         let (_dir, inst) = inst();
         legacy_layout(&inst);
 
-        assert_eq!(inst.live_thornlist_to_read(), inst.legacy_live_thornlist());
+        assert_eq!(inst.live_thornlist_to_read().unwrap(), inst.legacy_live_thornlist().unwrap());
         assert_eq!(inst.source_thornlist_to_read(), inst.legacy_source_thornlist());
-        assert!(inst.is_live_thornlist(&inst.legacy_live_thornlist().display().to_string()));
+        let legacy = inst.legacy_live_thornlist().unwrap();
+        assert!(inst.is_live_thornlist(&legacy.display().to_string()).unwrap());
 
     }
 
@@ -612,7 +948,7 @@ mod tests {
     #[test]
     fn missing_thornlists_resolve_to_the_current_name() {
         let (_dir, empty) = inst();
-        assert_eq!(empty.live_thornlist_to_read(), empty.live_thornlist());
+        assert_eq!(empty.live_thornlist_to_read().unwrap(), empty.live_thornlist().unwrap());
         assert_eq!(empty.source_thornlist_to_read(), empty.source_thornlist());
     }
 
@@ -623,15 +959,15 @@ mod tests {
 
         assert!(inst.migrate_thornlist_names().unwrap());
         assert_eq!(std::fs::read_to_string(inst.source_thornlist()).unwrap(), "A/B\n");
-        assert_eq!(std::fs::read_to_string(inst.live_thornlist()).unwrap(), "A/B\nC/D\n");
+        assert_eq!(std::fs::read_to_string(inst.live_thornlist().unwrap()).unwrap(), "A/B\nC/D\n");
         assert!(!inst.legacy_source_thornlist().exists());
-        assert!(!inst.legacy_live_thornlist().exists());
+        assert!(!inst.legacy_live_thornlist().unwrap().exists());
 
         // Retargeted, so a rebuild still resolves the live list (and still
         // picks up edits to it) instead of dropping to the config's snapshot.
-        let meta = crate::build::ConfigMeta::load(&inst.cactus_root(), "sim").unwrap().unwrap();
-        assert_eq!(meta.thornlist, inst.live_thornlist().display().to_string());
-        assert!(inst.is_live_thornlist(&meta.thornlist));
+        let meta = crate::build::ConfigMeta::load(&inst.cactus_root().unwrap(), "sim").unwrap().unwrap();
+        assert_eq!(meta.thornlist, inst.live_thornlist().unwrap().display().to_string());
+        assert!(inst.is_live_thornlist(&meta.thornlist).unwrap());
 
         // Idempotent: the second run has nothing to move.
         assert!(!inst.migrate_thornlist_names().unwrap());
@@ -643,11 +979,11 @@ mod tests {
     fn migration_never_clobbers_a_current_copy() {
         let (_dir, inst) = inst();
         legacy_layout(&inst);
-        std::fs::write(inst.live_thornlist(), "live\n").unwrap();
+        std::fs::write(inst.live_thornlist().unwrap(), "live\n").unwrap();
 
         assert!(inst.migrate_thornlist_names().unwrap());
-        assert_eq!(std::fs::read_to_string(inst.live_thornlist()).unwrap(), "live\n");
-        assert_eq!(inst.live_thornlist_to_read(), inst.live_thornlist());
+        assert_eq!(std::fs::read_to_string(inst.live_thornlist().unwrap()).unwrap(), "live\n");
+        assert_eq!(inst.live_thornlist_to_read().unwrap(), inst.live_thornlist().unwrap());
         // The pristine copy had no current-name file, so it still moved.
         assert!(inst.source_thornlist().exists());
     }
@@ -661,16 +997,16 @@ mod tests {
         let elsewhere = dir.path().join("custom").join(LEGACY_THORNLIST);
         std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
         std::fs::write(&elsewhere, "X/Y\n").unwrap();
-        let cfg = inst.cactus_root().join("configs/sim/cactup-config.toml");
-        let text = std::fs::read_to_string(&cfg)
-            .unwrap()
-            .replace(&inst.legacy_live_thornlist().display().to_string(), &elsewhere.display().to_string());
+        let cfg = inst.cactus_root().unwrap().join("configs/sim/cactup-config.toml");
+        let legacy = inst.legacy_live_thornlist().unwrap().display().to_string();
+        let custom = elsewhere.display().to_string();
+        let text = std::fs::read_to_string(&cfg).unwrap().replace(&legacy, &custom);
         std::fs::write(&cfg, text).unwrap();
 
         assert!(inst.migrate_thornlist_names().unwrap());
-        let meta = crate::build::ConfigMeta::load(&inst.cactus_root(), "sim").unwrap().unwrap();
+        let meta = crate::build::ConfigMeta::load(&inst.cactus_root().unwrap(), "sim").unwrap().unwrap();
         assert_eq!(meta.thornlist, elsewhere.display().to_string());
-        assert!(!inst.is_live_thornlist(&meta.thornlist));
+        assert!(!inst.is_live_thornlist(&meta.thornlist).unwrap());
     }
 
     #[test]
@@ -693,7 +1029,6 @@ mod tests {
         let meta = inst.meta().unwrap();
         assert_eq!(meta.active_config().unwrap(), "sim");
         assert_eq!(meta.sim_home().unwrap(), Path::new("/work/et-dev"));
-        assert_eq!(meta.schema, SCHEMA);
     }
 
     #[test]
@@ -725,30 +1060,504 @@ mod tests {
     #[test]
     fn is_live_thornlist_tolerates_both_recorded_forms() {
         let (_dir, inst) = inst();
-        let live = inst.live_thornlist();
+        let live = inst.live_thornlist().unwrap();
 
         // The default-rule form: a plain display() string, file need not exist.
-        assert!(inst.is_live_thornlist(&live.display().to_string()));
+        assert!(inst.is_live_thornlist(&live.display().to_string()).unwrap());
         // Never a match: an explicit custom path, or an empty recorded string
         // (which the old unwrap_or_default() form could spuriously match when
         // canonicalize failed).
-        assert!(!inst.is_live_thornlist("/somewhere/else/my-forks.th"));
-        assert!(!inst.is_live_thornlist(""));
+        assert!(!inst.is_live_thornlist("/somewhere/else/my-forks.th").unwrap());
+        assert!(!inst.is_live_thornlist("").unwrap());
 
         // The --thornlist form: the same file, but recorded canonicalized.
         std::fs::create_dir_all(live.parent().unwrap()).unwrap();
         std::fs::write(&live, "!CRL_VERSION = 1.0\n").unwrap();
         let canonical = std::fs::canonicalize(&live).unwrap();
-        assert!(inst.is_live_thornlist(&canonical.display().to_string()));
+        assert!(inst.is_live_thornlist(&canonical.display().to_string()).unwrap());
     }
 
     #[test]
     fn schema_guard_refuses_newer_files() {
         let (_dir, inst) = inst();
         std::fs::create_dir_all(inst.cactup_dir()).unwrap();
-        std::fs::write(inst.meta_path(), format!("schema = {}\n", SCHEMA + 1)).unwrap();
+        std::fs::write(inst.meta_path(), format!("schema = {}\n", INSTALLATION.current + 1)).unwrap();
         let err = format!("{:#}", inst.meta().unwrap_err());
         assert!(err.contains("upgrade"), "{err}");
+    }
+
+    /// Every field set, every collection non-empty, and no `..`: a new field
+    /// fails to compile here, and the shape pin then says what to do.
+    fn exhaustive_meta() -> InstallationMeta {
+        InstallationMeta {
+            active_config: Some("sim".to_owned()),
+            sim_home: Some("/scratch/sims/et".into()),
+            test_home: Some("/scratch/tests/et".into()),
+            root_dir: Some("Cactus".to_owned()),
+            added: vec![AddedPackage {
+                package: "owner/pkg".to_owned(),
+                version: "1.2.3".to_owned(),
+                tag: Some("v1.2.3".to_owned()),
+                commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                url: "https://github.com/owner/pkg".to_owned(),
+                repo: "pkg".to_owned(),
+                thorns: vec![AddedThorn {
+                    checkout: "Arr/Thorn".to_owned(),
+                    repo_path: "Arr/Thorn".to_owned(),
+                }],
+                replaces: vec!["OldRepo".to_owned()],
+                contact: Some("https://github.com/owner/pkg/issues".to_owned()),
+                libraries: vec![AddedLibrary {
+                    package: "owner/lib".to_owned(),
+                    version: "0.4.1".to_owned(),
+                    tag: Some("v0.4.1".to_owned()),
+                    commit: "89abcdef0123456789abcdef0123456789abcdef".to_owned(),
+                    url: "https://github.com/owner/lib".to_owned(),
+                    inside: "pkg".to_owned(),
+                    into: "src/lib".to_owned(),
+                }],
+                flesh: vec!["Makefile".to_owned(), "lib".to_owned(), "src".to_owned()],
+            }],
+            added_for: [(
+                "owner/pkg".to_owned(),
+                AddedFor {
+                    requested: false,
+                    by: vec!["owner/app@2.0.0".to_owned()],
+                    for_commit: Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
+                    choices: vec![AddedForChoice {
+                        dependent: "owner/app".to_owned(),
+                        alternatives: vec!["owner/pkg".to_owned(), "owner/other".to_owned()],
+                    }],
+                },
+            )]
+            .into(),
+            claim_overrides: [(
+                "drop owner/app:dependency:owner/other".to_owned(),
+                ClaimOverride { kind: "drop".to_owned(), note: Some("its thorns ship with the flesh".to_owned()) },
+            )]
+            .into(),
+            linked_to: Some("/scratch/cacti/et".into()),
+        }
+    }
+
+    /// [`exhaustive_meta`] as a record before claim overrides had it.
+    fn without_overrides() -> InstallationMeta {
+        InstallationMeta { claim_overrides: BTreeMap::new(), ..exhaustive_meta() }
+    }
+
+    fn exhaustive_sim_registry() -> SimRegistry {
+        let mut simulations = IndexMap::new();
+        for name in ["bbh", "gone"] {
+            simulations.insert(
+                name.to_owned(),
+                SimEntry {
+                    dir: format!("/scratch/sims/et/{name}").into(),
+                    config: "sim".to_owned(),
+                    created: "2026-05-01T12:00:00Z".parse().unwrap(),
+                },
+            );
+        }
+        SimRegistry { simulations }
+    }
+
+    fn exhaustive_test_registry() -> TestRegistry {
+        let mut tests = IndexMap::new();
+        for name in ["et-tests", "gone"] {
+            tests.insert(
+                name.to_owned(),
+                TestEntry {
+                    dir: format!("/scratch/tests/et/{name}").into(),
+                    config: "sim".to_owned(),
+                    created: "2026-05-01T12:00:00Z".parse().unwrap(),
+                },
+            );
+        }
+        TestRegistry { tests }
+    }
+
+    #[test]
+    fn installation_formats_generic_tests() {
+        use crate::format::testing::*;
+        let sample = exhaustive_meta();
+        descriptor_is_consistent(&INSTALLATION);
+        let fixtures = fixture_dir("installation");
+        shape_is_pinned(&INSTALLATION, &fixtures, &sample);
+        every_fixture_loads::<InstallationMeta, _>(&INSTALLATION, &fixtures);
+        newer_is_refused::<InstallationMeta, _>(&INSTALLATION, "installation.toml", "added = 7\n", &sample);
+        unknown_keys_survive(
+            &INSTALLATION,
+            "installation.toml",
+            &sample,
+            &[],
+            |m: &mut InstallationMeta| m.active_config = None,
+            &["active-config"],
+        );
+
+        let sample = exhaustive_sim_registry();
+        descriptor_is_consistent(&SIM_REGISTRY);
+        let fixtures = fixture_dir("simulations");
+        shape_is_pinned(&SIM_REGISTRY, &fixtures, &sample);
+        every_fixture_loads::<SimRegistry, _>(&SIM_REGISTRY, &fixtures);
+        newer_is_refused::<SimRegistry, _>(&SIM_REGISTRY, "simulations.toml", "simulations = 7\n", &sample);
+        unknown_keys_survive(
+            &SIM_REGISTRY,
+            "simulations.toml",
+            &sample,
+            &["simulations", "bbh"],
+            |r: &mut SimRegistry| drop(r.simulations.shift_remove("gone")),
+            &["simulations", "gone"],
+        );
+
+        let sample = exhaustive_test_registry();
+        descriptor_is_consistent(&TEST_REGISTRY);
+        let fixtures = fixture_dir("tests");
+        shape_is_pinned(&TEST_REGISTRY, &fixtures, &sample);
+        every_fixture_loads::<TestRegistry, _>(&TEST_REGISTRY, &fixtures);
+        newer_is_refused::<TestRegistry, _>(&TEST_REGISTRY, "tests.toml", "tests = 7\n", &sample);
+        unknown_keys_survive(
+            &TEST_REGISTRY,
+            "tests.toml",
+            &sample,
+            &["tests", "et-tests"],
+            |r: &mut TestRegistry| drop(r.tests.shift_remove("gone")),
+            &["tests", "gone"],
+        );
+    }
+
+    /// Only libraries need version 2: an installation without them is written
+    /// as v1, one with them as v2, and a v1 file that gains a library moves
+    /// up. Once at v2 a file stays there (sticky), even without libraries.
+    #[test]
+    fn only_libraries_make_an_installation_record_v2() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installation.toml");
+        let schema = || {
+            let doc: Toml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            doc["schema"].as_integer().unwrap()
+        };
+        let mut plain = without_overrides();
+        plain.added[0].libraries.clear();
+        plain.added[0].flesh.clear();
+        plain.linked_to = None;
+
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        assert_eq!(schema(), 1);
+        let back: InstallationMeta = format::read(&path, &INSTALLATION).unwrap().unwrap();
+        assert_eq!(back.added, plain.added);
+
+        let mut libraries = without_overrides();
+        libraries.added[0].flesh.clear();
+        libraries.linked_to = None;
+        format::write(&path, &libraries, &INSTALLATION).unwrap();
+        assert_eq!(schema(), 2);
+        let back: InstallationMeta = format::read(&path, &INSTALLATION).unwrap().unwrap();
+        assert_eq!(back.added, libraries.added);
+
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        assert_eq!(schema(), 2);
+
+        // A new file without libraries, and one with no packages at all.
+        std::fs::remove_file(&path).unwrap();
+        format::write(&path, &InstallationMeta::default(), &INSTALLATION).unwrap();
+        assert_eq!(schema(), 1);
+    }
+
+    /// What a binary from before version 2 makes of the files this one
+    /// writes: it reads one without libraries, and refuses one with them
+    /// (asking for an upgrade) instead of dropping them on its next write.
+    #[test]
+    fn an_older_binary_refuses_only_installations_with_libraries() {
+        // `INSTALLATION` as it shipped at version 1.
+        static V1: Format<Toml> = Format {
+            name: "installation record",
+            key: "schema",
+            current: 1,
+            upgrades: &[],
+            downgrades: &[],
+            down_floor: 1,
+            frozen_read: false,
+            legacy: None,
+            replace_whole: &[],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installation.toml");
+        let mut plain = without_overrides();
+        plain.added[0].libraries.clear();
+        plain.added[0].flesh.clear();
+        // Additive, and not in the v1 fixture (see the test of `added-for`).
+        plain.added_for.clear();
+        plain.linked_to = None;
+
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        let old: InstallationMeta = format::read(&path, &V1).unwrap().unwrap();
+        assert_eq!(old.added, plain.added);
+        // Exactly the shape version 1 shipped with, not merely one it reads.
+        let parse = |path: &Path| -> Toml {
+            toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        };
+        let v1 = crate::format::testing::fixture_dir("installation").join("v1.toml");
+        assert_eq!(parse(&path), parse(&v1));
+
+        let mut libraries = without_overrides();
+        libraries.added[0].flesh.clear();
+        libraries.linked_to = None;
+        format::write(&path, &libraries, &INSTALLATION).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let err = format::read::<InstallationMeta, _>(&path, &V1).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+        let err = format::write(&path, &plain, &V1).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "the libraries survive");
+
+        let fixture = crate::format::testing::fixture_dir("installation").join("v2.toml");
+        let err = format::read::<InstallationMeta, _>(&fixture, &V1).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+    }
+
+    /// An older binary, which models no `added-for`, rewrites the record (a
+    /// `config use`, an `add` of its own): the map is put back whole, entries
+    /// and their `choices` arrays alike, and the version stays what it was.
+    #[test]
+    fn an_older_binary_s_rewrite_keeps_added_for() {
+        // `InstallationMeta` and `INSTALLATION` as they shipped at version
+        // 2, before `added-for`.
+        #[derive(Debug, Default, Serialize, Deserialize)]
+        #[serde(rename_all = "kebab-case")]
+        struct Before {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            active_config: Option<String>,
+            #[serde(default)]
+            sim_home: Option<PathBuf>,
+            #[serde(default)]
+            test_home: Option<PathBuf>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            root_dir: Option<String>,
+            #[serde(default, skip_serializing_if = "Vec::is_empty")]
+            added: Vec<AddedPackage>,
+        }
+        static V2: Format<Toml> = Format {
+            name: "installation record",
+            key: "schema",
+            current: 2,
+            upgrades: &[installation_up_1],
+            downgrades: &[installation_down_2],
+            down_floor: 1,
+            frozen_read: false,
+            legacy: None,
+            replace_whole: &[],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installation.toml");
+        let mut plain = without_overrides();
+        plain.added[0].libraries.clear();
+        plain.added[0].flesh.clear();
+        plain.linked_to = None;
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        let schema = || {
+            let doc: Toml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            doc["schema"].as_integer().unwrap()
+        };
+        assert_eq!(schema(), 1, "added-for alone needs no newer version");
+
+        let mut old: Before = format::read(&path, &V2).unwrap().unwrap();
+        old.active_config = Some("other".to_owned());
+        old.added[0].version = "1.2.4".to_owned();
+        format::write(&path, &old, &V2).unwrap();
+        assert_eq!(schema(), 1);
+        let back: InstallationMeta = format::read(&path, &INSTALLATION).unwrap().unwrap();
+        assert_eq!(back.added_for, plain.added_for, "kept whole, choices included");
+        assert_eq!(back.added[0].version, "1.2.4");
+    }
+
+    /// An unrelated write (`config use`, a build) keeps what a newer binary
+    /// put inside an `added-for` entry; a write that rebuilds an entry drops
+    /// it from that entry only, its name taken literally (a `.` included).
+    #[test]
+    fn only_the_entries_a_command_rebuilds_lose_unknown_keys() {
+        let (_dir, inst) = inst();
+        std::fs::create_dir_all(inst.cactup_dir()).unwrap();
+        let mut meta = without_overrides();
+        let mut dotted = meta.added[0].clone();
+        dotted.package = "owner/pkg.x".to_owned();
+        meta.added.push(dotted);
+        meta.added_for.insert("owner/pkg.x".to_owned(), meta.added_for["owner/pkg"].clone());
+        let locked = inst.locked().unwrap();
+        locked.set_meta(&meta).unwrap();
+        let path = inst.meta_path();
+        let mut doc: Toml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for name in ["owner/pkg", "owner/pkg.x"] {
+            let entry = doc["added-for"][name].as_table_mut().unwrap();
+            entry.insert("cactup-future".to_owned(), toml::Value::Integer(1));
+        }
+        std::fs::write(&path, toml::to_string(&doc).unwrap()).unwrap();
+        let future = |name: &str| {
+            let doc: Toml = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            doc["added-for"][name].get("cactup-future").is_some()
+        };
+
+        let mut meta = locked.meta().unwrap();
+        meta.active_config = Some("other".to_owned());
+        locked.set_meta(&meta).unwrap();
+        assert!(future("owner/pkg") && future("owner/pkg.x"), "an unrelated write keeps them");
+
+        meta.added_for.get_mut("owner/pkg.x").unwrap().requested = true;
+        locked.set_meta_rebuilding(&meta, &["owner/pkg.x".to_owned()]).unwrap();
+        assert!(future("owner/pkg") && !future("owner/pkg.x"));
+        assert!(locked.meta().unwrap().added_for["owner/pkg.x"].requested);
+    }
+
+    /// `set_meta` drops an entry with no `[[added]]` entry beside it (an
+    /// older binary's `remove` left it), so a package added again later
+    /// never inherits it.
+    #[test]
+    fn set_meta_drops_added_for_entries_without_a_package() {
+        let (_dir, inst) = inst();
+        std::fs::create_dir_all(inst.cactup_dir()).unwrap();
+        let mut meta = without_overrides();
+        meta.added_for.insert("owner/gone".to_owned(), meta.added_for["owner/pkg"].clone());
+        let locked = inst.locked().unwrap();
+        locked.set_meta(&meta).unwrap();
+        let back = locked.meta().unwrap();
+        assert_eq!(back.added_for.keys().collect::<Vec<_>>(), ["owner/pkg"]);
+        let present: Vec<bool> = back.added_for_present().map(|(_, f)| f.is_some()).collect();
+        assert_eq!(present, [true]);
+    }
+
+    /// A version-2 binary must refuse a symbolic copy, which it would write
+    /// through into its source, and only that.
+    #[test]
+    fn an_older_binary_refuses_only_symbolic_copies() {
+        // `INSTALLATION` as it shipped at version 2.
+        static V2: Format<Toml> = Format {
+            name: "installation record",
+            key: "schema",
+            current: 2,
+            upgrades: &[installation_up_1],
+            downgrades: &[installation_down_2],
+            down_floor: 1,
+            frozen_read: false,
+            legacy: None,
+            replace_whole: &[],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let schema = |path: &Path| std::fs::read_to_string(path).unwrap().lines().next().unwrap().to_owned();
+
+        let path = dir.path().join("libraries.toml");
+        let mut libraries = without_overrides();
+        libraries.added[0].flesh.clear();
+        libraries.linked_to = None;
+        format::write(&path, &libraries, &INSTALLATION).unwrap();
+        assert_eq!(schema(&path), "schema = 2");
+        let old: InstallationMeta = format::read(&path, &V2).unwrap().unwrap();
+        assert_eq!(old.added, libraries.added);
+
+        let path = dir.path().join("symbolic.toml");
+        let mut symbolic = without_overrides();
+        symbolic.added[0].flesh.clear();
+        format::write(&path, &symbolic, &INSTALLATION).unwrap();
+        assert_eq!(schema(&path), "schema = 3");
+        let err = format::read::<InstallationMeta, _>(&path, &V2).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+
+        // Reified: the key goes, the version stays.
+        format::write(&path, &libraries, &INSTALLATION).unwrap();
+        assert_eq!(schema(&path), "schema = 3");
+    }
+
+    /// A version-3 binary must refuse a record with a flesh package, which
+    /// it would compose as a package with no thorns beside the base's flesh,
+    /// and only that: a record without one is still written as v3 or older.
+    #[test]
+    fn an_older_binary_refuses_only_installations_with_a_flesh_package() {
+        // `INSTALLATION` as it shipped at version 3.
+        static V3: Format<Toml> = Format {
+            name: "installation record",
+            key: "schema",
+            current: 3,
+            upgrades: &[installation_up_1, installation_up_2],
+            downgrades: &[installation_down_2, installation_down_3],
+            down_floor: 1,
+            frozen_read: false,
+            legacy: None,
+            replace_whole: &[],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let schema = |path: &Path| std::fs::read_to_string(path).unwrap().lines().next().unwrap().to_owned();
+
+        // Everything else v3 holds (libraries, a symbolic copy): v3, read by it.
+        let path = dir.path().join("plain.toml");
+        let mut plain = without_overrides();
+        plain.added[0].flesh.clear();
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        assert_eq!(schema(&path), "schema = 3");
+        let old: InstallationMeta = format::read(&path, &V3).unwrap().unwrap();
+        assert_eq!(old.added, plain.added);
+
+        let path = dir.path().join("flesh.toml");
+        format::write(&path, &without_overrides(), &INSTALLATION).unwrap();
+        assert_eq!(schema(&path), "schema = 4");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let err = format::read::<InstallationMeta, _>(&path, &V3).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+        let err = format::write(&path, &plain, &V3).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "the flesh package survives");
+        let fixture = crate::format::testing::fixture_dir("installation").join("v4.toml");
+        let err = format::read::<InstallationMeta, _>(&fixture, &V3).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+
+        // The flesh package removed: the version stays (sticky).
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        assert_eq!(schema(&path), "schema = 4");
+    }
+
+    /// A version-4 binary must refuse a record with a claim override, which
+    /// it would resolve without (`remove` could sweep a package only an added
+    /// dependency holds), and only that: a record without one is still
+    /// written as v4 or older.
+    #[test]
+    fn an_older_binary_refuses_only_installations_with_a_claim_override() {
+        // `INSTALLATION` as it shipped at version 4.
+        static V4: Format<Toml> = Format {
+            name: "installation record",
+            key: "schema",
+            current: 4,
+            upgrades: &[installation_up_1, installation_up_2, installation_up_3],
+            downgrades: &[installation_down_2, installation_down_3, installation_down_4],
+            down_floor: 1,
+            frozen_read: false,
+            legacy: None,
+            replace_whole: &[],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let schema = |path: &Path| std::fs::read_to_string(path).unwrap().lines().next().unwrap().to_owned();
+
+        // Everything else v4 holds (a flesh package, libraries, a symbolic copy): v4, read by it.
+        let path = dir.path().join("plain.toml");
+        let plain = without_overrides();
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        assert_eq!(schema(&path), "schema = 4");
+        let old: InstallationMeta = format::read(&path, &V4).unwrap().unwrap();
+        assert_eq!(old.added, plain.added);
+
+        let path = dir.path().join("overrides.toml");
+        format::write(&path, &exhaustive_meta(), &INSTALLATION).unwrap();
+        assert_eq!(schema(&path), "schema = 5");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let err = format::read::<InstallationMeta, _>(&path, &V4).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+        let err = format::write(&path, &plain, &V4).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "the override survives");
+        let fixture = crate::format::testing::fixture_dir("installation").join("v5.toml");
+        let err = format::read::<InstallationMeta, _>(&fixture, &V4).unwrap_err();
+        assert!(err.downcast_ref::<format::Newer>().is_some(), "{err:#}");
+
+        // The last override removed: the version stays (sticky), and an empty table counts as none.
+        format::write(&path, &plain, &INSTALLATION).unwrap();
+        assert_eq!(schema(&path), "schema = 5");
+        let mut doc: Toml = toml::from_str("schema = 5\n[claim-overrides]\n").unwrap();
+        assert!(installation_down_5(&mut doc).is_ok());
     }
 
     #[test]
@@ -785,20 +1594,20 @@ mod tests {
         let (_dir, inst) = inst();
         std::fs::create_dir_all(inst.cactup_dir()).unwrap();
         std::fs::write(inst.meta_path(), "root-dir = \"Something\"\n").unwrap();
-        assert_eq!(inst.cactus_root(), inst.root.join("Something"));
+        assert_eq!(inst.cactus_root().unwrap(), inst.root.join("Something"));
     }
 
     #[test]
     fn cactus_root_defaults_to_cactus_when_unrecorded() {
         // No installation.toml at all.
         let (_dir, no_meta) = inst();
-        assert_eq!(no_meta.cactus_root(), no_meta.root.join(DEFAULT_ROOT_DIR));
+        assert_eq!(no_meta.cactus_root().unwrap(), no_meta.root.join(DEFAULT_ROOT_DIR));
 
         // installation.toml exists but omits root-dir.
         let (_dir2, no_root_field) = inst();
         std::fs::create_dir_all(no_root_field.cactup_dir()).unwrap();
         std::fs::write(no_root_field.meta_path(), "schema = 1\n").unwrap();
-        assert_eq!(no_root_field.cactus_root(), no_root_field.root.join(DEFAULT_ROOT_DIR));
+        assert_eq!(no_root_field.cactus_root().unwrap(), no_root_field.root.join(DEFAULT_ROOT_DIR));
     }
 
     #[test]
@@ -879,16 +1688,17 @@ mod tests {
         std::fs::write(inst.meta_path(), "root-dir = \"MyTree\"\n").unwrap();
 
         let root = inst.root.join("MyTree");
-        assert_eq!(inst.cactus_root(), root);
-        assert_eq!(inst.live_thornlist(), root.join("thornlists").join(LIVE_THORNLIST));
-        assert_eq!(inst.legacy_live_thornlist(), root.join("thornlists").join(LEGACY_THORNLIST));
-        assert_eq!(inst.live_thornlist_to_read(), inst.live_thornlist());
+        assert_eq!(inst.cactus_root().unwrap(), root);
+        assert_eq!(inst.live_thornlist().unwrap(), root.join("thornlists").join(LIVE_THORNLIST));
+        let legacy = root.join("thornlists").join(LEGACY_THORNLIST);
+        assert_eq!(inst.legacy_live_thornlist().unwrap(), legacy);
+        assert_eq!(inst.live_thornlist_to_read().unwrap(), inst.live_thornlist().unwrap());
 
         // The pristine as-fetched copy lives at the installation home, NOT
         // inside the source tree — an easy asymmetry to break by accident.
         assert_eq!(inst.source_thornlist(), inst.root.join(SOURCE_THORNLIST));
 
-        assert!(inst.is_live_thornlist(&inst.live_thornlist().display().to_string()));
+        assert!(inst.is_live_thornlist(&inst.live_thornlist().unwrap().display().to_string()).unwrap());
     }
 
     /// `cactup use`'s backfill call passes `root_dir: None`; it must never
@@ -914,7 +1724,7 @@ mod tests {
         let generic = mdb.load("generic").unwrap();
         let meta = inst.ensure_meta(&generic, &Database::new(), None).unwrap();
         assert!(meta.root_dir.is_none());
-        assert_eq!(inst.cactus_root(), inst.root.join(DEFAULT_ROOT_DIR));
+        assert_eq!(inst.cactus_root().unwrap(), inst.root.join(DEFAULT_ROOT_DIR));
     }
 
     /// [`Installation::migrate_thornlist_names`] must move the legacy files
@@ -928,9 +1738,10 @@ mod tests {
 
         assert!(inst.migrate_thornlist_names().unwrap());
         let root = inst.root.join("MyTree");
-        assert!(inst.live_thornlist().starts_with(&root), "{}", inst.live_thornlist().display());
-        assert_eq!(std::fs::read_to_string(inst.live_thornlist()).unwrap(), "A/B\nC/D\n");
-        assert!(!inst.legacy_live_thornlist().exists());
+        let live = inst.live_thornlist().unwrap();
+        assert!(live.starts_with(&root), "{}", live.display());
+        assert_eq!(std::fs::read_to_string(inst.live_thornlist().unwrap()).unwrap(), "A/B\nC/D\n");
+        assert!(!inst.legacy_live_thornlist().unwrap().exists());
         // Never under the historical default name.
         assert!(!inst.root.join(DEFAULT_ROOT_DIR).exists());
     }
@@ -946,7 +1757,7 @@ mod tests {
 
         let meta = inst.ensure_meta(&mel5, &Database::new(), Some("Foo")).unwrap();
         assert_eq!(meta.root_dir.as_deref(), Some("Foo"));
-        assert_eq!(inst.cactus_root(), inst.root.join("Foo"));
+        assert_eq!(inst.cactus_root().unwrap(), inst.root.join("Foo"));
 
         // Fixed at install time: a later ensure with a different root dir
         // changes nothing.

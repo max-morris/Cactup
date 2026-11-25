@@ -26,6 +26,9 @@ hostname    = "qbc.loni.org"
 # @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
 install-home    = "/project/sbrandt/carpetx/@USER@"
 simulation-home = "/work/@USER@/simulations"
+# Where `cactup import` keeps the downloaded and unpacked inputs of shared
+# simulations: big, so beside the simulations, not in the home quota.
+inputs-home = "/work/@USER@/inputs"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
 test-home       = "/work/@USER@/tests"
 
@@ -74,8 +77,9 @@ blocking-submit = "sbatch --wait @SCRIPTFILE@ 2>&1"
 # set inside a SLURM allocation; gates `test run` (design §11.6)
 allocation-env  = "SLURM_JOB_ID"
 get-status      = "squeue -j @JOB_ID@"
-# What squeue says (on stderr) of a job Slurm no longer knows.
-unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'
+# What squeue says of a job it no longer lists: the error (on stderr) once
+# Slurm has forgotten it, or only its header line just after it ended.
+unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified|^ *JOBID '
 # One-call form `sim list` uses so it needn't ask job by job; `%i %t (%r)`
 # is what keeps the patterns below matching.
 get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"

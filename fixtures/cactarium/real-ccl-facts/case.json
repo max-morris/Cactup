@@ -1,0 +1,20 @@
+{
+  "about": "Facts as scanned from Z4c's CCL: inherited implementations and required thorns met by other packages' thorns",
+  "packages": [
+    "max--z4c--real-ccl",
+    "et--carpetx--real-ccl",
+    "et--admbase",
+    "et--tmunubase"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named",
+      "add et/carpetx@2026.5.1 Arith, Loop needed by max/z4c@1.2.0 (Z4c, Z4cTest), ^2026.5",
+      "add et/admbase@2026.5.1 ADMBase needed by max/z4c@1.2.0 (Z4c), ^2026.5",
+      "add et/tmunubase@2026.5.0 TmunuBase needed by max/z4c@1.2.0 (Z4c)"
+    ]
+  }
+}

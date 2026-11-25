@@ -5,16 +5,21 @@
 //! Implemented by the FETCH stream (design/_impl_fetch.md).
 
 // Consumed by refetch/install in Phases 4/5; the allows come off then.
+pub mod anonymous;
 pub mod download;
 pub mod external;
 pub mod git;
+pub mod library;
 pub mod link;
+pub(crate) mod retry;
+pub(crate) mod watch;
 
+use crate::format::{self, Format, Toml};
 use crate::thornlist::{Component, ComponentType, Thornlist};
 use crate::Res;
 use anyhow::{bail, Context};
 use git::{DirtyReason, RepoState};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// The number of parallel fetch workers, mirroring GetComponents'
@@ -48,6 +53,10 @@ pub struct Plan {
     pub external: Vec<Component>,
     /// Components needing an arrangement symlink after fetching.
     pub links: Vec<Component>,
+    /// Libraries placed inside another clone (`!CHECKOUT = .` sections whose
+    /// `!TARGET` is inside `repos/`; see [`library`]), in the order they are
+    /// placed: after every clone, a library inside another library after it.
+    pub libraries: Vec<library::Placement>,
     /// The thornlist's `ROOT` define (typically `Cactus`).
     pub root: String,
 }
@@ -61,6 +70,10 @@ pub enum GitAction {
     /// Clean, wanted branch not yet checked out locally: fetch by explicit
     /// refspec, create the branch, check it out.
     Align,
+    /// A `!REPO_COMMIT` pin on a clean repo: check the commit out detached,
+    /// fetching it only if the repo lacks it. A repo already at its pin is
+    /// left alone, offline — a pinned repo is never fast-forwarded.
+    Pin,
 }
 
 #[derive(Debug)]
@@ -69,8 +82,12 @@ pub struct GitRepoPlan {
     /// Absolute repo directory: `<install_root>/<root>/repos/<repo>`.
     pub dir: PathBuf,
     pub url: String,
-    /// `None` = the remote's default branch (no `!REPO_BRANCH`).
+    /// `None` = the remote's default branch (no `!REPO_BRANCH`). For a pinned
+    /// repo, the branch or tag the pin was taken from: a label, and where to
+    /// look for the commit when the server will not send it by id.
     pub branch: Option<String>,
+    /// The `!REPO_COMMIT` pin: `Clone` and `Pin` check this commit out.
+    pub commit: Option<gix::ObjectId>,
     pub action: GitAction,
     /// The checkout names (thorns) this repo backs, for reporting.
     pub checkouts: Vec<String>,
@@ -83,6 +100,16 @@ pub struct GitRepoPlan {
     /// persisting the URL (in `execute`, via `git::set_origin_url`) is also
     /// what stops the next probe from re-flagging it.
     pub retarget: Option<String>,
+    /// What the plan could not settle as it should have, said on the repo's
+    /// line: the remote's default branch not told, so the clone goes back to
+    /// the label a pinned fetch recorded. When that label is no branch of the
+    /// remote (a tag) the align fails before anything moves, and the failure
+    /// says plainly that the clone was left as it was until the remote
+    /// answers.
+    pub note: Option<String>,
+    /// Why the remote could not say its default branch, when the note is
+    /// about that: a silent one fails the fetch at once, untried.
+    pub unasked: Option<Unasked>,
 }
 
 #[derive(Debug)]
@@ -91,31 +118,71 @@ pub struct SkippedRepo {
     pub dir: PathBuf,
     pub url: String,
     pub branch: Option<String>,
+    /// The `!REPO_COMMIT` pin, if any: forcing this repo pins it.
+    pub commit: Option<gix::ObjectId>,
     pub reason: DirtyReason,
     pub untracked: Vec<String>,
     pub checkouts: Vec<String>,
+    /// The repo's last fetch record, for where a forced, detached clone goes.
+    pub record: Option<RepoRecord>,
 }
 
 impl Plan {
     /// Move every skipped repo into the fetchable set. See [`Plan::force_where`].
-    pub fn force(&mut self) -> Vec<String> {
+    pub fn force(&mut self) -> Res<Vec<String>> {
         self.force_where(|_| true)
     }
 
     /// Move the skipped repos `select` accepts into the fetchable set (after
     /// the caller has backed up their modified files), leaving the rest
     /// skipped. Returns the names moved, in plan order.
-    pub fn force_where(&mut self, select: impl Fn(&SkippedRepo) -> bool) -> Vec<String> {
+    ///
+    /// A forced repo with no pin and no `!REPO_BRANCH`, its HEAD on no branch,
+    /// goes where [`branch_to_follow`] says, which may ask its remote: those
+    /// questions are asked on the network fan-out, a line each, all within one
+    /// [`git::REMOTE_ASK_TIMEOUT`], before anything moves; Ctrl-C fails the
+    /// call.
+    pub fn force_where(&mut self, select: impl Fn(&SkippedRepo) -> bool) -> Res<Vec<String>> {
         let mut moved = Vec::new();
         // `drain` with a filter would leave the remaining `skipped` reordered
         // (retain-while-draining semantics); take the whole vec instead and
         // rebuild both parts in their original relative order.
         let taken = std::mem::take(&mut self.skipped);
-        for s in taken {
-            if !select(&s) {
-                self.skipped.push(s);
-                continue;
-            }
+        let (forced, kept): (Vec<SkippedRepo>, Vec<SkippedRepo>) = taken.into_iter().partition(|s| select(s));
+        self.skipped = kept;
+        // A skipped repo with no !REPO_BRANCH has `branch: None`; unlike
+        // `plan()`'s clean-repo path, nothing has resolved it to the repo's
+        // actual head branch yet. Do that here too: the branch HEAD is on,
+        // else where a detached clone goes back to. A pinned repo needs no
+        // branch: it is checked out by commit.
+        let on_branch = |s: &SkippedRepo| git::head_of(&s.dir).ok().map(|(b, _)| b).filter(|b| b != git::DETACHED);
+        let wants: Vec<(usize, Option<String>)> = (forced.iter().enumerate())
+            .filter(|(_, s)| s.commit.is_none() && s.branch.is_none())
+            .map(|(i, s)| (i, on_branch(s)))
+            .collect();
+        let asks: Vec<ToFollow> = (wants.iter())
+            .filter(|(_, b)| b.is_none())
+            .map(|(i, _)| &forced[*i])
+            .map(|s| ToFollow { repo: &s.repo, dir: &s.dir, url: &s.url, listed: None, record: s.record.as_ref() })
+            .collect();
+        let follows = if asks.is_empty() {
+            Vec::new()
+        } else {
+            let (progress, renderer) = crate::manifest::setup_prodash();
+            let follows = follow_all(progress.add_child(FOLLOWING), &asks);
+            renderer.shutdown_and_wait();
+            follows?
+        };
+        let mut follows = follows.into_iter();
+        let mut resolved: BTreeMap<usize, Follow> = BTreeMap::new();
+        for (i, branch) in wants {
+            let follow = match branch {
+                Some(b) => Follow { branch: Some(b), note: None, unasked: None },
+                None => follows.next().expect("one answer per ask"),
+            };
+            resolved.insert(i, follow);
+        }
+        for (i, s) in forced.into_iter().enumerate() {
             // A `RemoteUrlChanged` repo's `origin` still names the *old*
             // upstream until `execute` calls `set_origin_url`; against that,
             // `at_local_origin_tip`'s "already at the tip" reading is
@@ -125,7 +192,9 @@ impl Plan {
             // carry the URL to retarget to before this item is ever fetched.
             let retarget =
                 matches!(&s.reason, DirtyReason::RemoteUrlChanged { .. }).then(|| s.url.clone());
-            let action = if retarget.is_some() {
+            let action = if s.commit.is_some() {
+                GitAction::Pin
+            } else if retarget.is_some() {
                 GitAction::Align
             } else {
                 match &s.branch {
@@ -133,27 +202,210 @@ impl Plan {
                     _ => GitAction::Align,
                 }
             };
-            // A skipped repo with no !REPO_BRANCH has `branch: None`; unlike
-            // `plan()`'s clean-repo path, nothing has resolved it to the
-            // repo's actual head branch yet. Do that here too, or `execute`
-            // errors out with "no branch resolved for existing repo" for any
-            // dirty repo that was never given an explicit branch.
-            let branch = s.branch.or_else(|| git::head_of(&s.dir).ok().map(|(b, _)| b));
+            // Resolved above, for one with neither a pin nor a listed branch.
+            let (branch, note, unasked) = match resolved.remove(&i) {
+                Some(Follow { branch, note, unasked }) => (branch, note, unasked),
+                None => (s.branch, None, None),
+            };
             moved.push(s.repo.clone());
             self.git.push(GitRepoPlan {
                 repo: s.repo,
                 dir: s.dir,
                 url: s.url,
                 branch,
+                commit: s.commit,
                 action,
                 checkouts: s.checkouts,
                 forced: Some(s.reason.describe()),
                 retarget,
+                note,
+                unasked,
             });
         }
-        moved
+        Ok(moved)
     }
 }
+
+/// Where a clone goes back to, and what to say about it on its line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Follow {
+    pub branch: Option<String>,
+    pub note: Option<String>,
+    /// Why its remote could not say its default branch, when it was asked
+    /// and could not.
+    pub unasked: Option<Unasked>,
+}
+
+/// Why a clone's remote could not say its default branch, kept for its
+/// fetch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unasked {
+    /// The ask's own error, as said.
+    pub error: String,
+    /// It went unanswered (the remote stalled, or the window ran out while
+    /// it waited): its fetch would wait out the same silence, so it is not
+    /// tried. Not set for a remote that refused, or one never asked.
+    pub silent: bool,
+}
+
+/// Where a clone goes back to, as far as cactup can tell without asking its
+/// remote.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Known {
+    /// This branch.
+    Branch(String),
+    /// The remote's default branch, which only the remote can tell; `label`
+    /// is what to fall back to when it cannot be asked (a pinned fetch's).
+    RemoteDefault { label: Option<String> },
+}
+
+/// The branch a clone that is no longer pinned goes back onto: the list's
+/// (`!REPO_BRANCH`), else the one the last fetch followed (unpinned, from the
+/// same URL), else the remote's default (as the clone knows it, when its
+/// `origin` is that remote; else as the remote says: a clone made pinned
+/// knows none), else, last, the label a pinned fetch from that URL recorded.
+/// A pinned fetch's label is only where its pin came from, a branch or a tag
+/// (a stack release's list names release tags): a branch to align to only
+/// when nothing else names one. When it is no branch the fetch fails,
+/// leaves the clone as it was, and says that the remote did not answer and a
+/// refetch once it does puts the clone right. A label that was another real branch
+/// (`develop`) is not followed once the list stops pinning: the remote's
+/// default is, as for a fresh clone. This is the part decided offline;
+/// [`branch_to_follow`] asks the remote when it must. Used wherever cactup
+/// decides this, so they all agree: the fetch plan, a forced repo, and the
+/// base a removal brings back.
+pub fn known_branch(dir: &Path, url: &str, listed: Option<&str>, record: Option<&RepoRecord>) -> Known {
+    let same = |u: &str| git::normalize_url(u) == git::normalize_url(url);
+    if let Some(b) = listed {
+        return Known::Branch(b.to_owned());
+    }
+    let record = record.filter(|r| same(&r.url));
+    if let Some(b) = record.filter(|r| r.commit.is_none()).and_then(|r| r.branch.clone()) {
+        return Known::Branch(b);
+    }
+    // The clone's own refs speak for its `origin`, which is the list's
+    // remote only when the URLs agree.
+    if git::origin_url(dir).is_some_and(|u| same(&u))
+        && let Some(b) = git::default_branch(dir)
+    {
+        return Known::Branch(b);
+    }
+    Known::RemoteDefault { label: record.and_then(|r| r.branch.clone()) }
+}
+
+/// [`known_branch`], the remote asked when only it can tell (within `window`).
+/// Unanswered (offline, timed out), the clone goes back to the label and the
+/// note says why. Ctrl-C fails it ("Interrupted"), never a fallback.
+pub fn branch_to_follow(
+    dir: &Path,
+    url: &str,
+    listed: Option<&str>,
+    record: Option<&RepoRecord>,
+    window: git::AskWindow,
+) -> Res<Follow> {
+    match known_branch(dir, url, listed, record) {
+        Known::Branch(b) => Ok(Follow { branch: Some(b), note: None, unasked: None }),
+        Known::RemoteDefault { label } => match git::ask_remote_default_branch(url, window) {
+            Ok(b) => Ok(Follow { branch: Some(b), note: None, unasked: None }),
+            Err(e) if gix::interrupt::is_triggered() => Err(e),
+            Err(e) => Ok(unanswered(label, &e)),
+        },
+    }
+}
+
+/// Where a clone goes when its remote could not say its default branch.
+fn unanswered(label: Option<String>, e: &anyhow::Error) -> Follow {
+    let then = match &label {
+        Some(l) => format!("going back to {l}, the last pinned label"),
+        None => "nothing names a branch".to_owned(),
+    };
+    let note = Some(format!("its remote's default branch is unknown ({e:#}); {then}"));
+    let unasked = Some(Unasked { error: format!("{e:#}"), silent: git::is_unanswered(e) });
+    Follow { branch: label, note, unasked }
+}
+
+/// Where a fetch of the list puts the clone of `url` at `dir` back on a
+/// branch after cactup had it elsewhere (a package that replaced a base
+/// repo, removed), decided as [`plan`] and [`Plan::force_where`] decide it,
+/// so a removal reads the base where its restore will put it: the list's
+/// branch; else, no clone on disk, the remote's default (a clone takes it);
+/// else a clone on a branch of that remote keeps it (a clean one is
+/// fast-forwarded there); else, detached, [`known_branch`]. Offline: the
+/// caller asks the remote what it must (the default branch and its tip are
+/// one listing). Upstream may move between the read and the restore: that
+/// race is accepted, the restore takes the branch's tip then.
+pub fn known_after_restore(dir: &Path, url: &str, listed: Option<&str>, record: Option<&RepoRecord>) -> Known {
+    if let Some(b) = listed {
+        return Known::Branch(b.to_owned());
+    }
+    if !dir.exists() {
+        return Known::RemoteDefault { label: None };
+    }
+    let same = git::origin_url(dir).is_some_and(|u| git::normalize_url(&u) == git::normalize_url(url));
+    if same && let Some(b) = git::head_of(dir).ok().map(|(b, _)| b).filter(|b| b != git::DETACHED) {
+        return Known::Branch(b);
+    }
+    known_branch(dir, url, None, record)
+}
+
+/// The headline over the remote asks of a phase.
+const FOLLOWING: &str = "asking remotes for their default branches";
+
+/// One clone whose branch may take asking its remote.
+struct ToFollow<'a> {
+    repo: &'a str,
+    dir: &'a Path,
+    url: &'a str,
+    listed: Option<&'a str>,
+    record: Option<&'a RepoRecord>,
+}
+
+/// [`branch_to_follow`] for each of `items`, in order, under `parent` (a
+/// headline over a line each), the remotes asked on the network fan-out
+/// ([`git::ask_all`]), all within one [`git::REMOTE_ASK_TIMEOUT`]. Ctrl-C
+/// fails the whole call.
+fn follow_all(item: prodash::tree::Item, items: &[ToFollow]) -> Res<Vec<Follow>> {
+    let layout = crate::progress::Layout::for_names(items.iter().map(|t| t.repo).chain([FOLLOWING]));
+    let headline = std::sync::Mutex::new(crate::progress::Headline::over(
+        item,
+        FOLLOWING,
+        items.len(),
+        "repos",
+        layout.clone(),
+    ));
+    let started = std::time::Instant::now();
+    let answers = git::ask_all(items, |t| {
+        let line = crate::progress::Line::over(
+            headline.lock().expect("follow headline poisoned").add_child(t.repo.to_owned()),
+            t.repo,
+            layout.clone(),
+        );
+        line.phase("asking for its default branch".to_owned());
+        let follow = branch_to_follow(t.dir, t.url, t.listed, t.record, git::AskWindow::from(started, follow_timeout(t.url)));
+        drop(line);
+        headline.lock().expect("follow headline poisoned").inc();
+        follow
+    });
+    answers?.into_iter().collect()
+}
+
+/// [`git::REMOTE_ASK_TIMEOUT`], or a test's for its stalling `git://` server.
+fn follow_timeout(url: &str) -> std::time::Duration {
+    #[cfg(test)]
+    {
+        let ms = TEST_FOLLOW_TIMEOUT_MS.load(std::sync::atomic::Ordering::Relaxed);
+        if ms > 0 && url.starts_with("git://") {
+            return std::time::Duration::from_millis(ms);
+        }
+    }
+    let _ = url;
+    git::REMOTE_ASK_TIMEOUT
+}
+
+/// A test's remote-ask time for `git://` URLs (0: the real one; no other
+/// test asks one). Process-wide: the asks run on the fan-out's threads.
+#[cfg(test)]
+pub(crate) static TEST_FOLLOW_TIMEOUT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// What [`execute`] did, per item. Failures are collected, not fatal — the
 /// caller decides the exit code (§3.2 step 10) and reports each one.
@@ -164,6 +416,8 @@ pub struct ExecReport {
     pub links: Vec<(String, link::LinkOutcome)>,
     /// Files written by http/https downloads.
     pub downloads: Vec<PathBuf>,
+    /// Each download's [`download_key`] and SHA-256.
+    pub download_sums: Vec<(String, String)>,
     pub failures: Vec<Failure>,
 }
 
@@ -174,14 +428,23 @@ pub struct RepoResult {
     pub branch: Option<String>,
     /// The commit HEAD resolved to after the action (hex).
     pub head: String,
-    /// Whether the action moved HEAD (false = already up to date).
+    /// The pin this repo was fetched to, if any (see [`RepoRecord::commit`]).
+    pub commit: Option<gix::ObjectId>,
+    /// Whether the action moved HEAD, to another commit or from detached onto
+    /// a branch (false = already up to date).
     pub changed: bool,
+    /// Whether HEAD is at another commit than before (a move onto a branch at
+    /// the same commit changed no source).
+    pub moved_commit: bool,
     /// Carried through from the plan: why this repo needed forcing, if it did.
     pub forced: Option<String>,
     /// `Some(url)` when this fetch re-pointed the repo's `origin` at the
     /// thornlist URL — a persistent change to the user's repo, so it is
     /// reported unconditionally, not only under `--verbose`.
     pub retargeted: Option<String>,
+    /// What went wrong after the fetch itself succeeded (its branch's
+    /// upstream not written), said on the repo's line.
+    pub warning: Option<String>,
 }
 
 #[derive(Debug)]
@@ -191,15 +454,106 @@ pub struct Failure {
     pub error: String,
 }
 
+/// [`execute`]'s error when Ctrl-C stopped it before it had done everything
+/// (the link pass and the libraries included): it says "Interrupted", and
+/// carries what the fetch did get done, the work it never started among the
+/// failures. A caller that keeps a partial record (what was fetched, for
+/// prune; placements to undo) reads it with [`Interrupted::report_of`]; any
+/// other passes the error on. An interrupted fetch is never an `Ok`: its
+/// links may not match its plan.
+#[derive(Debug)]
+pub struct Interrupted(pub ExecReport);
+
+impl std::fmt::Display for Interrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Interrupted")
+    }
+}
+
+impl std::error::Error for Interrupted {}
+
+impl Interrupted {
+    /// The partial report, if `e` is an interrupted fetch.
+    pub fn report_of(e: &anyhow::Error) -> Option<&ExecReport> {
+        e.downcast_ref::<Interrupted>().map(|i| &i.0)
+    }
+
+    /// Stop with `report`, `rest` (what, why) still to do recorded as
+    /// failures.
+    fn with<'a>(mut report: ExecReport, rest: impl IntoIterator<Item = (String, &'a str)>) -> anyhow::Error {
+        for (what, error) in rest {
+            report.failures.push(Failure { what, error: error.to_owned() });
+        }
+        Interrupted(report).into()
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's hook, run by [`execute`] on the calling thread the moment
+    /// its pool of fetches is joined, before it looks at the interrupt flag.
+    pub(crate) static AFTER_POOL: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+}
+
+/// What a fetch leaves in `fetch-state.toml`: a record per repo, and the
+/// hash of each download by [`download_key`].
+pub struct FetchRecords {
+    pub repos: Vec<(String, RepoRecord)>,
+    pub downloads: Vec<(String, String)>,
+}
+
+/// A download's key in the fetch record: its path under the installation's
+/// root, as the thornlist places it (`<target>/<file name>`).
+pub fn download_key(install_root: &Path, path: &Path) -> String {
+    path.strip_prefix(install_root).unwrap_or(path).to_string_lossy().into_owned()
+}
+
+/// Per repo of `list` that is one download (an http/https/ftp checkout that
+/// is the only one of its repo, so one file), its hash as the fetch record
+/// at `install_root` keeps it: what a build freezes and `sim export` pins.
+/// No record, or one that does not read, is no hashes; one a newer cactup
+/// wrote is an error, never silently no hashes (which would freeze a build,
+/// or export a simulation, without the pins it does have).
+pub fn download_hashes(install_root: &Path, list: &Thornlist) -> Res<BTreeMap<String, String>> {
+    let state = match FetchState::read(install_root) {
+        Ok(Some(state)) => state,
+        Err(e) if e.downcast_ref::<crate::format::Newer>().is_some() => return Err(e),
+        Ok(None) | Err(_) => return Ok(BTreeMap::new()),
+    };
+    let mut out = BTreeMap::new();
+    for c in list.components() {
+        let single = list.components().iter().filter(|o| o.repo == c.repo).count() == 1;
+        if !single || !matches!(c.ty, ComponentType::Http | ComponentType::Https | ComponentType::Ftp) {
+            continue;
+        }
+        // Built as `download_component` built the path it recorded, so a
+        // target spelled `$ROOT/dl/` or `./dl` finds its record too.
+        let path = install_root.join(&c.target).join(download::derive_filename(c.name.as_deref(), &c.checkout));
+        if let Some(sum) = state.downloads.get(&download_key(install_root, &path)) {
+            out.insert(c.repo.clone(), sum.clone());
+        }
+    }
+    Ok(out)
+}
+
 impl ExecReport {
     /// The `fetch-state.toml` records for everything successfully fetched.
-    pub fn records(&self) -> Vec<(String, RepoRecord)> {
+    pub fn records(&self) -> FetchRecords {
+        FetchRecords { repos: self.repo_records(), downloads: self.download_sums.clone() }
+    }
+
+    fn repo_records(&self) -> Vec<(String, RepoRecord)> {
         self.repos
             .iter()
             .map(|r| {
                 (
                     r.repo.clone(),
-                    RepoRecord { url: r.url.clone(), branch: r.branch.clone(), head: r.head.clone() },
+                    RepoRecord {
+                        url: r.url.clone(),
+                        branch: r.branch.clone(),
+                        head: r.head.clone(),
+                        commit: r.commit.map(|c| c.to_string()),
+                    },
                 )
             })
             .collect()
@@ -215,27 +569,71 @@ impl ExecReport {
 /// A repo that was already at the wanted commit leaves *nothing*: in a
 /// typical refetch that is most of the tree, and eighty lines of "already up
 /// to date" would bury the handful that moved. The caller's summary reports
-/// how many were already current; the scrollback is for what happened.
-fn announce_repo(line: &crate::progress::Line, item: &GitRepoPlan, head: gix::ObjectId, changed: bool) {
+/// how many were already current; the scrollback is for what happened. A
+/// detached HEAD put back on a branch at the same commit (`onto_branch`)
+/// did move, and says so.
+fn announce_repo(
+    line: &crate::progress::Line,
+    item: &GitRepoPlan,
+    head: gix::ObjectId,
+    changed: bool,
+    onto_branch: bool,
+    warning: Option<&str>,
+) {
     let head = head.to_string();
     let short = &head[..12.min(head.len())];
     let what = match (&item.action, item.branch.as_deref()) {
+        (GitAction::Clone, _) if item.commit.is_some() => format!("cloned, pinned at {short}"),
+        (GitAction::Pin, _) if changed => format!("pinned at {short}"),
         (GitAction::Clone, Some(branch)) => format!("cloned {branch} at {short}"),
         (GitAction::Clone, None) => format!("cloned at {short}"),
+        (_, Some(branch)) if onto_branch => format!("now on branch {branch} at {short}"),
         (_, Some(branch)) if changed => format!("{branch} now at {short}"),
         (_, None) if changed => format!("now at {short}"),
         // Unchanged, but something else about the repo was: say what, since
         // the fetch itself has nothing to report.
-        _ if item.forced.is_some() || item.retarget.is_some() => {
+        _ if item.forced.is_some() || item.retarget.is_some() || item.note.is_some() || warning.is_some() => {
             format!("already at {short}")
         }
         _ => return,
     };
+    let what = match &item.note {
+        Some(note) => format!("{what} ({note})"),
+        None => what,
+    };
+    let what = match warning {
+        Some(warning) => format!("{what}; {warning}"),
+        None => what,
+    };
     match (&item.forced, &item.retarget) {
-        (Some(reason), _) => line.warned(format!("{what} — overwrote {reason}")),
-        (None, Some(url)) => line.warned(format!("{what} — origin re-pointed at {url}")),
+        (Some(reason), _) => line.warned(format!("{what}; overwrote {reason}")),
+        (None, Some(url)) => line.warned(format!("{what}; origin re-pointed at {}", git::redacted(url))),
+        (None, None) if item.note.is_some() || warning.is_some() => line.warned(what),
         (None, None) => line.succeeded(what),
     }
+}
+
+/// Why a clone the plan sent back to `label`, its pinned fetch's label,
+/// because its remote could not say its default branch, was left as it was:
+/// what the ask met and what puts it right, then how the fetch of the label
+/// failed (`fetched`) or that it was not tried.
+fn left_as_it_was(item: &GitRepoPlan, unasked: &Unasked, label: &str, fetched: Option<&anyhow::Error>) -> String {
+    let (asked, then) = if unasked.silent {
+        // The ask's error is the remote's silence itself ("<url> did not
+        // answer within 30 s").
+        (format!("its remote {} when asked for its default branch", unasked.error), "Refetch once the remote answers.")
+    } else {
+        let url = git::redacted(&item.url);
+        (
+            format!("its remote {url} could not be asked for its default branch ({})", unasked.error),
+            "Refetch once it can be asked.",
+        )
+    };
+    let label = match fetched {
+        Some(e) => format!("Going back to {label} failed: {e:#}"),
+        None => format!("Going back to {label} was not tried."),
+    };
+    format!("{asked}; left as it was. {then} {label}")
 }
 
 /// Run the plan: git repos and downloads on a [`WORKERS`]-wide pool keyed by
@@ -252,12 +650,21 @@ fn announce_repo(line: &crate::progress::Line, item: &GitRepoPlan, head: gix::Ob
 /// green for a clean fetch, yellow when it overwrote something, red when it
 /// failed. Errors are collected per item, never fatal to the rest of the
 /// fetch; the red line is what makes a failure visible live, next to the
-/// work going on around it, rather than only in the final report.
+/// work going on around it, rather than only in the final report. Ctrl-C
+/// before everything is done, links and libraries included, fails it with
+/// [`Interrupted`], never an `Ok`.
 pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
     enum Work<'p> {
         Git(&'p GitRepoPlan),
         Download(&'p Component),
     }
+    // A symbolic copy's files are links into its source until written
+    // (`crate::cow`). Its repos need nothing here: their `.git` is their
+    // own, and a checkout unlinks a link before it writes the file (gix opens
+    // with O_NOFOLLOW and unlinks on the collision), so a changed file
+    // becomes the copy's own and an unchanged one stays a link. A download
+    // replaces its file by rename; a system tool (svn) writes in place.
+    let cow = crate::cow::Cow::at(install_root)?;
 
     let (progress, renderer) = crate::manifest::setup_prodash_with(
         Some(crate::manifest::progress_level_filter(PROGRESS_MAX_LEVEL)),
@@ -325,6 +732,7 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                         } else {
                             match (&item.action, item.branch.as_deref()) {
                                 (GitAction::Clone, _) => "cloning".to_string(),
+                                (GitAction::Pin, _) => "pinning".to_string(),
                                 (GitAction::Update, _) => "updating".to_string(),
                                 (GitAction::Align, Some(branch)) => format!("switching to {branch}"),
                                 (GitAction::Align, None) => "switching".to_string(),
@@ -340,69 +748,142 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                         if let Some(url) = &item.retarget
                             && let Err(e) = git::set_origin_url(&item.dir, url)
                         {
-                            line.failed(format!("{e:#}"));
+                            let error = git::scrub(&format!("{e:#}"), url);
+                            line.failed(error.clone());
                             report.lock().expect("fetch report poisoned").failures.push(Failure {
                                 what: item.repo.clone(),
-                                error: format!("{e:#}"),
+                                error,
                             });
                             drop(line);
                             top.lock().expect("fetch progress poisoned").inc();
                             continue;
                         }
-                        let before = match item.action {
-                            GitAction::Clone => None,
-                            _ => git::head_of(&item.dir).ok().map(|(_, id)| id),
+                        let (before, was_detached) = match item.action {
+                            GitAction::Clone => (None, false),
+                            _ => match git::head_of(&item.dir) {
+                                Ok((branch, id)) => (Some(id), branch == git::DETACHED),
+                                Err(_) => (None, false),
+                            },
                         };
-                        let outcome = match (&item.action, item.branch.as_deref()) {
-                            (GitAction::Clone, branch) => {
+                        // Forced (backed-up local edits) or repointed: only
+                        // a full overwrite is right there.
+                        let force = item.forced.is_some() || item.retarget.is_some();
+                        // Its remote went silent when the plan asked it for its
+                        // default branch, in this very command: the fetch of the
+                        // label it falls back to would only wait out the same
+                        // silence. Failed at once, untried (said below). Not for
+                        // a clone whose `origin` was just re-pointed: that one is
+                        // no longer as it was.
+                        let untried = matches!(item.action, GitAction::Align)
+                            && item.branch.is_some()
+                            && item.retarget.is_none()
+                            && item.unasked.as_ref().is_some_and(|u| u.silent);
+                        let outcome = match (&item.action, item.branch.as_deref(), item.commit) {
+                            _ if untried => Err(anyhow::anyhow!("not tried: its remote did not answer")),
+                            (GitAction::Clone, branch, Some(commit)) => {
+                                git::clone_pinned(&item.url, branch, commit, &item.dir, &mut line)
+                            }
+                            (GitAction::Pin, branch, Some(commit)) => {
+                                git::pin(&item.dir, branch, commit, force, &mut line)
+                            }
+                            (GitAction::Pin, _, None) => {
+                                Err(anyhow::anyhow!("No commit to pin to (a bug in the fetch plan)"))
+                            }
+                            (GitAction::Clone, branch, None) => {
                                 git::clone(&item.url, branch, &item.dir, &mut line)
                                     .and_then(|()| git::head_of(&item.dir).map(|(_, id)| id))
                             }
-                            (_, Some(branch)) => {
-                                // Forced (backed-up local edits) or repointed:
-                                // only a full overwrite is right there.
-                                let force = item.forced.is_some() || item.retarget.is_some();
-                                git::align(&item.dir, branch, force, &mut line)
-                            }
-                            (_, None) => {
-                                // plan() always fills in the probed head
-                                // branch for existing repos; this is a bug
-                                // guard, not a reachable path.
-                                Err(anyhow::anyhow!("no branch resolved for existing repo"))
+                            (_, Some(branch), _) => git::align(&item.dir, branch, force, &mut line),
+                            (_, None, _) => {
+                                // Reached only when neither the list, the
+                                // clone nor the remote names a branch.
+                                Err(anyhow::anyhow!(
+                                    "No branch to put {} on: none in the thornlist, the clone or its remote. Name \
+                                     one with !REPO_BRANCH",
+                                    item.repo
+                                ))
                             }
                         };
                         // Assert the repo actually landed on its expected
                         // branch: an independent read of HEAD on disk, taken
                         // here (outside the report lock) so it runs in
                         // parallel with the other workers.
-                        let wrong_branch = match (&outcome, &item.branch) {
-                            (Ok(_), Some(expected)) => match git::head_of(&item.dir) {
-                                Ok((actual, _)) if &actual != expected => Some(actual),
+                        // A pinned repo has no branch to be on: it must sit at
+                        // its commit instead.
+                        let wrong_branch = match (&outcome, &item.branch, item.commit) {
+                            (Ok(_), _, Some(pin)) => match git::head_of(&item.dir) {
+                                Ok((_, actual)) if actual != pin => {
+                                    Some(format!("post-fetch HEAD is at {actual}, expected the pin {pin}"))
+                                }
                                 _ => None,
                             },
+                            (Ok(_), Some(expected), None) => match git::head_of(&item.dir) {
+                                Ok((actual, _)) if &actual != expected => {
+                                    Some(format!("post-fetch HEAD is on {actual}, expected {expected}"))
+                                }
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        // A branch align made gets its upstream, as a clone's does. Writing
+                        // it failing leaves the checkout as good as it is: said on the
+                        // line, never a failed fetch (its record is written all the same).
+                        let warning = match (&outcome, &item.action, item.branch.as_deref(), item.commit) {
+                            (Ok(_), GitAction::Align, Some(branch), None) => git::set_upstream_if_absent(&item.dir, branch)
+                                .err()
+                                .map(|e| format!("its branch's upstream could not be set ({e:#})")),
                             _ => None,
                         };
                         let mut report = report.lock().expect("fetch report poisoned");
                         match outcome {
                             Ok(head) => {
-                                let changed = before != Some(head);
-                                announce_repo(&line, item, head, changed);
+                                // A detached HEAD put back on a branch at the same
+                                // commit moved too: HEAD names the branch now.
+                                let onto_branch = before == Some(head)
+                                    && was_detached
+                                    && item.commit.is_none()
+                                    && item.branch.is_some();
+                                let changed = before != Some(head) || onto_branch;
+                                announce_repo(&line, item, head, changed, onto_branch, warning.as_deref());
                                 report.repos.push(RepoResult {
                                     repo: item.repo.clone(),
                                     url: item.url.clone(),
                                     branch: item.branch.clone(),
                                     head: head.to_string(),
+                                    commit: item.commit,
                                     changed,
+                                    moved_commit: before != Some(head),
                                     forced: item.forced.clone(),
                                     retargeted: item.retarget.clone(),
+                                    warning,
                                 });
-                                if let (Some(actual), Some(expected)) = (wrong_branch, &item.branch) {
-                                    let error = format!("post-fetch HEAD is on {actual}, expected {expected}");
+                                if let Some(error) = wrong_branch {
                                     report.failures.push(Failure { what: item.repo.clone(), error });
                                 }
                             }
                             Err(e) => {
-                                let error = describe_git_failure(&e);
+                                // The plan sent the clone back to its pinned fetch's
+                                // label because the remote could not say its default
+                                // branch (`unanswered`): untried (above), or going
+                                // there failed — a tag is no branch — before anything
+                                // moved. Said plainly, the fetch's own error after it.
+                                // Otherwise said with what the plan could not settle,
+                                // which is likely why.
+                                let unmoved = before.is_some()
+                                    && git::head_of(&item.dir).ok().map(|(b, id)| (Some(id), b == git::DETACHED))
+                                        == Some((before, was_detached));
+                                let error = match (&item.unasked, item.branch.as_deref(), &item.note) {
+                                    (Some(unasked), Some(label), _) if untried => {
+                                        left_as_it_was(item, unasked, label, None)
+                                    }
+                                    (Some(unasked), Some(label), _) if unmoved && !gix::interrupt::is_triggered() => {
+                                        left_as_it_was(item, unasked, label, Some(&e))
+                                    }
+                                    (_, _, Some(note)) => format!("{} ({note})", describe_git_failure(&e)),
+                                    (_, _, None) => describe_git_failure(&e),
+                                };
+                                // A transport's own words may quote the URL whole.
+                                let error = git::scrub(&error, &item.url);
                                 line.failed(error.clone());
                                 report.failures.push(Failure { what: item.repo.clone(), error });
                             }
@@ -423,10 +904,16 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                             layout.clone(),
                         );
                         line.phase("downloading");
-                        let outcome = download::download_component(install_root, c, &mut line);
+                        let outcome = download::download_component(install_root, c, &mut line, &cow);
                         let mut report = report.lock().expect("fetch report poisoned");
                         match outcome {
-                            Ok(path) => {
+                            // Kept as it was: nothing happened, so the line leaves nothing.
+                            Ok(download::Downloaded { path, fetched: false, sha256 }) => {
+                                report.download_sums.push((download_key(install_root, &path), sha256));
+                                report.downloads.push(path)
+                            }
+                            Ok(download::Downloaded { path, fetched: true, sha256 }) => {
+                                report.download_sums.push((download_key(install_root, &path), sha256));
                                 let size = crate::progress::bytes(prodash::Count::step(&line));
                                 let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
                                 // The line is already named for the
@@ -455,6 +942,10 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
             });
         }
     });
+    // The pool is joined: every clone and checkout of this fetch is over.
+    // Placing a library takes this, so it cannot be done from inside the
+    // pool, while the clone it goes into may still be being written.
+    let clones_done = library::ClonesDone::after_the_pool();
 
     // External tools (svn/cvs) talk to the terminal directly, so the
     // renderer must be gone before they run — shut it down here rather than
@@ -463,39 +954,49 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
     renderer.shutdown_and_wait();
 
     let mut report = report.into_inner().expect("fetch report poisoned");
+    #[cfg(test)]
+    AFTER_POOL.with(|h| h.get().map(|h| h()));
 
-    // Interrupted (§ Ctrl-C): the workers drained out with items still
-    // queued. Those were never fetched — record each as a failure so the
-    // caller's report and exit code see them (in-flight items already failed
-    // with gix's own abort error), and skip the externals and the symlink
-    // pass: nothing further should run, and returning a success-shaped
-    // report here is what once let an interrupted fetch masquerade as
-    // complete.
+    // What is still to do once the externals are done, for a Ctrl-C's report.
+    let after_externals = || {
+        let links = plan.links.iter().map(|c| (c.checkout.clone(), "Interrupted before this link was made"));
+        links.chain(plan.libraries.iter().map(|p| (p.label(), "Interrupted before this library was placed")))
+    };
+
+    // Interrupted (§ Ctrl-C): the workers drained out, with items still
+    // queued or none. Those never fetched are recorded as failures (in-flight
+    // items already failed with gix's own abort error), and nothing further
+    // runs: not the externals, not the symlink pass, not the libraries, each
+    // a failure too. The fetch fails ("Interrupted") even when the queue was
+    // already empty: an `Ok` here, its links never made, once let callers
+    // commit a record the tree did not match.
     if gix::interrupt::is_triggered() {
-        for work in queue.into_inner().expect("fetch queue poisoned") {
-            let what = match work {
-                Work::Git(item) => item.repo.clone(),
-                Work::Download(c) => c.checkout.clone(),
-            };
-            report
-                .failures
-                .push(Failure { what, error: "interrupted before this component was fetched".into() });
-        }
-        return Ok(report);
+        let queued = queue.into_inner().expect("fetch queue poisoned").into_iter().map(|work| match work {
+            Work::Git(item) => item.repo.clone(),
+            Work::Download(c) => c.checkout.clone(),
+        });
+        let queued = queued.map(|what| (what, "Interrupted before this component was fetched"));
+        let externals = plan.external.iter().map(|c| (c.checkout.clone(), "Interrupted"));
+        return Err(Interrupted::with(report, queued.chain(externals).chain(after_externals())));
     }
 
     // Externals sequentially: they spawn system tools that may talk to the
     // terminal, and none occur in the real ET list anyway.
-    for c in &plan.external {
+    for (i, c) in plan.external.iter().enumerate() {
         if gix::interrupt::is_triggered() {
-            report
-                .failures
-                .push(Failure { what: c.checkout.clone(), error: "interrupted".into() });
-            continue;
+            let rest = plan.external[i..].iter().map(|c| (c.checkout.clone(), "Interrupted"));
+            return Err(Interrupted::with(report, rest.chain(after_externals())));
         }
-        if let Err(e) = external::fetch_external(install_root, c) {
+        // A system tool writes in its checkout in place.
+        let reified = cow.reify(&install_root.join(&c.target), &gix::interrupt::IS_INTERRUPTED, &|| ());
+        if let Err(e) = reified.and_then(|_| external::fetch_external(install_root, c)) {
             report.failures.push(Failure { what: c.checkout.clone(), error: format!("{e:#}") });
         }
+    }
+    // Ctrl-C during the last external: the links and libraries are still to
+    // do (the checks in their loops cover only lists that are not empty).
+    if gix::interrupt::is_triggered() {
+        return Err(Interrupted::with(report, after_externals()));
     }
 
     // Symlink pass, after every fetch: repoint-or-create per checkout.
@@ -510,12 +1011,12 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
         // Ctrl-C: the links not yet made are failures, like the components
         // never fetched above, and nothing further runs (no settle pass).
         if gix::interrupt::is_triggered() {
-            for c in &links[i..] {
-                let error = "interrupted before this link was made".to_owned();
-                report.failures.push(Failure { what: c.checkout.clone(), error });
-            }
-            return Ok(report);
+            let rest = links[i..].iter().map(|c| (c.checkout.clone(), "Interrupted before this link was made"));
+            let libraries = plan.libraries.iter().map(|p| (p.label(), "Interrupted before this library was placed"));
+            return Err(Interrupted::with(report, rest.chain(libraries)));
         }
+        #[cfg(test)]
+        BEFORE_LINK.with(|hook| hook.get().map(|hook| hook(c)));
         match pass.link(c) {
             Ok(outcome) => report.links.push((c.checkout.clone(), outcome)),
             Err(e) => {
@@ -524,6 +1025,28 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
         }
     }
     drop(link_span);
+
+    // Libraries, after every clone above has finished (the pool is joined)
+    // and in the plan's order: the one write each makes is a link inside the
+    // clone it goes into, so nothing writes inside a dependent while it is
+    // being cloned or checked out, and a library inside another library comes
+    // after it. One whose dependent (or own clone, or the library it goes
+    // inside) failed is not attempted, and says why.
+    let failed: std::collections::BTreeSet<String> = report.failures.iter().map(|f| f.what.clone()).collect();
+    let mut unplaced = std::collections::BTreeSet::new();
+    for (i, p) in plan.libraries.iter().enumerate() {
+        if gix::interrupt::is_triggered() {
+            let rest = plan.libraries[i..].iter().map(|p| (p.label(), "Interrupted before this library was placed"));
+            return Err(Interrupted::with(report, rest));
+        }
+        match library::place(&clones_done, install_root, &plan.root, p, &failed, &unplaced) {
+            Ok(outcome) => report.links.push((p.label(), outcome)),
+            Err(e) => {
+                unplaced.insert(p.repo.clone());
+                report.failures.push(Failure { what: p.label(), error: format!("{e:#}") });
+            }
+        }
+    }
 
     // Last, after all git work: settle the index of every repo that was
     // cloned or aligned (or found already at its tip), so later status walks
@@ -566,26 +1089,52 @@ fn settle_indexes(repos: &[(String, std::path::PathBuf)]) {
 /// cactup itself fetched (URL, branch, resolved HEAD). Prune only ever
 /// removes repos this file (or the current thornlist) accounts for, and it
 /// is the input a future rebuild-decision hookup will diff (§7.5).
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct FetchState {
-    pub schema: u32,
     #[serde(default)]
     pub repos: indexmap::IndexMap<String, RepoRecord>,
+    /// Each download's SHA-256 as last fetched, by [`download_key`]. An
+    /// additive key: older binaries ignore it.
+    #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
+    pub downloads: indexmap::IndexMap<String, String>,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct RepoRecord {
     pub url: String,
     pub branch: Option<String>,
     /// The commit HEAD resolved to when cactup last fetched this repo.
     pub head: String,
+    /// The `!REPO_COMMIT` that fetch pinned the repo to, if any. A pinned
+    /// repo sits detached at it, so `branch` is only the label it was taken
+    /// from — not a branch HEAD is expected to be on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
 }
 
-impl FetchState {
-    pub const SCHEMA: u32 = 1;
+/// `fetch-state.toml`'s format. Written by login binaries only (a fetch
+/// never runs on a compute node), so it is not `frozen_read`. Every deployed
+/// binary requires the `schema` key, which the helper always writes, first.
+/// `record` edits the file in place: a repo it did not fetch keeps its
+/// record whole, unknown keys included; a repo it did fetch gets a record
+/// made anew, which it names to `write_replacing`, so a key a newer binary
+/// put on the old record does not outlive the commit it described. The
+/// downloads table is a map of hashes: nothing to replace whole.
+pub static FETCH_STATE: Format<Toml> = Format {
+    name: "fetch state",
+    key: "schema",
+    current: 1,
+    upgrades: &[],
+    downgrades: &[],
+    down_floor: 1,
+    frozen_read: false,
+    legacy: None,
+    replace_whole: &[],
+};
 
+impl FetchState {
     fn path(install_root: &Path) -> PathBuf {
         install_root.join(".cactup").join("fetch-state.toml")
     }
@@ -594,43 +1143,32 @@ impl FetchState {
     /// installations) — callers must treat that as "no record", never as
     /// "nothing was fetched by cactup".
     pub fn read(install_root: &Path) -> Res<Option<FetchState>> {
-        let path = Self::path(install_root);
-        let text = match std::fs::read_to_string(&path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            other => other.with_context(|| format!("Failed to read {}", path.display()))?,
-        };
-        let state: FetchState = toml::from_str(&text)
-            .with_context(|| format!("Failed to parse {}", path.display()))?;
-        Ok(Some(state))
+        format::read(&Self::path(install_root), &FETCH_STATE)
     }
 
     /// Merge `records` over the existing state (repos not touched by this
     /// fetch keep their previous record) and write atomically.
-    pub fn record(install_root: &Path, records: &[(String, RepoRecord)]) -> Res<()> {
-        let mut state = Self::read(install_root)?
-            .unwrap_or_else(|| FetchState { schema: Self::SCHEMA, repos: Default::default() });
-        for (repo, record) in records {
+    pub fn record(install_root: &Path, records: &FetchRecords) -> Res<()> {
+        let mut state = Self::read(install_root)?.unwrap_or_default();
+        for (key, sum) in &records.downloads {
+            state.downloads.insert(key.clone(), sum.clone());
+        }
+        for (repo, record) in &records.repos {
             state.repos.insert(
                 repo.clone(),
                 RepoRecord {
                     url: record.url.clone(),
                     branch: record.branch.clone(),
                     head: record.head.clone(),
+                    commit: record.commit.clone(),
                 },
             );
         }
-        let path = Self::path(install_root);
-        let dir = path.parent().expect("fetch-state path has a parent");
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("Failed to create {}", dir.display()))?;
-        let text = toml::to_string_pretty(&state).with_context(|| "Failed to render fetch state")?;
-        let tmp = tempfile::NamedTempFile::new_in(dir)
-            .with_context(|| format!("Failed to create temp file in {}", dir.display()))?;
-        std::fs::write(tmp.path(), text)
-            .with_context(|| "Failed to write fetch state temp file")?;
-        tmp.persist(&path)
-            .with_context(|| format!("Failed to replace {}", path.display()))?;
-        Ok(())
+        // The records made anew above: put-back must not reach into them,
+        // each named by its key (a repo name may hold a dot).
+        let whole: Vec<Vec<String>> =
+            records.repos.iter().map(|(repo, _)| vec!["repos".to_owned(), repo.clone()]).collect();
+        format::write_replacing_keys(&Self::path(install_root), &state, &FETCH_STATE, &whole)
     }
 }
 
@@ -721,6 +1259,33 @@ pub fn source_heads(
             out.missing.insert(c.repo.clone());
         }
     }
+    // The flesh used by a build is where the root's `Makefile` links into
+    // `repos/`, whatever the list names: a config's own list keeps naming the
+    // base's flesh after a flesh package took its place. That repo is probed
+    // even when the list does not name it.
+    let repos_real = std::fs::canonicalize(&repos_dir).ok();
+    let makefile = install_root.join(list.root()).join("Makefile");
+    if let Some(repo) = crate::thornlist::repo_behind(&makefile, &repos_dir, repos_real.as_deref())
+        && repos_dir.join(&repo).is_dir()
+    {
+        if seen.insert(repo.clone()) {
+            repos.push(repo.clone());
+        }
+        // The flesh named by the list, unused by the build: not this config's
+        // source, so not in its record either. A swap back to it is then a
+        // flesh from a repo the record lacks, as the swap away was.
+        if let Some(named) = out.flesh.take().filter(|named| *named != repo) {
+            let root = list.root().trim_end_matches('/');
+            let only_flesh = (list.components().iter())
+                .filter(|c| c.repo == named)
+                .all(|c| c.target.trim_end_matches('/') == root);
+            if only_flesh {
+                repos.retain(|r| *r != named);
+                out.missing.remove(&named);
+            }
+        }
+        out.flesh = Some(repo);
+    }
 
     progress.init(Some(repos.len()), Some(prodash::unit::label("repos")));
     let progress = std::sync::Mutex::new(progress);
@@ -794,12 +1359,11 @@ impl std::fmt::Display for NoSources {
             NoSources::NoGitRepos => write!(f, "its thornlist names no git repos"),
             NoSources::NoLinkedThorns { repos_dir } => write!(
                 f,
-                "none of its thorns is a link into {}, so cactup cannot tell which repo each \
-                 comes from",
+                "none of its thorns is a link into '{}'",
                 repos_dir.display()
             ),
             NoSources::NoneOnDisk { repos_dir, count, plain } => {
-                write!(f, "none of the {count} git repo(s) its thornlist names is in {}", repos_dir.display())?;
+                write!(f, "none of the {count} git repo(s) its thornlist names is in '{}'", repos_dir.display())?;
                 if !repos_dir.is_dir() {
                     write!(f, " (that directory does not exist")?;
                     if !plain {
@@ -813,7 +1377,7 @@ impl std::fmt::Display for NoSources {
             }
             NoSources::NoneReadable { repos_dir, count, repo, error } => write!(
                 f,
-                "none of the {count} repo(s) in {} could be read as a git repo ({repo}: {error})",
+                "none of the {count} repo(s) in '{}' could be read as a git repo ({repo}: {error})",
                 repos_dir.display()
             ),
         }
@@ -854,6 +1418,13 @@ pub fn source_heads_with_progress(
     result
 }
 
+#[cfg(test)]
+thread_local! {
+    /// What a test does just before each link of a fetch is made (`execute`'s
+    /// link pass runs on the calling thread): an interrupt part way through.
+    pub(crate) static BEFORE_LINK: std::cell::Cell<Option<fn(&Component)>> = const { std::cell::Cell::new(None) };
+}
+
 /// The flesh is the repo that checks the Cactus make system straight into the
 /// Cactus root: `Makefile`, `lib`, `src`. Identifying it by *what it provides*
 /// rather than by the Einstein Toolkit's `!NAME = flesh` keeps this working
@@ -861,7 +1432,7 @@ pub fn source_heads_with_progress(
 /// target the root, but check out `./manifest`, `./simfactory` and `par`, so
 /// neither matches — which matters, because a flesh change costs a full
 /// realclean rebuild and those two do not affect compilation at all.
-fn is_flesh(root: &str, c: &Component) -> bool {
+pub(crate) fn is_flesh(root: &str, c: &Component) -> bool {
     c.target.trim_end_matches('/') == root.trim_end_matches('/')
         && matches!(c.checkout.as_str(), "Makefile" | "lib" | "src")
 }
@@ -873,7 +1444,28 @@ fn is_flesh(root: &str, c: &Component) -> bool {
 /// probe — a plain gix status walk — finishes. The probes run on the
 /// [`crate::par`] pool: even so, on ~80 repos they take long enough that
 /// without progress the command looks hung before anything appears.
+/// How a repo's source reads in a conflict message: its branch, and its pin.
+fn source_label(branch: Option<&str>, commit: Option<&str>) -> String {
+    let branch = branch.unwrap_or("<default>");
+    match commit {
+        Some(commit) => format!("{branch} pinned at {commit}"),
+        None => branch.to_owned(),
+    }
+}
+
 pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree::Item) -> Res<Plan> {
+    plan_only(list, install_root, progress, None)
+}
+
+/// [`plan`], with the clones probed and planned limited to `only` (when
+/// given): a clone outside it is never looked at, nor its remote asked. The
+/// list is still checked whole (sources, placements).
+pub fn plan_only(
+    list: &Thornlist,
+    install_root: &Path,
+    progress: &mut prodash::tree::Item,
+    only: Option<&BTreeSet<&str>>,
+) -> Res<Plan> {
     let root = list.root().to_owned();
     let repos_dir = install_root.join(&root).join("repos");
 
@@ -882,6 +1474,7 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
     struct Group<'c> {
         url: String,
         branch: Option<String>,
+        commit: Option<String>,
         checkouts: Vec<String>,
         first: &'c Component,
     }
@@ -889,6 +1482,7 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
     let mut downloads = Vec::new();
     let mut external = Vec::new();
     let mut links = Vec::new();
+    let mut placements: Vec<(&Component, String, String)> = Vec::new();
 
     for c in list.components() {
         match c.ty {
@@ -897,6 +1491,16 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
                     .url
                     .clone()
                     .with_context(|| format!("git component {} has no !URL", c.checkout))?;
+                // Two names that differ only in case are one directory on a
+                // case-insensitive filesystem: one clone, claimed twice.
+                if let Some(other) =
+                    git_groups.keys().find(|k| **k != c.repo && k.eq_ignore_ascii_case(&c.repo))
+                {
+                    bail!(
+                        "Thornlist names repos {other} and {}, which differ only in case",
+                        c.repo
+                    );
+                }
                 match git_groups.get_mut(&c.repo) {
                     None => {
                         git_groups.insert(
@@ -904,6 +1508,7 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
                             Group {
                                 url,
                                 branch: c.branch.clone(),
+                                commit: c.commit.clone(),
                                 checkouts: vec![c.checkout.clone()],
                                 first: c,
                             },
@@ -912,23 +1517,26 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
                     Some(group) => {
                         // Two sections naming one repo dir must agree, or the
                         // fetch would be order-dependent.
-                        if group.url != url || group.branch != c.branch {
+                        if group.url != url || group.branch != c.branch || group.commit != c.commit {
                             bail!(
-                                "thornlist names repo {} twice with conflicting \
+                                "Thornlist names repo {} twice with conflicting \
                                  sources: {} @ {} (for {}) vs {} @ {} (for {})",
                                 c.repo,
                                 group.url,
-                                group.branch.as_deref().unwrap_or("<default>"),
+                                source_label(group.branch.as_deref(), group.commit.as_deref()),
                                 group.first.checkout,
                                 url,
-                                c.branch.as_deref().unwrap_or("<default>"),
+                                source_label(c.branch.as_deref(), c.commit.as_deref()),
                                 c.checkout,
                             );
                         }
                         group.checkouts.push(c.checkout.clone());
                     }
                 }
-                links.push(c.clone());
+                match library::placement_of(&root, c) {
+                    Some((dependent, into)) => placements.push((c, dependent, into)),
+                    None => links.push(c.clone()),
+                }
             }
             ComponentType::Http | ComponentType::Https | ComponentType::Ftp => {
                 downloads.push(c.clone());
@@ -946,12 +1554,39 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
         }
     }
 
+    // Each library goes inside a clone this list checks out, at a plain path
+    // under it; the dependent's source comes along, to check the clone on
+    // disk against before anything is placed inside it.
+    let mut libraries = Vec::new();
+    for (c, dependent, into) in placements {
+        library::check_into(&into).with_context(|| format!("The thornlist places {} inside {dependent}", c.repo))?;
+        let Some(host) = git_groups.get(&dependent) else {
+            bail!(
+                "The thornlist places {} inside repos/{dependent}, which it does not check out",
+                c.repo
+            );
+        };
+        libraries.push(library::Placement {
+            repo: c.repo.clone(),
+            url: c.url.clone().unwrap_or_default(),
+            dependent,
+            dependent_url: host.url.clone(),
+            dependent_commit: host.commit.clone(),
+            into,
+        });
+    }
+    let libraries = library::order(libraries)?;
+    if let Some(only) = only {
+        git_groups.retain(|repo, _| only.contains(repo.as_str()));
+    }
+
     let mut plan = Plan {
         git: Vec::new(),
         skipped: Vec::new(),
         downloads,
         external,
         links,
+        libraries,
         root,
     };
 
@@ -970,7 +1605,11 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
     let probes = crate::par::parallel_map(&groups, |(repo, group)| {
         let current = progress.lock().expect("plan progress poisoned").add_child(repo.clone());
         let dir = repos_dir.join(repo);
-        let mut probe = git::probe(&dir, &group.url, group.branch.as_deref().unwrap_or(""));
+        // A pinned repo is checked out by commit, so the branch it happens to
+        // be on is no reason to skip it — only edits and local commits are.
+        // Probing against "no branch" checks exactly those.
+        let wanted_branch = if group.commit.is_some() { "" } else { group.branch.as_deref().unwrap_or("") };
+        let mut probe = git::probe(&dir, &group.url, wanted_branch);
         if let RepoState::Dirty(DirtyReason::BranchSwitched { head, .. }) = &probe.state
             && fetch_state
                 .as_ref()
@@ -991,19 +1630,68 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
         progress.lock().expect("plan progress poisoned").inc();
         probe
     })?;
+    let progress = progress.into_inner().expect("plan progress poisoned");
 
-    for ((repo, group), probe) in groups.into_iter().zip(probes) {
+    // Detached where cactup's last fetch left it, and no longer pinned: where
+    // it goes back to may take asking its remote. Asked after the probes, on
+    // the network fan-out (`git::REMOTE_ASKS_AT_ONCE` at once), all within
+    // one `git::REMOTE_ASK_TIMEOUT` (one not started by then is not asked,
+    // and falls back as unanswered), each with a line.
+    let records = |repo: &str| fetch_state.as_ref().and_then(|s| s.repos.get(repo));
+    let to_follow: Vec<(usize, PathBuf)> = (groups.iter().zip(&probes).enumerate())
+        .filter(|(_, ((repo, group), probe))| {
+            group.commit.is_none()
+                && matches!(&probe.state, RepoState::Detached { head } if records(repo).is_some_and(|r| r.head == head.to_string()))
+        })
+        .map(|(i, ((repo, _), _))| (i, repos_dir.join(repo)))
+        .collect();
+    let asks: Vec<ToFollow> = (to_follow.iter())
+        .map(|(i, dir)| {
+            let (repo, group) = &groups[*i];
+            ToFollow { repo, dir, url: &group.url, listed: group.branch.as_deref(), record: records(repo) }
+        })
+        .collect();
+    let follows = if asks.is_empty() { Vec::new() } else { follow_all(progress.add_child(FOLLOWING), &asks)? };
+    drop(asks);
+    let mut follows: BTreeMap<usize, Follow> = to_follow.into_iter().map(|(i, _)| i).zip(follows).collect();
+
+    for (i, ((repo, group), probe)) in groups.into_iter().zip(probes).enumerate() {
+        let follow = follows.remove(&i);
         let dir = repos_dir.join(&repo);
+        let commit = match &group.commit {
+            Some(hex) => Some(
+                gix::ObjectId::from_hex(hex.as_bytes())
+                    .with_context(|| format!("Thornlist pins repo {repo} to an invalid commit {hex}"))?,
+            ),
+            None => None,
+        };
+        let record = fetch_state.as_ref().and_then(|s| s.repos.get(&repo));
         match probe.state {
             RepoState::Absent => plan.git.push(GitRepoPlan {
                 repo,
                 dir,
                 url: group.url,
                 branch: group.branch,
+                commit,
                 action: GitAction::Clone,
                 checkouts: group.checkouts,
                 forced: None,
                 retarget: None,
+                note: None,
+                unasked: None,
+            }),
+            RepoState::Clean { .. } if commit.is_some() => plan.git.push(GitRepoPlan {
+                repo,
+                dir,
+                url: group.url,
+                branch: group.branch,
+                commit,
+                action: GitAction::Pin,
+                checkouts: group.checkouts,
+                forced: None,
+                retarget: None,
+                note: None,
+                unasked: None,
             }),
             RepoState::Clean { head_branch } => {
                 // No !REPO_BRANCH = follow whatever branch the clone is on.
@@ -1015,11 +1703,59 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
                     dir,
                     url: group.url,
                     branch: Some(wanted),
+                    commit: None,
                     action,
                     checkouts: group.checkouts,
                     forced: None,
                     retarget: None,
+                    note: None,
+                    unasked: None,
                 });
+            }
+            RepoState::Detached { head } => {
+                // Detached where cactup's last fetch left it: an earlier pin
+                // (the fetch record holds the commit it checked out). That is
+                // cactup's state to move — to a new pin, or back onto a
+                // branch when the list no longer pins the repo. Detached
+                // anywhere else is the user's doing, unless it is already the
+                // pin itself.
+                let ours = record.is_some_and(|r| r.head == head.to_string());
+                // One no branch can be found for stays where it is, skipped as
+                // detached, as it was before cactup could ask its remote: a
+                // forced fetch says why it cannot move it.
+                let action = match (commit, follow) {
+                    (Some(pin), _) if pin == head || ours => Some((GitAction::Pin, group.branch.clone(), None, None)),
+                    (None, Some(Follow { branch: Some(branch), note, unasked })) => {
+                        Some((GitAction::Align, Some(branch), note, unasked))
+                    }
+                    _ => None,
+                };
+                match action {
+                    Some((action, branch, note, unasked)) => plan.git.push(GitRepoPlan {
+                        repo,
+                        dir,
+                        url: group.url,
+                        branch,
+                        commit,
+                        action,
+                        checkouts: group.checkouts,
+                        forced: None,
+                        retarget: None,
+                        note,
+                        unasked,
+                    }),
+                    None => plan.skipped.push(SkippedRepo {
+                        repo,
+                        dir,
+                        url: group.url,
+                        branch: group.branch,
+                        commit,
+                        reason: DirtyReason::DetachedHead(head),
+                        untracked: probe.untracked,
+                        checkouts: group.checkouts,
+                        record: record.cloned(),
+                    }),
+                }
             }
             RepoState::Dirty(reason) => {
                 // BranchSwitched against "" happens only when no !REPO_BRANCH
@@ -1030,9 +1766,11 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
                     dir,
                     url: group.url,
                     branch: group.branch,
+                    commit,
                     reason,
                     untracked: probe.untracked,
                     checkouts: group.checkouts,
+                    record: record.cloned(),
                 });
             }
         }
@@ -1062,7 +1800,7 @@ fn describe_git_failure(e: &anyhow::Error) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #[test]
     fn a_credential_failure_reads_as_a_possibly_missing_repository() {
         let e = anyhow::anyhow!(
@@ -1221,9 +1959,11 @@ mod tests {
             dir,
             url: "https://example.invalid/repo.git".to_string(),
             branch: branch.map(str::to_string),
+            commit: None,
             reason: DirtyReason::WorktreeModified(vec!["src/foo.c".to_string()]),
             untracked: Vec::new(),
             checkouts: vec![repo.to_string()],
+            record: None,
         }
     }
 
@@ -1238,6 +1978,7 @@ mod tests {
         git::testrepo::commit(&b_dir, "initial");
 
         let mut plan = Plan {
+            libraries: Vec::new(),
             git: Vec::new(),
             skipped: vec![skipped_repo(a_dir.clone(), "A", None), skipped_repo(b_dir.clone(), "B", Some("main"))],
             downloads: Vec::new(),
@@ -1246,7 +1987,7 @@ mod tests {
             root: "Cactus".to_string(),
         };
 
-        let moved = plan.force_where(|s| s.repo == "A");
+        let moved = plan.force_where(|s| s.repo == "A").unwrap();
         assert_eq!(moved, vec!["A".to_string()]);
 
         // B stays skipped, in place.
@@ -1288,6 +2029,7 @@ mod tests {
             dir: dir.clone(),
             url: wanted_url.clone(),
             branch: Some("main".to_string()),
+            commit: None,
             reason: DirtyReason::RemoteUrlChanged {
                 on_disk: "https://old.example.invalid/repo.git".to_string(),
                 wanted: wanted_url.clone(),
@@ -1295,8 +2037,10 @@ mod tests {
             },
             untracked: Vec::new(),
             checkouts: vec!["R".to_string()],
+            record: None,
         };
         let mut plan = Plan {
+            libraries: Vec::new(),
             git: Vec::new(),
             skipped: vec![skipped],
             downloads: Vec::new(),
@@ -1305,7 +2049,7 @@ mod tests {
             root: "Cactus".to_string(),
         };
 
-        let moved = plan.force_where(|_| true);
+        let moved = plan.force_where(|_| true).unwrap();
         assert_eq!(moved, vec!["R".to_string()]);
         assert_eq!(plan.git.len(), 1);
         let forced = &plan.git[0];
@@ -1323,6 +2067,7 @@ mod tests {
         // Control: the identical fixture, skipped for a reason that is *not*
         // a URL change, does take the `Update` early-out.
         let mut plan = Plan {
+            libraries: Vec::new(),
             git: Vec::new(),
             skipped: vec![skipped_repo(dir.clone(), "R", Some("main"))],
             downloads: Vec::new(),
@@ -1330,7 +2075,7 @@ mod tests {
             links: Vec::new(),
             root: "Cactus".to_string(),
         };
-        plan.force_where(|_| true);
+        plan.force_where(|_| true).unwrap();
         assert!(matches!(plan.git[0].action, GitAction::Update));
         assert_eq!(plan.git[0].retarget, None);
     }
@@ -1410,7 +2155,7 @@ mod tests {
         // force_where(): moved into `git`, retargeted at the fork's URL, and
         // always `Align` (never `Update` — see force_where's own comment on
         // why the local-origin-tip early-out cannot be trusted here).
-        let moved = plan.force_where(|_| true);
+        let moved = plan.force_where(|_| true).unwrap();
         assert_eq!(moved, vec!["R".to_string()]);
         assert_eq!(plan.git.len(), 1);
         assert_eq!(plan.git[0].retarget.as_deref(), Some(fork_url.as_str()));
@@ -1454,8 +2199,28 @@ mod tests {
     /// never actually contains the nested path can't provide that after a
     /// real clone (unlike the working tree right after `commit_file`, a
     /// clone only ever materializes what the last commit's tree records).
-    fn commit_files(dir: &Path, files: &[(&str, &str)]) -> gix::ObjectId {
-        let repo = gix::open(dir).expect("open repo");
+    /// A download's hash is found again however its target is spelled
+    /// (`$ROOT/dl/`, `./dl`): looked up by the same path it was recorded by.
+    #[test]
+    fn download_hashes_are_found_by_their_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        for target in ["Cactus/dl/", "./Cactus/dl", "Cactus//dl"] {
+            let list = crate::thornlist::parse(&format!(
+                "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!TARGET = {target}\n!TYPE = https\n!URL = https://x/zlib\n!CHECKOUT = zlib.tgz\n"
+            ))
+            .unwrap();
+            let c = &list.components()[0];
+            let path = tmp.path().join(&c.target).join("zlib.tgz");
+            let records = FetchRecords { repos: Vec::new(), downloads: vec![(download_key(tmp.path(), &path), "f".repeat(64))] };
+            FetchState::record(tmp.path(), &records).unwrap();
+            assert_eq!(download_hashes(tmp.path(), &list).unwrap().get("zlib").map(String::as_str), Some(&*"f".repeat(64)), "{target}");
+        }
+    }
+
+    pub(crate) fn commit_files(dir: &Path, files: &[(&str, &str)]) -> gix::ObjectId {
+        let mut repo = gix::open(dir).expect("open repo");
+        // CI runners have no git identity.
+        let _ = repo.committer_or_set_generic_fallback();
 
         #[derive(Default)]
         struct Dir<'a> {
@@ -1504,7 +2269,8 @@ mod tests {
             .and_then(|mut h| h.peel_to_commit().ok())
             .map(|c| vec![c.id])
             .unwrap_or_default();
-        let id = repo.commit("HEAD", "add files", tree_id, parents).expect("commit");
+        let sig = gix::actor::SignatureRef { name: "test".into(), email: "test@example.org".into(), time: "0 +0000" };
+        let id = repo.commit_as(sig, sig, "HEAD", "add files", tree_id, parents).expect("commit");
 
         let mut index = repo.index_from_tree(&tree_id).expect("index from tree");
         let mut opts = repo
@@ -1644,7 +2410,930 @@ mod tests {
         assert!(found.is_empty(), "found stray Cactus dir(s): {found:?}");
     }
 
+    /// A clone made pinned (it knows no remote branch) from a list naming a
+    /// pin and the tag it came from, then fetched from a list naming neither (a stack
+    /// release's list, then a base that follows its branch): back onto the
+    /// remote's default branch, as the remote says, never skipped as the
+    /// user's detached HEAD; and a forced fetch of it resolves a branch too.
+    #[test]
+    fn a_clone_made_pinned_goes_back_onto_the_remote_s_default_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let upstream = tmp.path().join("sources/upstream");
+        git::testrepo::init(&upstream);
+        let c1 = git::testrepo::commit_tree(&upstream, &[("v", "1\n", false)]);
+        // The pin taken from a tag, which the list names as its branch.
+        gix::open(&upstream).unwrap().reference("refs/tags/v1.0.0", c1, gix::refs::transaction::PreviousValue::Any, "tag").unwrap();
+        git::testrepo::commit_tree(&upstream, &[("v", "2\n", false)]);
+        let (branch, tip) = git::head_of(&upstream).unwrap();
+        let url = upstream.to_string_lossy().into_owned();
+        let root = tmp.path().join("install");
+        let repo_dir = root.join("Cactus/repos/R");
+        let list = |pinned: bool| {
+            let head = if pinned { format!("!REPO_BRANCH = v1.0.0\n!REPO_COMMIT = {c1}\n") } else { String::new() };
+            crate::thornlist::parse(&format!(
+                "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\n!TARGET = $ROOT\n!TYPE = git\n\
+                 !URL = {url}\n{head}!NAME = R\n!CHECKOUT = Makefile\n"
+            ))
+            .unwrap()
+        };
+        let planned = |list: &Thornlist| {
+            let mut progress = prodash::tree::Root::new().add_child("test plan");
+            plan(list, &root, &mut progress).unwrap()
+        };
+        let p = planned(&list(true));
+        let report = execute(&p, &root).unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        FetchState::record(&root, &report.records()).unwrap();
+        assert_eq!(git::default_branch(&repo_dir), None, "a clone made pinned knows no remote branch");
+
+        let p = planned(&list(false));
+        assert!(matches!(p.git[0].action, GitAction::Align), "{:?}", p.git);
+        assert_eq!(p.git[0].branch.as_deref(), Some(branch.as_str()));
+        let report = execute(&p, &root).unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(git::head_of(&repo_dir).unwrap(), (branch.clone(), tip));
+        FetchState::record(&root, &report.records()).unwrap();
+
+        // A detached HEAD the user made, forced: a branch resolved all the same.
+        let mut progress = prodash::tree::Root::new().add_child("test checkout");
+        git::pin(&repo_dir, None, c1, false, &mut progress).unwrap();
+        let mut skipped = planned(&list(false));
+        assert!(skipped.git.is_empty(), "the user's detached HEAD is skipped");
+        skipped.force().unwrap();
+        assert_eq!(skipped.git[0].branch.as_deref(), Some(branch.as_str()));
+    }
+
+    /// A local server that accepts `git://` connections and never answers:
+    /// a remote that stalls. Its URL for `repo`.
+    fn stalling_remote(repo: &str) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming().flatten() {
+                held.push(stream);
+            }
+        });
+        format!("git://127.0.0.1:{port}/{repo}.git")
+    }
+
+    /// `n` clones made pinned (each from a tag it names as its branch), then
+    /// pointed at `url`, list and record alike: what an installation of a
+    /// stack release looks like to a list that stops pinning. The root, and
+    /// the list that no longer pins them.
+    fn clones_made_pinned(tmp: &Path, n: usize, url: &str) -> (PathBuf, Thornlist) {
+        let upstream = tmp.join("sources/upstream");
+        git::testrepo::init(&upstream);
+        let c1 = git::testrepo::commit_tree(&upstream, &[("v", "1\n", false)]);
+        gix::open(&upstream).unwrap().reference("refs/tags/v1.0.0", c1, gix::refs::transaction::PreviousValue::Any, "tag").unwrap();
+        let local = upstream.to_string_lossy().into_owned();
+        let root = tmp.join("install");
+        let sections = |url: &str, pinned: bool| -> String {
+            let head = if pinned { format!("!REPO_BRANCH = v1.0.0\n!REPO_COMMIT = {c1}\n") } else { String::new() };
+            (0..n)
+                .map(|i| format!("\n!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = {url}\n{head}!NAME = R{i}\n!CHECKOUT = A{i}/T\n"))
+                .collect()
+        };
+        let list = |url: &str, pinned: bool| {
+            crate::thornlist::parse(&format!("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{}", sections(url, pinned))).unwrap()
+        };
+        let mut progress = prodash::tree::Root::new().add_child("test plan");
+        let p = plan(&list(&local, true), &root, &mut progress).unwrap();
+        let report = execute(&p, &root).unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        FetchState::record(&root, &report.records()).unwrap();
+        for i in 0..n {
+            git::set_origin_url(&root.join(format!("Cactus/repos/R{i}")), url).unwrap();
+        }
+        let state = root.join(".cactup/fetch-state.toml");
+        let text = std::fs::read_to_string(&state).unwrap().replace(&local, url);
+        std::fs::write(&state, text).unwrap();
+        (root, list(url, false))
+    }
+
+    /// Eighty clones made pinned whose list stops pinning ask their remotes
+    /// where to go back to: in parallel, on the probe's pool, each within
+    /// the ask's time; a remote that does not answer leaves its clone going
+    /// back to the label of its pinned fetch, said on its line.
+    #[test]
+    fn the_remote_asks_of_a_plan_go_in_parallel_and_time_out() {
+        TEST_FOLLOW_TIMEOUT_MS.store(1000, std::sync::atomic::Ordering::Relaxed);
+        let tmp = tempfile::tempdir().unwrap();
+        let url = stalling_remote("r");
+        let (root, list) = clones_made_pinned(tmp.path(), 8, &url);
+        let started = std::time::Instant::now();
+        let mut progress = prodash::tree::Root::new().add_child("test plan");
+        let p = plan(&list, &root, &mut progress).unwrap();
+        let took = started.elapsed();
+        assert_eq!(p.git.len(), 8, "{:?}", p.skipped);
+        for g in &p.git {
+            assert!(matches!(g.action, GitAction::Align), "{g:?}");
+            assert_eq!(g.branch.as_deref(), Some("v1.0.0"), "{g:?}");
+            let note = g.note.as_deref().unwrap_or_default();
+            assert!(note.contains("did not answer") && note.contains("going back to v1.0.0"), "{note}");
+        }
+        // Eight asks of a second each: together, not one after another.
+        assert!(took < std::time::Duration::from_secs(4), "{took:?}");
+    }
+
+    /// A plan narrowed to some clones looks at no other: not probed, and
+    /// its remote not asked (what `add` and `remove` plan).
+    #[test]
+    fn a_narrowed_plan_asks_nothing_of_the_clones_it_leaves_out() {
+        TEST_FOLLOW_TIMEOUT_MS.store(1000, std::sync::atomic::Ordering::Relaxed);
+        let tmp = tempfile::tempdir().unwrap();
+        let url = stalling_remote("r");
+        let (root, list) = clones_made_pinned(tmp.path(), 3, &url);
+        let started = std::time::Instant::now();
+        let mut progress = prodash::tree::Root::new().add_child("test plan");
+        let p = plan_only(&list, &root, &mut progress, Some(&BTreeSet::new())).unwrap();
+        assert!(p.git.is_empty() && p.skipped.is_empty(), "{p:?}");
+        assert!(started.elapsed() < std::time::Duration::from_millis(800), "{:?}", started.elapsed());
+    }
+
+    /// Ctrl-C while a plan asks remotes fails the plan ("Interrupted"),
+    /// at once, never a fallback that would read as a plan. The interrupt
+    /// flag is the process's: run in a child of its own.
+    #[test]
+    fn an_interrupt_while_a_plan_asks_remotes_fails_it() {
+        if std::env::var_os("CACTUP_TEST_INTERRUPT_CHILD").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["fetch::tests::an_interrupt_while_a_plan_asks_remotes_fails_it", "--exact", "--test-threads=1"])
+                .env("CACTUP_TEST_INTERRUPT_CHILD", "1")
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && said.contains("1 passed"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+            return;
+        }
+        TEST_FOLLOW_TIMEOUT_MS.store(20_000, std::sync::atomic::Ordering::Relaxed);
+        let tmp = tempfile::tempdir().unwrap();
+        let url = stalling_remote("r");
+        let (root, list) = clones_made_pinned(tmp.path(), 3, &url);
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            gix::interrupt::IS_INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let started = std::time::Instant::now();
+        let mut progress = prodash::tree::Root::new().add_child("test plan");
+        let e = plan(&list, &root, &mut progress).unwrap_err();
+        assert!(format!("{e:#}").to_lowercase().contains("interrupted"), "{e:#}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+    }
+
+    /// A list of `n` fresh clones from `url` (each its own repo, so each its
+    /// own fetch): the plan to clone them under `root`.
+    fn fresh_clones(root: &Path, n: usize, url: &str) -> Plan {
+        let sections: String = (0..n)
+            .map(|i| format!("\n!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = {url}\n!NAME = S{i}\n!CHECKOUT = S{i}/T\n"))
+            .collect();
+        let list = crate::thornlist::parse(&format!("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n{sections}")).unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("test plan");
+        plan(&list, root, &mut progress).unwrap()
+    }
+
+    /// A remote that accepts the connection and never answers fails each
+    /// fetch from it once nothing has moved for the silence bound — clones,
+    /// and aligns of clones already there — each its own failure saying
+    /// so, rather than holding the fetch (and the process) for ever.
+    #[test]
+    fn a_fetch_from_a_remote_that_never_answers_fails_after_the_silence() {
+        TEST_FOLLOW_TIMEOUT_MS.store(1000, std::sync::atomic::Ordering::Relaxed);
+        git::TEST_SILENCE_MS.store(1000, std::sync::atomic::Ordering::Relaxed);
+        let tmp = tempfile::tempdir().unwrap();
+        let url = stalling_remote("r");
+        let (root, list) = clones_made_pinned(tmp.path(), 2, &url);
+        let mut progress = prodash::tree::Root::new().add_child("test plan");
+        let mut p = plan(&list, &root, &mut progress).unwrap();
+        assert!(p.git.iter().all(|g| matches!(g.action, GitAction::Align)), "{:?}", p.git);
+        // As if the asks had failed some other way: the aligns' fetches are
+        // tried (one whose ask went silent is not, see below).
+        for g in &mut p.git {
+            g.unasked = None;
+        }
+        p.git.extend(fresh_clones(&root, 2, &url).git);
+        let started = std::time::Instant::now();
+        let report = execute(&p, &root).unwrap();
+        let took = started.elapsed();
+        assert_eq!(report.failures.len(), 4, "{:?}", report.failures);
+        for f in &report.failures {
+            assert!(f.error.contains(&format!("{url} did not answer within 1 s")), "{f:?}");
+        }
+        // Gone too: a clone given up on leaves nothing to trip the next fetch.
+        assert!(!root.join("Cactus/repos/S0").exists());
+        // Four at once, each given up on after its second of silence.
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+    }
+
+    /// Ctrl-C while fetches hang in their handshake fails the fetch at once
+    /// ("Interrupted"), however long the silence bound. The interrupt flag
+    /// is the process's: run in a child of its own.
+    #[test]
+    fn an_interrupt_while_a_fetch_hangs_in_its_handshake_fails_it_at_once() {
+        if std::env::var_os("CACTUP_TEST_INTERRUPT_CHILD").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "fetch::tests::an_interrupt_while_a_fetch_hangs_in_its_handshake_fails_it_at_once",
+                    "--exact",
+                    "--test-threads=1",
+                ])
+                .env("CACTUP_TEST_INTERRUPT_CHILD", "1")
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && said.contains("1 passed"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+            return;
+        }
+        git::TEST_SILENCE_MS.store(60_000, std::sync::atomic::Ordering::Relaxed);
+        let tmp = tempfile::tempdir().unwrap();
+        let url = stalling_remote("r");
+        let root = tmp.path().join("install");
+        let p = fresh_clones(&root, 3, &url);
+        let fetching = std::thread::spawn(move || {
+            let report = execute(&p, &root);
+            (report, std::time::Instant::now())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        gix::interrupt::IS_INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let interrupted = std::time::Instant::now();
+        let (result, returned) = fetching.join().unwrap();
+        let e = result.unwrap_err();
+        assert_eq!(format!("{e:#}"), "Interrupted");
+        let report = Interrupted::report_of(&e).expect("the fetch's partial report");
+        // The three clones, and the three links never made.
+        assert_eq!(report.failures.len(), 6, "{:?}", report.failures);
+        assert!(report.failures.iter().all(|f| f.error.to_lowercase().contains("interrupted")), "{:?}", report.failures);
+        let unlinked = report.failures.iter().filter(|f| f.error == "Interrupted before this link was made").count();
+        assert_eq!(unlinked, 3, "{:?}", report.failures);
+        let took = returned.duration_since(interrupted);
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    }
+
+    /// A remote that cannot be asked for another reason than silence — ssh
+    /// refusing the key, here — says that reason, never "did not answer",
+    /// and a password in its URL is not shown. The ssh command is the
+    /// process's environment: run in a child of its own.
+    #[test]
+    fn a_refused_ask_names_its_cause() {
+        if std::env::var_os("CACTUP_TEST_SSH_REFUSED").is_none() {
+            let tmp = tempfile::tempdir().unwrap();
+            let ssh = tmp.path().join("ssh");
+            std::fs::write(&ssh, "#!/bin/sh\necho 'Permission denied (publickey).' >&2\nexit 255\n").unwrap();
+            std::fs::set_permissions(&ssh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["fetch::tests::a_refused_ask_names_its_cause", "--exact", "--test-threads=1"])
+                .env("CACTUP_TEST_SSH_REFUSED", "1")
+                .env("GIT_SSH_COMMAND", &ssh)
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && said.contains("1 passed"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+            return;
+        }
+        let e = git::ask_remote_default_branch("ssh://example.invalid/r.git", git::AskWindow::now()).unwrap_err();
+        let said = format!("{e:#}");
+        // gix takes ssh's "Permission denied" for credentials wanted, and
+        // says it could not obtain them: an authentication failure, named.
+        assert!(said.contains("credentials") && !said.contains("did not answer"), "{said}");
+        assert!(!git::is_unanswered(&e));
+        // Silence, with a password in the URL: unanswered, and not shown.
+        let url = stalling_remote("r").replace("git://", "https://max:hunter2@");
+        let window = git::AskWindow::from(std::time::Instant::now(), std::time::Duration::from_millis(500));
+        let e = git::ask_remote_default_branch(&url, window).unwrap_err();
+        assert!(git::is_unanswered(&e) && !format!("{e:#}").contains("hunter2"), "{e:#}");
+    }
+
+    /// An ssh remote whose command hangs (and runs its own child, as `sh -c
+    /// 'ssh …'` does) is given up on after the silence, and the processes
+    /// it started are killed, not left behind. The ssh command is the
+    /// process's environment: run in a child of its own.
+    #[test]
+    fn a_hung_ssh_command_is_killed_when_its_fetch_is_given_up_on() {
+        let Some(dir) = std::env::var_os("CACTUP_TEST_SSH_CHILD") else {
+            let tmp = tempfile::tempdir().unwrap();
+            let ssh = tmp.path().join("ssh");
+            std::fs::write(&ssh, "#!/bin/sh\nsleep 600 &\necho $! > \"$(dirname \"$0\")/sleep.pid\"\nwait\n").unwrap();
+            std::fs::set_permissions(&ssh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["fetch::tests::a_hung_ssh_command_is_killed_when_its_fetch_is_given_up_on", "--exact", "--test-threads=1"])
+                .env("CACTUP_TEST_SSH_CHILD", tmp.path())
+                .env("GIT_SSH_COMMAND", &ssh)
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && said.contains("1 passed"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        git::TEST_SILENCE_MS.store(1000, std::sync::atomic::Ordering::Relaxed);
+        let dest = dir.join("clone");
+        let mut progress = prodash::tree::Root::new().add_child("test clone");
+        let started = std::time::Instant::now();
+        let e = git::clone("ssh://example.invalid/r.git", None, &dest, &mut progress).unwrap_err();
+        assert!(format!("{e:#}").contains("did not answer within 1 s"), "{e:#}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(4), "{:?}", started.elapsed());
+        let pid = std::fs::read_to_string(dir.join("sleep.pid")).unwrap();
+        let gone = || std::fs::read_to_string(format!("/proc/{}/stat", pid.trim())).map_or(true, |s| s.contains(") Z "));
+        let waited = std::time::Instant::now();
+        while !gone() && waited.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(gone(), "the ssh command's child {} outlived its fetch", pid.trim());
+    }
+
+    /// A clone made pinned whose list stops pinning goes from its detached
+    /// HEAD onto the remote's default branch at the same commit: that is a
+    /// move, counted as one, and its line says so ("now on branch …"), green
+    /// as an align's, yellow when the plan had to say something.
+    #[test]
+    fn a_detached_clone_put_on_a_branch_at_the_same_commit_gets_a_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, list) = clones_made_pinned(tmp.path(), 1, &tmp.path().join("sources/upstream").to_string_lossy());
+        let dir = root.join("Cactus/repos/R0");
+        let (before, at) = git::head_of(&dir).unwrap();
+        assert_eq!(before, git::DETACHED);
+        let mut progress = prodash::tree::Root::new().add_child("test plan");
+        let p = plan(&list, &root, &mut progress).unwrap();
+        let report = execute(&p, &root).unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        let (branch, now) = git::head_of(&dir).unwrap();
+        assert_ne!(branch, git::DETACHED);
+        assert_eq!(now, at);
+        assert!(report.repos[0].changed, "{:?}", report.repos[0].changed);
+        // No source changed: no config has anything to pick up.
+        assert!(!report.repos[0].moved_commit);
+
+        let tree = prodash::tree::Root::new();
+        let layout = crate::progress::Layout::for_names(["R0"]);
+        let line = crate::progress::Line::over(tree.add_child("R0"), "R0", layout);
+        announce_repo(&line, &p.git[0], at, true, true, None);
+        let mut item = GitRepoPlan { note: Some("its remote's default branch is unknown".into()), ..p.git.into_iter().next().unwrap() };
+        announce_repo(&line, &item, at, true, true, None);
+        item.note = None;
+        // An align that moved the commit says so as before.
+        announce_repo(&line, &item, at, true, false, None);
+        let mut said = Vec::new();
+        tree.copy_messages(&mut said);
+        let short = &at.to_string()[..12];
+        let said: Vec<(prodash::messages::MessageLevel, String)> = said.into_iter().map(|m| (m.level, m.message)).collect();
+        assert_eq!(said[0], (prodash::messages::MessageLevel::Success, format!("now on branch {branch} at {short}")));
+        assert_eq!(said[1].0, prodash::messages::MessageLevel::Info, "{said:?}");
+        assert!(said[1].1.contains(&format!("now on branch {branch} at {short}")), "{said:?}");
+        assert_eq!(said[2], (prodash::messages::MessageLevel::Success, format!("{branch} now at {short}")));
+    }
+
+    /// An unanswered ask says the window it was given, not the part of it
+    /// left when it began (a window of 2 s begun 0.6 s earlier once read
+    /// "within 1 s").
+    #[test]
+    fn an_unanswered_ask_says_its_window() {
+        let url = stalling_remote("r");
+        let window = git::AskWindow::from(std::time::Instant::now() - std::time::Duration::from_millis(600), std::time::Duration::from_secs(2));
+        let e = git::ask_remote_default_branch(&url, window).unwrap_err();
+        assert_eq!(format!("{e:#}"), format!("{url} did not answer within 2 s"));
+    }
+
+    /// A clone the plan sent back to its pinned fetch's label, a tag, since
+    /// the remote did not say its default branch: the fetch fails plainly —
+    /// the remote did not answer, the clone (named) was left as it was, a
+    /// refetch once it answers fixes it — with the fetch's own error last,
+    /// and the clone is indeed as it was.
+    #[test]
+    fn a_clone_sent_back_to_a_tag_fails_plainly_and_is_left_as_it_was() {
+        let tmp = tempfile::tempdir().unwrap();
+        let local = tmp.path().join("sources/upstream").to_string_lossy().into_owned();
+        let (root, list) = clones_made_pinned(tmp.path(), 1, &local);
+        let dir = root.join("Cactus/repos/R0");
+        let before = git::head_of(&dir).unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("test plan");
+        let mut p = plan(&list, &root, &mut progress).unwrap();
+        // What `unanswered` makes of a remote that did not say its default.
+        let window = git::AskWindow::from(std::time::Instant::now(), std::time::Duration::ZERO);
+        let e = git::ask_remote_default_branch(&local, window).unwrap_err();
+        let follow = unanswered(Some("v1.0.0".into()), &e);
+        (p.git[0].branch, p.git[0].note, p.git[0].unasked) = (follow.branch, follow.note, follow.unasked);
+        let report = execute(&p, &root).unwrap();
+        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+        let error = &report.failures[0].error;
+        let plain = format!(
+            "its remote {local} could not be asked for its default branch ({local} was not asked: the time for asking \
+             remotes was up); left as it was. Refetch once it can be asked. Going back to v1.0.0 failed"
+        );
+        assert!(error.starts_with(&plain), "{error}");
+        assert!(error.contains("refs/heads/v1.0.0"), "the fetch's own error comes last: {error}");
+        assert_eq!(git::head_of(&dir).unwrap(), before);
+
+        // With no label to go back to, the plain words would be wrong: the
+        // fetch's error and the note, as before.
+        p.git[0].branch = None;
+        let report = execute(&p, &root).unwrap();
+        let error = &report.failures[0].error;
+        assert!(error.starts_with("No branch to put R0 on") && error.contains("default branch is unknown"), "{error}");
+        assert!(!error.contains("left as it was"), "{error}");
+    }
+
+    /// A clone whose remote went silent when the plan asked it for its
+    /// default branch is failed at once, untried — its fetch would only wait
+    /// out the same silence — saying the remote did not answer within the
+    /// ask's window, with none of gix's refspec words.
+    #[test]
+    fn a_clone_whose_ask_went_silent_is_failed_untried() {
+        TEST_FOLLOW_TIMEOUT_MS.store(1000, std::sync::atomic::Ordering::Relaxed);
+        let tmp = tempfile::tempdir().unwrap();
+        let url = stalling_remote("r");
+        let (root, list) = clones_made_pinned(tmp.path(), 3, &url);
+        let before = git::head_of(&root.join("Cactus/repos/R0")).unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("test plan");
+        let p = plan(&list, &root, &mut progress).unwrap();
+        assert!(p.git.iter().all(|g| g.unasked.as_ref().is_some_and(|u| u.silent)), "{:?}", p.git);
+        let started = std::time::Instant::now();
+        let report = execute(&p, &root).unwrap();
+        assert_eq!(report.failures.len(), 3, "{:?}", report.failures);
+        for f in &report.failures {
+            let plain = format!(
+                "its remote {url} did not answer within 1 s when asked for its default branch; left as it was. \
+                 Refetch once the remote answers. Going back to v1.0.0 was not tried."
+            );
+            assert_eq!(f.error, plain);
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+        assert_eq!(git::head_of(&root.join("Cactus/repos/R0")).unwrap(), before);
+    }
+
+    /// A local `git://` server that relays `git upload-pack` of `repo` until
+    /// the client sends its first `want`, then goes silent, holding the
+    /// connection: a remote that answers the handshake and stalls once the
+    /// fetch has begun (gix holds the repo's `shallow` lock by then). Its URL.
+    fn relay_until_want(repo: &Path) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let repo = repo.to_owned();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let repo = repo.clone();
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut len = [0u8; 4];
+                    stream.read_exact(&mut len).unwrap();
+                    let len = usize::from_str_radix(std::str::from_utf8(&len).unwrap(), 16).unwrap();
+                    let mut request = vec![0u8; len - 4];
+                    stream.read_exact(&mut request).unwrap();
+                    let v2 = request.windows(9).any(|w| w == b"version=2");
+                    let mut command = std::process::Command::new("git");
+                    command.arg("upload-pack").arg(&repo);
+                    if v2 {
+                        command.env("GIT_PROTOCOL", "version=2");
+                    }
+                    let mut child = command
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped())
+                        .spawn()
+                        .unwrap();
+                    let mut from_git = child.stdout.take().unwrap();
+                    let mut to_client = stream.try_clone().unwrap();
+                    std::thread::spawn(move || {
+                        let _ = std::io::copy(&mut from_git, &mut to_client);
+                    });
+                    let mut to_git = child.stdin.take().unwrap();
+                    let mut seen = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    while let Ok(n) = stream.read(&mut buf) {
+                        if n == 0 {
+                            break;
+                        }
+                        seen.extend_from_slice(&buf[..n]);
+                        if seen.windows(5).any(|w| w == b"want ") {
+                            // Silent from here on, the connection held.
+                            loop {
+                                std::thread::sleep(std::time::Duration::from_secs(60));
+                            }
+                        }
+                        if to_git.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                    }
+                    let _ = child.kill();
+                    let _ = child.wait();
+                });
+            }
+        });
+        format!("git://127.0.0.1:{port}/r.git")
+    }
+
+    /// A fetch given up on while gix holds the repo's `shallow` lock (the
+    /// remote stalled after its first `want`) leaves the lock to a thread
+    /// stuck in its read; what the process removes on its way out
+    /// (`crate::remove_leftover_tempfiles`, run at the end of `main`) takes
+    /// it, so the next fetch works once the remote answers. A pin given up on
+    /// that way does not fall back to fetching the label, which would trip
+    /// over the same lock. The process's exit: run in a child of its own.
+    #[test]
+    fn a_fetch_given_up_on_leaves_no_shallow_lock_behind() {
+        let Some(dir) = std::env::var_os("CACTUP_TEST_SHALLOW_CHILD") else {
+            let tmp = tempfile::tempdir().unwrap();
+            let upstream = tmp.path().join("upstream");
+            git::testrepo::init(&upstream);
+            git::testrepo::commit_file(&upstream, "a", "1\n");
+            let (branch, _) = git::head_of(&upstream).unwrap();
+            let clone = tmp.path().join("clone");
+            let mut progress = prodash::tree::Root::new().add_child("test clone");
+            git::clone(&upstream.to_string_lossy(), Some(&branch), &clone, &mut progress).unwrap();
+            git::testrepo::commit_file(&upstream, "a", "2\n");
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["fetch::tests::a_fetch_given_up_on_leaves_no_shallow_lock_behind", "--exact", "--test-threads=1"])
+                .env("CACTUP_TEST_SHALLOW_CHILD", tmp.path())
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && said.contains("1 passed"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+            for repo in [&clone, &tmp.path().join("pinned")] {
+                assert!(!repo.join(".git/shallow.lock").exists(), "{} kept its shallow lock", repo.display());
+            }
+            // The remote answers again: the next align goes through.
+            git::set_origin_url(&clone, &upstream.to_string_lossy()).unwrap();
+            let mut progress = prodash::tree::Root::new().add_child("test align");
+            let tip = git::align(&clone, &branch, false, &mut progress).unwrap();
+            assert_eq!(tip, git::head_of(&upstream).unwrap().1);
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        git::TEST_SILENCE_MS.store(1000, std::sync::atomic::Ordering::Relaxed);
+        let upstream = dir.join("upstream");
+        let (branch, tip) = git::head_of(&upstream).unwrap();
+        let url = relay_until_want(&upstream);
+        let clone = dir.join("clone");
+        git::set_origin_url(&clone, &url).unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("test align");
+        let e = git::align(&clone, &branch, false, &mut progress).unwrap_err();
+        assert!(format!("{e:#}").contains(&format!("{url} did not answer within 1 s")), "{e:#}");
+        // What went wrong before the fix: the abandoned fetch holds it.
+        assert!(clone.join(".git/shallow.lock").exists());
+
+        let pinned = dir.join("pinned");
+        let e = git::clone_pinned(&url, Some(&branch), tip, &pinned, &mut progress).unwrap_err();
+        let said = format!("{e:#}");
+        assert!(said.contains("did not answer within 1 s") && !said.contains("lock"), "{said}");
+        crate::remove_leftover_tempfiles();
+    }
+
+    /// Where a restore puts a clone, offline: none on disk, the remote's
+    /// default (a fresh clone's), whatever a fetch record says; one on a
+    /// branch of the list's remote keeps that branch, not the default.
+    #[test]
+    fn a_restore_keeps_a_clone_s_branch_and_clones_the_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let upstream = tmp.path().join("sources/upstream");
+        git::testrepo::init(&upstream);
+        let c1 = git::testrepo::commit_tree(&upstream, &[("v", "1\n", false)]);
+        let (main, _) = git::head_of(&upstream).unwrap();
+        gix::open(&upstream).unwrap().reference("refs/heads/develop", c1, gix::refs::transaction::PreviousValue::Any, "branch").unwrap();
+        let url = upstream.to_string_lossy().into_owned();
+        let pinned = RepoRecord { url: url.clone(), branch: Some("v1".into()), head: c1.to_string(), commit: Some(c1.to_string()) };
+        let absent = tmp.path().join("nowhere");
+        assert_eq!(known_after_restore(&absent, &url, None, Some(&pinned)), Known::RemoteDefault { label: None });
+
+        let dir = tmp.path().join("clone");
+        let mut progress = prodash::tree::Root::new().add_child("test");
+        git::clone(&url, Some("develop"), &dir, &mut progress).unwrap();
+        let mut clone = gix::open(&dir).unwrap();
+        let _ = clone.committer_or_set_generic_fallback();
+        clone.reference(format!("refs/remotes/origin/{main}"), c1, gix::refs::transaction::PreviousValue::Any, "test").unwrap();
+        std::fs::write(clone.git_dir().join("refs/remotes/origin/HEAD"), format!("ref: refs/remotes/origin/{main}\n")).unwrap();
+        assert_eq!(git::default_branch(&dir).as_deref(), Some(main.as_str()));
+        assert_eq!(known_after_restore(&dir, &url, None, None), Known::Branch("develop".into()));
+        assert_eq!(known_after_restore(&dir, &url, Some("main"), None), Known::Branch("main".into()));
+    }
+
+    /// A clone forced out of a detached HEAD the user made goes back to the
+    /// branch its last fetch followed, not to the remote's default; and when
+    /// the list moved it to another remote, the clone's own refs (the old
+    /// remote's) say nothing about the new one's default: that remote does.
+    /// Either way the branch `align` puts it on gets its upstream.
+    #[test]
+    fn a_forced_clone_follows_its_record_and_the_new_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let upstream = tmp.path().join("sources/upstream");
+        git::testrepo::init(&upstream);
+        let c1 = git::testrepo::commit_tree(&upstream, &[("v", "1\n", false)]);
+        let c2 = git::testrepo::commit_tree(&upstream, &[("v", "2\n", false)]);
+        let (main, _) = git::head_of(&upstream).unwrap();
+        gix::open(&upstream).unwrap().reference("refs/heads/develop", c2, gix::refs::transaction::PreviousValue::Any, "branch").unwrap();
+        let url = upstream.to_string_lossy().into_owned();
+        let root = tmp.path().join("install");
+        let repo_dir = root.join("Cactus/repos/R");
+        let list = |url: &str, branch: Option<&str>| {
+            let branch = branch.map(|b| format!("!REPO_BRANCH = {b}\n")).unwrap_or_default();
+            crate::thornlist::parse(&format!(
+                "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\n!TARGET = $ROOT\n!TYPE = git\n\
+                 !URL = {url}\n{branch}!NAME = R\n!CHECKOUT = Makefile\n"
+            ))
+            .unwrap()
+        };
+        let planned = |list: &Thornlist| {
+            let mut progress = prodash::tree::Root::new().add_child("test plan");
+            plan(list, &root, &mut progress).unwrap()
+        };
+        let p = planned(&list(&url, Some("develop")));
+        let report = execute(&p, &root).unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        FetchState::record(&root, &report.records()).unwrap();
+        // The clone knows the remote's default (main), as a full clone would.
+        let mut clone = gix::open(&repo_dir).unwrap();
+        let _ = clone.committer_or_set_generic_fallback();
+        clone.reference(format!("refs/remotes/origin/{main}"), c2, gix::refs::transaction::PreviousValue::Any, "test").unwrap();
+        std::fs::write(clone.git_dir().join("refs/remotes/origin/HEAD"), format!("ref: refs/remotes/origin/{main}\n")).unwrap();
+        assert_eq!(git::default_branch(&repo_dir).as_deref(), Some(main.as_str()));
+        // align gave develop its upstream, as a clone would have.
+        let config = std::fs::read_to_string(clone.git_dir().join("config")).unwrap();
+        assert!(config.contains("[branch \"develop\"]") && config.contains("merge = refs/heads/develop"), "{config}");
+
+        let mut progress = prodash::tree::Root::new().add_child("test checkout");
+        git::pin(&repo_dir, None, c1, false, &mut progress).unwrap();
+        let mut skipped = planned(&list(&url, None));
+        assert!(skipped.git.is_empty(), "the user's detached HEAD is skipped");
+        skipped.force().unwrap();
+        assert_eq!(skipped.git[0].branch.as_deref(), Some("develop"), "the branch its last fetch followed");
+
+        // Another remote, whose default is trunk: neither the record (the old
+        // remote's) nor the clone's refs speak for it.
+        let other = tmp.path().join("sources/other");
+        git::testrepo::init(&other);
+        let t1 = git::testrepo::commit_tree(&other, &[("t", "1\n", false)]);
+        let repo = gix::open(&other).unwrap();
+        repo.reference("refs/heads/trunk", t1, gix::refs::transaction::PreviousValue::Any, "branch").unwrap();
+        std::fs::write(repo.git_dir().join("HEAD"), "ref: refs/heads/trunk\n").unwrap();
+        let other_url = other.to_string_lossy().into_owned();
+        let mut skipped = planned(&list(&other_url, None));
+        assert!(skipped.git.is_empty());
+        assert!(matches!(skipped.skipped[0].reason, DirtyReason::RemoteUrlChanged { .. }));
+        skipped.force().unwrap();
+        assert_eq!(skipped.git[0].branch.as_deref(), Some("trunk"), "the new remote's default");
+        let report = execute(&skipped, &root).unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(git::head_of(&repo_dir).unwrap(), ("trunk".to_owned(), t1));
+    }
+
+    /// A branch a fetch aligns to gets its upstream, as a clone's does, and
+    /// one the user set stays; the clone's `config` keeps its mode through
+    /// any edit (a group-shared tree's 0664), the origin's re-pointing too;
+    /// and a config that cannot be written leaves the fetch done, its record
+    /// written, said as a warning.
+    #[test]
+    fn a_branch_gets_its_upstream_and_the_config_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let upstream = tmp.path().join("up");
+        git::testrepo::init(&upstream);
+        let c1 = git::testrepo::commit_tree(&upstream, &[("v", "1\n", false)]);
+        let repo = gix::open(&upstream).unwrap();
+        repo.reference("refs/heads/feature", c1, gix::refs::transaction::PreviousValue::Any, "branch").unwrap();
+        repo.reference("refs/heads/mine", c1, gix::refs::transaction::PreviousValue::Any, "branch").unwrap();
+        let url = upstream.to_string_lossy().into_owned();
+        let root = tmp.path().join("install");
+        let dir = root.join("Cactus/repos/R");
+        let list = |branch: &str| {
+            crate::thornlist::parse(&format!(
+                "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\n!TARGET = $ROOT\n!TYPE = git\n\
+                 !URL = {url}\n!REPO_BRANCH = {branch}\n!NAME = R\n!CHECKOUT = Makefile\n"
+            ))
+            .unwrap()
+        };
+        let fetch = |branch: &str| {
+            let mut progress = prodash::tree::Root::new().add_child("test plan");
+            let p = plan(&list(branch), &root, &mut progress).unwrap();
+            let report = execute(&p, &root).unwrap();
+            assert!(report.failures.is_empty(), "{:?}", report.failures);
+            FetchState::record(&root, &report.records()).unwrap();
+            report
+        };
+        let (main, _) = git::head_of(&upstream).unwrap();
+        fetch(&main);
+        let config_path = gix::open(&dir).unwrap().git_dir().join("config");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o664)).unwrap();
+        // One the user gave an upstream of their own.
+        let mut text = std::fs::read_to_string(&config_path).unwrap();
+        text.push_str("[branch \"mine\"]\n\tremote = fork\n\tmerge = refs/heads/elsewhere\n");
+        std::fs::write(&config_path, text).unwrap();
+        fetch("feature");
+        fetch("mine");
+        let text = std::fs::read_to_string(&config_path).unwrap();
+        assert!(text.contains("[branch \"feature\"]\n\tremote = origin\n\tmerge = refs/heads/feature"), "{text}");
+        assert!(text.contains("merge = refs/heads/elsewhere") && !text.contains("merge = refs/heads/mine"), "{text}");
+        assert_eq!(mode(&config_path), 0o664, "the upstream's write keeps the mode");
+        git::set_origin_url(&dir, &url).unwrap();
+        assert_eq!(mode(&config_path), 0o664, "re-pointing origin keeps the mode");
+
+        // A config that cannot be written: the fetch stands, with a warning.
+        upstream_fails(&dir, true);
+        let report = fetch("feature");
+        upstream_fails(&dir, false);
+        // (feature has its upstream already: nothing to write, nothing to warn.)
+        assert!(report.repos[0].warning.is_none());
+        let fresh = gix::open(&upstream).unwrap();
+        fresh.reference("refs/heads/other", c1, gix::refs::transaction::PreviousValue::Any, "branch").unwrap();
+        upstream_fails(&dir, true);
+        let report = fetch("other");
+        upstream_fails(&dir, false);
+        let r = &report.repos[0];
+        assert!(r.warning.as_deref().is_some_and(|w| w.contains("upstream could not be set")), "{r:?}");
+        assert_eq!(git::head_of(&dir).unwrap().0, "other", "the checkout stands");
+        let state = FetchState::read(&root).unwrap().unwrap();
+        assert_eq!(state.repos["R"].branch.as_deref(), Some("other"), "and its record is written");
+    }
+
+    /// Make writing `dir`'s upstream fail, or no longer.
+    fn upstream_fails(dir: &Path, fail: bool) {
+        let mut hook = git::FAIL_UPSTREAM.lock().unwrap();
+        hook.retain(|d| d != dir);
+        if fail {
+            hook.push(dir.to_owned());
+        }
+    }
+
     /// Regression pin for the split-installation bug's planning half:
+    /// §3.2 pins, end to end against a real upstream: a pinned repo is
+    /// cloned detached at its commit (not the tip); a refetch leaves it
+    /// there without touching the network; moving the pin moves it; dropping
+    /// the pin puts it back on its branch; and a detached HEAD cactup did
+    /// not leave is the user's, skipped like any other local state.
+    #[test]
+    fn pinned_repos_follow_their_pin_and_nothing_else() {
+        let tmp = tempfile::tempdir().unwrap();
+        let upstream = tmp.path().join("sources/upstream");
+        git::testrepo::init(&upstream);
+        let c1 = git::testrepo::commit_tree(&upstream, &[("v", "1\n", false)]);
+        let c2 = git::testrepo::commit_tree(&upstream, &[("v", "2\n", false)]);
+        let c3 = git::testrepo::commit_tree(&upstream, &[("v", "3\n", false)]);
+        let (branch, _) = git::head_of(&upstream).unwrap();
+        let url = upstream.to_string_lossy().into_owned();
+        let root = tmp.path().join("install");
+        let repo_dir = root.join("Cactus/repos/R");
+
+        let list = |pin: Option<&gix::ObjectId>| {
+            let pin = pin.map(|c| format!("!REPO_COMMIT = {c}\n")).unwrap_or_default();
+            crate::thornlist::parse(&format!(
+                "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\n!TARGET = $ROOT\n!TYPE = git\n\
+                 !URL = {url}\n!REPO_BRANCH = {branch}\n{pin}!NAME = R\n!CHECKOUT = Makefile\n"
+            ))
+            .unwrap()
+        };
+        let fetch = |list: &Thornlist| {
+            let mut progress = prodash::tree::Root::new().add_child("test plan");
+            let planned = plan(list, &root, &mut progress).unwrap();
+            let report = execute(&planned, &root).unwrap();
+            assert!(report.failures.is_empty(), "{:?}", report.failures);
+            FetchState::record(&root, &report.records()).unwrap();
+            (planned, report)
+        };
+        let content = || std::fs::read_to_string(repo_dir.join("v")).unwrap();
+
+        // Absent: cloned straight onto the pin, detached, though c3 is the tip.
+        let (planned, _) = fetch(&list(Some(&c2)));
+        assert!(matches!(planned.git[0].action, GitAction::Clone));
+        assert_eq!(git::head_of(&repo_dir).unwrap(), (git::DETACHED.to_owned(), c2));
+        assert_eq!(content(), "2\n");
+        let recorded = FetchState::read(&root).unwrap().unwrap();
+        assert_eq!(recorded.repos["R"].commit.as_deref(), Some(c2.to_string().as_str()));
+
+        // Upstream moves on, and is then unreachable: a refetch of the same
+        // pin plans a Pin that changes nothing and needs no network.
+        git::testrepo::commit_tree(&upstream, &[("v", "4\n", false)]);
+        let away = tmp.path().join("sources/away");
+        std::fs::rename(&upstream, &away).unwrap();
+        let (planned, report) = fetch(&list(Some(&c2)));
+        assert!(matches!(planned.git[0].action, GitAction::Pin));
+        assert!(!report.repos[0].changed, "a pinned repo is never moved by a refetch");
+        assert_eq!(git::head_of(&repo_dir).unwrap().1, c2);
+        std::fs::rename(&away, &upstream).unwrap();
+
+        // Moving the pin: the detached HEAD is cactup's (the fetch record
+        // holds it), so it moves.
+        fetch(&list(Some(&c3)));
+        assert_eq!(git::head_of(&repo_dir).unwrap(), (git::DETACHED.to_owned(), c3));
+        assert_eq!(content(), "3\n");
+
+        // Dropping the pin: back onto the branch, at its tip.
+        let (planned, _) = fetch(&list(None));
+        assert!(matches!(planned.git[0].action, GitAction::Align));
+        assert_eq!(git::head_of(&repo_dir).unwrap().0, branch);
+        assert_eq!(FetchState::read(&root).unwrap().unwrap().repos["R"].commit, None);
+        assert_eq!(content(), "4\n");
+
+        // A detached HEAD the user made is theirs: skipped, never moved. (A
+        // clean checkout of c1 that cactup's fetch record does not hold.)
+        let mut progress = prodash::tree::Root::new().add_child("test checkout");
+        git::pin(&repo_dir, None, c1, false, &mut progress).unwrap();
+        let tip = RepoRecord { url: url.clone(), branch: Some(branch.clone()), head: c3.to_string(), commit: None };
+        FetchState::record(&root, &FetchRecords { repos: vec![("R".to_owned(), tip)], downloads: Vec::new() }).unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("test plan");
+        let mut skipped = plan(&list(Some(&c3)), &root, &mut progress).unwrap();
+        assert!(skipped.git.is_empty());
+        assert!(matches!(skipped.skipped[0].reason, DirtyReason::DetachedHead(id) if id == c1));
+        // Forcing it pins it all the same.
+        skipped.force().unwrap();
+        assert!(matches!(skipped.git[0].action, GitAction::Pin));
+    }
+
+    fn exhaustive_fetch_state() -> FetchState {
+        let mut repos = indexmap::IndexMap::new();
+        for (name, branch) in [("CarpetX", "main"), ("Cactus", "master")] {
+            repos.insert(
+                name.to_owned(),
+                RepoRecord {
+                    url: format!("https://github.com/example/{name}.git"),
+                    branch: Some(branch.to_owned()),
+                    head: "3f2c9e1a00112233445566778899aabbccddeeff".to_owned(),
+                    commit: Some("3f2c9e1a00112233445566778899aabbccddeeff".to_owned()),
+                },
+            );
+        }
+        let mut downloads = indexmap::IndexMap::new();
+        downloads.insert("Cactus/dl/data.tar.gz".to_owned(), "ab".repeat(32));
+        FetchState { repos, downloads }
+    }
+
+    #[test]
+    fn fetch_state_format_generic_tests() {
+        use crate::format::testing::*;
+        let sample = exhaustive_fetch_state();
+        descriptor_is_consistent(&FETCH_STATE);
+        let fixtures = fixture_dir("fetch-state");
+        shape_is_pinned(&FETCH_STATE, &fixtures, &sample);
+        every_fixture_loads::<FetchState, _>(&FETCH_STATE, &fixtures);
+        newer_is_refused::<FetchState, _>(&FETCH_STATE, "fetch-state.toml", "repos = 7\n", &sample);
+        unknown_keys_survive(
+            &FETCH_STATE,
+            "fetch-state.toml",
+            &sample,
+            &["repos", "CarpetX"],
+            |s: &mut FetchState| s.repos["CarpetX"].commit = None,
+            &["repos", "CarpetX", "commit"],
+        );
+    }
+
+    /// `record` through a real file, from the shapes that shipped: the
+    /// `schema` key a deployed binary requires is always written, first; keys
+    /// this binary does not know survive on records it did not touch and
+    /// do not on one it replaced; a newer file is refused and left alone.
+    #[test]
+    fn record_keeps_schema_and_unknown_keys_and_refuses_newer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let file = root.join(".cactup/fetch-state.toml");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let fixture = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/formats/fetch-state/v1-nodownloads.toml"),
+        )
+        .unwrap();
+        // A newer binary's additions: top level, on each repo record.
+        let future = fixture
+            .replace("[repos.CarpetX]\n", "[repos.CarpetX]\nnewer-key = 1\n")
+            .replace("[repos.Cactus]\n", "[repos.Cactus]\nnewer-key = 2\n")
+            + "\n[future]\nx = 1\n";
+        std::fs::write(&file, &future).unwrap();
+
+        let moved = RepoRecord {
+            url: "https://github.com/example/CarpetX.git".to_owned(),
+            branch: Some("main".to_owned()),
+            head: "ffffffffffffffffffffffffffffffffffffffff".to_owned(),
+            commit: None,
+        };
+        let sum = "cd".repeat(32);
+        let records = FetchRecords {
+            repos: vec![("CarpetX".to_owned(), moved)],
+            downloads: vec![("Cactus/dl/data.tar.gz".to_owned(), sum.clone())],
+        };
+        FetchState::record(root, &records).unwrap();
+
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.starts_with("schema = 1\n"), "{text}");
+        let doc: toml::Table = toml::from_str(&text).unwrap();
+        assert_eq!(doc["future"]["x"].as_integer(), Some(1), "{text}");
+        assert_eq!(doc["repos"]["Cactus"]["newer-key"].as_integer(), Some(2), "an untouched record keeps its keys");
+        assert!(doc["repos"]["CarpetX"].get("newer-key").is_none(), "a replaced record starts clean: {text}");
+        assert_eq!(doc["repos"]["CarpetX"]["head"].as_str(), Some("ffffffffffffffffffffffffffffffffffffffff"));
+        assert_eq!(doc["downloads"]["Cactus/dl/data.tar.gz"].as_str(), Some(sum.as_str()));
+
+        // A newer file: refused, byte for byte as it was.
+        let newer = text.replacen("schema = 1", "schema = 2", 1);
+        std::fs::write(&file, &newer).unwrap();
+        let err = format!("{:#}", FetchState::record(root, &records).unwrap_err());
+        assert!(err.contains("upgrade cactup") && err.contains("fetch-state.toml"), "{err}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), newer);
+        assert!(FetchState::read(root).is_err());
+    }
+
+    /// A first fetch (no file yet) writes `schema` too.
+    #[test]
+    fn a_first_record_writes_the_schema_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        FetchState::record(tmp.path(), &FetchRecords { repos: Vec::new(), downloads: Vec::new() }).unwrap();
+        let text = std::fs::read_to_string(tmp.path().join(".cactup/fetch-state.toml")).unwrap();
+        assert!(text.starts_with("schema = 1\n"), "{text}");
+    }
+
     /// `plan()` must place every repo under the thornlist's declared root,
     /// not a hardcoded `Cactus` — before the fix, the fetcher already got
     /// this right (it read `list.root()`), but nothing enforced it, so a
@@ -1698,6 +3387,43 @@ mod tests {
         assert!(install_root.join("MyTree/repos/cactusbase").is_dir());
         assert_tree_lands_under_root(&install_root, "MyTree");
         assert_no_cactus_dir_anywhere(&install_root);
+    }
+
+    /// Ctrl-C landing once every clone is done (nothing left queued) and
+    /// before the link pass fails the fetch ("Interrupted"), never an `Ok`
+    /// whose links were never made: each link is a failure saying so, and
+    /// none is on disk. The interrupt flag is the process's: run in a child
+    /// of its own.
+    #[test]
+    fn an_interrupt_after_the_clones_and_before_the_links_fails_the_fetch() {
+        const NAME: &str = "fetch::tests::an_interrupt_after_the_clones_and_before_the_links_fails_the_fetch";
+        if std::env::var_os("CACTUP_TEST_INTERRUPT_CHILD").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([NAME, "--exact", "--test-threads=1"])
+                .env("CACTUP_TEST_INTERRUPT_CHILD", "1")
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && said.contains("1 passed"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let install_root = tmp.path().join("install");
+        let plan = plan_for(&et_shaped_thornlist(&tmp.path().join("sources"), "Cactus"), &install_root);
+        assert!(!plan.links.is_empty());
+        AFTER_POOL.with(|h| h.set(Some(|| gix::interrupt::IS_INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst))));
+        let result = execute(&plan, &install_root);
+        AFTER_POOL.with(|h| h.set(None));
+        let e = result.unwrap_err();
+        assert_eq!(format!("{e:#}"), "Interrupted");
+        let report = Interrupted::report_of(&e).expect("the fetch's partial report");
+        assert!(report.links.is_empty(), "{:?}", report.links);
+        assert_eq!(report.failures.len(), plan.links.len(), "{:?}", report.failures);
+        assert!(report.failures.iter().all(|f| f.error == "Interrupted before this link was made"), "{:?}", report.failures);
+        // Cloned, and not linked.
+        assert!(install_root.join("Cactus/repos/cactusbase").is_dir());
+        assert!(std::fs::symlink_metadata(install_root.join("Cactus/arrangements/CactusBase/Boundary")).is_err());
+        assert!(std::fs::symlink_metadata(install_root.join("Cactus/src")).is_err());
     }
 
     /// Control case: the identical ET-shaped list, but with the ordinary

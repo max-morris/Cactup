@@ -1,0 +1,39 @@
+schema = 2
+name = "sim"
+flavor = "cuda"
+thornlist = "/home/user/et/thornlists/sim.th"
+machine = "workstation"
+universe = "et-sif"
+coerce-run-universe = false
+config-id = "config-sim-workstation-20260501-120000"
+build-id = "build-sim-workstation-20260501-120000"
+built = "2026-05-01T13:00:00Z"
+
+[flags]
+debug = true
+optimize = true
+unsafe = true
+profile = true
+
+[runs-on]
+queues = [
+    "gpu",
+    "gpu-debug",
+]
+gpu = true
+default-queue = "gpu"
+
+[sources]
+Cactus = "0123456789abcdef0123456789abcdef01234567"
+
+[downloads]
+ExternalLibraries-Data = "sha256-of-the-download"
+
+[thorn-providers]
+CarpetX = "repos/cactusamrex/CarpetX"
+
+[thorn-shapes]
+CarpetX = "shape-fingerprint"
+
+[thorn-stamps]
+CarpetX = "stamp-fingerprint"

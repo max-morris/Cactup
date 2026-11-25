@@ -1,0 +1,17 @@
+{
+  "about": "Adding one thorn brings only the dependencies whose needed-by names it",
+  "packages": [
+    "max--z4c--needed-by",
+    "et--carpetx",
+    "et--testlib"
+  ],
+  "specs": [
+    "max/z4c/Z4cTest"
+  ],
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4cTest named",
+      "add et/testlib@1.0.0 TestLib needed by max/z4c@1.2.0 (Z4cTest)"
+    ]
+  }
+}

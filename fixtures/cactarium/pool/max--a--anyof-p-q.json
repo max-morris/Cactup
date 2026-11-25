@@ -1,0 +1,65 @@
+{
+  "slug": "max/a",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "72973d980ae52812b357de0e4ef9fcebc00b97e8",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/a.git",
+      "thorns": [
+        {
+          "arrangement": "A",
+          "thorn": "A",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "A",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/p",
+          "range": null,
+          "alternatives": [
+            {
+              "target": "et/p",
+              "range": null,
+              "needs": [
+                "P"
+              ]
+            },
+            {
+              "target": "et/q",
+              "range": null,
+              "needs": [
+                "Q"
+              ]
+            }
+          ],
+          "needs": [
+            "P"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

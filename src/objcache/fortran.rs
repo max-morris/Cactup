@@ -155,9 +155,9 @@ impl Renamed {
     /// those mapped ([`Renamed::write_copy`]).
     pub fn new(cwd: &Path, source: &Path, text: &[u8], map: &PathMap) -> Res<Self> {
         let joined = cwd.join(source);
-        let name = joined.file_name().with_context(|| format!("{} names no file", source.display()))?;
+        let name = joined.file_name().with_context(|| format!("'{}' names no file", source.display()))?;
         let dir = joined.parent().unwrap_or(Path::new("/"));
-        let source_dir = std::fs::canonicalize(dir).with_context(|| format!("Failed to resolve {}", dir.display()))?;
+        let source_dir = std::fs::canonicalize(dir).with_context(|| format!("Failed to resolve '{}'", dir.display()))?;
         let copy = match names_files(text).map_err(anyhow::Error::msg)? {
             false => None,
             true => Some((source_dir.join(".cactup").join(name), mapped_text(text, map).map_err(anyhow::Error::msg)?)),
@@ -173,13 +173,13 @@ impl Renamed {
     pub fn write_copy(&self) -> Res<()> {
         let Some((copy, text)) = &self.copy else { return Ok(()) };
         let dir = copy.parent().expect("a copy is inside its directory");
-        std::fs::create_dir_all(dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+        std::fs::create_dir_all(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
         let mut temp = tempfile::Builder::new()
             .prefix(".copy-")
             .tempfile_in(dir)
-            .with_context(|| format!("Failed to create a file in {}", dir.display()))?;
+            .with_context(|| format!("Failed to create a file in '{}'", dir.display()))?;
         std::io::Write::write_all(&mut temp, text).context("Failed to write a copy of the source")?;
-        temp.persist(copy).with_context(|| format!("Failed to write {}", copy.display()))?;
+        temp.persist(copy).with_context(|| format!("Failed to write '{}'", copy.display()))?;
         Ok(())
     }
 
@@ -463,8 +463,8 @@ impl Fortran {
         let said = !deps.said.is_empty();
         self.watched = places.clone();
         match (taken, unplaced) {
-            (Some(place), _) => self.unfollowed(format!("{} is where the compile looks first", place.display()), true),
-            (None, Some(input)) => self.unfollowed(format!("{} was found where the compile does not look", input.display()), false),
+            (Some(place), _) => self.unfollowed(format!("a file appeared at '{}', where the compile looks first", place.display()), true),
+            (None, Some(input)) => self.unfollowed(format!("'{}' was found where the compile does not look", input.display()), false),
             // What the run said, only the run can say again.
             (None, None) if said => self.unfollowed("the dependency run printed a message".to_owned(), false),
             (None, None) => self.places = Ok(places),
@@ -480,8 +480,8 @@ impl Fortran {
     fn unfollowed(&mut self, why: String, blind: bool) {
         self.blind = blind || self.copy_written;
         self.places = Err(match (blind, self.copy_written) {
-            (true, _) => format!("{why}; the compile is not stored then"),
-            (false, true) => format!("{why}; the copy's compile is not stored then"),
+            (true, _) => format!("{why}; the compile is not stored"),
+            (false, true) => format!("{why}; the copy's compile is not stored"),
             (false, false) => why,
         });
     }
@@ -562,7 +562,7 @@ pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsStrin
             given_dirs.push(dir.to_owned());
         }
     }
-    let cwd = std::fs::canonicalize(cwd).with_context(|| format!("Failed to resolve {}", cwd.display()))?;
+    let cwd = std::fs::canonicalize(cwd).with_context(|| format!("Failed to resolve '{}'", cwd.display()))?;
     // The source, read once: what the compile reads is this, or a copy of it.
     let joined = cwd.join(&compile.source);
     // The way its name leads, before it is read and after the key is made:
@@ -574,11 +574,11 @@ pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsStrin
         seen.hex()
     };
     let pinned = pin(&joined);
-    let source_dir = joined.parent().and_then(|dir| std::fs::canonicalize(dir).ok()).with_context(|| format!("Failed to resolve {}", joined.display()))?;
-    let source = source_dir.join(joined.file_name().with_context(|| format!("{} names no file", joined.display()))?);
-    let mut file = std::fs::File::open(&source).with_context(|| format!("Failed to open {}", source.display()))?;
+    let source_dir = joined.parent().and_then(|dir| std::fs::canonicalize(dir).ok()).with_context(|| format!("Failed to resolve '{}'", joined.display()))?;
+    let source = source_dir.join(joined.file_name().with_context(|| format!("'{}' names no file", joined.display()))?);
+    let mut file = std::fs::File::open(&source).with_context(|| format!("Failed to open '{}'", source.display()))?;
     let mut text = Vec::new();
-    file.read_to_end(&mut text).with_context(|| format!("Failed to read {}", source.display()))?;
+    file.read_to_end(&mut text).with_context(|| format!("Failed to read '{}'", source.display()))?;
     check_text(&text).map_err(anyhow::Error::msg)?;
     let renamed = map.map(|map| Renamed::new(&cwd, &compile.source, &text, map)).transpose()?;
     let copy_written = match &renamed {
@@ -610,7 +610,7 @@ pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsStrin
     let private = tempfile::Builder::new()
         .prefix(".fortran-")
         .tempdir_in(in_dir)
-        .with_context(|| format!("Failed to create a directory in {}", in_dir.display()))?;
+        .with_context(|| format!("Failed to create a directory in '{}'", in_dir.display()))?;
     // The runs that preprocess: in their own directory, finding module
     // files in the compile's working directory after their own; the source
     // itself, by its absolute path; the compile's arguments otherwise, but
@@ -663,10 +663,10 @@ pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsStrin
     if fortran.renamed.as_ref().is_none_or(|renamed| renamed.copy.is_none())
         && std::fs::canonicalize(&fortran.given_source).ok().as_ref() != Some(&std::fs::canonicalize(&fortran.source)?)
     {
-        bail!("{} is not the file read", fortran.given_source.display());
+        bail!("'{}' is not the file that was read", fortran.given_source.display());
     }
     if pin(&joined) != pinned || pin(&fortran.given_source) != given_pinned {
-        bail!("the way to {} changed while it was read", joined.display());
+        bail!("the path to '{}' changed while it was read", joined.display());
     }
     fortran.deps = Some(deps);
     Ok(Keyed { text: hasher.hex(), text_bytes, files, count, seen, each, fortran })
@@ -787,12 +787,12 @@ fn read_inputs(deps: &Dependencies, map: Option<&PathMap>, fortran: &Fortran) ->
                 candidate.exists()
             });
             if first.is_some_and(|first| std::fs::canonicalize(first).ok().as_ref() != Some(&physical)) {
-                bail!("the compile would find another module file of the name {} first", file_name.to_string_lossy());
+                bail!("the compile would find another module file named {} first", file_name.to_string_lossy());
             }
         }
         if !(named_module && is_gzip(input)) {
             if input.starts_with(&fortran.cwd) || physical.starts_with(&fortran.cwd) {
-                bail!("an included file would be found under the working directory, where the compile does not look for one");
+                bail!("an included file would be found under the working directory, where the compile does not look");
             }
             if copies.is_some() {
                 // The compile of a copy looks first in the copy's directory,
@@ -802,10 +802,10 @@ fn read_inputs(deps: &Dependencies, map: Option<&PathMap>, fortran: &Fortran) ->
                 // was found in) leads elsewhere from there than from the
                 // source's directory.
                 if copies.as_ref().is_some_and(|copies| copies.join(file_name).exists()) {
-                    bail!("an included file of that name is beside the copy, where the compile would look first");
+                    bail!("a file beside the copy has the name of an included file, and the compile looks there first");
                 }
                 if input.components().any(|part| part == std::path::Component::ParentDir) {
-                    bail!("an included file is named with \"..\", which leads elsewhere from the copy");
+                    bail!("an included file is named with \"..\"");
                 }
             }
         }
@@ -831,9 +831,9 @@ fn read_inputs(deps: &Dependencies, map: Option<&PathMap>, fortran: &Fortran) ->
         if fortran.copy_written {
             looked_at.insert((mapped(copy_path), copy_path.clone()), true);
             // What the compile reads must be the text keyed.
-            let written = std::fs::read(copy_path).with_context(|| format!("Failed to read {}", copy_path.display()))?;
+            let written = std::fs::read(copy_path).with_context(|| format!("Failed to read '{}'", copy_path.display()))?;
             if Some(&written) != copy.map(|(_, text)| text) {
-                bail!("{} does not hold the copy written", copy_path.display());
+                bail!("'{}' does not match the copy written", copy_path.display());
             }
         }
     }
@@ -867,9 +867,9 @@ fn is_gzip(path: &Path) -> bool {
 /// Run the dependency run of `fortran`, and read what it says.
 fn dependencies(compiler: &Compiler, name: &OsStr, fortran: &Fortran) -> Res<Dependencies> {
     // What an earlier run wrote there is no input of this one.
-    for entry in std::fs::read_dir(fortran.private.path()).with_context(|| format!("Failed to read {}", fortran.private.path().display()))? {
+    for entry in std::fs::read_dir(fortran.private.path()).with_context(|| format!("Failed to read '{}'", fortran.private.path().display()))? {
         let entry = entry.context("Failed to read a module directory")?;
-        std::fs::remove_file(entry.path()).with_context(|| format!("Failed to remove {}", entry.path().display()))?;
+        std::fs::remove_file(entry.path()).with_context(|| format!("Failed to remove '{}'", entry.path().display()))?;
     }
     let mut command = Command::new(&compiler.path);
     command.arg0(name).args(&fortran.args).current_dir(fortran.private.path());
@@ -879,7 +879,7 @@ fn dependencies(compiler: &Compiler, name: &OsStr, fortran: &Fortran) -> Res<Dep
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("Failed to run {} for the dependencies", compiler.path.display()))?;
+        .with_context(|| format!("Failed to run '{}' for the dependencies", compiler.path.display()))?;
     key::PREPROCESSOR.store(child.id() as i32, Ordering::SeqCst);
     let out = child.wait_with_output();
     key::PREPROCESSOR.store(0, Ordering::SeqCst);
@@ -911,7 +911,7 @@ fn driver_says(compiler: &Compiler, name: &OsStr, fortran: &Fortran) -> Res<Driv
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("Failed to run {}", compiler.path.display()))?;
+        .with_context(|| format!("Failed to run '{}'", compiler.path.display()))?;
     key::PREPROCESSOR.store(child.id() as i32, Ordering::SeqCst);
     let out = child.wait_with_output();
     key::PREPROCESSOR.store(0, Ordering::SeqCst);

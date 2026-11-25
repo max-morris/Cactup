@@ -1,0 +1,35 @@
+{
+  "about": "--no-deps narrows nothing by a present package's declared range, and says what it breaks",
+  "packages": [
+    "et--p--needs-d",
+    "et--d"
+  ],
+  "specs": [
+    "et/d@^2"
+  ],
+  "present": [
+    {
+      "package": "et/p",
+      "version": "1.0.0",
+      "enabled": [
+        "P"
+      ]
+    },
+    {
+      "package": "et/d",
+      "version": "1.0.0",
+      "enabled": [
+        "D"
+      ]
+    }
+  ],
+  "options": {
+    "no-deps": true
+  },
+  "expect": {
+    "plan": [
+      "upgrade et/d 1.0.0 -> 2.0.0 D named",
+      "note: et/p@1.0.0 needs et/d ^1; --no-deps leaves it unmet"
+    ]
+  }
+}

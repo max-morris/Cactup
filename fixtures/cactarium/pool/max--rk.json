@@ -1,0 +1,39 @@
+{
+  "slug": "max/rk",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "42e0e59bcb95939c3a929ccb897058db9ac4514b",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/rk.git",
+      "thorns": [
+        {
+          "arrangement": "RK",
+          "thorn": "RK",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "RK",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    }
+  ]
+}

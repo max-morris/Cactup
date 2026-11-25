@@ -1,0 +1,39 @@
+{
+  "about": "A present package's any-of, held by a present alternative, constrains that alternative",
+  "packages": [
+    "max--z4c--anyof-carpet-2026-5",
+    "et--carpet--two",
+    "et--cactuspugh",
+    "max--other--carpet-2026-6"
+  ],
+  "specs": [
+    "max/other"
+  ],
+  "present": [
+    {
+      "package": "max/z4c",
+      "version": "1.2.0",
+      "enabled": [
+        "Z4c",
+        "Z4cTest"
+      ]
+    },
+    {
+      "package": "et/carpet",
+      "version": "2026.5.0",
+      "enabled": [
+        "CarpetSlab"
+      ]
+    }
+  ],
+  "options": {
+    "upgrade": true
+  },
+  "expect": {
+    "refusal": "NoReleaseFits",
+    "message": [
+      "et/carpet ~2026.5 (from installed max/z4c@1.2.0)",
+      "et/carpet ^2026.6 (from max/other@1.0.0)"
+    ]
+  }
+}

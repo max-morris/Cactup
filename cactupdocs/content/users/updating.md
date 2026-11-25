@@ -156,9 +156,8 @@ your build keeps using the last revision of its own generation and says so,
 loudly, on every command:
 
 ```
-the machine database has moved to generation 3; this cactup (generation 2)
-keeps using the last generation-2 revision. Run `cactup update` (if that
-reports up to date, a release is still propagating; retry later)
+The machine database has moved to generation 3; this cactup stays on generation 2.
+Run `cactup update`; retry later if it reports up to date.
 ```
 
 Nothing breaks while you see this; your machines simply stop receiving
@@ -171,16 +170,44 @@ Machines in your overlay record the generation they were written for, as
 
 - a machine **without** the key loads with a one-time warning that cactup is
   assuming its own generation;
-- a machine written for an **older** generation is refused, with a pointer to
-  the list of changes you need to apply; `cactup machine list` still lists it,
-  marked in yellow;
+- a machine written for an **older** generation is brought forward by cactup
+  itself, once, the first time any command loads it: it prints one line
+  saying so, and your old files are kept in
+  `~/.cactup/machine-backups/<name>/generation-<N>/`. If it cannot do that
+  without risking a change in what the machine does (or the machine is from
+  generation 1, which is never updated automatically), it stops, keeps what
+  it finished, and says which entry of the list of changes to follow by hand;
+  `cactup machine list` still lists such a machine, marked in yellow;
 - a machine written for a **newer** generation asks you to run `cactup update`.
 
-How to bring an overlay machine forward is described in
+What the automatic update does and how to finish one it stopped is described in
 [MDB Generations](../authors/mdb-generations.html#updating-an-overlay-machine).
 An optionlist file of your own that you build from with `--optionlist` follows
 the same format: if its `[cactup]` header uses keys a newer generation moved,
 the next rebuild of that config stops and says where each key went.
+
+## Files written by another cactup
+
+cactup's own files (the installation list, simulation and build records, your
+configs) each carry a format version. A newer cactup reads every older file
+it ever wrote, and does not touch a file it only reads; the file is upgraded
+the next time cactup saves it (a record that queued jobs read may be saved in
+an older format that still holds its content, so those jobs keep working). A
+cactup that is older than the one that wrote a file keeps the keys it does not
+know when it saves (cactup releases from before November 2026 do not), but
+refuses a file whose format it cannot read at all:
+
+```
+'/home/you/.cactup/database.json' was written by a newer cactup (database schema 2; this cactup, 0.1.0 (a1b2c3d 2026-11-10), reads up to 1); upgrade cactup
+```
+
+Nothing is overwritten when you see this. Run `cactup update` (or use the
+newer cactup that wrote the file). A queued job runs the build it was
+submitted with, so it is not affected by an update in between.
+
+`~/.cactup/credentials`, which holds your Cactarium token, is always readable
+only by you (mode 0600), however cactup rewrites it. Other files keep the
+permissions they have, so a shared Cactus tree stays readable by its group.
 
 ## Offline hosts and firewalls
 
@@ -255,11 +282,12 @@ that binary from where it was built.
 ## Uninstalling
 
 1. Optionally remove the Einstein Toolkit installations first with `cactup
-   list` and `cactup uninstall <alias>`, so nothing is left behind outside
+   list` and `cactup inst delete <alias>`, so nothing is left behind outside
    `~/.cactup` (installation, simulation and test directories can live
    elsewhere, as set by your machine definition).
 2. Remove cactup's home. **This also removes anything else under it**: your
-   overlay machines (`machines/`), knobs and installation list
+   overlay machines (`machines/`) and the copies kept when cactup updated
+   them (`machine-backups/`), knobs and installation list
    (`database.json`), and any installations or simulations that live under
    the default `~/.cactup/cacti/` or `~/.cactup/simulations/`:
 

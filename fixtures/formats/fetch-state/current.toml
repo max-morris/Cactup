@@ -1,0 +1,16 @@
+schema = 1
+
+[repos.CarpetX]
+url = "https://github.com/example/CarpetX.git"
+branch = "main"
+head = "3f2c9e1a00112233445566778899aabbccddeeff"
+commit = "3f2c9e1a00112233445566778899aabbccddeeff"
+
+[repos.Cactus]
+url = "https://github.com/example/Cactus.git"
+branch = "master"
+head = "3f2c9e1a00112233445566778899aabbccddeeff"
+commit = "3f2c9e1a00112233445566778899aabbccddeeff"
+
+[downloads]
+"Cactus/dl/data.tar.gz" = "abababababababababababababababababababababababababababababababab"

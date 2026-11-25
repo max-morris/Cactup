@@ -1,0 +1,21 @@
+{
+  "slug": "max/cactus-other",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "87bd3c64575fcf3ef915d3d8041586426ff2850a",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/cactus-other.git",
+      "flesh": true,
+      "thorns": [],
+      "claims": []
+    }
+  ]
+}

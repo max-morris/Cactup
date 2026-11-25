@@ -1,0 +1,39 @@
+{
+  "slug": "max/v1",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "e854b2181326cb314a1f25f35d4e9d858cd2b68c",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/v1.git",
+      "thorns": [
+        {
+          "arrangement": "V1",
+          "thorn": "V1",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "V1",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    }
+  ]
+}

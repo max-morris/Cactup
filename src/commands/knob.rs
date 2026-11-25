@@ -53,7 +53,7 @@ fn delete(ctx: &Ctx, name: &str) -> Res<()> {
 pub fn dispatch(ctx: &Ctx, name: Option<String>, value: Option<String>, custom: bool) -> Res<()> {
     let Some(name) = name else {
         if custom {
-            bail!("-c/--custom creates a knob: name the knob and give it a value");
+            bail!("-c/--custom needs a knob name and a value");
         }
         return print_all(ctx);
     };
@@ -68,7 +68,7 @@ pub fn dispatch(ctx: &Ctx, name: Option<String>, value: Option<String>, custom: 
     match value {
         None => {
             if custom {
-                bail!("-c/--custom creates a knob: give \"{name}\" a value to set");
+                bail!("-c/--custom needs a value for \"{name}\"");
             }
             let db = ctx.db.read()?;
             if !standard && db.knob(&name).is_none() {
@@ -108,6 +108,8 @@ fn print_all(ctx: &Ctx) -> Res<()> {
         let knob = spec.name;
         let marker = override_marker(knob);
         match (db.knob(knob), db.knob_or_default(knob)) {
+            // Stored blank reads as unset, as `knob NAME` shows it.
+            (Some(""), _) => println!("  {knob} {}{marker}", unset_note(knob).dimmed()),
             (Some(stored), _) => println!("  {knob} = {}{marker}", (spec.render)(stored)),
             (None, Some(derived)) => {
                 println!("  {knob} = {} {}", (spec.render)(&derived), "(derived)".dimmed())
@@ -122,7 +124,7 @@ fn print_all(ctx: &Ctx) -> Res<()> {
         println!("  {knob} = {value}{}", override_marker(knob));
     }
     if !any {
-        println!("  {}", "(none — create one with `cactup knob -c NAME VALUE`)".dimmed());
+        println!("  {}", "(none; create one with `cactup knob -c NAME VALUE`)".dimmed());
     }
     Ok(())
 }
@@ -134,11 +136,8 @@ fn unset_note(name: &str) -> String {
 
 /// The error for a non-standard name nothing has created yet.
 fn unknown_custom(name: &str) -> String {
-    let known: Vec<&str> = KNOWN_KNOBS.iter().map(|s| s.name).collect();
     format!(
-        "no knob named \"{name}\" (standard knobs: {}). To create a custom knob of that name, \
-         pass -c/--custom: `cactup knob -c {name} VALUE`",
-        known.join(", ")
+        "No knob named \"{name}\"; create it with `cactup knob -c {name} VALUE`"
     )
 }
 

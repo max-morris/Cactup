@@ -1,0 +1,34 @@
+{
+  "about": "A new placement that does not accept the installed release is a clash",
+  "packages": [
+    "max--kadath",
+    "max--fuka-gw--fuka-2",
+    "et--fuka"
+  ],
+  "specs": [
+    "max/fuka-gw"
+  ],
+  "present": [
+    {
+      "package": "max/kadath",
+      "version": "1.0.0",
+      "enabled": [
+        "Kadath"
+      ],
+      "libraries": [
+        {
+          "package": "et/fuka",
+          "commit": "547817e775491964edcb9d9e2c8cde37b1742b80",
+          "into": "src/fuka"
+        }
+      ]
+    }
+  ],
+  "expect": {
+    "refusal": "LibraryClash",
+    "message": [
+      "et/fuka ^2 (from max/fuka-gw@1.0.0)",
+      "et/fuka #547817e77549 (from installed max/kadath@1.0.0)"
+    ]
+  }
+}

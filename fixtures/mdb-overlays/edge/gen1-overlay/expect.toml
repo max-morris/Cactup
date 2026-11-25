@@ -1,0 +1,4 @@
+# A generation-1 overlay: never migrated, the 1->2 step always refuses.
+result-generation = 1
+outcome = "refused"
+findings = ["generation-1-not-migrated"]

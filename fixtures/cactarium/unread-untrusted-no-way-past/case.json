@@ -1,0 +1,36 @@
+{
+  "about": "The same where Cactarium reads it only at released versions: that is what to do",
+  "packages": [],
+  "specs": [
+    "et/admbase/StaticConformal"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "unknown": "abababababababababababababababababababab",
+      "thorns": [
+        "ADMBase",
+        "ADMCoupling",
+        "StaticConformal"
+      ],
+      "base": "admbase",
+      "enabled": [
+        "ADMBase"
+      ],
+      "stand_in": true
+    }
+  ],
+  "unanswered": {
+    "et/admbase": "untrusted"
+  },
+  "expect": {
+    "refusal": "Unreadable",
+    "message": [
+      "Put et/admbase at a released version"
+    ],
+    "not_in_message": [
+      "--upgrade",
+      "Try again"
+    ]
+  }
+}

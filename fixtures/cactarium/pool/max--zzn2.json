@@ -1,0 +1,58 @@
+{
+  "slug": "max/zzn2",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "bed74112db49aebb5f276e93a7c8435e253cc4f7",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/zzn2.git",
+      "thorns": [
+        {
+          "arrangement": "Zzn2",
+          "thorn": "N2",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "N2",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/zzq",
+          "range": null,
+          "needs": [
+            "A2"
+          ],
+          "note": null
+        },
+        {
+          "kind": "dependency",
+          "target": "max/zzy2",
+          "range": null,
+          "needs": [
+            "Y2"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

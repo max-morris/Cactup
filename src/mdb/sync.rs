@@ -39,15 +39,12 @@ use gix::objs::tree::EntryKind;
 use gix::protocol::fetch::Tags;
 use gix::remote::Direction;
 use gix::ObjectId;
-use prodash::messages::MessageLevel;
-use prodash::progress::{Id, Step, StepShared};
-use prodash::{Count, NestedProgress, Progress, Unit};
+use prodash::{Count, NestedProgress, Progress};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// How long a successful (or failed) sync is trusted before the next one.
@@ -129,8 +126,9 @@ pub fn system_root(root: &Path, db: &Db, mode: Mode) -> Res<PathBuf> {
     let dir = match fresh_link(root, generation, mode) {
         Some(dir) => dir,
         None => {
-            let url = db
-                .read()?
+            // As updating reads it: the sync that follows an update must not
+            // fail on a database a newer cactup wrote.
+            let url = crate::update::readable_db(db)?
                 .knob_or_default("mdb-url")
                 .unwrap_or_else(|| crate::update::DEFAULT_MDB_URL.to_owned());
             sync_at(root, &url, generation, mode)?
@@ -150,9 +148,8 @@ fn generation_notice(root: &Path, generation: u32) -> Option<String> {
     let stamp = read_stamp(root, generation)?;
     (stamp.tip_generation > generation).then(|| {
         format!(
-            "the machine database has moved to generation {}; this cactup (generation {generation}) \
-             keeps using the last generation-{generation} revision. Run `cactup update` (if that \
-             reports up to date, a release is still propagating; retry later)",
+            "The machine database has moved to generation {}; this cactup stays on generation \
+             {generation}.\nRun `cactup update`; retry later if it reports up to date.",
             stamp.tip_generation
         )
     })
@@ -201,7 +198,7 @@ fn write_stamp(root: &Path, generation: u32, stamp: &SyncStamp) {
 
 /// Shuts the progress renderer down on every way out of [`sync_at`], so an
 /// error is never printed underneath a live bar.
-struct Renderer(Option<prodash::render::line::JoinHandle>);
+struct Renderer(Option<crate::manifest::JoinHandle>);
 
 impl Drop for Renderer {
     fn drop(&mut self) {
@@ -219,7 +216,7 @@ pub fn sync_at(root: &Path, url: &str, generation: u32, mode: Mode) -> Res<PathB
     if let Some(dir) = fresh_link(root, generation, mode) {
         return Ok(dir);
     }
-    fs::create_dir_all(root).with_context(|| format!("Failed to create {}", root.display()))?;
+    fs::create_dir_all(root).with_context(|| format!("Failed to create '{}'", root.display()))?;
 
     // Phase-scoped renderer, one line, gix's phases collapsed onto it (the
     // same shape as the release manifest's fetch). Tests get the tree alone,
@@ -302,12 +299,10 @@ fn sync_locked(root: &Path, url: &str, generation: u32, line: &mut Line) -> Res<
         Err(e) => {
             let Some(dir) = current else {
                 bail!(
-                    "could not fetch the machine database from {url}: {e:#}\n\
-                     This cactup has no copy of it yet, and without one it cannot know which machine \
-                     it is on. Run `cactup update` on a host with network access (the copy in {} serves \
-                     every host that shares this home directory), or pass --mdb-path with the path of \
-                     a machine database on disk.",
-                    root.display()
+                    "Could not fetch the machine database from {url}: {e:#}\n\
+                     No local copy exists yet.\n\
+                     Run `cactup update` on a host with network access and the same home directory, \
+                     or point --mdb-path at a machine database on disk."
                 );
             };
             keep_stamp(root, generation, &dir, None);
@@ -324,13 +319,9 @@ fn sync_locked(root: &Path, url: &str, generation: u32, line: &mut Line) -> Res<
     let Some(commit) = found else {
         let Some(dir) = current else {
             bail!(
-                "{url} has never published MDB generation {generation} (its newest is generation \
-                 {tip_generation}), which this cactup needs. {}",
-                if tip_generation > generation {
-                    "Run `cactup update` to get a cactup that reads the newer generation."
-                } else {
-                    "A release may still be propagating; retry later."
-                }
+                "{url} has never published MDB generation {generation}; its newest is \
+                 {tip_generation}.\n{}",
+                if tip_generation > generation { "Run `cactup update`." } else { "Retry later." }
             );
         };
         keep_stamp(root, generation, &dir, Some((tip_generation, tip)));
@@ -434,9 +425,9 @@ fn open_repo(dir: &Path) -> Res<gix::Repository> {
         Err(_) => {
             if dir.exists() {
                 fs::remove_dir_all(dir)
-                    .with_context(|| format!("Failed to remove {}", dir.display()))?;
+                    .with_context(|| format!("Failed to remove '{}'", dir.display()))?;
             }
-            gix::init_bare(dir).with_context(|| format!("Failed to create {}", dir.display()))?
+            gix::init_bare(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?
         }
     };
     // The fetch writes a reflog entry for the ref it moves, which gix refuses
@@ -487,7 +478,7 @@ fn preflight(repo: &gix::Repository, url: &str) -> Res<()> {
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
         if gix::interrupt::is_triggered() {
-            bail!("interrupted");
+            bail!("Interrupted");
         }
         if started.elapsed() >= PREFLIGHT_TIMEOUT {
             bail!("no connection to {host}:{port} within {}s", PREFLIGHT_TIMEOUT.as_secs());
@@ -538,12 +529,12 @@ fn stall_timeout() -> Duration {
     if cfg!(test) { Duration::from_secs(2) } else { FETCH_STALL }
 }
 
-/// [`fetch_mdb_branch`] on a helper thread, watched from this one every
-/// 100 ms; returns the repository along with the tip. The calling thread is
-/// what bounds the wait: gix's http transport connects with a hard-coded
-/// 20 s timeout and idles out after 30 s per read, other transports never
-/// time out at all, and gix checks the interrupt flag only between phases
-/// (and behind a proxy no preflight bounds even the connect).
+/// [`fetch_mdb_branch`] on a helper thread, watched from this one
+/// (`crate::fetch::watch`); returns the repository along with the tip. The
+/// calling thread is what bounds the wait: gix's http transport connects
+/// with a hard-coded 20 s timeout and idles out after 30 s per read, other
+/// transports never time out at all, and gix checks the interrupt flag only
+/// between phases (and behind a proxy no preflight bounds even the connect).
 ///
 /// - Nothing reported for [`stall_timeout`], or the whole fetch past
 ///   [`FETCH_MAX`]: the fetch is abandoned and this fails like any other
@@ -555,173 +546,24 @@ fn stall_timeout() -> Duration {
 ///   whether or not the fetch finished.
 ///
 /// An abandoned fetch is never joined and dies with the process; its cancel
-/// flag stops it at gix's next check should the server wake up meanwhile.
-/// The thread reports through its own handle on `line`, watched for
-/// activity.
+/// flag stops it at gix's next check should the server wake up meanwhile,
+/// and the processes it started (ssh) are killed. The thread reports through
+/// its own handle on `line`, watched for activity.
 fn fetch_abandonable(repo: gix::Repository, url: &str, line: &Line) -> Res<(gix::Repository, ObjectId)> {
-    use std::sync::mpsc::RecvTimeoutError;
-    use std::time::Instant;
-    let (tx, rx) = std::sync::mpsc::channel();
-    let activity = Activity::default();
-    let cancel = Arc::new(AtomicBool::new(false));
-    let mut handle = Watched { line: line.another_handle(), activity: activity.clone() };
-    let (worker_url, worker_cancel) = (url.to_owned(), Arc::clone(&cancel));
-    std::thread::spawn(move || {
-        let tip = fetch_mdb_branch(&repo, &worker_url, &mut handle, &worker_cancel);
-        drop(handle);
-        let _ = tx.send(tip.map(|tip| (repo, tip)));
+    use crate::fetch::watch::{abandonable, Bounds, Stop};
+    let bounds = Bounds { stall: stall_timeout(), total: Some(FETCH_MAX), wind_down: FETCH_WIND_DOWN };
+    let worker_url = url.to_owned();
+    let fetched = abandonable(line.another_handle(), bounds, move |progress, cancel| {
+        let tip = fetch_mdb_branch(&repo, &worker_url, progress, cancel)?;
+        Ok((repo, tip))
     });
-    let started = Instant::now();
-    let (mut seen, mut moved) = (activity.reading(), started);
-    loop {
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(result) => return result,
-            Err(RecvTimeoutError::Disconnected) => {
-                bail!("the machine database fetch stopped unexpectedly")
-            }
-            Err(RecvTimeoutError::Timeout) => {}
-        }
-        if gix::interrupt::is_triggered() {
-            cancel.store(true, Ordering::Relaxed);
-            let _ = rx.recv_timeout(FETCH_WIND_DOWN);
-            bail!("interrupted");
-        }
-        let reading = activity.reading();
-        if reading != seen {
-            (seen, moved) = (reading, Instant::now());
-        }
-        let stall = stall_timeout();
-        if moved.elapsed() >= stall {
-            cancel.store(true, Ordering::Relaxed);
-            bail!("no response for {}s", stall.as_secs());
-        }
-        if started.elapsed() >= FETCH_MAX {
-            cancel.store(true, Ordering::Relaxed);
-            bail!("the fetch did not finish within {} minutes", FETCH_MAX.as_secs() / 60);
-        }
-    }
-}
-
-/// Everything a fetch reports, reduced to one number that changes whenever
-/// anything moves — how [`fetch_abandonable`] tells a slow fetch from a hung
-/// one.
-#[derive(Clone, Default)]
-struct Activity(Arc<ActivityState>);
-
-#[derive(Default)]
-struct ActivityState {
-    /// Bumped by every report made through a [`Watched`] handle.
-    reports: AtomicU64,
-    /// Counters handed out to be incremented directly, never through a
-    /// handle (gix's threaded delta resolution counts that way).
-    counters: Mutex<Vec<StepShared>>,
-}
-
-impl Activity {
-    fn bump(&self) {
-        self.0.reports.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn watch(&self, counter: &StepShared) {
-        let mut counters = self.0.counters.lock().unwrap_or_else(PoisonError::into_inner);
-        if !counters.iter().any(|known| Arc::ptr_eq(known, counter)) {
-            counters.push(Arc::clone(counter));
-        }
-    }
-
-    fn reading(&self) -> u64 {
-        let counters = self.0.counters.lock().unwrap_or_else(PoisonError::into_inner);
-        counters.iter().fold(self.0.reports.load(Ordering::Relaxed), |sum, counter| {
-            sum.wrapping_add(counter.load(Ordering::Relaxed) as u64)
-        })
-    }
-}
-
-/// A [`Line`] handle, and every child it hands out, that records each
-/// report in an [`Activity`] before passing it on.
-struct Watched {
-    line: Line,
-    activity: Activity,
-}
-
-impl Watched {
-    fn child(&self, line: Line) -> Watched {
-        self.activity.bump();
-        Watched { line, activity: self.activity.clone() }
-    }
-}
-
-impl Count for Watched {
-    fn set(&self, step: Step) {
-        self.activity.bump();
-        self.line.set(step);
-    }
-
-    fn step(&self) -> Step {
-        self.line.step()
-    }
-
-    fn inc_by(&self, step: Step) {
-        self.activity.bump();
-        self.line.inc_by(step);
-    }
-
-    fn counter(&self) -> StepShared {
-        let counter = self.line.counter();
-        self.activity.watch(&counter);
-        counter
-    }
-}
-
-impl Progress for Watched {
-    fn init(&mut self, max: Option<Step>, unit: Option<Unit>) {
-        self.activity.bump();
-        self.line.init(max, unit);
-    }
-
-    fn unit(&self) -> Option<Unit> {
-        self.line.unit()
-    }
-
-    fn max(&self) -> Option<Step> {
-        self.line.max()
-    }
-
-    fn set_max(&mut self, max: Option<Step>) -> Option<Step> {
-        self.activity.bump();
-        self.line.set_max(max)
-    }
-
-    fn set_name(&mut self, name: String) {
-        self.activity.bump();
-        self.line.set_name(name);
-    }
-
-    fn name(&self) -> Option<String> {
-        self.line.name()
-    }
-
-    fn id(&self) -> Id {
-        self.line.id()
-    }
-
-    fn message(&self, level: MessageLevel, message: String) {
-        self.activity.bump();
-        self.line.message(level, message);
-    }
-}
-
-impl NestedProgress for Watched {
-    type SubProgress = Watched;
-
-    fn add_child(&mut self, name: impl Into<String>) -> Watched {
-        let line = self.line.add_child(name);
-        self.child(line)
-    }
-
-    fn add_child_with_id(&mut self, name: impl Into<String>, id: Id) -> Watched {
-        let line = self.line.add_child_with_id(name, id);
-        self.child(line)
+    match fetched {
+        Ok(fetched) => Ok(fetched),
+        Err(Stop::Failed(e)) => Err(e),
+        Err(Stop::Interrupted) => bail!("Interrupted"),
+        Err(Stop::Stalled(stall)) => bail!("No response for {}s", stall.as_secs()),
+        Err(Stop::Overran(max)) => bail!("The fetch did not finish within {} minutes", max.as_secs() / 60),
+        Err(Stop::Vanished) => bail!("The machine database fetch stopped unexpectedly"),
     }
 }
 
@@ -732,30 +574,30 @@ impl NestedProgress for Watched {
 fn fetch_mdb_branch(
     repo: &gix::Repository,
     url: &str,
-    progress: &mut Watched,
+    progress: &mut crate::fetch::watch::Watched<Line>,
     cancel: &AtomicBool,
 ) -> Res<ObjectId> {
     let remote = repo
         .remote_at(url)
-        .with_context(|| format!("invalid mdb-url {url}"))?
+        .with_context(|| format!("Invalid mdb-url {url}"))?
         .with_refspecs([REFSPEC], Direction::Fetch)
         .expect("the refspec is valid")
         .with_fetch_tags(Tags::None);
     remote
         .connect(Direction::Fetch)
-        .with_context(|| format!("failed to connect to {url}"))?
+        .with_context(|| format!("Failed to connect to {url}"))?
         .prepare_fetch(&mut *progress, Default::default())
-        .with_context(|| format!("failed to list the branches of {url}"))?
+        .with_context(|| format!("Failed to list the branches of {url}"))?
         .receive(&mut *progress, cancel)
-        .with_context(|| format!("failed to fetch the mdb branch of {url}"))?;
+        .with_context(|| format!("Failed to fetch the mdb branch of {url}"))?;
     if cancel.load(Ordering::Relaxed) || gix::interrupt::is_triggered() {
-        bail!("interrupted");
+        bail!("Interrupted");
     }
     let tip = repo
         .find_reference(MDB_REF)
         .with_context(|| format!("{url} has no mdb branch"))?
         .peel_to_id()
-        .with_context(|| format!("failed to resolve the mdb branch of {url}"))?
+        .with_context(|| format!("Failed to resolve the mdb branch of {url}"))?
         .detach();
     Ok(tip)
 }
@@ -792,12 +634,12 @@ pub fn find_generation(
         .rev_walk([tip])
         .first_parent_only()
         .all()
-        .with_context(|| "failed to walk the MDB history")?;
+        .with_context(|| "Failed to walk the MDB history")?;
     for info in walk {
         if gix::interrupt::is_triggered() {
-            bail!("interrupted");
+            bail!("Interrupted");
         }
-        let id = info.with_context(|| "failed to walk the MDB history")?.id;
+        let id = info.with_context(|| "Failed to walk the MDB history")?.id;
         let found = commit_generation(repo, id)?;
         if found == generation {
             return Ok((Some(id), tip_generation));
@@ -823,7 +665,7 @@ pub fn install_commit(
     let found = commit_generation(repo, commit)?;
     if found != generation {
         bail!(
-            "publishing error: MDB commit {} says it is generation {found}, not {generation}",
+            "Publishing error: MDB commit {} says it is generation {found}, not {generation}",
             short(commit)
         );
     }
@@ -851,23 +693,23 @@ pub fn export_tree(
         .traverse()
         .breadthfirst
         .files()
-        .with_context(|| format!("failed to read the tree of MDB commit {commit}"))?;
+        .with_context(|| format!("Failed to read the tree of MDB commit {commit}"))?;
     let temp = tempfile::Builder::new()
         .prefix(&format!("{name}.tmp-"))
         .tempdir_in(root)
-        .with_context(|| format!("Failed to create a temp directory in {}", root.display()))?;
+        .with_context(|| format!("Failed to create a temp directory in '{}'", root.display()))?;
 
     // Named as gix names its checkout, so the line reads "checking out".
     let mut files = progress.add_child("checkout");
     files.init(Some(entries.len()), Some(prodash::unit::label("files")));
     for entry in &entries {
         if should_interrupt.load(Ordering::Relaxed) {
-            bail!("interrupted");
+            bail!("Interrupted");
         }
-        let rel = entry.filepath.to_str().map_err(|_| anyhow!("non-UTF-8 path in the MDB"))?;
+        let rel = entry.filepath.to_str().map_err(|_| anyhow!("Non-UTF-8 path in the MDB"))?;
         let rel = Path::new(rel);
         if !rel.components().all(|c| matches!(c, Component::Normal(_))) {
-            bail!("unsafe path {} in the MDB", rel.display());
+            bail!("Unsafe path '{}' in the MDB", rel.display());
         }
         let path = temp.path().join(rel);
         let write = || -> Res<()> {
@@ -890,12 +732,12 @@ pub fn export_tree(
                     use std::os::unix::ffi::OsStrExt;
                     std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(&blob.data), &path)?;
                 }
-                EntryKind::Commit => bail!("the MDB may not contain submodules"),
+                EntryKind::Commit => bail!("The MDB may not contain submodules"),
                 EntryKind::Tree => unreachable!(),
             }
             Ok(())
         };
-        write().with_context(|| format!("Failed to write {}", path.display()))?;
+        write().with_context(|| format!("Failed to write '{}'", path.display()))?;
         files.inc();
     }
     // tempdir() creates its directory 0700.
@@ -905,7 +747,7 @@ pub fn export_tree(
     if let Err(e) = fs::rename(&staged, &dest) {
         let _ = fs::remove_dir_all(&staged);
         return Err(e)
-            .with_context(|| format!("Failed to move the MDB into place at {}", dest.display()));
+            .with_context(|| format!("Failed to move the MDB into place at '{}'", dest.display()));
     }
     Ok(dest)
 }
@@ -922,10 +764,10 @@ pub fn swap_link(root: &Path, generation: u32, name: &str) -> Res<bool> {
     let temp = tempfile::Builder::new()
         .prefix(&format!("gen-{generation}.tmp-"))
         .make_in(root, |path| std::os::unix::fs::symlink(name, path))
-        .with_context(|| format!("Failed to create a symlink in {}", root.display()))?;
+        .with_context(|| format!("Failed to create a symlink in '{}'", root.display()))?;
     temp.persist(&link)
         .map_err(|e| e.error)
-        .with_context(|| format!("Failed to move the link {} into place", link.display()))?;
+        .with_context(|| format!("Failed to move the link '{}' into place", link.display()))?;
     // A tree that is current again is no longer retired.
     let _ = fs::remove_file(root.join(format!("{name}.retired")));
     if let Some(old_name) = old.as_deref().and_then(Path::file_name) {
@@ -964,7 +806,7 @@ pub fn prune(root: &Path) -> Vec<String> {
             Err(e) => Err(e),
         };
         if let Err(e) = result {
-            warnings.push(format!("could not remove {}: {e}", path.display()));
+            warnings.push(format!("could not remove '{}': {e}", path.display()));
         }
     };
     for (name, path) in &entries {
@@ -1124,7 +966,7 @@ mod tests {
         let remote = history(&[1, 2]);
         let root = tempfile::tempdir().unwrap();
         let err = install(&remote, remote.commits[1], root.path(), 1).unwrap_err().to_string();
-        assert!(err.contains("publishing error"), "{err}");
+        assert!(err.contains("Publishing error"), "{err}");
         assert!(names(root.path()).is_empty(), "{:?}", names(root.path()));
     }
 
@@ -1143,7 +985,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("interrupted"), "{err}");
+        assert!(err.contains("Interrupted"), "{err}");
         assert!(names(root.path()).is_empty(), "{:?}", names(root.path()));
     }
 
@@ -1193,7 +1035,7 @@ mod tests {
         write_stamp(root.path(), 1, &stamp(3));
         let notice = generation_notice(root.path(), 1).unwrap();
         assert!(notice.contains("moved to generation 3"), "{notice}");
-        assert!(notice.contains("this cactup (generation 1)"), "{notice}");
+        assert!(notice.contains("stays on generation 1"), "{notice}");
         assert!(notice.contains("cactup update"), "{notice}");
     }
 
@@ -1422,7 +1264,7 @@ mod tests {
         let bare = tempfile::tempdir().unwrap();
         let err =
             format!("{:#}", sync_at(&bare.path().join("mdb"), &url, 1, Mode::Throttled).unwrap_err());
-        assert!(err.contains("no response for"), "{err}");
+        assert!(err.contains("No response for"), "{err}");
     }
 
     #[test]

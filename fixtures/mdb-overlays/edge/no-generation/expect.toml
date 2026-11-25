@@ -1,0 +1,5 @@
+# No [cactup] mdb-generation (a hand-made overlay): not migrated, not stamped;
+# loads as current with a warning. result-generation = 0 means none recorded.
+result-generation = 0
+outcome = "untouched"
+findings = ["no-recorded-generation-warning"]

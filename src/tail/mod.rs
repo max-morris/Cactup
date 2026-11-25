@@ -292,7 +292,7 @@ fn read_static_tail(path: &Path, max_lines: usize) -> Option<StaticTail> {
 fn install_sigint_flag() -> Res<Arc<AtomicBool>> {
     let stop = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&stop))
-        .context("installing Ctrl-C handler for --follow")?;
+        .context("Installing Ctrl-C handler for --follow")?;
     Ok(stop)
 }
 
@@ -364,7 +364,7 @@ pub(crate) fn tail_log(sources: &[(&str, PathBuf); 2], mode: FollowMode, subject
     if mode == FollowMode::None {
         if !shown {
             println!(
-                "No output files yet for {subject} (looked for {} and {})",
+                "No output yet for {subject} in '{}' or '{}'",
                 sources[0].1.display(),
                 sources[1].1.display()
             );

@@ -10,7 +10,10 @@
 # env-setup after the leading directive/comment block (design §6.1), so the
 # #SBATCH lines stay on top. (This was a .py script back when env-setup was
 # inserted right after the shebang.)
-#SBATCH -A @ALLOCATION@
+# Account optional: not known to be required here. The allocation knob, which
+# -a sets for one command; with none, the line is dropped (an empty one makes
+# the scheduler read the next directive as the account).
+#SBATCH -A @KNOB-OR-DROP-LINE(allocation)@
 #SBATCH -p @QUEUE@
 #SBATCH -t @WALLTIME@
 #SBATCH -N @NODES@ -n @TASKS@

@@ -1,0 +1,22 @@
+name = "et-tests"
+config = "sim"
+config-id = "cfg-0123"
+build-id = "build-0001"
+machine = "workstation"
+alias = "et"
+test-run-id = "test-et-tests-workstation-host-user-20260501-120000-4242"
+select = "all"
+queue = "workq"
+nodes = 1
+tasks = 4
+tpn = 4
+cpus = 1
+walltime = "02:00:00"
+job-id = "-1"
+
+[timestamps]
+created = "2026-05-01T12:00:00Z"
+
+[vars]
+
+[knobs]

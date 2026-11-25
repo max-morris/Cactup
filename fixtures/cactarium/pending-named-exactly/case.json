@@ -1,0 +1,14 @@
+{
+  "about": "A spec naming a release awaiting review exactly takes it",
+  "packages": [
+    "et--carpetx--pending"
+  ],
+  "specs": [
+    "et/carpetx@=2026.6.0"
+  ],
+  "expect": {
+    "pending": [
+      "et/carpetx@2026.6.0"
+    ]
+  }
+}

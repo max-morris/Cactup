@@ -144,21 +144,11 @@ and is concerned **exclusively** with global cactup state:
   one cluster's machine onto another unnoticed, because the stamp is what
   decides whether the name is trusted or re-verified.
 
-**Version guard & on-disk schema policy (backward compatibility
-required).** On-disk state is versioned by an integer **`schema`** (the DB and
-every cactup TOML carry one; §9.3), *separate* from the human `cactup-version`
-string. The binding rule is: **a newer cactup binary MUST be able to read any
-older `schema` it ever shipped** — reads are backward-compatible by contract, so
-a cactup upgrade never orphans existing installations, configs, or in-flight
-simulations/chains (this is what makes the compute-node `sim run --restart-id`
-safe across an upgrade). cactup refuses only when the on-disk `schema` is
-**newer** than the running binary understands (a genuinely forward-incompatible
-read), with guidance to upgrade. The `schema` integer is bumped **only** on a
-breaking on-disk change; during active prototyping it stays fixed, so iterating
-on the code needs no migration and no data churn. In-place *up-migration* of old
-schemas to the newest is still out of scope for v1 (the requirement is that new
-binaries *read* old schemas, not that they rewrite them); when a breaking bump
-finally happens, a migration story is designed then.
+**Version guard & on-disk schema policy.** On-disk state is versioned by an
+integer **`schema`**, separate from the human `cactup-version` string. A newer
+cactup reads every older `schema` it ever shipped and refuses a newer one with
+"upgrade cactup"; the full rules (upgrade chains, sticky versions on write,
+unknown keys put back, `frozen_read` records, fixtures) are §2.5.
 
 The database does **NOT** store config metadata or simulation state. Those live
 on disk next to the things they describe (D4, D6). Rationale: a simulation
@@ -399,6 +389,213 @@ string instead — trailing on the line, or just above the statement. Test
 assertion messages, `#[cfg(test)]` fixtures, and comments in `mdb/` source
 files are internal and may carry §-refs freely.
 
+### 2.5 On-disk formats and versioning
+
+This is the one place that states how cactup's files are versioned, read and
+written; §7.4, §9.3 and the CLAUDE.md rule point here. The mechanism is
+`src/format.rs`; the plan it came from is `design/format-versioning-plan.md`.
+
+**Principles.**
+
+1. **One version per format.** Every local record cactup writes and reads
+   back has a `static` `Format` descriptor in the module that owns the record
+   (the table below); `.sim`, `latest.json` and the caches have none. A local
+   record carries an integer **`schema`** as its first key; a missing key
+   reads as 1, and its struct holds no version field: `format::read` strips
+   the key before the typed parse and `format::write` puts it back, first.
+   The shared crate's interchange formats (`.sim`, `cactarium.toml`, the stack
+   release) carry **`format`** as a required field of their own struct,
+   checked by the crate's `generation::check` before the typed parse (a
+   missing `format` is an error). Both are separate from the human
+   `cactup-version` string.
+2. **Read: version first.** The raw document is parsed, its version read, and
+   a version newer than `Format::current` is refused with one message naming
+   the file (`'<path>' was written by a newer cactup (<name> schema N; this
+   cactup, <VERSION>, reads up to M); upgrade cactup`) before any typed parse.
+   The verdict is final, including in the database's lock-free read; only a
+   raw document that does not parse, or a stale NFS file handle, is retried
+   (a torn or half-visible read). The
+   closed `legacy` normalization (below) runs on every read, then an older
+   file runs the upgrade chain `vN → vN+1` over the raw document, and the
+   result is parsed. **Upgrades are
+   kept forever. A read never rewrites the file** (rewriting on read races a
+   concurrent writer): an old file reaches the current version the next time
+   it is saved.
+3. **Write: atomic, never over a newer file, sticky, keeping what it does
+   not know.** Every write is a temp file in the same directory, fsync, and
+   rename, so a reader sees the old file or the new one. `write` re-reads
+   the target first: a newer version is refused, so a newer cactup's file is
+   never overwritten; one that does not parse is overwritten with nothing put
+   back. A writer serialized by a lock may instead read once with
+   `read_for_write` and write with `write_over` (`Db::update`,
+   `BuildAttempt::store_meta_keeping_job`): the refusal and the put-back come
+   from that one read, and a file that does not parse fails the read instead
+   of being overwritten. Use the pair only under the lock. The version written is the **oldest version, no older than the file
+   on disk, that the format's down-chain reaches** while the content fits it
+   (a down-step answers `CannotExpress` when the document uses something the
+   older version cannot hold); a new file is written at the oldest version
+   that holds its content. A format with no down-steps writes `current`.
+4. **Unknown keys are put back, decided from disk.** Records are not
+   `deny_unknown_fields` (the config record's `[runs-on]` reuses the MDB's
+   strict `RunsOn` but is read through `tolerant_runs_on`, which drops unknown
+   keys, so the rule holds). At write time the helper takes the disk document
+   (after `legacy` and the upgrades), types and re-serializes it, and treats
+   every key that does not survive the round trip as one this binary does not
+   model. Those are copied into the new document only where the key is absent
+   there, recursing into **maps only** (never into array elements: a
+   reordered array would graft a key onto the wrong element), keeping the
+   file's key order. So an older binary's rewrite keeps a newer one's
+   additions (cactup releases from before November 2026 do not), and a key the writer cleared stays cleared. Two invariants
+   follow: `skip_serializing_if` may only skip the field's deserialize
+   default, and the version key never takes part in the comparison. A flattened
+   `extra` table and `serde_ignored` were rejected: flatten buffers through
+   serde's `Content` and keeps keys as they were when loaded (a compute-node
+   write two days later would restore stale values), and `serde_ignored`
+   reports nothing under `flatten`.
+5. **`write`, `replace`, `write_replacing`, `write_private`.** `write` edits
+   the record on disk (put-back as above). `replace` writes a record made
+   anew (a build finishing, `BuildAttempt::create`, a test re-run in the same
+   directory, the frozen config copy of `sim create`; the submit binary's
+   build-finish config write is one): the same refusal of a newer file and the same
+   sticky version, but **nothing is put back**, since a key a newer binary
+   added to the old record says nothing about the new one.
+   `Format::replace_whole` names sub-records a writer always rebuilds whole
+   (dotted paths, `*` for any one key, for example
+   `installations.*.unfetched-repos.*`); put-back never enters them, and
+   `write_replacing` adds more for one write. `write_private` is `write` for a
+   file that holds a secret (`~/.cactup/credentials`): the file is created
+   owner-only (0600) and never has a wider mode, not even between the write
+   and a later chmod.
+6. **Modes.** A new file gets the mode a plain write would give it (0666 less
+   the umask), not the temp file's owner-only 0600, because records in a
+   group-shared Cactus tree must stay readable by the group. An existing file
+   keeps its mode. Credentials are always 0600. (The umask is read from
+   `/proc`; the binary links no C library, D13.)
+7. **When a change needs a bump.**
+
+   | Change | Bump? | Mechanism |
+   |---|---|---|
+   | New optional key whose absence means the old behavior and that an older binary can safely ignore | No | Older readers ignore it; older writers put it back (4), except inside array elements (`installation.toml`'s `[[added]]`, `[[added.thorns]]`), where an older writer drops it: accept that loss or bump. |
+   | New key an older binary would get *wrong* by ignoring it | Yes | The down-step answers `CannotExpress` only when the key is used, so only files using the feature get the new version (the `.sim` `unpack` pattern). |
+   | Rename, retype, removal, new meaning, stricter validation, new required key | Yes | The `vN → vN+1` upgrade, a new fixture, and, for a `frozen_read` record, the `vN+1 → vN` down-step. |
+   | A change inside a cache | n/a | A fresh namespace (store `FORMAT`/`KEY_LABEL`, §18). |
+
+8. **`legacy` is a closed list.** `Format::legacy` runs on every read, before
+   the upgrades, on the raw document and holds same-version normalizations that shipped before
+   versioning existed: the database's bare `detected-machine` string, and
+   `build.toml`'s `variant` → `flavor` rename (which also brings the embedded
+   config record to the current schema, so put-back compares it in the shape
+   its writer writes). New changes bump; they do not join the list, and no entry is ever
+   removed (a queued build may carry any of them).
+9. **Embedded records.** The config record inside `build.toml` keeps its own
+   `schema` through `parse_embedded` / `upgrade_embedded`: the same chain, a
+   newer embedded record refusing the outer file on every path, read and
+   write. The embedded copy is always *written* at `CONFIG.current`
+   (`ConfigMeta::serialize_versioned`), and `BUILD`'s `legacy` lifts it to
+   current. So the next bump of `CONFIG` must first make the embedded copy
+   sticky; otherwise a newer binary's stop rewrites a queued build's record
+   into one its older binary refuses, losing the build's outcome.
+
+**Fixtures and the shape pin.** `fixtures/formats/<format>/` holds one file per
+shipped shape (`v1.toml`, a `-noschema` variant where a format once had no
+key, the `legacy` shapes) plus `current.{toml,json}`. A committed fixture is
+never edited or deleted, with the one exception of `current.*`; the early
+ones come from real files written by the code before the change, not by the
+new serializer. Generic tests in `format::testing` run on every descriptor:
+(1) every fixture loads, and writing it back and reading it again gives the
+same value at the expected version; (2) the **shape pin**: each format builds
+an `exhaustive_sample()` (a struct literal without `..`, so a new field fails
+to compile; every `Option` is `Some`, every collection non-empty), and its
+serialized form, compared as a parsed table, must equal `current.*`. When it
+fails, an additive change copies the old `current` to a numbered fixture and
+re-pins; anything else bumps. (3) A newer file is refused before the typed
+parse, naming the file, and is left unchanged. (4) Unknown top-level and
+nested keys survive a write, and a key the writer cleared stays cleared.
+(5) A `frozen_read` format has every down-step: `downgrades.len() == current -
+down_floor`. `tests/formats.rs` runs the compute path (`sim run --sim-dir`) on
+a hand-built sim directory to check the same against the real binary.
+
+**Who can be older than whom.** An older reader of a file comes from three
+sources: (a) a queued job's **frozen binary** (`@CACTUP@`, §17.2), which runs
+for months against files a newer login binary also rewrites; (b) **another
+login binary** sharing `~/.cactup` (autoupdate off, an explicit
+`bin/cactup-<old>`, a home shared between clusters); (c) **deployed clients**
+of a server or update site.
+
+| Format | Writers | Older readers | Newer → older | Older → newer |
+|---|---|---|---|---|
+| `database.json`, `installation.toml`, `simulations.toml`, `tests.toml`, `fetch-state.toml`, `credentials` | login binaries only (D11) | (b) | Same version: older binaries ignore new keys and put them back on write. A bump: older binaries refuse with "upgrade", which `cactup update` fixes, so avoid bumping. | Upgrade chain. |
+| `simulation.toml` | `sim create`, `set_knobs` (login) | (a) every queued restart's compute binary | Sticky version and put-back: a newer binary writes nothing that must be understood into an existing file. | Chain. |
+| `restart.toml` | the submitting binary S (submit, compute start/finish) and a newer login binary L (stop, clean, reaper, `job-stopped`) | (a) S | Sticky and put-back. | Chain. |
+| `build.toml` (with the embedded config record) | S (submit, compute), L (stop) | (a) S | Sticky and put-back; the embedded record is written at `CONFIG.current`, so it must be made sticky before `CONFIG` next bumps (principle 9). | Chain, plus `legacy`. |
+| `test.toml` | S, L | (a) S | Sticky and put-back. | Chain. |
+| `cactup-config.toml` | S at build finish; L on build, the up-to-date refresh and the thornlist retarget | (a) S at `execute` start | Sticky and put-back. The 1 → 2 bump predates down-steps and is grandfathered (`down_floor` 2): §7.4's accepted narrow window. | Chain `[1 → 2]`. |
+| `<sim>/.cactup/cfg/cactup-config.toml` | `sim create`, once, by `replace` | login readers (`sim export`) | Written once, at the oldest version that holds it. | The config chain. |
+| `.sim` | `cactup export` | (c) every cactup import, the server | Written at the oldest generation that holds the content (`SimFile::required_format`), so a file needing nothing new stays readable by older cactups. | Reads generations 1 to `SIM_FORMAT`; a newer one is refused with an upgrade message, and a file claiming a generation older than its content needs is refused as invalid. |
+| `cactarium.toml`, `cactarium-stack.toml`, `cactarium-sim.toml` | authors | the server | Read 1..=`MANIFEST_FORMAT` forever: tags are immutable. | n/a |
+| Stack release (API JSON, `FrozenStack`) | the server | (c) all clients | Gated by the `api-generation` header, and cactup checks the release's `format` against the shared crate's `STACK_FORMAT` before the typed parse, so a newer one says to upgrade rather than failing on an unknown key. The server should keep answering older-generation clients in their generation beside the new one until a deliberate cutoff (a rule for the Cactarium repository). | n/a |
+| `latest.json` | CI (`ci/assemble-site.sh`) | (c) every deployed binary and the installer | **Never versioned and never broken**: a refusal would leave old binaries unable to update themselves. It carries no version key; **the path is the version**. Keys may only be added (it is read leniently), and a change that cannot be additive is published at a new path beside the old one. | n/a |
+
+**The hard case.** A newer L rewriting `restart.toml` at a bumped version
+would make the older frozen S of a queued job refuse its own record. Three
+rules prevent it: (1) a rewrite never raises a file's version unless its
+content needs it; (2) a breaking bump of a `frozen_read` record ships its
+down-step (test 5 enforces it), so L writes an old file back at its old
+version; (3) L never writes something that must be understood into an
+**existing** `frozen_read` record (a new restart created by L is run by L, so
+it may carry the new version). If the rules are broken anyway, S fails
+cleanly: at load, before it runs anything, with the upgrade message; or, mid
+run, at its finish write, which refuses to overwrite the newer file (the
+outcome is not recorded, but the file is never corrupted).
+
+**Every format.** `frozen_read` marks records a queued job's frozen binary
+reads; `down_floor` is the oldest version the down-chain reaches (nothing is
+written older).
+
+| File | Descriptor | Key | Current | `frozen_read` |
+|---|---|---|---|---|
+| `~/.cactup/database.json` | `database::DATABASE` (JSON; `legacy`: bare `detected-machine`) | `schema` | 1 | no |
+| `<inst>/.cactup/installation.toml` | `installation::INSTALLATION` (chain `[1 → 2, 2 → 3, 3 → 4, 4 → 5]`, no-ops; down-step `[2 → 1]` unless some `[[added]]` has `libraries`, which an older writer would drop; down-step `[3 → 2]` unless the record has `linked-to` (a symbolic copy, §3.1), into which an older binary would write through its links; down-step `[4 → 3]` unless some `[[added]]` has `flesh` (a flesh package), which an older writer would drop, composing the base's flesh back beside the package; down-step `[5 → 4]` unless the record has a `claim-overrides` entry (`cactup claims override`), which an older binary would resolve without (`remove` could sweep a package that only an added dependency holds); once written as N a file stays N. Binaries released before the first bump read a schema-2 file's `root-dir` as `Cactus` on some paths, so with a custom `!DEFINE ROOT` they may report a missing tree instead of "upgrade") | `schema` | 5 | no |
+| `simulations.toml` | `installation::SIM_REGISTRY` | `schema` | 1 | no |
+| `tests.toml` | `installation::TEST_REGISTRY` | `schema` | 1 | no |
+| `<inst>/.cactup/fetch-state.toml` | `fetch::FETCH_STATE` | `schema` | 1 | no |
+| `~/.cactup/credentials` | `cactarium::CREDENTIALS` (written by `write_private`) | `schema` | 1 | no |
+| `<sim>/.cactup/simulation.toml` | `sim::SIMULATION` | `schema` | 1 | yes |
+| `output-NNNN/.cactup/restart.toml` | `sim::restart::RESTART` | `schema` | 1 | yes |
+| `<test>/.cactup/test.toml` | `testsuite::TEST` | `schema` | 1 | yes |
+| `.cactup-builds/NNNN/build.toml` | `build::attempt::BUILD` (`legacy`: `variant` → `flavor`) | `schema` | 1 | yes |
+| `configs/<c>/cactup-config.toml` (and the sim's frozen copy) | `build::CONFIG` (chain `[1 → 2]`, `down_floor` 2) | `schema` | 2 | yes |
+| `.sim` | shared crate, `SimFile` (`SIM_FORMAT`) | `format` | 4 | n/a |
+| `cactarium.toml`, `cactarium-stack.toml`, `cactarium-sim.toml` | shared crate (`MANIFEST_FORMAT`) | `format` | 2 | n/a |
+| Stack release JSON | shared crate (`STACK_FORMAT`) | `format` | 1 | n/a |
+| `latest.json` | none: the path is the version | n/a | n/a | n/a |
+
+`replace_whole` per descriptor: `DATABASE` (`detected`,
+`installations.*.unfetched-repos.*`); `SIMULATION` (`knobs`); `RESTART`
+(`vars`, `knobs`); `BUILD` (`vars`, `knobs`, `outcome`); `TEST` (`vars`,
+`knobs`, `results`); `CONFIG` (`sources`, `downloads`, `thorn-providers`,
+`thorn-shapes`, `thorn-stamps`); the rest none.
+
+**Deliberately unversioned.** *Caches*: the build cache's store (a
+`v<FORMAT>/` namespace, each entry's format and label checked on read: a bump
+is a fresh namespace, §18), compiler memos, `cc/events.jsonl` (kept per
+build; the reader counts lines it cannot parse, §18.6), the inputs store
+(content-addressed; its tree key carries its own label). *`cc/config.toml`*
+in a build attempt: it names the exact binary that reads it
+(`BuildConf.cactup`), a stronger stamp than an integer. *Lock stamps*: only
+ever append lines; the parser ignores extras. *`log.txt`* is simfactory's
+format; *CRL thornlists* are an external format. *`update-check` and
+`*.retired`* are markers whose mtime is the content. The MDB sync stamp
+(`.synced-<N>`) is best effort: a stamp that does not read is a missing one. The **MDB** is out of
+scope: its generation mechanism (D14, §17) is its only one.
+
+**The next change.** The shape is a read-side upgrade in one place, the
+record's own `schema` bumped, never a rewrite on read. `build::CONFIG`'s 1 → 2
+bump is the model for the upgrade only: it shipped no down-step and is
+grandfathered (`down_floor` 2), so a `frozen_read` bump must also ship its
+down-step, and `CONFIG`'s next bump needs the embedded copy made sticky first
+(principle 9).
+
 ---
 
 ## 3. CLI surface
@@ -432,7 +629,6 @@ path flag.
 
 ```
 cactup install [release] [--alias …] [--silent] [--install-prefix …] …   (existing)
-cactup uninstall <alias> [-f]                                             (new; see §3.1)
 cactup show                        (aggregate state view: active installation +
                                     active config + resolved machine; read-only,
                                     never prompts, never writes the DB)
@@ -446,6 +642,37 @@ cactup installation refetch [THORNLIST | --release TAG] [-f]
                                                    see §3.2)
 cactup installation delta [<alias>]               (how the source trees diverged
                                                    from the last fetch — §3.3)
+cactup installation delete <alias> [-f]           (delete an installation: the
+                                                   Cactus tree and cactup's files
+                                                   beside it; the directory only
+                                                   once empty, the default symlink
+                                                   if it points there; refuses
+                                                   while a build is in flight
+                                                   unless -f)
+cactup installation cp <alias> <new-name>         (copy an installation: the
+       [--install-prefix P] [-s|--symbolic]        Cactus tree without configs/
+                                                   and exe/, imports/, the
+                                                   pristine thornlist, and the
+                                                   installation record and fetch
+                                                   state; new sim-home/test-home
+                                                   for the new alias, no active
+                                                   config, no simulations or test
+                                                   runs; staged in
+                                                   P/.cactup-cp-<new>.partial and
+                                                   registered last; holds the
+                                                   fetch locks of the source and
+                                                   of what it links into; DB
+                                                   entry records `copied-from`.
+                                                   -s: a symbolic copy, below)
+cactup installation reify <alias> [PATH…]         (make a symbolic copy's files
+                                                   its own: every copy link under
+                                                   PATH, or all of them, becomes
+                                                   a copy, a repo's borrowed
+                                                   objects are copied in, a link
+                                                   to a file the source no longer
+                                                   has is removed; all of them:
+                                                   `linked-to` goes. Holds its own
+                                                   and the source's fetch locks)
 cactup inst …                      (short form of `installation`, a duplicate
                                     clap variant routed identically, so the docs
                                     generator renders both)
@@ -528,6 +755,42 @@ test scripts, as it picks every script (§11.2); `--variants` on `machine
 show`, now `--flavors`. They are kept indefinitely (`args::RETIRED_FLAGS`). This
 paragraph is the one place they are documented: user docs never mention them.
 
+**Symbolic copies (`installation cp -s`).** A symbolic copy makes the same
+real directories as a copy, and in them, for every file of the Cactus tree
+and of `imports/`, an absolute symlink to the same file in the source (a
+*copy link*). Real all the same: `.cactup/`, the pristine thornlist, the
+live thornlist (edited by hand, and an editor writes through a link), every
+repo's `.git` (git accepts no `HEAD` that links elsewhere, and writes refs,
+the index and reflogs in place), and any file named `.git*` (git reads
+`.gitignore`/`.gitattributes` only from a file). A repo's object store
+borrows the source's through `objects/info/alternates`, under a
+`# cactup: …` marker line that tells it from the user's own lines. The
+record names the source home (`installation.toml` `linked-to`, which made it
+version 3: an older binary must refuse the copy rather than write through
+its links).
+
+Copy-on-write: nothing may open a copy link for writing. A checkout (gix's,
+and git's) unlinks a link before writing the file, so a refetch gives every
+file it changes a copy of the installation's own and leaves the rest links;
+new objects land in the copy's store. cactup's whole-file writes (the
+thornlists, `import`'s parfile, a download's temp file) remove a link first
+(`cow::Cow::before_replace`); what writes in place (an svn/cvs/hg checkout)
+has its directory reified first (`cow::Cow::reify`). Status reads
+(`fetch::git::status_paths_until`, `local_edits`) count a link that resolves
+to a regular file with the index entry's content and executable bit as that
+file, unchanged (stat first, while the index is the copied one; else hashed),
+so refetch's dirty guard, `inst delta`, a build's source state and
+`sim export` see a symbolic copy as they see its source. Plain `git status` in
+the copy still reports each link as a type change.
+
+A symbolic copy follows its source: a file it has not made its own changes
+when the source's does. So `installation delete` refuses a source while any
+installation's `linked-to` names it (not even `-f`); refetch and add in a
+source say which symbolic copies see the change; refetch and add in a copy
+hold the source's fetch lock. A plain copy of a symbolic copy copies what its
+links point at and copies in its borrowed objects; a symbolic copy of one
+links to its paths (a chain). `installation reify` ends the dependence.
+
 ### 3.1 Command mapping from simfactory
 
 | simfactory command | cactup equivalent | Notes |
@@ -609,6 +872,51 @@ or by naming it in `--overwrite` — rewrites its `origin` fetch URL to the
 thornlist's URL, persisted to `.git/config` and always reported, before
 fetching and checking out from it; this is the fork-adoption path (point the
 thornlist at a fork of a component, then `refetch --overwrite <that repo>`).
+
+**Pinned repos: `!REPO_COMMIT`.** A git section may carry
+`!REPO_COMMIT = <full commit id>` (40 hex digits, or 64 for a SHA-256 repo;
+abbreviations are refused, and so is a pin on any other `!TYPE`). It is a
+cactup extension: GetComponents ignores directives it does not know, so an
+older tool fetches the branch unpinned rather than failing. A pinned repo is
+checked out **detached at exactly that commit** and is **never
+fast-forwarded**: a refetch of an unchanged pin finds the repo already there
+and leaves it alone without touching the network. `!REPO_BRANCH` keeps
+naming where the pin came from — a branch, or a tag such as a Cactarium
+track tag `mixed-precision/v1.4.0` — and is only a label plus the place to
+look for the commit. The commit is fetched by its id alone at depth 1 when the
+repo lacks it; a server that will not hand out an unadvertised commit
+(protocol v0/v1 without `allowAnySHA1InWant`) gets the fallback of fetching
+`!REPO_BRANCH` with full history and finding the commit there. Every
+component of one repo must agree on the pin, as on URL and branch. A fresh
+pinned repo is created empty with `origin` set to the URL (fetching every
+branch, as a clone would) and then pinned; a failure before its checkout
+began leaves nothing behind.
+
+**Checked downloads: `!CHECKSUM_SHA256`.** A download section (`http`,
+`https`, `ftp`) that checks out exactly one file may carry
+`!CHECKSUM_SHA256 = <64 hex digits>`; on any other type, on a section of
+several files (a hash names one), or with any other value it is refused. The
+same kind of extension as `!REPO_COMMIT`: GetComponents keeps the directives
+it does not know without reading them, and Cactus's ThornList readers drop
+every `!` line, so the list still works anywhere, only unchecked. cactup
+downloads to the usual temporary name and hashes it: a mismatch fails that
+component, is not retried, and leaves the old file in place; a file already
+there with the pinned content is kept without touching the network and,
+like a repo already at its pin, leaves no line.
+
+Classification of a pinned repo follows the rules above with one change:
+the branch it happens to be on is no reason to skip it — local edits and
+local commits still are. A clean **detached** HEAD is a pinned repo's normal
+state, and whether cactup may move it depends on who put it there:
+`fetch-state.toml` records, per repo, the commit each fetch left HEAD at and
+the pin it fetched to (`commit`). Detached at the pin, or where cactup's
+last fetch left it, the repo is cactup's to move — to a new pin, or back
+onto its branch when the list drops the pin. Detached anywhere else is the
+user's doing and is skipped (`detached HEAD at …`) unless forced; forcing a
+pinned repo pins it. `installation delta` compares a pinned repo by commit
+alone (its recorded branch is a label, not a branch HEAD should be on), and
+`refetch --prune` treats an orphan detached exactly at cactup's pin as
+clean.
 
 **The arrangement link pass.** After every fetch, each git component's
 `$TARGET/$CHECKOUT` is materialized as a **relative symlink** into
@@ -720,7 +1028,10 @@ diverge in two independent ways.**
 
 1. **Per repo**, from a git status walk of `<root-dir>/repos/<repo>`: a moved
    HEAD, a changed branch, modified tracked files, untracked files (which never
-   affect a build but do block `--prune`), a repo the fetch recorded that is no
+   affect a build but do block `--prune`; a path the thornlist itself checks
+   another component out into — a `!TARGET` that resolves, through the
+   arrangement links, to inside this repo, as pretty-bhns puts FUKA inside
+   KadathThorn — is that component's, not an untracked file here), a repo the fetch recorded that is no
    longer on disk, and a repo directory that **cannot be inspected as a git
    repo at all** — most often because someone replaced the checkout with a
    hand-built variant that has no `.git/`.
@@ -968,8 +1279,20 @@ TOML port of simfactory's `mdb/machines/<name>.ini` (`simfactory-docs.txt` §8).
   unset) is passed over for the next place with one line, never failing a
   build, a simulation or an install. A purge of the store's storage costs
   misses later, never a wrong object.
+- **`inputs-home`** (optional) is where `cactup import` keeps a `.sim`'s
+  downloaded and unpacked inputs (§8.9); omitted → `~/.cactup/inputs`. A
+  cluster puts it on a work or scratch filesystem the compute nodes see,
+  beside `simulation-home`: inputs are often large, and the simulation reads
+  them where they were unpacked. `@USER@` and `@ENV(NAME)@` work as in
+  `simulation-home`. Like `build-cache-home` it is left out of
+  `Meta::paths_for` and resolved only by its one user (`inputs::inputs_dir`),
+  so a value that cannot be resolved here fails an import, never a build or
+  a simulation. A fixup bakes an unpacked tree's absolute path into its
+  files, so a tree is good only where it was unpacked: moving `inputs-home`
+  means unpacking again there.
 - **Every `[paths]` key has a knob of the same name** (§5): `install-home`,
-  `simulation-home`, `test-home`, `scratch-home`, `build-cache-home`, an
+  `simulation-home`, `test-home`, `scratch-home`, `build-cache-home`,
+  `inputs-home`, an
   absolute path that wins over the machine's value for the user who sets it
   (`Meta::path_for`/`Meta::paths_for`; a machine value a knob overrides is
   not resolved at all). They are read where the machine's are, on the login
@@ -1528,7 +1851,10 @@ It describes a single-node workstation with **no batch system**:
   `ps @JOB_ID@`, `stop` = `pkill` the process group (§10: cactup stops only
   a job that leads its own group).
 - A single `local` queue (`gpu = false`, `default = true`) and a single
-  `default` script of each kind, plus a single `default` flavor.
+  `default` script of each kind — submit, run and build-submit — plus a
+  single `default` flavor. The build-submit script lets `cactup build submit`
+  background a build like any other job (§7.9); `[build].default-action =
+  "run"` keeps a bare `cactup build` in the foreground, as on any workstation.
 - It ships no matcher file — `generic` is never auto-matched; it is the
   explicit zero-match fallback (§4.3) and is always selectable via
   `--machine generic`.
@@ -1555,6 +1881,13 @@ neither joins the "would some queue resolve no value" trigger, since no SMT and
 no GPUs is the ordinary case, and §8.5 already falls back to one thread per CPU
 and one GPU per task. A kernel that reports no CPU topology at all (some VMs)
 falls back to one core per thread and claims nothing about SMT.
+
+A detected `max-cpus-per-node` is marked as such: it still sizes the
+fill-the-node default, but §8.5 derives no node count from it and refuses no
+layout on it, since on a cluster it is the login node's, not a compute node's.
+A user overlay's top-level value counts as detected for the same reason
+(§4.7, §8.5). `max-gpus-per-node` filled here is not marked, and on a GPU run
+it bounds a node's room; see §14.
 
 This is the same detection simfactory's `CREATE_MACHINE` did at setup time
 (`simfactory-docs.txt` §20), but done at runtime so the built-in `generic`
@@ -1590,8 +1923,16 @@ cactup machine delete <name>
   the user may re-create to refresh). If the source no longer exists, the warning
   says so instead.
 - `<name>` defaults to the local hostname's short form.
-- **Autodetects and writes concrete hardware** (`max-cpus-per-node`, `memory`
-  via §4.6) so the persisted machine is stable rather than re-detecting each run.
+- **Autodetects and writes concrete hardware** (`max-cpus-per-node`, `memory`,
+  `max-gpus-per-node` via §4.6) so the persisted machine is stable rather than
+  re-detecting each run — for a base whose jobs run on this host (`job-ids =
+  "pids"`: `generic`, a workstation), over whatever the base says, since this
+  host is the node. A batch machine keeps what its base declares, which
+  describes the base's nodes (the host running `machine create`, a login node,
+  need not be one of them), and gets only `memory`/`max-gpus-per-node` filled
+  where the base has none; a missing `max-cpus-per-node` is left to load-time
+  detection. Either way an overlay's top-level `max-cpus-per-node` counts as
+  detected, so no node count is derived from it (§8.5).
 - Sets `simulation-home`/`install-home` (prompted; defaults are the
   `~/.cactup/simulations` and `~/.cactup/cacti` fallbacks, §4.2) and prompts for
   `user`/`email`/`allocation` knobs unless `--silent` (which takes defaults — the
@@ -1916,19 +2257,22 @@ ordinal `0`–`4`, and is always rendered as the name (`cactup knob` shows
 `normal`, `database.json` holds `"2"`). `wisdom-kind` accepts and stores
 `relevant|all`.
 
-Additionally three **maintenance** knobs for distribution (D14, §17):
+Additionally four **maintenance** knobs for distribution and the registry (D14, §17, §8.10):
 `autoupdate` (`auto`, the default, `|notify|off`; read leniently — garbage
 means `auto`), `update-url` (https base of the site serving `latest.json` —
 plain `http://` only for a loopback host, `127.0.0.1`/`localhost`/`[::1]`,
 since what it serves is installed unasked; trailing `/` stripped; default
 `https://max-morris.github.io/Cactup`) and
 `mdb-url` (git URL whose `mdb` branch is synced; default
-`https://github.com/max-morris/Cactup.git`). Their `KnobSpec` has
+`https://github.com/max-morris/Cactup.git`) and `cactarium-url` (the
+registry's base URL, `http(s)://`, no query or fragment, trailing `/`
+stripped; default `https://cactarium.cct.lsu.edu`; `CACTARIUM_URL`
+outranks it, §8.10). Their `KnobSpec` has
 `snapshot = false`: they configure the cactup installation, not a job, so
 `knob_snapshot()` never freezes them into restart/build/test metadata.
 
 The path knobs, one per `[paths]` key (`install-home`, `simulation-home`,
-`test-home`, `scratch-home`, `build-cache-home`; §4.2), are maintenance knobs
+`test-home`, `scratch-home`, `build-cache-home`, `inputs-home`; §4.2), are maintenance knobs
 too: an absolute path each (validated; read leniently, so a value that is not
 one is no value), winning over the machine's value of that key for the user
 who sets it. Where a job needs one, it is frozen like the machine's would be.
@@ -1959,8 +2303,16 @@ cactup state).
 For any value that can come from several places (mirrors `simfactory-docs.txt`
 §6.2, adapted):
 
-1. Explicit CLI flag (e.g. `-q/--queue`, `-a/--allocation`) — highest.
-2. `-K name=value` overlay (this command only).
+1. Explicit CLI flag (e.g. `-q/--queue`) — highest.
+2. `-K name=value` overlay (this command only). `-a/--allocation ACCOUNT` is
+   shorthand for `-K allocation=ACCOUNT`, not a flag of its own: it joins the
+   overlay (`Args::knob_overlay`), so `@ALLOCATION@` and `@KNOB(allocation)@`
+   can never disagree. The two spellings are equally explicit, so one command
+   giving both with different values is refused before anything runs, naming
+   both; the same value both ways is fine. `cactup import`'s `--allocation`
+   (long only: its `-a` is `--alias`) joins the overlay the same way, for the
+   `sim submit`/`sim run` it starts. `resolve_topology` refuses an
+   `--allocation` that did not reach the overlay rather than drop it.
 3. Knob.
 4. Machine `meta.toml` value / default.
 5. Built-in default.
@@ -1985,6 +2337,20 @@ and **frozen** into the corresponding metadata — `restart.toml`, `build.toml`,
 `test.toml` `[knobs]` tables (§9.3) — so the compute node resolves
 `@KNOB(…)@` from disk and never opens the DB (D11).
 
+**A simulation's own knobs.** `simulation.toml` may carry a `[knobs]` table:
+values that belong to that simulation rather than to the user — what
+`cactup import` sets for the inputs a `.sim`'s parfile needs (§8.9), such as
+`kadath-initial-data`. A restart of the simulation freezes the global snapshot
+with these laid over it, and the `-K` overlay over both (a knob `-K` names
+keeps its `-K` value): `-K` (and `-a`) > the simulation's knobs > the global
+knobs. Which knobs the overlay set travels with the snapshot
+(`Database::is_overlaid`), not a process global. `@ALLOCATION@` is the
+allocation knob of this effective map (a simulation's own included), so it
+too follows command line > simulation > global. Import
+never changes a global knob. When a stored global value contradicts the
+simulation's, submit and run warn, naming the `-K` that would choose
+otherwise. `sim show` lists them.
+
 ### 5.2 No `defs.ini` / `defs.local.ini`
 
 simfactory's two-file config DB and its merge/layering engine
@@ -2005,7 +2371,7 @@ redistributed:
 ## 6. Templating / variable substitution
 
 Per D7, cactup implements **literal `@NAME@` replacement plus two computed
-token families**, `ENV` and `KNOB`, each in three forms:
+token families**, `ENV` and `KNOB`, each in four forms:
 
 | Token | Value |
 |---|---|
@@ -2015,11 +2381,13 @@ token families**, `ENV` and `KNOB`, each in three forms:
 | `@KNOB(name)@` | the knob `name` from the set's knob snapshot (§5.1); unset or empty is a hard error |
 | `@KNOB-OPTIONAL(name)@` | the knob, or the empty string |
 | `@KNOB-OPTIONAL(name, default)@` | the knob, or `default` |
+| `@ENV-OR-DROP-LINE(NAME)@` | `NAME`; unset or empty removes the whole line holding the token |
+| `@KNOB-OR-DROP-LINE(name)@` | the knob; unset or empty removes the whole line holding the token |
 
 `ENV` arguments are `UPPER_SNAKE`, `KNOB` arguments are kebab-case knob
 identifiers (§5); blanks around the argument and default are tolerated; the
-required forms reject a default (it would defeat them); the only suffix is
-`-OPTIONAL`. The **default** is `"double-quoted"`, `'single-quoted'` — quotes
+required and drop-line forms reject a default (it would defeat them); the
+suffixes are `-OPTIONAL` and `-OR-DROP-LINE`. The **default** is `"double-quoted"`, `'single-quoted'` — quotes
 dropped, `\"`/`\'`/`\\` escape the quote or backslash, any other backslash is
 literal — or a **bare** run of ASCII letters and digits; a bare default
 containing anything else (a space, `/`, `_`, `.`) is an error that names the
@@ -2029,7 +2397,39 @@ machine in question (login node for a submit script or optionlist, compute
 node for a run script or parfile). `KNOB` reads the snapshot attached to the
 variable set; a set without one (MDB `[paths]`, ad-hoc sets) rejects every
 `KNOB` token, optional or not, as "not available in this context" rather than
-reading as unset.
+reading as unset. The required `@KNOB(allocation)@` refusal names `-a` as well
+as `-K`, since `-a ACCOUNT` is shorthand for `-K allocation=ACCOUNT` (§8.5).
+
+**Drop-line forms** (MDB generation 5). An `-OR-DROP-LINE` token whose value is
+set and non-empty is replaced exactly as the required form would be; unset or
+empty, the whole source line holding it is removed, newline included — for a
+directive that must not go out with an empty value (`#SBATCH -A
+@KNOB-OR-DROP-LINE(allocation)@`: a bare `#SBATCH -A ` makes sbatch read the
+next directive as the account). Rules:
+- A line with several drop tokens goes if any of them is empty.
+- Every other token on a dropped line is still substituted, and still fails
+  (an unknown `@NAME@`, say); its output goes with the line.
+- A comment is opaque (§6.1), so a drop token in one does nothing.
+- They are allowed only in texts made of lines: `.sh` scripts, the rendered
+  optionlist, `.par` parfiles. They are an error in `Plain` text (a `[paths]`
+  value, a `wrapper-argv` word) and in a single command template (`[scheduler]`
+  commands, `[build].make`, a universe `wrapper`: `Syntax::ShellLine`, shell
+  comments but no lines), where dropping the line would leave no command.
+- They are an error, set or not, on a line that runs on into the next or on
+  the line that continues one, since dropping half of it breaks what is left.
+  What runs on depends on the syntax. In shell: a backslash-newline (outside
+  single quotes; in a heredoc body only when the delimiter is unquoted), a
+  line that ends inside a `'…'` or `"…"` string, a line ending in `|`, `&&`
+  or `||` outside a comment, and a line holding a heredoc opener (its body
+  follows). A heredoc body line is data and may go; a scheduler directive is
+  a comment to the shell, so a trailing backslash on one continues nothing.
+  In an optionlist: a backslash-newline outside a comment. In a parfile: a
+  `"…"` string spanning lines.
+  A mid-line value inside a quoted command (the qbc/db1 runscripts' `srun -A`)
+  is not a line to drop; those keep a shell `${alloc:+-A …}` instead.
+- `.py` scripts take no tokens: `knob(name, "")` and an `if` do the same.
+- `VarSet::check`, which is lenient about an unset `@ENV(…)@`, keeps such a
+  line rather than dropping it.
 
 `@ENV()@` is the mechanism for machine paths only the machine's environment
 knows (TACC/LRZ-style hashed storage roots in `[paths]`, §4.2); because of
@@ -2068,8 +2468,10 @@ environment can judge. `.py` parfiles are not checked.
    address, a `@NAME@` mentioned in prose) is not an error. What a comment
    *is* depends on what will read the substituted text, so every caller
    names the file kind (`template::Syntax`) — the engine does not guess:
-   - **Shell** (`.sh` submit/run/build-submit scripts, `[scheduler]` and
-     `[build].make` command lines, a universe `wrapper` string): a `#` that
+   - **Shell** (`.sh` submit/run/build-submit scripts; and, as
+     `ShellLine`, which differs only in refusing drop-line tokens, the
+     `[scheduler]` and `[build].make` command lines and a universe `wrapper`
+     string): a `#` that
      begins a word — at the start of the text or after whitespace, `;`,
      `&`, `|` or `(` — outside `'…'`/`"…"` quotes and heredoc bodies, to the
      end of the line. A **scheduler directive is not a comment**: a line
@@ -2269,7 +2671,8 @@ flags exactly** — this is the primary divergence from simfactory's names.
 **Topology (canonical — one variable per §8.5 flag):**
 `NODES` (`-n`), `TASKS` (`-T`, total MPI ranks), `TASKS_PER_NODE` (`-t`/tpn),
 `CPUS_PER_TASK` (`-c`/cpus), `GPU` (`-g`; `1`/`0`),
-`GPUS_PER_TASK` (`-G`/gpus-per-task; always `0` when `GPU` is `0`), `ALLOCATION` (`-a`),
+`GPUS_PER_TASK` (`-G`/gpus-per-task; always `0` when `GPU` is `0`), `ALLOCATION` (`-a`; an
+alias of the effective `allocation` knob, §5.1),
 `QUEUE` (`-q`; the scheduler-facing name — the selected queue's `name` override
 when set, else its `[queues.<q>]` key — §4.2), `MAIL` (`-m`), `MAIL_TYPE` (`-M`),
 `JOB_NAME` (`-J` — not `-j`; see below),
@@ -2506,25 +2909,17 @@ never the queue a build of it is submitted to (§7.9).
 **Schema 2, and the first read-side upgrade.** Schema 2 renamed `variant` to
 `flavor` and grouped the flat `gpu`/`compatible-queues` keys as `[runs-on]`
 (`queues`/`gpu`). A schema-1 record — or one predating the `schema` key — is
-upgraded **in memory on every read**, in one place (`ConfigMeta::from_table`),
-and that covers both copies on disk: `cactup-config.toml` and the record
-embedded in each build attempt's `build.toml` (whose own top-level `variant`
-key is renamed the same way when the attempt is opened). A read never rewrites
-the file — rewriting on read could race a concurrent build storing a newer
-record — so a file reaches schema 2 the next time it is stored. The upgrade is
-kept indefinitely: a build queued by an older cactup runs that older binary on
-the compute node (`@CACTUP@`, §17.2) and writes a schema-1 record when it
-finishes. An older binary cannot read a schema-2 record, and one path reaches
-that without anyone running mixed versions on purpose: a build queued by an
-older cactup reads the config's record when its compute-node `execute`
-starts, so if the newer cactup stored that record in the meantime, the queued
-build fails to parse it. The newer binary stores a record only when it builds
-the config — which `build` refuses while an attempt of it is queued or
-running, unless forced with `-f` — or in the one-time legacy thornlist
-retarget, so the window is narrow and accepted. This is the
-"migration story designed when a breaking bump happens" that §2.1 defers to,
-and the pattern for the next one: a read-side upgrade in one place, the
-record's own `schema` bumped, never a rewrite on read. The machine the
+upgraded in memory on every read, in one place (`build::CONFIG`'s chain), for
+every copy on disk (`cactup-config.toml`, the record embedded in each
+build attempt's `build.toml`, and the sim's frozen `cfg/cactup-config.toml`). The upgrade is kept indefinitely, since a build
+queued by an older cactup writes a schema-1 record when it finishes. This
+bump predates down-steps (`down_floor` 2), so an older binary cannot read a
+schema-2 record: a build queued by an older cactup that finds the config
+record stored by a newer one fails to parse it at `execute`. The newer binary
+stores a record only when it builds the config (which `build` refuses while an
+attempt of it is queued or running, unless forced with `-f`) or in the
+one-time legacy thornlist retarget, so the window is narrow and accepted. The
+general rules are §2.5. The machine the
 config was built on is recorded too (`machine = "<name>"`; a build is not
 portable across machines) and **enforced**: `build` of an existing config,
 `sim create`/`submit`/`run` and `test run`/`submit` refuse a config whose
@@ -3080,7 +3475,12 @@ compute node's own cactup has already written the outcome into the very
 A machine with no `blocking-submit` key gets the ordinary `submit`, followed
 by polling the attempt until it reports an outcome — reusing the exact loop
 `--follow` already builds on `tail::LogTail` and `tail::PollBackoff` for, just
-in a silent mode that skips the output streaming. Ctrl-C detaches without
+without the output streaming. Neither route is silent (§2.4): from the moment
+it is known the build is queued, one progress line names the job, the state
+the scheduler last gave and the time waited (`--follow` draws it until the
+output starts), and the native route says before it submits that the command
+holds until the job ends, since `sbatch --wait` may report the job id only at
+the end. Ctrl-C detaches without
 touching the queued job, exactly as `--follow` does. Both routes derive the
 verdict identically, from the attempt's own recorded outcome and never a
 relayed exit code, so the only difference a user sees between them is that the
@@ -3386,7 +3786,16 @@ key (an installation from before root tracking landed) means the historical
 default, `Cactus`. `Installation::cactus_root()` resolves
 `<installation home>/<root-dir>` from this one recorded value, and every
 path that needs the source tree — build, sim, test, config, refetch,
-delta — goes through it rather than assuming a literal `Cactus`.
+delta — goes through it rather than assuming a literal `Cactus`. An
+`installation.toml` that cannot be read is an error there, never the
+default: the user gets the read error, not a missing tree under a guessed
+root. One a newer cactup wrote (§2.5) is refused up front, by every command
+that resolves the installation, with the upgrade message. Any other
+unreadable file (a typo in a hand edit) fails only the commands that need
+the tree or the record, where they read it: `sim stop`/`list`/`show`/`log`,
+`test list`/`show`/`log`/`stop` and the like never read `installation.toml`
+and keep working, and the thornlist-name migration (§3.2) is skipped until
+the file can be read.
 
 **Per-simulation directory & the registry.** A simulation's directory defaults to
 `<sim-home>/<config>/<SimName>` (grouping simulations by the config that produced
@@ -3470,7 +3879,12 @@ Port of `create()` (`simfactory-docs.txt` §14.1):
    (`cactup-thornlist.th` processed + `cactup-thornlist.src.th` source, §7.5).
    The processed thornlist is what records *which thorns the frozen binary
    contains*, so a simulation stays self-describing after its config is
-   rebuilt or deleted. `simulation.toml`'s `optionlist`/`thornlist` keys name
+   rebuilt or deleted. The config record itself (`cactup-config.toml`, §7.4)
+   is frozen alongside, serialized from the record whose `build-id` the
+   simulation names: its `sources` map is the per-repo commit set the binary
+   was compiled from, with the build flags and flavor, all of which the
+   config's next build overwrites. It is what `sim export` reads; a
+   simulation created before it was frozen has none. `simulation.toml`'s `optionlist`/`thornlist` keys name
    the fed-to-Cactus copy of each pair; both are empty strings when the config
    was built by a cactup old enough not to have written the artifact.
 
@@ -3649,11 +4063,11 @@ proc-distribution math. Flags (those passed through to submit scripts marked *):
 
 | Flag | Meaning | Default |
 |------|---------|---------|
-| `-a/--allocation` * | account | knob |
+| `-a/--allocation` * | account; shorthand for `-K allocation=` (§5.1) | knob (a simulation's own, else the global one) |
 | `-q/--queue` * | scheduler queue | `queue` knob (passed over when the binary may not run there) → the flavor's `runs-on.default-queue` → machine default queue (§4.4). A build job: `build-queue` knob → `[build].queue` → machine default (§7.9) |
 | `-m/--mail` * | notify address | knob |
 | `-M/--mail-type` * | notify type | knob (`all`) |
-| `-n/--nodes` * | node count | 1 |
+| `-n/--nodes` * | node count | derived: `ceil(TASKS / TASKS_PER_NODE)` for a scheduled job; inside an allocation, its own node count where known; 1 on a single host (see below) |
 | `-T/--tasks` | total tasks (MPI ranks) | inferred: `nodes * tpn` |
 | `-t/--tpn` * | tasks per node | full node (see below) |
 | `-c/--cpus` * | CPUs (threads) per task | 1 |
@@ -3692,38 +4106,94 @@ facts fill any topology the user left unset.
   `default-cpus-per-task` (simfactory's `num-threads`), else 1. This is the
   request-side default — e.g. Deep Bayou sets it to 24 so a no-`--cpus` job
   fills its 48-CPU nodes as 2 tasks × 24 CPUs.
-- `TASKS_PER_NODE` = `--tpn` if given, else
-  `floor(MAX_CPUS_PER_NODE / CPUS_PER_TASK)`, min 1 (fill the node — divide the
-  node's available CPUs among ranks) — using the queue-effective
-  `max-cpus-per-node` (§4.2) — and then, on a GPU run whose queue declares
+- **A node's room.** `floor(MAX_CPUS_PER_NODE / CPUS_PER_TASK)`, min 1 (fill
+  the node — divide the node's available CPUs among ranks), using the
+  queue-effective `max-cpus-per-node` (§4.2); on a GPU run whose queue declares
   `max-gpus-per-node`, additionally bounded by the node's GPU budget:
-  `min(that, max(1, floor(MAX_GPUS_PER_NODE / GPUS_PER_TASK)))`. The bound
-  applies **only to the fully derived value**: an explicit `--tpn` is
-  authoritative, and an explicit `--tasks` is a requested rank count — on a
-  single-node machine with no batch system every one of those ranks lands on
-  the node, so quietly shrinking `TASKS_PER_NODE` under it would bless a layout
-  the node cannot run. Both leave the CPU-rule value in place and are checked
-  against the ceiling below instead. With GPUs indivisible and one per rank, a
-  node holding fewer devices than the CPU split implies cannot run that many
-  ranks — deriving them anyway only produces a layout the ceiling refuses.
-  Bounding it here is what lets a GPU machine declare a *polite*
-  `default-cpus-per-task` (omnia: a rank wanting 8 of its 72 cores for the host
-  side of a single-MI210 job) without the CPU rule inferring 9 ranks for one
-  device. This costs the fill-the-node guarantee on such machines — CPUs may sit
-  idle, which is the machine's stated intent — and does not make GPUs *build* a
-  layout: the count comes from CPUs, GPUs only cap it.
-- `TASKS` = `--tasks` if given, else `NODES * TASKS_PER_NODE`. An explicit
-  `--tasks` replaces the fill-the-node total, so a *derived* `TASKS_PER_NODE` is
-  then capped to `ceil(TASKS / NODES)` to keep the layout self-consistent
-  (`--tasks=1` is 1 rank on 1 node, not `TASKS = 1, TASKS_PER_NODE = 2`); an
-  explicit `--tpn` is authoritative and never capped. This is a no-op in the
-  default case, where `TASKS == NODES * TASKS_PER_NODE` already.
+  `min(that, max(1, floor(MAX_GPUS_PER_NODE / GPUS_PER_TASK)))`. With GPUs
+  indivisible and one per rank, a node holding fewer devices than the CPU split
+  implies cannot run that many ranks — deriving them anyway only produces a
+  layout the ceiling refuses. Bounding the room is what lets a GPU machine
+  declare a *polite* `default-cpus-per-task` (omnia: a rank wanting 8 of its 72
+  cores for the host side of a single-MI210 job) without the CPU rule inferring
+  9 ranks for one device. This costs the fill-the-node guarantee on such
+  machines — CPUs may sit idle, which is the machine's stated intent — and does
+  not make GPUs *build* a layout: the count comes from CPUs, GPUs only cap it.
+- **Placement** decides what a missing `--nodes` means. A job handed to a batch
+  system (`sim submit`, `test submit`, `build submit` on a machine whose job ids
+  come from a scheduler) is *scheduled*: the scheduler allocates the nodes it
+  asks for. A foreground run (`sim run`, `test run`) inside one of the
+  machine's job allocations (`[scheduler].allocation-env` set) may span that
+  allocation's nodes. Anything else runs on a *single host*: a login node, or a
+  machine with `job-ids = "pids"`, whose "submit" backgrounds the script on the
+  submitting host.
+- `NODES` = `--nodes` if given. Else, for a scheduled job: `ceil(TASKS /
+  per-node)` when `--tasks` is given, where per-node is `--tpn` if given (which
+  needs no node size), else the node's room — `--tasks 256 --cpus 1` on qbd's
+  64-core nodes is 4 nodes, `--tasks 100` 2, `--tasks 64 --cpus 2` 2, and on
+  qbd's 2-GPU `gpu2` nodes `--tasks 100` is 50. Dividing ranks rather than CPUs
+  (`ceil(TASKS × CPUS_PER_TASK / MAX_CPUS_PER_NODE)`) matters when the CPUs do
+  not split evenly: a rank's threads cannot straddle two nodes, so 64 ranks of 3
+  CPUs need 4 such nodes, not 3. Inside an allocation whose environment gives
+  its node count (`SLURM_JOB_NUM_NODES`/`SLURM_NNODES` beside a Slurm
+  `allocation-env` variable; `PBS_NUM_NODES`, or for PBS Pro the distinct hosts
+  of `$PBS_NODEFILE`, beside a PBS one), `NODES` is that count — all of it with
+  no `--tasks`; with `--tasks`, never more nodes than the ranks need by the rule
+  above where the room is declared, since the queue's node size is not
+  necessarily the allocation's (a one-node `salloc` of a big node stays one
+  node). An explicit `--tpn` is the exception: the nodes follow from it, past
+  the allocation's size if need be, so `TASKS` never exceeds `NODES ×
+  TASKS_PER_NODE`. An allocation of unknown size derives like a scheduled job.
+  Otherwise 1.
+  Nodes are derived from the room only where `max-cpus-per-node` is
+  **declared**: by a queue, in either MDB layer, or at the top level of a
+  system-MDB machine. A value filled from the OS at load (§4.6) is the login
+  node's, and so, in practice, is the top-level value of a user overlay:
+  `machine create` long wrote this host's cores there for every clone (and still
+  does for a machine whose jobs run on this host), so an overlay made on a login
+  node holds a login node's count.
+  Both count as **detected**: they still size the fill-the-node default, but
+  with them `NODES` stays 1 (an allocation's own count and `--tpn` aside) and
+  nothing below is refused on their strength. An overlay that wants node counts
+  derived declares `max-cpus-per-node` per queue. Whenever a derived `NODES` is
+  above 1, cactup says so in one line before submitting or running, naming the
+  count and what decided it (`Asking for 50 nodes: at most 2 tasks per node (the
+  queue's 2 GPUs per node at 1 GPU per task) for 100 tasks; pass -n to choose`).
+- `TASKS_PER_NODE` = `--tpn` if given. Else, with no `--tasks`, the node's room
+  (fill the node). With `--tasks` and a derived `NODES`, the ranks spread
+  evenly over the nodes, `ceil(TASKS / NODES)`. With `--tasks` and a `NODES`
+  that was not derived — an explicit `--nodes` in any placement, or a single
+  host — the same, but capped at the CPU rule's room (not the GPU-bounded one).
+  That cap is deliberate: an explicit `--tasks` is then a requested rank count
+  for the nodes given, so quietly shrinking `TASKS_PER_NODE` under it would bless
+  a layout the nodes cannot run; it meets the GPU ceiling below, or for a
+  scheduled job the refusal below, instead. An explicit `--tpn` is
+  authoritative and never capped (`--tasks=1` with no `--tpn` is 1 rank on 1
+  node, not `TASKS = 1, TASKS_PER_NODE = 2`).
+- `TASKS` = `--tasks` if given, else `NODES * TASKS_PER_NODE`.
+- **A scheduled layout that cannot fit is refused** before anything is
+  submitted: when `TASKS > NODES × TASKS_PER_NODE` — an explicit `--nodes`
+  with more ranks than its nodes' CPUs have room for, or an explicit `--tpn`
+  that cannot hold them — cactup names the `--nodes` that would fit (or says to
+  leave it out) rather than hand the scheduler a job it refuses with
+  "Requested node configuration is not available". The count it names comes
+  from the GPU-bounded room, so it is one the GPU ceiling also accepts (qbd
+  `gpu2`, `-n 1 -T 128 -c 1`: `-n 64`, not the 2 the CPUs alone allow); and the
+  GPU ceiling, refusing an explicit `--nodes` whose ranks fit its CPUs but not
+  its GPUs, gives the same advice. A run inside an allocation or on a single
+  host is never refused on the CPU ground: what fits an allocation cactup does
+  not know, and oversubscribing one host's CPUs is a choice. A task asking for
+  more GPUs than a node has is refused first, as that: no node count helps it.
+  Counts of zero are refused by the parser; a zero from the MDB counts as 1.
 - **Script-route default tasks (§4.2).** When *no* process-layout flag
   (`-n`/`-T`/`-t`) was given, the routed script's optional `tasks = N`
-  setting replaces the fill-the-node `TASKS` (capping `TASKS_PER_NODE` to keep
-  the layout self-consistent); for a submit the submitscript entry is consulted
-  first, then the runscript entry. Testsuite runs additionally fall back to
-  `TASKS = 2` when no route sets it (§11.6).
+  setting replaces the fill-the-node `TASKS`, and is treated as a `--tasks`
+  would be: `NODES` follows from it where nodes are derived, and
+  `TASKS_PER_NODE` is capped to keep the layout self-consistent. For a submit
+  the submitscript entry is consulted first, then the runscript entry.
+  Testsuite runs additionally fall back to `TASKS = 2` when no route sets it
+  (§11.6); that fallback is no rank count to derive nodes from, so it stays on
+  one node (`TASKS_PER_NODE` capped to it), as it always has.
 - `GPU` = `1` if `--gpu` or the chosen queue's `gpu = true`, else `0` — checked
   **one-directionally** against the built binary's `runs-on.gpu` flag (§4.4 / D12):
   refused (absent `--force-queue`/`-f`) only when the binary's `gpu` flag is
@@ -3746,8 +4216,9 @@ facts fill any topology the user left unset.
   genuinely wants otherwise says so with `default-gpus-per-task`.
 
   Consequently GPUs never *build* a `TASKS_PER_NODE`: CPUs alone drive the
-  process layout, and GPUs only ever bound a derived rank count downward (see
-  the `TASKS_PER_NODE` bullet) or refuse an explicitly requested one (below).
+  process layout, and GPUs only ever bound a node's room downward (see the
+  node's-room bullet; on a scheduled job that spreads the ranks over more
+  nodes) or refuse an explicitly requested layout (below).
 - **GPUs are not oversubscribable.** `max-gpus-per-node` is therefore a
   **ceiling, never a target**: it does not set `GPUS_PER_TASK`, it bounds it.
   A layout needing more GPUs per node than the queue has — `GPUS_PER_TASK ×
@@ -4154,6 +4625,1195 @@ make (above), so there is no knob to expose. There is no user-facing chaining
 flag either; internally cactup still tracks `chained-job-id` in `restart.toml`
 (§9.3) to wire up scheduler dependencies — computed, not asked for.
 
+### 8.9 `sim export`: `.sim` files
+
+```
+cactup sim export <sim> [file] [-f] [-y] [--name N] [--summary S] [--description D]
+                  [--author A]… [--license SPDX] [--local]
+```
+
+Writes a simulation as a `.sim` file (default `<sim>.sim`): the Cactup
+ecosystem's portable record of a parfile plus the exact sources and build it
+ran on, the unit the Cactarium registry stores and `cactup import` consumes.
+The format belongs to the shared `cactup-ecosystem-common` crate
+(`sim::SimFile`): TOML, strict, generation-versioned (`format`), with the
+thornlist and the parfile carried **verbatim** and the pins in a per-repo
+table beside them.
+
+Everything comes from what the simulation froze at create (§8.2 step 6), never
+from the installation as it is now: the **source** thornlist snapshot (which
+must be a CRL list; its `!INCLUDE`s are spliced in by the parser's own
+splicer, `crl::splice_includes`, resolved against the directory of the list the
+config recorded — and `sim pack` against the given list's — so a `.sim`
+carries the whole list), and the config record,
+whose `sources` map gives each git repo's pin — the commit the binary was
+built from. A simulation created before the record was frozen falls back to
+the config's own record only while that still describes the same `build-id`.
+
+- **Pins.** One `[[repo]]` per repo the list names (keyed by the derived repo
+  name, not per section), `ref` = `!REPO_BRANCH` as a label. A download that
+  is the only file of its repo gets a `sha256`: the list's
+  `!CHECKSUM_SHA256`, else the hash the build froze. Every download's hash is
+  recorded in `fetch-state.toml` when it is fetched (`downloads`, by its path
+  under the installation), and `prepare` copies the hashes of the list's
+  single-file downloads into the config record (`downloads`, beside
+  `sources`), so a later refetch cannot change what a simulation of that
+  build records. A config built before hashes were recorded has none to
+  give: export leaves such a download unpinned, rather than hash a file the
+  binary may not have been built from, and refuses it unless `--local`
+  ("rebuild config X to pin it"): there is nothing Cactarium could review.
+  Any other component is listed unpinned.
+- **`--local`** is the one way past every refusal below (decision 3 of the
+  dependency plan, November 2026; `--allow-dirty` and `--allow-unpushed`
+  were removed with no shim). It needs no marker in the file: Cactarium
+  refuses exactly the files that needed it. Without it, every refusal of
+  every kind is collected into one error, a line each with its own fix,
+  ending "Pass --local to export for use here only."
+- **Dirty sources** (a state string with `+Nmod`, §7.4) are refused —
+  no commit reproduces that binary ("commit them and rebuild") — and with
+  `--local` marked `dirty`.
+- **Unpublished commits** are refused ("push it, then run `cactup inst
+  refetch`", which updates the remote-tracking refs): a pin passes
+  when cactup's fetch record shows it fetched that very commit, or when it is
+  the tip or in the history of a remote-tracking branch or tag in the
+  installation's repo — read locally, so a commit pushed since the last fetch,
+  or below a shallow boundary, reads as unpublished and errs toward asking.
+- **Repos nothing pins** are refused (Max's decision 5, artifacts fully
+  specified): a git repo with no commit (`export::unpinned_git`: "the
+  build recorded no commit; rebuild config X", or for `pack -I` "not
+  fetched by the installation; run `cactup inst refetch`", and for a repo
+  the installation's own list lacks, which a plain refetch would not
+  fetch, "fetch it with `cactup inst refetch <the packed list>`"), an svn, cvs,
+  hg or darcs component, a section downloading several files.
+- **Downloads on a private address** (and inputs' URLs) are refused:
+  `fetch::anonymous::private_download` resolves the host and refuses when
+  any address fails `probe::is_public_address`, as the git probe does; a
+  host that does not resolve here passes to Cactarium. Tests' loopback
+  servers are listed in `PUBLIC_IN_TESTS`.
+- **One line per refused repo, and nothing refused sent.** A repo whose URL
+  is refused (offline or by its probe) gets no "unpinned", "no hash" or
+  "cannot be pinned" line besides; a download refused offline (its form, a
+  private address) is left out of the lookup, as a refused git URL is.
+- **`ignore` components** (`!TYPE = ignore`: on this machine only) are
+  refused, as the crate's parser lists them (`crl::Thornlist::ignored`,
+  crate PR #11; they are never in `components()`).
+- **Registered packages and reviewed downloads** (`sim::registered`). One
+  `POST /lookup` (crate `api::LookupRequest`, chunked at
+  `MAX_LOOKUP_PINS` pins plus downloads, each request validated before it
+  is sent) asks about every git pin at a full commit and every download pin
+  (by URL and sha256), never about a URL refused offline (it may carry a
+  credential); a git remote probed is asked about as the URL it will be
+  published as. It runs at the same time as the probes, under one renderer,
+  with a line of its own, through the watcher (Ctrl-C fails at once). A git
+  pin whose `package` is null is refused ("push it and register it with
+  `cactup package init <repo> --publish`, or fork a registered package"),
+  unless its probe already refused its URL. A download passes only when its
+  `review` is `approved`; null (never submitted) names
+  `cactup download submit <url>`, `pending` says it awaits verification and
+  review, `rejected` says so; and `verification` refines a pending one
+  (crate PR #11): `failed` says "Cactarium could not verify <url>:
+  <reason>" with "resubmit it with `cactup download submit <url>`" (a
+  resubmission retries the fetch), `fetching` says it is being verified,
+  `ok`/`vouched` that it awaits review. No `verification` (an older server)
+  keeps the wording above. An `[[input]]` with a `url` and `sha256` goes
+  through the same review: its sha256 is known only once `finish` has
+  downloaded it, after the questions, so inputs are asked about in a second
+  lookup there. A lookup that fails is one line among the refusals
+  (`registered::lookup_failed`: the first line of why, the client's own
+  "Cannot ask Cactarium …" not wrapped twice), so nothing else refused is
+  lost; Ctrl-C in flight is "Interrupted" alone. For `sim pack` without an
+  installation (whose `!REPO_COMMIT`s no local check can place), a pin of a
+  registered package whose `commit-known` is false is refused.
+  `commit-known = false` is not refused (the local published check decides).
+- **Pin labels.** Each git pin of a registered package gets
+  `RepoPin.cactarium` from the lookup: `owner/pkg@<version>` (a track's
+  `@track:X.Y.Z` too) when a version froze the commit, else a bare
+  `owner/pkg`; never a `#` stamp (the pin's `commit` names it), never on a
+  download, never with `--local` (nothing is asked). The labels are valid
+  at format 1, so `SimFile::required_format` (which looks only at the
+  `[sim]` stamp and the inputs) is unchanged: a labeled file still writes
+  the oldest format that holds it. Export still pins from what was built;
+  the lookup only labels and refuses.
+- **Shareable URLs** (`sim::shareable`; export and pack alike). A `.sim`
+  leaves the machine, so every repo URL in it must be one anybody can fetch
+  and nothing in it may carry credentials. The shared crate decides
+  (`url`, `probe`), the same code that Cactarium runs, so the two refuse
+  exactly the same URLs.
+  - *Every component's URL* is judged, once per URL string, not once per
+    repo name (two sections may share one). A quoted URL is refused for its
+    quotes (the parser keeps them, and gix will not fetch such a URL;
+    `url::unquote` only shows it cleanly).
+  - *Every git remote* goes through `probe::start`: refused by its form
+    (`url::shareability`: credentials or a query string, a local path,
+    `git://`, which can't be probed and has no encryption, an ssh URL with
+    no https equivalent, anything else), or probed with a candidate to
+    publish: an https or http remote itself, an ssh remote's https
+    equivalent. The probe (`fetch::anonymous`) is a bare GET of
+    `probe::probe_url` with reqwest, not gix (gix consults credential
+    helpers even with prompts off): no auth, cookies, netrc or referer, a
+    `git/cactup-<version>` user agent, no redirect followed. The host is
+    resolved once and every address must pass `probe::is_public_address`
+    (else `url::private_address_refusal`); the
+    connection is pinned to those addresses (`resolve_to_addrs`), so DNS
+    cannot swap one in between (an environment proxy connects on its own,
+    and then the pin cannot hold). A host that does not resolve here at all
+    is not refused for that: a proxy-only login node resolves nothing
+    itself. The check is skipped and the host pinned to no address
+    (`resolve_to_addrs(host, &[])`), so reqwest never resolves it
+    unchecked: a direct connection fails, said as "dns lookup failed", and
+    a proxied one is unaffected (reqwest resolves only the proxy).
+    Cactarium vets addresses server-side for what is published there, so
+    this side may be lenient. `probe::outcome` turns the response into an
+    `Outcome` (Answer, Redirect, Busy, Other), and
+    `probe::next_step` decides: publish the candidate, ask once more at a
+    redirect to the same repo (GitLab's `.git` form; the candidate is still
+    what is published), or refuse (`moved_refusal` for a move on the same
+    host, `busy_refusal` for a busy or failing host, 408, 429 or 5xx,
+    which says to try again later, else `unanswered_refusal`, in https or
+    ssh wording), cactup appending what the probe saw ("answered 401
+    Unauthorized") but to a busy refusal, which says its status. A probe
+    that got no HTTP response at all (a failed connection, a silence) is
+    `url::unreachable_refusal`, its detail built from the error's kind
+    ("connection refused", "dns lookup failed", "no answer within N s",
+    the probe's own wait), never reqwest's words, which quote the URL:
+    nothing was asked, so the repo is not blamed. A refusal names the repo
+    without quotes or `.git`, cut at its first `?` or `#` (the parser names
+    a repo after its URL's last segment, query and all; `shown_repo`, used
+    by every message that shows a repo name, `sim pack`'s tip failures
+    with `--local` included), and with its `!URL`'s line when another
+    section gives another URL the same name. One request per remote, all
+    at once (`ask_all_at`, up to `anonymous::PROBES_AT_ONCE` = 128: a
+    silent host holds its worker for the whole window, so a narrower
+    fan-out left the remotes behind a few unasked) within one 30 s window,
+    each connecting within what is left of it, a progress line each,
+    through the watcher (§2.4: Ctrl-C fails at once, "Interrupted"). A
+    remote published as another URL (an ssh one) is rewritten in the
+    thornlist's `!URL` lines (an import fetches what the thornlist names,
+    and the pins are built from it; a `$1`/`$2` template is rewritten as
+    one, unless its host is a variable, which the crate's https equivalent
+    would lowercase), said on one line ("published as … (was …)"); the
+    result is parsed back and must give the same components but for the
+    URLs rewritten, so one that no `!URL` line spells out (built from a
+    `!DEFINE`) is refused. Tests reach their local servers only through
+    `cfg(test)` routes and resolvers (`ROUTES`, `RESOLVES`, `WIRES`,
+    `SWAPS`, `fetch::git::ASK_ROUTES`), never a runtime knob or the real
+    network.
+  - *A non-git component's URL* (a download, svn) is not probed:
+    `url::download_shareability` judges it, so a query is fine unless a key
+    looks like a credential (`url::is_credential_key`), and ssh-based
+    schemes (`svn+ssh`), local paths and schemes other than https, http and
+    ftp are refused. A cvs root (no URL) is refused only for a password
+    (`:pserver:anonymous@…` is anonymous access): the main one, a CVSNT
+    option whose key holds `pass` (`;password=`), or a `;proxy=u:p@host`
+    userinfo. The crate percent-decodes a query key before it judges it
+    (`%74oken`), and a refusal hides a fragment, which the crate's `Redacted` shows. A
+    `!AUTH_URL` is held to
+    its type's rule where it is fetched (svn, cvs), and for git, which
+    never fetches it, only to carrying no credentials.
+  - *The whole thornlist text* that goes into the `.sim`, comments, unused
+    `!DEFINE`s and overridden lines included, is searched for credentials:
+    a `scheme://` URL that `download_shareability` finds carrying them (the
+    userinfo may hold quotes and backticks), an scp-like token that
+    `shareability` does, a cvs root with a password. One in what is
+    fetched is refused above. One where nothing fetches it is hidden, not
+    refused (Max's decision: export reads the frozen
+    `cfg/cactup-thornlist.src.th`, which nobody edits, so a refusal could
+    not be fixed): its secret becomes `***` in the `.sim`'s copy, one
+    yellow line quoting each line as it now reads (a number would be of
+    the spliced text, not the user's file). The hidden text is parsed
+    back and must give the same components, or the export fails.
+    `!ANON_USER`/`!ANON_PASS` hold bare anonymous logins, never a URL, and
+    are never refused.
+  - *An input's URL* (`--input-url`, or one typed at the prompt) is judged
+    as a download's.
+  - The whole check, probes, lookup and rewrite included, runs before any
+    question is asked. Offline first (URL forms, dirty, unpublished,
+    `ignore`, unhashed downloads), then the probes and the lookup at once.
+    `sim pack` without an installation, when a repo is unpinned, checks the
+    URLs (and the offline content refusals) first, alone, and then asks its
+    tips of the rewritten https URLs (never of an ssh URL, with the user's
+    keys): a URL refused fails with no tip asked. The lookup follows the
+    tips. With every repo pinned, no tip is asked, and it checks everything
+    at once like export. Messages show URLs redacted (`url::Redacted`, also behind
+    `fetch::git::redacted`; `scrub` hides a URL's userinfo, password and
+    query in a lower layer's words, as given, percent-decoded, and as
+    `reqwest::Url` re-encodes them). `--local` writes every URL as it is,
+    hides nothing and probes nothing.
+- **Inputs.** Every required `@KNOB(name)@` in a `.par` that is not a
+  standard knob (§5) becomes an `[[input]]`: something the simulation needs
+  from outside the source tree. `vars` lists the `@VAR@`s used. Both come
+  from the shared crate's parfile lexer (`par::references`), which lexes as
+  substitution does — comments (`par::comment_spans`) and `@@` skipped — and
+  which Cactarium's review uses too, so the registry flags exactly what
+  export declares. A `.py` parfile has neither. An input can be given where
+  its file is downloaded (`--input-url KNOB=URL`, else asked on a terminal):
+  the file is downloaded once into the inputs directory and its `sha256`
+  recorded. An archive is recorded `unpack = true`, unpacked in a scratch
+  directory there: `path` is the member the knob's value here ends with
+  (else `--input-path KNOB=MEMBER`, else asked), the knob's value minus that
+  path is the author's unpack directory, and each text member (up to
+  16 MiB) whose copy there differs only on lines naming that directory
+  gives whole-line fixups, the directory written `{dir}` (asked about on a
+  terminal); any other difference is reported and not recorded. A plain
+  file's download is compared with the author's copy and a difference
+  said. The absolute-path warning
+  looks only outside comments, likewise.
+- **Run hints** (`tasks`, `cpus-per-task`, `gpus-per-task`, `walltime`) come
+  from the latest restart; machine-shaped settings stay out.
+- **Provenance**: exporter version and time, machine, flavor or optionlist,
+  build universe, flags, and `machine-disabled` (thorns disabled in the list
+  Cactus was handed but not in the source list). The installation's claim
+  overrides (`cactup claims`) go into `extra["claims-overrides"]`, their
+  canonical keys joined by `; ` (export and `pack -I`): informational, since
+  an import never resolves dependencies.
+- **Descriptive fields** default to the simulation's name, the parfile's
+  leading comment block (its first line as the summary), the git `user.name`,
+  and the `default-license` knob; on a terminal each one a flag did not give
+  is asked for, prefilled (`-y` takes them all). Absolute paths in parfile
+  values are warned about, suggesting a knob input instead.
+
+A file with every repo pinned and nothing dirty or untracked is **fully
+specified**; only such a file can be published, and export says so when its
+output is not.
+
+`cactup sim pack <file.th> <file.par> [file]` makes a `.sim` for whoever has
+only a thornlist and a parfile, with the same descriptive fields and checks.
+With `-I <installation>`, each repo is pinned to what that installation has
+checked out (its live HEAD and source state, checked like an export's; a
+checkout of a different repo than the list names is left unpinned, with a
+note), and each single download by the hash its fetch record keeps, or,
+fetched before hashes were recorded, by hashing the installed file (pack
+pins the installation as it is now).
+Without, each is pinned to the commit its branch or tag names on the
+remote today (`git ls-remote`, no fetch), and the output says so; a remote
+that cannot be asked fails the whole pack, and a repo the list already pins
+keeps its pin. Either way a download the list gives a `!CHECKSUM_SHA256`
+keeps it, and without `-I` that is the only way one is pinned. A packed file has no run hints and no build provenance.
+
+**`--trim`** (export, and pack with `-I`) cuts the thornlist down to what the
+parfile needs: the thorns its `ActiveThorns` statements name (every statement,
+the key case-insensitive, names compared case-insensitively), closed under
+their `.ccl` facts as the shared crate's CCL scanner reads them from the
+installed tree (only **built** thorns take part: a checkout-only thorn —
+written on its `!CHECKOUT` line, the Einstein Toolkit's idiom for "fetch, do
+not build", since Cactus's ThornList reader skips `!` lines; the parser's
+`Component::fetch_only` — can neither be activated nor meet a requirement,
+and a trim leaves it exactly as it is) — every provider of a `REQUIRES`d capability (which one a build
+settles on is not ours to guess), `REQUIRES THORNS`, and the implementers of
+an `INHERITS`/`FRIEND` implementation or providers of a `REQUIRES FUNCTION`
+only when no kept thorn already offers it. The flesh and every component that
+is not an arrangement thorn stay, as does a thorn whose `interface.ccl` cannot
+be read (missing, not a regular file, or over the crate's size limit). Bytes
+that are no UTF-8 (a Latin-1 comment) do not make a file unreadable: they are
+replaced, as the crate reads them, so such a thorn's requirements are followed
+and, if nothing needs it, it is trimmed (before November 2026 it was kept). A trimmed thorn is not deleted: it moves out of its `!CHECKOUT` into
+a `#DISABLED Arrangement/Thorn` line, so it is neither fetched nor built but
+stays one edit from coming back. Every kept checkout keeps its place — inline
+on the `!CHECKOUT` line (checkout-only) or on a line of its own (built) — and
+the result is parsed back and must name exactly the kept checkouts, each still
+built or checkout-only as it was, and the pins follow the trimmed list. A thorn the
+parfile activates that the list lacks is an error; a `.py` parfile cannot be
+trimmed.
+
+`cactup install --simfile <file.sim>` makes an installation of exactly the
+sources a `.sim` records: its live and pristine thornlists (§3.2) are the
+file's thornlist pinned by `!REPO_COMMIT` to every commit it records and by
+`!CHECKSUM_SHA256` to every download hash, so the ordinary fetch checks each
+repo out at its pin, refuses a download that is not the recorded file, and a
+later refetch never moves either. The file's `root` must match the list's `!DEFINE ROOT`; the alias defaults
+to the file's name. It says which repos the file leaves unpinned (they follow
+their branch), which were dirty at export (their edits are not in the file),
+and which downloads it cannot check (a recorded hash for a repo the list
+downloads several files from names none of them), and it names the knob
+inputs the parfile needs. A Cactarium stack release is pinned the same way. The DB records the file as a third
+kind of install-time provenance, `simfile`, beside `release` and `thornlist`;
+`show`, `list` and `config show` name it.
+
+`cactup import <file.sim>` reproduces a `.sim` in one step: `install
+--simfile` under the file's name (or `--alias`), `cactup build` of a config of
+that name — in the foreground, or, on a machine that queues builds, submitted
+with the plain `submit` and followed (`build submit --follow`, §7.9), with
+`--flavor` and `-j`/`--make-jobs` passed to it: the job is named at once, a
+line shows its state and the time waited until the build's output starts,
+and the output then streams as a foreground build's does. Never through
+`blocking-submit`, which can hold back even the job id until the job ends,
+leaving an import silent for the whole queue wait. Ctrl-C detaches, leaving
+the job running, and the import fails "interrupted"; running the same
+command again once the build is over finishes it —
+then `sim create` from the file's parfile, and with
+`--submit`/`--run` the simulation started. `import` takes every flag of the
+groups `sim submit` and `sim run` start with — the TOPOLOGY flags (§8.5), the
+universe flags (§4.8) and the start flags `--force-queue`, `--ignore-machine`,
+`--checkpt-buffer` — by flattening those same groups, so the two cannot drift,
+and passes them through to the command it starts; the file's run hints fill
+in tasks, CPUs and GPUs per task and wall time where those flags give none.
+`-a` is `--alias` in `import`, as in `install`, so there the allocation is
+`--allocation` only. A `.sim` suggests no node count (nodes are machine
+shaped): `-n` passes one through, and without it the started command derives
+it from the tasks (§8.5). Without either flag it prints the submit command,
+with the same flags. The parfile's knob inputs are settled **first**, before anything
+long runs: `--input KNOB=VALUE`, else a download of the input's URL into
+`<inputs>/<sha256>/<file name>` (shared by every simulation needing
+the same bytes; checked against the recorded hash, and said so when there is
+none), else a prompt offering the user's global value. `<inputs>` is the
+`inputs-home` path (§4.2: the knob, else the machine's `[paths]` value, else
+`~/.cactup/inputs`).
+
+An **archive input** (`.sim` format 2: `unpack = true`, with `url` and the
+archive's `sha256` required, an optional `path` and `[[input.fixup]]`s; the
+shared crate validates all of it, so Cactarium and cactup agree) is
+unpacked into `<inputs>/unpacked/<key>/`, `<key>` a digest of the archive's
+hash and its fixups in order, so two files that edit the same archive
+differently never share a tree. The archive is downloaded beside it,
+verified before the first byte is unpacked, unpacked into a `.unpacking-*`
+directory, its fixups applied (each `replace`, literal, must occur at least
+once; `{dir}` in `with` is the tree's final absolute path), `path` checked to
+exist, and the whole renamed into place, the download then removed: an
+interrupted import leaves no tree a later one would trust, and a finished
+tree is reused at once. The knob gets `<tree>/<path>`, or the tree itself.
+Kinds go by the URL's extension: `.tar`, `.tar.gz`/`.tgz`, `.tar.xz`/`.txz`,
+`.zip` (deflate), every decoder pure Rust (D13). Unpacking refuses an entry
+with an absolute or `..` path or a backslash, a hard link to anything but a
+regular file already unpacked, a device or FIFO, and any write through a
+non-directory an earlier entry made; file modes keep only their permission
+bits. Symlinks are made **last**, after every file and directory, so nothing
+is ever written through one; each is then checked where it really resolves,
+through any link before it, to stay inside the tree (a dangling one through
+its deepest existing ancestor, with no `..` past it) — a lexical check alone
+is fooled by a chain of links (`x -> .`, `y -> x/x/../..`). A fixup's file,
+the `path` and a hard link's source are reached through no link at all, and
+a fixup writes a new file renamed over the old (so a read-only member can be
+edited, its mode kept). It stops past 1,000,000 entries or
+`max(4 GiB, 32 × the archive)` bytes, a 4 KiB link target, or an `.xz`
+stream asking for over 1 GiB of memory, and polls the interrupt flag per
+entry and per MiB. A finished tree carries a marker; one without it, or
+without its `path` (a scratch purge removes files, not directories), is
+unpacked again. A download the server says is over 1 GiB (HEAD,
+`Content-Length`) is asked about on a terminal, taken with `-y`, and refused
+otherwise; the GET then stops past what was announced, or past 1 GiB when
+the server would not say (unless `-y`). The archive's hash is computed with
+progress. `cactup cache inputs` lists the inputs directory, what an
+interrupted import left included (`--clear` empties it). The values become the
+simulation's own knobs (§5.1) — a global knob is never changed — and an input
+left to an existing global knob records nothing. An input with no value at all
+fails the import before the install. The chained steps are parsed from
+ordinary command lines, so each gets exactly the defaults the typed command
+would; all network I/O happens here, never on a compute node (D11).
+
+An installation that already has the file's code is used instead of a second
+copy of the same tree: no install, straight to the build. "Has the code"
+means every thorn the file's thornlist builds is in the installation's live
+thornlist, built, from the same repository (normalized URL), and every repo
+the file pins is checked out at that commit with no uncommitted changes;
+extra thorns do not matter, since the parfile activates none of them. With
+`-I` that installation must match, or the import stops naming each
+difference; without, cactup looks for one: first each installation's last
+fetch record (`fetch-state.toml`) must name every pinned commit, and only
+those are probed on disk, the active installation first. `--new-installation`
+skips the search.
+
+`cactup sim unpack <file.sim> [--dir D] [-f]` goes the other way, for whoever
+works with loose files: it writes the thornlist and the parfile under the
+names they carried, the thornlist with every pinned repo pinned by
+`!REPO_COMMIT` or `!CHECKSUM_SHA256` (`crl::pin_text` in the shared crate: a section from one repo gains the
+directive, replacing any it had; a section spanning repos through `$1`/`$2` in its `!URL` is split
+into one copy per repo; everything else stays byte for byte, and the result
+is parsed back to prove it names the same checkouts with exactly those pins).
+It names the repos left unpinned and the knob inputs the parfile needs.
+
+### 8.10 The Cactarium registry
+
+Cactarium (a registry of thorn packages, stacks and `.sim` files) is
+reached over its HTTP API, whose request and response shapes are the shared
+crate's `api` module — the structs the server itself serves — so the two
+sides cannot drift apart silently. `src/cactarium.rs` is only transport:
+
+- **Where:** `CACTARIUM_URL`, else the `cactarium-url` knob, else
+  `https://cactarium.cct.lsu.edu`.
+- **Generations:** every request says the API generation cactup speaks; an
+  answer from a newer generation is refused with "run `cactup update`".
+- **Errors:** an error body's `message` is printed as the server wrote it.
+- **Kinds:** every `/resolve` says the kind of entry the command wants
+  (`kind=package` from `add`, `stack` from install and refetch, `sim` from
+  import), so a registry that knows the parameter refuses another kind
+  saying so (`owner/name is a sim, not a package`) before reading the rest of
+  the reference. An older one ignores it, and the client still checks
+  `Resolved::kind`.
+- **Tokens:** `cactup login [--token T]` stores one per registry in
+  `~/.cactup/credentials`, written owner-only; `CACTARIUM_TOKEN` overrides.
+  Never a knob: knob values are frozen into every restart's metadata (§5.1),
+  and a token there would travel with every simulation.
+
+What uses it, all on the login node (D11):
+
+- `cactup install owner/stack[@range|version|head|master]` — a `/` tells a
+  stack from a manifest release. A range resolves once (`/resolve`) to an
+  exact release; its frozen thornlist is pinned (`crl::pin_text`) and installed
+  like `--simfile`, and the DB records the release as `stack` provenance.
+  `@head`/`@master` are installed unpinned, and said not to be reproducible.
+  A tip of a stack not trusted by Cactarium (`x-cactarium-untrusted:
+  true`, or no such header on a tip at all: the check fails closed; the
+  server may instead refuse such tips with a 403, whose message is printed
+  as is) is code nobody reviewed: cactup says so loudly and takes it only on
+  `yes` typed at the terminal (stdin and stderr both terminals; the prompt
+  reads on a thread of its own, so the first Ctrl-C stops it), or with the
+  global `--risky-allow-untrusted-artifacts`, which still prints the
+  warning; without a terminal and without the flag it refuses. Install and
+  `refetch --release` reach stack tips through
+  `cactarium::stack_release_text`, `add` reaches package tips through the
+  same `confirm_untrusted`. A release is frozen, so nothing is resolved;
+  after a stack install (after its symlink and `cactup use` lines), and
+  after a refetch to a stack that wrote its list with no fetch failure (its
+  last output), `claims::warn_problems` runs `claims check`'s check over the
+  result and prints each problem as a yellow warning ending in its way past
+  (`cactup add --upgrade <pkg>`, a `cactup claims override …`), plus what it
+  could not check. It is bounded: each request 15 s (`with_timeout`), the
+  whole check 20 s of wall clock (it runs on a thread; at the deadline or a
+  Ctrl-C a stop flag, `Client::stopped_by`, ends its requests at once, and
+  it says "did not answer in time" or "interrupted"), and base packages at
+  commits no version froze are not read (`PresentOptions::no_unreleased_reads`;
+  they go on the "Not checked" line). Neither problems nor a check that did
+  not run fail the command, each said in one line. A Ctrl-C that arrives
+  while it runs ends the check only: it records that it took the interrupt
+  (`claims::interrupt_taken_by_warnings`), and `main` then does not turn the
+  finished command's Ok into "Interrupted". The flag itself stays set, and
+  a Ctrl-C from before the check began is not taken.
+- `cactup import owner/name[/sim][@range|=X.Y.Z]` downloads the published sim
+  (versions are semver, like packages and stacks; the newest matching, or
+  the newest at all) to `~/.cactup/simfiles/<owner>/<name>/<X.Y.Z>.sim`,
+  checked against the registry's `x-sha256`, then imports it as a file. It is
+  downloaded whenever the registry answers, a cached copy of the version
+  notwithstanding: an admin's reread of a moved tag changes a version's file,
+  and a copy kept by version alone would be imported stale for good. A copy
+  that changed is said (yellow); the cached copy stands in only when the
+  registry or the download cannot be reached. An
+  entry holding several sims (`[sim.files]`, manifest format 2) names each:
+  `owner/name/sim` goes to `/resolve` as is, which answers with the newest
+  version in range that has the sim (and `newer-without-sim` when a newer one
+  in range dropped it: cactup warns and goes on); the download takes
+  `?sim=<sim>`; the copy is cached at
+  `simfiles/<owner>/<name>/<sim>/<X.Y.Z>.sim` (`import::simfile_cache_path`;
+  a sim name starts with a letter, so it never meets a version's file); and
+  the file's stamp (`owner/name/sim@X.Y.Z`, `.sim` format 4) must name that
+  sim, checked with the hash before anything is written to the cache. Only
+  one version written out in full (`@=X.Y.Z` or `@X.Y.Z`; `TrackedReq::is_exact`)
+  is exact; `@^X.Y.Z` and the like are ranges. Cache paths are made only of
+  parsed versions, in their canonical form. A bare `owner/name` of such an entry is refused by the server, listing
+  its sims, and that message is printed. A registry from before multi-sim
+  entries (it reads the third segment as a thorn: it refuses a sim name that
+  is no thorn name, or answers without `sim`) is refused, saying so. It
+  resolves even an exact version, which is how a yank is told; an exact
+  version already downloaded still imports when the registry cannot be
+  reached, its yank status unknown. A sim published by Cactarium from its
+  repository (`cactarium-sim.toml`) may have `repo-file` inputs (`.sim`
+  format 3): files of that repository, fetched at the version's commit (by
+  id, at depth 1) from the URL and commit `/resolve` gives for the file's
+  `cactarium` stamp, kept at `<inputs>/repo/<commit>/<path>` or unpacked like
+  a download (the tree keyed by `repo:<commit>:<path>` and the fixups).
+- **Yanked versions.** A range never chooses a yanked version, so one cactup
+  gets was asked for exactly: `add`, stack installs and refetches, and sim
+  imports warn with the reason and go on (yanked is "not by default", not
+  "gone"). `inst show` asks whether the installation's stack release (the
+  one a refetch last took it to, else the installed one, never after a
+  refetch elsewhere) or any added package version is yanked now, in
+  parallel, with progress and a 5 s limit per request, and only when there
+  is something to ask about; a registry it cannot reach gets one dim note.
+- `cactup sim publish <file.sim> <owner/name> [--version X.Y.Z]` uploads a
+  fully specified file (anything else is refused locally, naming what is
+  unspecified) as that version, else the next major version. Before the
+  upload it runs export's checks (§8.9, `sim::registered::check_publish`):
+  offline first, sharing export's code (`classify` on the file's thornlist,
+  each pin's URL by `probe::start` or the download rule,
+  `export::content_problems` and `unpinned_git`, private input downloads,
+  dirty pins, untracked thorns), and nothing is sent while any is refused;
+  then the token (`token_for`, so a user without one is not kept waiting);
+  then one lookup of every git pin, download pin and input download. Every
+  problem is a line of one error, with nothing uploaded. The registry
+  says whether it is public or pending review. A pending release (new releases of a public entry wait for an
+  admin unless the entry, its owner or the publisher is trusted) is not
+  served, listed or resolved until approved, and cactup says so.
+- `cactup download submit <url> [--note TEXT]` (`commands::download`)
+  submits a download for review (`POST /downloads`, bearer token, crate
+  `api::DownloadSubmission`): the URL is refused first if it carries
+  credentials or is no download URL (`url::download_shareability`), the
+  token is looked up before anything is downloaded, then the file is
+  streamed through a sha256 (`fetch::download::download_to` into a hashing
+  writer, nothing written to disk) on a thread of its own with a line of
+  progress in bytes, so Ctrl-C ends the wait at once even on a silent
+  server. The answer is printed in terse lines: "Submitted it to … for
+  review." or, for a 409 (`api::DownloadConflict`, no error), "Already
+  submitted."; then where the download stands, from one lookup of it
+  (`DownloadInfo::verification`, `reason`; `registered::download_status`):
+  being verified, verified and awaiting review, approved, rejected, or "could
+  not verify it: <reason>" with "Submitting it again retries the check." A
+  server that says nothing of its check (no `verification`) gets the old
+  lines: the review, and the 409's message when it says more than "already
+  submitted". A server without the route is an older Cactarium.
+- In a shared `.sim` (§8.9), a repo of another kind than git that nothing
+  pins (svn, cvs, hg, darcs; one section downloading several files) is
+  refused too, since artifacts must be fully specified (Max's decision 5).
+- `cactup stack publish <cactarium-stack.toml> <owner/name> --version V
+  [--thornlist F]` cuts a release from a stack definition (a recipe, or a flat
+  list with `--thornlist`); the registry resolves and freezes it, and refuses
+  a version that exists — releases never change.
+- **Unreviewed releases** (`--risky-allow-untrusted-artifacts`, second meaning,
+  §8.12). Under the flag every request of `add`, `remove`, `claims`, `import`,
+  `install` and `inst refetch` (all through `Client::for_command`, which
+  `Client::exchange` honors in the one place a request leaves) carries
+  `x-cactarium-include-unreviewed: true` and, unless the request has an
+  `Authorization` of its own, the stored token (`CACTARIUM_TOKEN`, else
+  `cactup login`'s), whether or not the user is an admin; the server decides
+  what the header gets (an admin's token: releases awaiting review, and entries
+  awaiting their first review; anyone else: releases awaiting review of public
+  entries when the site's untrusted-tips setting is `allow`). An answer that
+  serves anything unreviewed has `x-cactarium-unreviewed: true`, and cactup
+  warns once per release (`warn_unreviewed`; the flag is the confirmation). A
+  release with `review = pending` is printed in red by a plan. Without the
+  flag no request carries the header or the token, a client drops pending
+  releases from version lists and batch reads, treats a pending single read as
+  absent, and refuses a `/resolve` or stack answer that awaits review. Export,
+  publish, `download submit`, `login`, `refresh` and `inst show` never send the
+  header, so a shared `.sim` rests on reviewed releases. A sim awaiting review
+  downloads to `<v>.unreviewed.sim` (`import::simfile_cache_path`), which the
+  offline fallback never reads, and a failed download of one fails instead of
+  falling back to an older copy; `download_sim` fails when the download says
+  unreviewed where `/resolve` did not.
+- The dependency endpoints (`/lookup`, `/providers`, `POST /packages/read`,
+  `/whoami`, `POST /repos`) and what `add`, `remove`, `claims`, `package init`
+  and `stack init` do with them are §8.12.
+- `cactup refresh <owner/name>` has the registry check a package's (or a
+  repo-kept stack's) repository for new release tags now, instead of at its
+  next poll, and says how many versions it found and how many of the entry's
+  versions await review (`Refreshed::awaiting_review`; those are not served
+  yet).
+- `cactup inst refetch --release owner/stack` with no version, on an
+  installation of a release of that stack from a track, means the newest
+  release **on that track** (`owner/stack@track`), never a jump to the default
+  track; the track is read from the release a refetch last moved it to, else
+  the installed one.
+
+A 401 adds "run `cactup login`" to the server's message. Every artifact has a
+**contact** (where to go for help: an `https://` URL or `mailto:`, the repo
+when none is declared). `sim export`/`pack` take `--contact` (default: the
+`default-contact` knob); `add` records a package's resolved contact, `inst
+show` prints it beside each added package, and the base stack's (the
+`x-cactarium-contact` header of the release served, recorded in the DB as
+`stack-contact` at install and on every refetch, cleared when a refetch moves
+off a stack), and after a failed build whose
+error lines name an added thorn (its `…/Arrangement/Thorn/` source path or
+`…/build/Thorn/` directory, in the last 64 KiB of the attempt's output),
+cactup says which package the thorn came from and where to report it.
+
+### 8.11 `cactup add`: Cactarium packages on top of a base
+
+`cactup add owner/name[/Thorn][@version|@track:range]… [--replace] [-f]
+[--upgrade] [--upgrade-all] [--no-deps] [--ignore-claim C]… [-y] [--dry-run]`
+(the last five are §8.12) puts
+packages' thorns into the active installation at the commit the registry froze
+for each resolved version (a tag is only a label; a moved tag never moves an
+install). `owner/name/Thorn` adds one thorn, and several specs of one package
+(`owner/pkg/A owner/pkg/B`) add those thorns in one go; naming the package
+whole anywhere adds all of them, and two specs resolving to different versions
+of one package are refused. A later add of the same package updates it,
+adding named thorns to those already enabled. All the packages are fetched in
+one pass and recorded together.
+
+**At a commit.** `owner/name[/Thorn]#<sha>` names only a commit: a full id or
+an abbreviation of at least 7 lowercase hex digits, which the registry
+resolves against the repository's history (an ambiguous or unknown prefix is
+its error). `owner/name@<x>` is read as a version, range or track first, and
+as a commit only when it names none of those. When a published version was
+frozen at that commit, the registry answers with that version
+(`owner/name@X.Y.Z`) and the add is an ordinary one. Otherwise it answers
+with the package read at that commit, `owner/name#<full id>`: no tag, and the
+registry's trust verdict, which cactup applies as for a branch tip (an
+untrusted package is refused or asked about,
+`--risky-allow-untrusted-artifacts`). cactup records it at the full id,
+pinned by `!REPO_COMMIT` with no `!REPO_BRANCH`; `inst show` and `add` name
+it `owner/name at commit <first 12 digits>`, and the yank check skips it (no
+version to yank). An answer whose commit does not start with what was asked
+for is refused.
+
+**The model.** (§8.12.4 adds `added-for` and `claim-overrides` to this record.)
+`installation.toml` records each added package under
+`[[added]]` (package, exact version, tag, commit, URL, repo name, the
+checkouts with their directories in the repo, and the base repos it
+`replaces`). The pristine thornlist (§3.2) stays the **base** — what was
+installed, a stack release say — and the live thornlist is always
+`compose(base, added)`: the base byte for byte, then one cactup-managed block
+(opened by a `# Added by \`cactup add\`` line) of generated sections, each
+pinned by `!REPO_COMMIT` with one checkout per line (Cactus reads the list as
+its ThornList and skips `!` lines, §7.5). So:
+
+- refetch's hand-edit guard compares the live list against that composition,
+  not against the bare base, and an add never reads as a hand edit; `add`
+  itself refuses to overwrite real hand edits unless `-f`;
+- an explicit refetch source is a new base: the added packages are composed
+  onto it before it is planned, fetched and written live — which is how
+  `cactup inst refetch --release owner/stack@range` upgrades a stack
+  installation and keeps everything added to it;
+- only the added repo is fetched by `add`; nothing else in the installation
+  moves.
+
+`cactup remove owner/name… [-f] [--no-deps] [-y] [--dry-run]` undoes an add:
+the record goes, the live list is recomposed without it, and only the base
+repos it replaced are fetched again — back to the base's pins. The package's own
+repo stays on disk, unlisted, for `inst refetch --prune` to remove. Which other
+packages go with it, and when it is refused, is §8.12: dependents block it,
+and packages brought in only for the ones named are swept in the same command.
+
+**Flesh packages.** A package marked `flesh` by Cactarium takes the place
+of the base's flesh, keyed on the flesh (every base repo with a component
+that checks `Makefile`, `lib` or `src` into the root), whatever its name or
+URL. Its `[[added]]` entry records `flesh`, the base flesh's items at the
+root when the package was added (`Makefile`, `lib`, `src`, …), and
+`replaces` names the base's flesh repos. `compose` drops every component of
+those repos and writes one `$ROOT` section checking those items out of the
+package's clone (`repos/<its name>`, pinned at its commit), so the root's
+links into `repos/` move to that clone. A flesh package needs a clone name
+of its own: one named like the base's flesh clone is refused. A plan has at
+most one flesh: two named or brought in at once are refused, and a flesh
+coming in takes the place of a flesh package already added (its entry goes),
+unless a package staying needs the flesh it would displace (`--no-deps` gets
+past). `remove` points the links back into the base's flesh clone (fetched
+again if it was pruned); a base with no flesh gets the links removed. The
+command's last line says every config needs a rebuild, and so does the plan
+when it is shown. The flesh used by a build is where the root's `Makefile`
+links into `repos/`, and a build whose flesh now comes from a repo absent
+from its last build's record rebuilds from scratch (§7.4). A record with a
+flesh package is written as schema 4 (§2.5).
+
+**Libraries.** A package can build against a library package (`[package]
+library = true` in the registry: no thorns, e.g. et/fuka, which KadathThorn
+builds from source), declaring where its checkout goes relative to the
+package's own repo root (`into = "src/fuka"`; `ClaimInfo.into` in the API).
+`add` resolves every such dependency of the version it adds (its range or
+commit, as any spec; a commit no version names gets the same trust check),
+checks the target really is a library, and follows the library's own
+`into`-dependencies down the chain (a cycle is refused). Each is recorded
+under the package (`[[added.libraries]]`: package, version, tag, commit, URL,
+the clone it goes `inside`, and `into`; `installation.toml` is written as
+schema 2 once some package has libraries, since an older writer would drop
+them, and stays schema 2 thereafter (versions are sticky); one that never had
+libraries stays schema 1: §2.5) and composed as one whole-repo
+section, pinned, with `!CHECKOUT = .` on the `!` line (never a thorn):
+
+```
+!TARGET      = Cactus/repos/KadathThorn/src
+!TYPE        = git
+!URL         = https://bitbucket.org/fukaws/fuka
+!REPO_BRANCH = <tag>
+!REPO_COMMIT = <commit>
+!NAME        = fuka
+!CHECKOUT    = .
+```
+
+So the library is cloned as any repo, at `repos/<last part of into>`
+(fetched, pinned, recorded, refetched and pruned like every other), and
+`repos/KadathThorn/src/fuka` is one relative link to it: the arrangement the
+Einstein Toolkit's own list makes for FUKA (its `!TARGET` reaches into
+`repos/KadathThorn/src/fuka`), with nothing cloned inside another working
+tree. The fetch planner recognizes such a section (a `.` checkout whose
+target is inside `repos/<clone>`) as a placement and makes it in the link
+phase, after the worker pool has joined, a library inside another library
+after it. Placing checks, before its first write: `into` is a plain
+relative path (no `..`, no root, no `.git`, no part starting with `-`); the
+dependent is really checked out (a directory, not a link; its `origin` and
+pin), and so is the library's clone; no symlink or non-directory on the way;
+nothing the dependent tracks at the path or under it, and no proper prefix of
+it tracked as anything but a directory (a submodule's gitlink, a file), in
+its index (which must exist) or HEAD's tree; `.git` a plain directory (not a
+link, not a `gitdir:` file); nothing at the path but the link itself. The way
+is walked by descriptor (`openat` with `O_NOFOLLOW`), and the missing folders
+and the link are made relative to those descriptors (`mkdirat`,
+`symlinkat`), so the write lands where the checks looked. It then appends
+`/<into>` to the dependent's `.git/info/exclude` (`O_APPEND|O_NOFOLLOW`,
+never rewritten), so the link is not an untracked file there; if that fails,
+the link and the folders it made are taken back. It never overwrites, moves
+or deletes anything else. When a list stops placing a library (the package
+is removed, its `into` changes, or the base takes the library over), `add`,
+`remove` and `refetch` take that placement away after every refusal, just
+before fetching: the link, only if it is a symlink whose text is exactly the
+one placing writes, and the exclude's comment and path pair (handled as
+bytes, rewritten through a temporary in `.git/info` unique to the process
+(a dead process's is unlinked first, never followed) and one rename; every
+other line kept). A failure
+to rewrite the exclude after the link went is a note, never an error that
+hides the link's removal. Whatever else is at the path (the dependent's own tracked files, a
+folder on the way that became a link) is left, with a note; removing
+nothing is always safe. Until a command commits (writes the list that
+drops them; it commits as soon as the list is written, before pruning or
+the metadata), any way out (an error, a late `?`, an interrupt, a list not
+adopted) undoes it: the placements this run created (by its fetch report,
+never a link it found there) go, and what it dropped comes back; what cannot be put back is printed with how, moving
+aside whatever sits at the path first. Prune counts files at any path still excluded by such a pair as
+untracked, so an orphan holding the user's work there is kept, or backed up
+under -f. Independently, the link pass refuses any `!TARGET` that resolves
+physically outside the installation, its Cactus root, `repos/` and
+`arrangements/` (each of which may be a symlink out, to scratch space, when
+the user made it: a link whose chain passes through `repos/`, a hop's own
+directory included, is a repo's content and is not trusted), and it never makes a link at the Cactus root,
+its `arrangements/` or its `repos/` themselves (compared without case). A library whose
+repository the base already checks out stays where the base puts it (a
+stack's or sim's own list places its libraries). Refused when composing,
+names compared without case (a case-insensitive filesystem): two libraries
+at one path, or in one directory of a clone (two `.` checkouts at one
+`!TARGET` read as one path), and a library clone name another source uses.
+`add` also refuses a library clone name already on disk that is not a clone
+cactup fetched from that repository (by its fetch record), and the planner
+refuses two repos whose names differ only in case. `cactup add
+owner/library` on its own is refused with what a library is. A flesh package
+named directly is added like any other (above, §8.12).
+
+**Collisions.** A package whose repository the base already has (same derived
+name or same normalized URL), or that checks out a thorn the base already
+checks out, is refused unless `--replace`, which records the base repos it
+stands in for (a plan's `replace` step does the same for a dependency, §8.12). Composition then drops those repos' checkouts of the claimed
+thorns from the base by parsed component (the same rewrite `--trim` uses,
+without the `#DISABLED` lines), and the composed list must still parse, so two
+sources can never silently claim one checkout.
+
+### 8.12 Dependencies
+
+Packages declare **claims** about each other (a dependency, an
+incompatibility, a fork), and `cactup add` and `cactup remove` act on them.
+This section describes the system as built (decisions 1-10 of the dependency
+plan, November 2026); §8.11 is the base under it (`[[added]]`, `compose`,
+libraries, flesh), §8.9 the sharing checks, which use the same lookup, §8.10
+the registry transport, §2.5 the record formats. Code: `src/deps/` (the
+resolver, pure), `src/commands/{add,resolution,claims,package,stack}.rs`
+(the commands and the registry reads), `src/sim/registered.rs` (the lookup
+refusals of §8.9).
+
+**What Cactarium serves.** Per package, `GET /packages/{o}/{n}/versions`
+gives every approved version with its thorns (each with its CCL facts), its
+claims and whether it is the flesh. A claim is a `ClaimInfo`: `kind`
+(`dependency`, `incompatible-with`, `fork-of`), `target`, `range` or `sha`,
+`needs` (thorns of the target), `needed-by` (thorns of the package that need
+it; empty means the package as a whole), `alternatives` (an any-of) and
+`into` (a library, §8.11). `GET /versions/{commit|head|master}` serves a
+package read at a snapshot; a snapshot is no release, and the dependency check
+of publication never ran on it. `POST /lookup` maps pins (URL and commit) and
+downloads (URL and SHA-256) to packages and review states, `POST
+/packages/read` reads many packages at commits in one request (200 items),
+`GET /providers` lists the thorns that meet a CCL requirement, and `GET
+/whoami`, `POST /repos` and `POST /downloads` serve `package init` and
+`download submit`. A 404 or 405 from `/lookup`, `/providers` or the batch route
+means an older server only when the answer carries `api-generation`; an
+answer without it is not Cactarium's, and the error names the `cactarium-url`
+knob. Requests that resolve dependencies (`Client::patient`) wait up to 120 s
+for an answer's head; every client request gives way to Ctrl-C within 50 ms.
+
+**The unreviewed flag.** `--risky-allow-untrusted-artifacts` has a second
+meaning, described in §8.10 (the header, the token, and which commands follow
+the flag). Here it matters in one way: a release with `review = pending` may be
+chosen only under it.
+
+#### 8.12.1 The model
+
+The resolver (`deps::resolve`) knows the registry only through the `Facts`
+trait (version lists, snapshots at a commit or tip, providers of a
+requirement); the commands implement it in parallel, with progress, and print
+or confirm what comes back.
+
+- A **package** is `owner/name`, or `local:<name>` for a repo of the base
+  thornlist that no registered package is known to be: a pseudo-package, so
+  its thorns take part in clashes. The base is mapped to packages by one
+  `/lookup` of every repo's URL and commit.
+- A **release** is a package at a version, a branch tip or a commit, with its
+  thorns, claims, `flesh` and `pending` flags. A **present** package is a
+  release plus the thorns enabled and where it comes from: the base, an
+  `[[added]]` entry, or the plan. A base repo at a commit that no version froze is
+  a **stand-in**: its thorns are read from the clone, its claims from an exact
+  read at that commit (`versions/{commit}`), made before the search, in
+  batches. What cannot be read stays unknown, and only the decisions that need
+  it fail (§8.12.2).
+- A **need** is a dependency of a chosen release: target, range or commit,
+  thorns, the dependent that wants it. A single-target dependency is a need; an
+  any-of is a decision. A library dependency (`into`) is placement, never a
+  need (§8.11), and its version constraint still enters the search.
+- **Overrides** (§8.12.7) and `--ignore-claim`s are applied to every release as
+  it is loaded, before anything else sees its claims.
+
+#### 8.12.2 The resolver
+
+`resolve(specs, present, rules, options, facts)` returns a `Plan` or a typed
+`Refusal`. The search is deterministic backtracking with conflict-directed
+backjumping over an assignment of a release to each package decided and an
+alternative to each any-of decided; everything else (which packages are in
+play, needs, takers, enabled thorns, constraints) is derived from the
+assignment at each node, so nothing stale survives a change of mind. Every map
+is ordered, so the same inputs give the same plan whatever order the server
+listed them in.
+
+- **Order of decisions:** present packages something touched, then the
+  packages that the plan brings in (named first, each group by id), then any-of
+  dependencies (by dependent, then declaration order).
+- **Candidates.** A present package that may stay tries its present release
+  first; otherwise newest first, approved before awaiting review, never
+  `invalid` or `upstream-missing`, yanked only for an exact constraint (an
+  installed release is never pushed out for being yanked), and a candidate
+  older than the present release after all others. Such a candidate stays a
+  candidate, so any constraint that excludes the newer releases (a named `@^1`,
+  a dependency's range under `--upgrade`) gives a `downgrade` step. A named spec for an added
+  package targets the newest release that fits (a named base package stays put
+  unless `--upgrade`, `--upgrade-all` or `--replace`); an unnamed present package is
+  fixed unless `--upgrade` (only what the plan touches) or `--upgrade-all`
+  (every package starts as a need for its newest fitting release). A named
+  spec never moves a base package without `--upgrade`, `--upgrade-all` or
+  `--replace`. An upgrade, a replacement or a fork standing in carries the
+  present enabled thorns plus the new needs, never the needs alone.
+- **Taking a need.** A need is taken by its target when present or named; by a
+  package that an override says satisfies it (no version check); by a fork in play
+  whose `fork-of` stands in for it (`ForkOf::stands_in_for`: the declared range
+  or `#sha` against the upstream's published versions); else the target is
+  decided. A `#sha` need goes through the snapshot read; `At::Unknown` (a
+  stand-in) satisfies a range with a note.
+- **Transitive needs.** Enabling a thorn pushes the dependencies whose
+  `needed-by` contains it, and those with an empty `needed-by` when the package
+  first enters. `--no-deps` pushes nothing beyond the named specs (libraries
+  excepted), and the dependency claims of installed packages stop binding: the
+  plan notes each one left unmet ("--no-deps leaves it unmet"). Clashes,
+  incompatibilities, forks beside their upstream and the CCL check still
+  refuse.
+- **Any-of.** An alternative present at a release that fits, else one already
+  in play, else the first listed that conflicts with nothing ("conflicts with
+  nothing" being "the rest of the search succeeds"). The choice and its rule
+  are printed and recorded (`ChoiceRule`: already installed, already in the
+  plan, the first listed, the first listed that conflicts with nothing). No
+  "fewest packages" rule.
+- **Conflicts**, pruned as soon as the packages involved are settled: two
+  enabled thorns of one name (case-insensitive) from different packages,
+  pseudo-packages included; a fork and its upstream both present (always); a
+  chosen release's `incompatible-with` matching another (both directions); two
+  fleshes, or a flesh dependency unmet by the installed or planned flesh (or a
+  fork standing in); two packages placing one library at incompatible versions
+  or paths.
+- **CCL check on the delta.** Every hard requirement (`ccl::needs_of`) of every
+  newly enabled thorn must be met by the final set, with the registry's facts
+  for planned thorns and a local scan for present ones. This covers what
+  publication does not: `--no-deps`, ignores, snapshots, base and local thorns.
+  An unmet requirement always refuses, whatever the number of providers
+  (artifacts are fully specified: decision 5): the refusal names the thorn, the
+  requirement and the package that leaves it undeclared, and lists what `GET
+  /providers` returns as `cactup add` lines (or says no registered package
+  provides it). Cactup never plans an undeclared provider.
+- **Flesh.** A flesh dependency unmet is first a need like any other: the
+  newest fitting flesh release is planned as a `Replace` of the base's `$ROOT`
+  component. A flesh coming in never displaces a present flesh (added or the
+  base's) that a staying package needs (`FleshHasDependents`).
+- **Pending releases** (§8.10): an approved release is preferred; a pending
+  one is taken only when named exactly or when none approved fits, and the
+  plan lists each in red ("awaits review").
+- **Loading and reads.** Everything that could come into play is loaded before
+  the search: every version of every package reachable through any claim from
+  the named specs (and from every present package under `--upgrade` and
+  `--upgrade-all`), in waves on `par::parallel_map` under one headline, then the
+  snapshots those versions name, then the reads a stand-in needs (batches of
+  200, waiting out 429s, ending at a 5-minute batch deadline or 30 rounds; what
+  is left is read singly). A read during the search is a debug assertion. The
+  resolver collects the snapshots of untrusted packages (`#sha` or a tip) that
+  the plan chose or placed in `Plan::untrusted`; `add` asks about them (§8.10's
+  `confirm_untrusted`) after the plan is confirmed and the yank warnings print,
+  before the lock and the fetch.
+- **Unread stand-ins.** A branch fails for want of a stand-in's claims only
+  when deciding needs them: enabling a thorn of it that is not enabled, a
+  dependency naming no thorns that would enable more, or bringing in a package
+  that shares a thorn name with it, where being a fork would make it stand in.
+  Notes are worked out from the plan and the facts, never from the branches the
+  search explored (naming each release not considered and what it needed and Cactarium did not
+  read), and a plan with such a note is always shown and
+  confirmed. No plan, and a branch failed that way: `Refusal::Unreadable`.
+- **Bounds.** A step budget (1,000,000 divided by the present packages plus the named specs plus one, at
+  least 2,000 steps) binds before a 30 s wall-time net,
+  so the result never depends on the machine. Past either, the refusal is the
+  most specific one found, else "no consistent set" listing the live
+  constraints with their sources. The search reports every 64 steps, so a long
+  one shows progress. Ctrl-C is polled each step.
+- **Ways past are checked, never guessed.** A refusal suggests `--upgrade`,
+  `--replace` or `--no-deps` only when a search with it, on the facts already
+  read, finds a plan (at most three such searches). `--ignore-claim` ways are
+  not searched; naming an older version is never suggested. Every message ends
+  with its way past (or says which claim to ignore, or the `cactup claims
+  override` for good).
+
+#### 8.12.3 Showing and confirming a plan
+
+A plan is one line per step (`add`, `re-add`, `upgrade`, `downgrade`,
+`replace`, `keep`) with why: `named`, `needed by max/z4c@1.2.0 (Z4c), ^2026.5`,
+`--upgrade-all`, or an any-of choice with its rule (`max/z4c@1.2.0: any of et/carpet,
+et/cactuspugh (the first listed)`); then the pending releases,
+the flesh-rebuild line, and notes. It is shown and confirmed only when it goes
+beyond the packages named (or passed over releases that it could not check); on a
+terminal `Proceed? [Y/n]`, without one a refusal naming `--yes` and `--dry-run`.
+`--dry-run` shows the plan and changes nothing; `--yes` skips the question.
+The plan's steps turn into the `Wanted` entries of §8.11's machinery
+(`replaces` for `Replace`), so fetch, compose, links and rollback are as
+there, and a refetch, which never looks at claims, keeps what a plan added.
+
+#### 8.12.4 What `installation.toml` records
+
+Beside `[[added]]` (§8.11), `INSTALLATION` (§2.5) carries two top-level maps,
+so an older binary's rewrite puts them back (put-back never enters arrays):
+
+```toml
+[added-for."et/carpet"]         # one per [[added]] package
+requested = false               # named on a command line, or brought in
+by = ["max/z4c@1.2.0"]          # dependents that brought it in (informational)
+for-commit = "<the [[added]] commit that this entry was written for>"
+[[added-for."et/carpet".choices]]   # one per any-of it was chosen for
+dependent = "max/z4c"
+alternatives = ["et/carpet", "et/cactuspugh"]
+
+[claim-overrides."drop max/foo:incompatible-with:et/bar"]
+kind = "drop"                   # drop | add | needs | satisfies
+note = "why"                    # drop only, optional
+```
+
+- **`added-for`** is additive: it came while the format was at 2, with no
+  version of its own, so a record holding only it is written at schema 1. An entry is believed only
+  beside an `[[added]]` entry at its `for-commit`: one that is missing (every
+  installation written before this work), or whose `for-commit` differs (an
+  older binary re-added or upgraded the package), reads as `requested = true`,
+  so no orphan sweep ever removes a package that the user may have named. An entry
+  without an `[[added]]` entry (an older binary's `remove`) is dropped on the
+  next write, and never inherited by a later add. `by` is informational (dependents
+  and orphans are always computed from current claims). A choice is keyed by
+  the dependent and its alternatives' ids, so it stops matching when the
+  dependent's author edits the alternatives; `remove` then takes the first
+  present alternative as the holder, which is safe. `add` replaces only the
+  entries it writes for a new commit (`format::write_replacing_keys`), and
+  `remove` deletes the entries of the packages it removes; every
+  other write keeps keys a newer binary put inside an entry. Known gap: an
+  older binary that removes a brought-in package and re-adds it by name at the
+  same commit leaves an entry that still reads `requested = false`.
+- **`claim-overrides`** is keyed by the override's canonical text
+  (`Override::key`), which is all there is to it; `kind` repeats the key's first
+  word, for a reader. A record that does not read, or whose kind disagrees with
+  its key, fails every command that reads the overrides, naming the record (running
+  without an override would change what resolution does). It needs a schema of its own: an older binary
+  would resolve without overrides, and `remove` could sweep a package that only
+  an added dependency holds.
+- **Schemas.** 2 `[[added.libraries]]`, 3 `linked-to`, 4 `flesh`, 5
+  `claim-overrides`; the matrix and the down-step rules are §2.5's. The shape
+  pins are `fixtures/formats/installation/` (`v1`, `v1-noschema`, `v2`, `v2-1`,
+  `v3`, `v3-1`, `v4`, `v5`, `current`).
+- **`[[added]]` fields of this work.** `flesh`: the base flesh's items at the
+  root when the package was added (`Makefile`, `lib`, `src`, …; frozen at that
+  time, so a refetch to a base with more items does not pick them up);
+  empty means no flesh package. `replaces` names the base's flesh repos too.
+- **Base extensions.** An `[[added]]` entry that only gives a base clone more
+  thorns (it replaces nothing, and the base has that clone under the same name
+  from the same repository: `add::base_clone_of`) lives in that clone, at the
+  commit at which the base has it: `compose` writes its sections with the
+  base's URL, branch and pin, `add` only links its thorns, and a refetch that
+  moves the base moves them. In the resolver it merges into the base package;
+  in `remove` it is a node of its own, held only by dependencies that need one
+  of its thorns, so removing it takes those thorns away and leaves the base.
+
+#### 8.12.5 `cactup remove`
+
+`cactup remove owner/name… [-f] [--no-deps] [-y] [--dry-run]` plans with
+`deps::plan_remove` over the current claims of every present package (one
+`versions` wave and the base lookup, with progress; never the stored `by`),
+with overrides and any-of choices applied.
+
+- **Dependents.** Removal is refused while an added or base package that stays
+  depends on one named, naming each dependent and its claim. `--no-deps` gets
+  past it: it removes exactly what was named, with no dependents check and no
+  sweep, and needs no Cactarium. Without `--no-deps` and without Cactarium,
+  `remove` refuses and names `--no-deps`.
+- **Orphan sweep.** Packages that were brought in (`requested = false`), never
+  named, with no remaining dependent, join the plan as `remove` steps, each with
+  its reason ("brought in by max/z4c@1.2.0, no longer needed"), to a fixpoint,
+  cycles included. A package that nothing reached before (left by an earlier
+  `--no-deps`) counts as named and is never swept. The plan is shown and
+  confirmed as in §8.12.3.
+- **Returning bases.** A removed package (or orphan) that replaced base repos
+  brings them back, and a returning base package holds a claim only if its
+  release fits the range or sha and has the needed thorns enabled; what it
+  meets is no dependent after the removal, what it does not still refuses
+  ("(the base's, after the removal)"). The returning bases are read where the
+  base has them (the pin, or the tip of the branch that the restore will put the
+  clone on, asked of the remote in one listing; upstream moving between that
+  read and the restore is an accepted race). Only the bases of the targets and
+  of every added package that the user did not name are read (`deps::may_bring_back`):
+  a returning base can take a dependency over, leaving more to sweep, whose
+  bases come back in turn, so the sweep repeats until the set going settles. A
+  base that cannot be read is said on a "Not checked" line, and every orphan's
+  line then says "unless a returning base repo needs it".
+- **What cannot be read.** An added package whose release Cactarium cannot give
+  hides what it depends on: `remove` refuses beside one (`--no-deps` gets
+  past). Base packages with unknown dependencies are normal: one short line.
+- **Restoring clones.** A base clone that cactup detached for a replacement goes
+  back on a branch, never kept as a user's detached checkout
+  (`fetch::branch_to_follow`: the thornlist's `!REPO_BRANCH`, the recorded
+  branch if the last fetch was not pinned, the clone's default branch, the
+  remote's default asked of the remote, and only then the pinned label).
+  Flesh packages go as §8.11 says; the last line says every config needs a
+  rebuild.
+
+#### 8.12.6 `cactup add`
+
+`cactup add` gains `--upgrade`, `--upgrade-all`, `--no-deps`,
+`--ignore-claim OWNER/PKG[:KIND:TARGET]` (repeatable), `-y`/`--yes` and
+`--dry-run` beside §8.11's `--replace` and `-f`. In order: `/resolve` per spec
+and the version lists; the base lookup; where HEAD is in each clone cactup
+fetched (once, in parallel); batch reads of base packages at unfrozen commits
+and of added packages at a commit or tip; `deps::resolve`; the plan, shown and
+confirmed; then §8.11's execution. The command records `added-for` for every
+package of the plan (`requested` true for the named, false for a brought-in
+one, `by`, `choices`) in the same write as `[[added]]`, and re-checks the
+installation under its lock before writing (`Start::recheck`, which compares
+the overrides too), so a change made while a prompt waited refuses the add.
+`--no-deps` reads no base package's release. An older server without `/lookup`
+refuses, naming `--no-deps`. A flesh package is added like any other (§8.11);
+a named library is still refused.
+
+#### 8.12.7 `cactup claims`
+
+An override changes a claim for this installation and applies to every `add`,
+`remove`, `list` and `check` in it. Forms, with their canonical keys:
+
+| Command | Key |
+|---|---|
+| `claims override drop OWNER/PKG:KIND:TARGET [--note T]` | `drop OWNER/PKG:KIND:TARGET`; KIND is `dependency`, `incompatible-with` or `fork-of`; dropped from every version |
+| `claims override add OWNER/PKG --dependency TARGET[@RANGE] --needs A,B [--needed-by T,U]` | `add OWNER/PKG dependency TARGET[@RANGE] needs A,B[ needed-by T]` |
+| `claims override needs OWNER/PKG:dependency:TARGET THORN…` | `needs OWNER/PKG:dependency:TARGET A,B` |
+| `claims override satisfies X Y` | `satisfies X Y`; X (`OWNER/PKG` or `local:NAME`) takes every need for Y with no version check |
+
+Thorn lists are sorted case-insensitively and deduplicated, so one override has
+one key whatever order it was typed in. `claims override --remove KEY` takes the
+key as `claims list` prints it. **Validation** is read-only and asks Cactarium
+before anything is written: the package is served; `drop` and `needs` name a
+claim that some served version makes; `needs` and `add` name thorns that some
+version of the target (and, for `--needed-by`, of the package) has; `add`
+refuses a dependency that the package already declares (`needs` is the way);
+`satisfies X Y` needs Y served and X served or a `local:NAME` for a base repo no
+registered package stands for. Setting an override twice says so and keeps one.
+`claims list` prints the overrides and the any-of choices (with the package
+chosen), and fails after printing when an override does not read; `inst show` prints the overrides too. The overrides go into an
+exported `.sim` as `provenance.extra["claims-overrides"]`, informational (§8.9).
+
+`claims check` (`deps::check`, not `resolve`: the resolver looks only at what a
+command changes and stops at the first conflict) reads the installation as
+`add` does, with overrides applied, and prints one line per problem, each with
+its way past, in a fixed order: forks installed beside their upstream;
+incompatibilities (either direction); a thorn name enabled by two packages;
+unmet CCL requirements of enabled thorns (with providers from `GET
+/providers`); dependency claims of installed packages not met by what is
+installed (a release outside the range, needed thorns not enabled, an any-of
+with no alternative met; a fork standing in meets one); and `satisfies`
+overrides naming a `local:` repo that is not installed. What was left
+unchecked goes on "Not checked" lines: base packages at commits that Cactarium
+cannot read, added packages that Cactarium cannot give (their dependencies are
+unknown), and a base with no fetch record (no repo is mapped to a package).
+Problems and those lines go to stdout, then the command fails with "1 problem."
+or "N problems." (the one command that reports findings by exit status). With
+no problem it prints "No problems.", or "No problems in what was checked." when
+something was left unchecked.
+
+#### 8.12.8 Checks at stack install and refetch
+
+A stack release is frozen, so installing or refetching to one resolves
+nothing. After the command's own output, `claims::warn_problems` runs
+`claims check`'s check over the result, each problem a yellow warning ending in
+its way past (`cactup add --upgrade <pkg>`, a `cactup claims override …`), and
+never fails the command. It is bounded (15 s a request, 20 s in all, no reads at
+unreleased commits, which go on the "Not checked" line) and a Ctrl-C ends it
+alone (§8.10). The base mapping comes from the lookup, since the server leaves
+`RepoPin.cactarium` empty in a frozen stack.
+
+#### 8.12.9 `cactup package init` and `cactup stack init`
+
+Both render a file from a template and refuse to write unless
+`Manifest::from_repo_file` reads it back (stack init also parses its
+thornlist); they write through `format::write_atomic` (`write_atomic_all` for
+two files), check Ctrl-C right before, and never write a heuristic as a claim:
+everything that cactup cannot decide is a `# TODO:` comment, and every value written
+into a comment has its control characters replaced, so a newline from a server
+can never start a claim.
+
+**`package init [REPO] [--name N] [--owner O] [--exact] [-f] [--publish]`**
+writes `cactarium.toml` at the root of a repo of the active installation. The
+active config must be built: its `ThornList` says what is built and its
+`sources` give the commit at which each repo was built (a repo with no source is
+read at its clone's HEAD). `[package]` has the lowercased repo name, the owners
+(whoami; the token's user), and `root`/`arrangement` where the thorns are not
+at the default layout. A `[[dependency]]` is written for each `ccl::needs_of`
+requirement of a repo thorn that no repo thorn meets, when exactly one
+installed thorn meets it (built thorns first), in a package that the lookup maps at
+a frozen version; edges are grouped by package and version and by the set of
+repo thorns needing them, with `needed-by` always written. Ranges are
+`~X.Y.Z` (`track:~X.Y.Z` on a track), floored at the version built with;
+`--exact` writes `=X.Y.Z`. Every other case is a TODO: nothing meets it, an
+unregistered repo, a commit that no version froze, several thorns of one package,
+several packages (a commented `any-of` listing each released candidate), a
+requirement met only by another clone of the repo's own package.
+- **Forks.** Packages of the lookup that share a thorn name with the repo (flesh
+  packages, for a flesh repo) are candidates; every frozen commit of theirs is
+  asked of the repo's history in one walk (`fetch::git::is_ancestor`). The newest
+  contained version with every thorn present is `[[fork-of]] target =
+  "<pkg>@=<version>"` (exact: decision 8); missing thorns make a TODO. cactup's
+  clones are depth 1, so a shallow clone cannot show a fork: a TODO names the
+  candidates, and the command prints `git -C <clone> fetch --unshallow` and
+  `cactup package init <repo> -f` and never changes the clone.
+- **Smells (TODOs only):** repo thorns not in the built list (an
+  `exclude-thorns` comment); an `#include` that leaves its thorn's directory
+  (`..`, resolved lexically in the tree's layout) into another repo's installed
+  thorn; a thorn inheriting or befriending `driver` that includes a header in a
+  driver thorn's `provides_includes`; a flesh fork in use. The installation's
+  claim overrides follow as comments.
+- **`--publish`** writes nothing. Cactarium reads a package at its newest
+  release tag, so it compares the file on disk with the one at the newest
+  release tag that the remote has (`tag-pattern`, else `[track/]vX.Y.Z`; asked of the
+  remote, `fetch::git::ask_remote_tags`), and refuses a repo with no release
+  tag on the remote, a tag without the file, or a file that differs, printing
+  the git commands. A newer tag that is not pushed is said ("Tag … is not on
+  the remote."), and the newest pushed one is used. The URL (the live list's, else origin's) passes
+  the anonymous probe, so an ssh remote registers as its https form and a local
+  path or credential is refused. Then `POST /repos` with `dry-run` previews
+  (`only = [<name>]`, `owner`): `existing` is refreshed (as `cactup refresh`),
+  `new` is registered with the preview's `expect` (a preview without it
+  registers nothing), anything else is refused with the server's note. A server
+  from before refresh-by-name answers 400 and is said to be too old, with
+  `cactup refresh` as the way past.
+
+**`stack init [DIR] [--name N] [--owner O] [-f] [--publish --version V]`**
+writes `cactarium-stack.toml` (and `cactarium-stack.th` when a package needs
+one) for the installation. The release is the installation's current stack
+release; none, a tip or a `#commit` is refused naming `cactup inst refetch
+--release`. Dirty and unpushed repos are refused through export's checks (§8.9),
+and so is a thorn in an ignore section: the installation's own with export's way
+out, one of the release's named as the release's (Cactarium refuses a stack with
+one in its own thornlist or a base's; an empty `!CHECKOUT` is no thorn).
+The stack `extends` that release; `[[stack.pin]]` marks each release pin whose
+repo the installation has at another commit (replaced repos skipped); a package
+that takes the place of every checkout that the release has from the one repo
+that it replaces is a `[[stack.override]]` at its exact version (`<pkg>@=<v>`; at a tip
+or an unfrozen commit, `url`/`ref` plus a pin at the installed commit);
+every other added package is a section of `cactarium-stack.th`, composed onto
+the release's own text, pinned at the installed commit when it is a tip, an
+unfrozen commit, or has commits on its version. `enable`/`disable` are never
+written. The informational `[[dependency]]` entries are the dependency claims
+of installed packages whose target is installed (an any-of: an alternative),
+one per declaration with `# Declared by <pkg>@<v>.`, never resolved at install
+(decision 10; exact pins are always required). `--publish` reads the definition
+in DIR and calls `publish_stack` as `<owner>/<name>@V`.
+
+#### 8.12.10 Limits
+
+- An override redirects every checkout of a base repo; `compose` drops only the
+  checkouts that a package claims, so `stack init` overrides only when the package
+  takes all of them.
+- Nothing records that an installed package was pending, so commands run
+  without the flag cannot say so beyond what the server answers; old
+  `.unreviewed.sim` files are never cleaned up.
+- A restoring remote that does not answer leaves the clone on the pinned label,
+  said on its line.
+- `scan_sources` of the shared crate does not poll Ctrl-C, so a stop waits for
+  the thorns in flight.
+
 ---
 
 ## 9. ON-DISK LAYOUT — the binding compatibility contract
@@ -4238,8 +5898,8 @@ format. External tools do not read this metadata, so changing it is safe.
   exe                              hard link → CACHE/exe/<build-id> (the frozen
                                    binary for this sim's config; a plain copy only
                                    if CACHE is on a different filesystem — §8.1)
-  cfg/  par/                       master copies of the optionlist + thornlist, and
-                                   of the parfile (§8.2)
+  cfg/  par/                       master copies of the optionlist + thornlist and
+                                   the config record (§8.2), and of the parfile
 output-%04d/.cactup/               restart-level metadata              [cactup-owned]
   restart.toml                     (replaces restart properties.ini; absorbs the
                                     old timestamp/simulation mark files)
@@ -4262,21 +5922,11 @@ user mid-migrating from simfactory manages old sims with old simfactory and new
 sims with cactup; there is no interop. If that proves painful, a one-shot
 `cactup sim import` could be added later, but it is explicitly out of scope.)
 
-**Schema versioning (backward-compatible reads).** Every cactup TOML
-file (`simulation.toml`, `restart.toml`, `cactup-config.toml`,
-`installation.toml`, `simulations.toml`) — and the global `database.json` — carries
-a top-level integer **`schema`** as its first key. The policy matches §2.1: **a
-newer cactup binary MUST read any older `schema` it ever shipped** (reads are
-backward-compatible by contract), so upgrading cactup never orphans an existing
-installation, config, or in-flight simulation/chain — this is what lets the
-compute-node `sim run --restart-id` (§8.3.1) safely read metadata written by a
-possibly-older login-node binary across an upgrade. cactup refuses only a `schema`
-**newer** than it understands, with guidance to upgrade. The `schema` integer is
-bumped **only** on a breaking on-disk change; during active prototyping it stays
-fixed so iterating on the code needs no data migration. In-place *up-migration* of
-old files is still out of scope for v1 (the contract is that new binaries *read*
-old schemas, not that they rewrite them); a migration story is designed if and
-when a breaking bump happens.
+**Schema versioning.** Every cactup TOML file (`simulation.toml`,
+`restart.toml`, `cactup-config.toml`, `installation.toml`, `simulations.toml`)
+and the global `database.json` carries a top-level integer **`schema`** as its
+first key (every local record; the table in §2.5); the rules for reading,
+upgrading and writing it, and which formats a compute node reads, are §2.5.
 
 `simulation.toml` (sim level) carries `schema`, the keys simfactory wrote at
 create (`simfactory-docs.txt` §15) — `machine`, `simulation-id`, `sourcedir`,
@@ -4573,9 +6223,11 @@ and start time beside it), so no caller can skip the checks.
   gone (`sim list`, `sim delete` take it so, and `sim show` with them, its
   header and rows from one answer). The MDB sets the
   key where the real tool's message is known: Slurm's `squeue -j`
-  (`slurm_load_jobs error: Invalid job id specified`, on stderr with
-  nothing on stdout and exit 1, once the job has aged out of the
-  controller), Torque's `qstat` (`Unknown Job Id`; qb, smic, thornyflat)
+  (`slurm_load_jobs error: Invalid job id specified|^ *JOBID `: the
+  error, on stderr with nothing on stdout and exit 1, once the job has
+  aged out of the controller; before that, within MinJobAge of its end,
+  the header line alone and exit 0, since squeue leaves out a job in a
+  finished state), Torque's `qstat` (`Unknown Job Id`; qb, smic, thornyflat)
   and PBS Pro's (crux: `Unknown Job Id`, or `Job has finished` with job
   history on). Not set: golub (Slurm's `qstat` compatibility wrapper, whose
   message is not established), sciama (an `squeue -u | awk` filter, which
@@ -5206,10 +6858,9 @@ Each is marked **ASSUMPTION** inline above; collected here:
         symlink — the exact hook depends on the target Cactus flesh version
         (§11.6). None of these change the two hard requirements (separate command
         tree, separate configurable output root).
-12. Schema/version handling: newer binaries **must read older `schema`**
-    (backward-compatible reads), refusing only a `schema` newer than understood;
-    the `schema` integer is bumped only on a breaking change and in-place
-    up-migration is deferred (§2.1, §9.3).
+12. Schema/version handling: versioned formats read old, refuse newer, keep
+    unknown keys, and are upgraded in memory on read (never rewritten on read)
+    (§2.5).
 13. Universes (§4.8): generic command-wrapper (`wrapper-argv` prefix form default,
     `wrapper`/`@COMMAND@` template power-form), wired for all three seams —
     `cactup build`, `sim run`, and `sim submit` — via one `[universes.*]` registry
@@ -5221,6 +6872,10 @@ Each is marked **ASSUMPTION** inline above; collected here:
     or opted out via the optionlist `[cactup].coerce-run-universe = false`.
     Flag if you'd prefer a different representation or want the temp-script-file
     (`@COMMAND_FILE@`) power-form instead of the `@COMMAND@` template.
+14. `max-gpus-per-node` filled from the login host at load (§4.6) is trusted
+    like a declared one: it bounds a GPU run's room per node (§8.5), and so
+    the node counts derived from it. Unlike `max-cpus-per-node` it is not
+    marked detected, because marking it would change existing defaults.
 
 ---
 
@@ -5423,7 +7078,7 @@ later)"). Compute-node paths (D11) never open the MDB, so never sync.
 
 `mdb/GENERATION` (an integer, compiled into the binary as `MDB_GENERATION`)
 and `mdb/GENERATIONS.md` (one `## Generation N` entry per generation: what
-changed and how to migrate an overlay) version the published MDB. Unlike all
+changed, what the automatic overlay migration does, and the hand recipe) version the published MDB. Unlike all
 other on-disk state, the published MDB has deployed readers, so it carries a
 compatibility promise, and the generation is its only mechanism.
 
@@ -5460,17 +7115,68 @@ names: an overlay that keeps them fails to load), adds the provisioning keys
 rostam's `arm-conda` micromamba block and `x86-modules` Perl stub moved into
 `build-provision`), and adds `[scheduler]`'s `job-ids` and
 `unknown-job-pattern` (§10); `ENV_SETUP` now carries the provisioning steps
-too. Overlays set `[cactup] mdb-generation = 3`. `mdb/GENERATIONS.md` carries
-the step-by-step overlay recipe for each.
+too. Overlays set `[cactup] mdb-generation = 3`. *Generation 4* adds
+`[paths].inputs-home`, where `cactup import` keeps a shared simulation's
+inputs (§8.9). *Generation 5* adds the drop-line tokens
+`@KNOB-OR-DROP-LINE(name)@`/`@ENV-OR-DROP-LINE(NAME)@` (§6), allowed only in
+`.sh` scripts, optionlists and parfiles; with `-a` now shorthand for
+`-K allocation=` (§5.1), the in-repo machines read the `allocation` knob and
+say whether they need it: required ones refuse a submit with none
+(`@KNOB(allocation)@`, or a `.py` `CactupError`), optional ones leave the
+account line out (`@KNOB-OR-DROP-LINE(allocation)@`, or a `.py` `if`).
+`mdb/GENERATIONS.md` carries the step-by-step overlay recipe for each.
 
 **Overlays** (`~/.cactup/machines/<name>/meta.toml`) carry
 `[cactup] mdb-generation = N` (written by `machine create`). On load of a
-user-layer machine: missing → one warning per process ("assuming generation
-N"); older → `OverlayGenerationError` naming `GENERATIONS.md`; newer →
-"requires a newer cactup; run `cactup update`". `machine list` shows a
-refused overlay annotated instead of failing. A `--mdb-path` directory whose
-`GENERATION` differs from the binary's is a hard error (a missing file is
-accepted, for fixtures).
+user-layer machine (`Mdb::check_overlay`, before the typed parse): missing →
+one warning per process ("assuming generation N", naming the older
+generation when its keys give it away), never rewritten; newer → "run
+`cactup update`", never downgraded, with the kept copy named when a newer
+cactup made one; older → brought forward on disk (below). Hidden directories
+are not machines (`Mdb::machines`, `machine_dir`; `machine create` rejects a
+name starting with '.'). `machine list` shows an overlay that is refused or
+could not be updated annotated instead of failing. A `--mdb-path` directory
+whose `GENERATION` differs from the binary's is a hard error (a missing file
+is accepted, for fixtures).
+
+**Overlay migration** (`src/mdb/migrate.rs`; plan in
+`design/mdb-overlay-migration-plan.md`). The first login command that loads
+an older overlay takes a `LinkLock` beside it (`.<name>.migrate.lock`, never
+inside the directory; a holder is waited for, up to 60 s, with one line on
+stderr), re-reads the stamp, runs `STEPS[N-1..]` in memory over `meta.toml`
+and the optionlists (`toml_edit`: comments survive), checks that the result
+loads under today's schema, and only then copies the whole overlay into
+`<CACTUP_HOME>/machine-backups/<name>/generation-<N>/` (`.2`, `.3`, … when
+one is kept already; backups are never pruned) and writes the changed files
+atomically, `meta.toml` last, its stamp the commit point. A refusal from the
+first step, or from the check, writes nothing, not even the copy. The copy
+carries `.committing` before the first write and `.complete` plus a
+`NOTES.txt` after the last, so a crashed run is finished by the next load
+from the same copy. One line says what was updated and where the old files
+are; steps may add `note:` lines, and a step whose generation has optional
+changes points at them. A step preserves behavior or refuses (`Stop`): it
+does mechanical edits, notes what can only fail loudly later, and stops where
+the machine could quietly behave differently; earlier finished steps are kept
+and the refusal names the generation reached. Optional recommendations are
+never applied, scripts never edited, and a step never writes a key the target
+generation's first binary lacks. Generation 1 is never migrated (the 1→2
+step always refuses), 2→3 renames the three phase setups and refuses on an
+ambiguous rename or a build-submit script whose `ENV_SETUP` would change, and
+3→4 and 4→5 only raise the number. A refusal is short: machine and file,
+generation found and wanted, what stopped, then a line of its own pointing at
+that generation's section of `GENERATIONS.md` and the stamp to set, and, when
+the base still exists, a start-over command that moves the overlay to a hidden
+`.<name>.old` (`.<name>.old.2`, … when that is taken) and runs
+`machine create`. Transient failures (the lock, I/O)
+say nothing needs editing and finish on the next run. Nothing here runs on the
+compute path (D11). Enforcement: `every_generation_has_a_migration`,
+`every_older_generation_has_snapshots` and `every_snapshot_migrates` (over
+`fixtures/mdb-overlays/gen-N/`, taken by `ci/overlay-fixtures.sh`, plus the
+`edge/` cases: generation-1 snapshots and the refusal cases must be refused
+untouched, the rest must migrate, load, and stay put on the next load), so
+every bump ships its step. A step's checks read the files at the step's own
+generation, never through today's schema, which later generations may
+change.
 
 ---
 
@@ -6314,8 +8020,8 @@ of the installation's paths; why the other compiles were not keyed; how
 many keys no longer held after the compile; and what keying and checking
 again cost against the compiles themselves.
 
-The log's format is not kept between versions of cactup (§2.4: no backward
-compatibility). Lines the reader cannot parse are counted and the count is
+The log is deliberately unversioned (§2.5): it is kept per build, not across
+versions of cactup. Lines the reader cannot parse are counted and the count is
 printed; a log with nothing else is an error that says to build again.
 
 With any of the `--against` flags it compares with another recording build
@@ -6340,7 +8046,7 @@ write is a new file under a name of its own, and the one shared step is
 `link(2)`, atomic on all three (`objcache::store`). (The one index, of
 the entries each object has, is made of such files too: below.)
 
-**Where.** `<root>/v2/<machine>/<first two hex digits of the key>/<key>`.
+**Where.** `<root>/v4/<machine>/<first two hex digits of the key>/<key>`.
 The root is the user's knob `build-cache-home` (an absolute path), else the
 machine's `[paths] build-cache-home` (§4.2), else `.cactup-build-cache` in the
 install home (the `install-home` knob, else the machine's, else
@@ -6349,9 +8055,9 @@ I/O there. A machine's place that cannot be resolved here is passed over for
 the next with a warning (`objcache::store_root`). It is resolved by `prepare`
 and frozen into
 `<attempt>/cc/config.toml` (§18.2): the wrapper on a compute node reads it
-from there (§18.1 rule 6). `v2` is the entry format. A cactup with another
-format writes beside it and never reads it — no backward compatibility
-(§2.4); the old tree is left as it is (`cache stats` names it, and says to
+from there (§18.1 rule 6). `v4` is the entry format (`store::FORMAT`). A cactup with another
+format writes beside it and never reads it (a cache is a fresh namespace,
+§2.5); the old tree is left as it is (`cache stats` names it, and says to
 remove it by hand once no older cactup builds with the store). `<machine>` is the cactup
 machine the build was prepared for, which the key also covers: the
 directory keeps machines apart for `cache stats` and `cache gc`, not for
@@ -6684,7 +8390,7 @@ by default) is frozen with the rest (§18.2). At the end of a serving or
 auditing build, if it is set and the store is larger, the build says so in
 one line and names `cactup cache gc`. A build never walks the store: the
 size of the whole store (every machine's entries of this format) is kept
-in `<root>/v2/size`, measured by `cache stats` and `cache gc`, and each
+in `<root>/v4/size`, measured by `cache stats` and `cache gc`, and each
 serving build adds the bytes it published and keeps the sum. Builds that
 add at the same moment can lose each other's additions, so between
 measurements it is an estimate, low if anything. Before the first

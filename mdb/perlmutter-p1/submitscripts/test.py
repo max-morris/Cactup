@@ -10,7 +10,16 @@
 # Python).
 
 lines = ["#! /bin/bash"]
-lines.append("#SBATCH -A {0}_g".format(ALLOCATION))
+# Account required: NERSC rejects a job without a project (GPU jobs charge its
+# `_g` account). The allocation knob, which -a sets for one command; with
+# none, cactup refuses before submitting, naming both.
+allocation = knob("allocation", "")
+if not allocation:
+    raise CactupError(
+        "{0} needs an allocation: pass -a ACCOUNT, or set it once with "
+        "`cactup knob allocation ACCOUNT`".format(MACHINE)
+    )
+lines.append("#SBATCH -A {0}_g".format(allocation))
 lines.append("#SBATCH -C gpu")
 lines.append("#SBATCH -p {0}".format(QUEUE))
 lines.append("#SBATCH -t {0}".format(WALLTIME))

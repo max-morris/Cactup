@@ -54,6 +54,9 @@ knobs with `@KNOB(name)@`; see [Running Simulations](../users/running-simulation
 - `~/.cactup/mdb-builtin/` — the built-in `generic` machine, unpacked from
   the binary when no system machine database provides one.
 - `~/.cactup/machines/` — your own machine definitions (the user overlay).
+- `~/.cactup/machine-backups/<name>/generation-<N>/` — a machine's files as
+  they were before cactup brought it forward from MDB generation `N`. Kept
+  until you remove them.
 - `~/.cactup/refetch-backups/<alias>/<timestamp>/` — files backed up before
   `cactup installation refetch --overwrite-modified` (or `-f`, or a targeted
   `--overwrite <name>`) fetches over a repo with local changes.
@@ -72,4 +75,5 @@ knobs with `@KNOB(name)@`; see [Running Simulations](../users/running-simulation
   build metadata, including the per-repo source state it was built from, which
   is what lets a later `cactup build` notice edited or refetched sources.
 - `simulation-home` / `test-home` — simulation and test-suite output roots, set per machine or by the knobs of the same names (fallbacks `~/.cactup/simulations/` and `~/.cactup/tests/`).
+- `~/.cactup/inputs/` — inputs `cactup import` downloaded for simulations, and archives it unpacked (the machine's `inputs-home`, or the knob of that name, moves it; `cactup cache inputs` lists it).
 - `<install-home>/.cactup-build-cache/` — the build cache's objects, beside the installations (the `build-cache-home` knob moves it; `cactup cache stats` says where it is).

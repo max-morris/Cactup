@@ -1,0 +1,5 @@
+# 2->3: a .py build-submit script reads ENV_SETUP, and the submit-phase env
+# of the build universe (et-sing) differs from the route universe (plain).
+result-generation = 2
+outcome = "refused"
+findings = ["py-env-setup-differs", "build-universe:et-sing", "submit-universe:plain"]

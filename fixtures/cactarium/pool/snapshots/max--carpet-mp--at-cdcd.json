@@ -1,0 +1,64 @@
+{
+  "slug": "max/carpet-mp",
+  "at": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+  "untrusted": false,
+  "served": {
+    "version": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "track": null,
+    "tag": null,
+    "commit": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "tree": "0000000000000000000000000000000000000000",
+    "yanked": false,
+    "yank-reason": null,
+    "state": "ok",
+    "curated": false,
+    "published": 1793000000,
+    "url": "https://github.com/max/carpet-mp.git",
+    "thorns": [
+      {
+        "arrangement": "Carpet-mp",
+        "thorn": "Carpet",
+        "repo-path": "$1/$2",
+        "facts": {
+          "implements": "Carpet",
+          "inherits": [],
+          "friends": [],
+          "requires-functions": [],
+          "uses-functions": [],
+          "provides-functions": [],
+          "uses-includes": [],
+          "requires": [],
+          "requires-thorns": [],
+          "optional": [],
+          "provides": []
+        }
+      },
+      {
+        "arrangement": "Carpet-mp",
+        "thorn": "CarpetSlab",
+        "repo-path": "$1/$2",
+        "facts": {
+          "implements": "CarpetSlab",
+          "inherits": [],
+          "friends": [],
+          "requires-functions": [],
+          "uses-functions": [],
+          "provides-functions": [],
+          "uses-includes": [],
+          "requires": [],
+          "requires-thorns": [],
+          "optional": [],
+          "provides": []
+        }
+      }
+    ],
+    "claims": [
+      {
+        "kind": "fork-of",
+        "target": "et/carpet",
+        "range": "=2026.5.0",
+        "note": null
+      }
+    ]
+  }
+}

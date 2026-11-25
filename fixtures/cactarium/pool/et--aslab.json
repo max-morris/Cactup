@@ -1,0 +1,39 @@
+{
+  "slug": "et/aslab",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "31d89f696f574c96f84641094dc8c7bc4bb82990",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/aslab.git",
+      "thorns": [
+        {
+          "arrangement": "Aslab",
+          "thorn": "CarpetSlab",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "CarpetSlab",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    }
+  ]
+}

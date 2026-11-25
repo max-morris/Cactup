@@ -1,0 +1,49 @@
+{
+  "slug": "et/dd",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "5c1a86cd310c66c6ee1520e25b80e8a1812e7b5b",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/dd.git",
+      "thorns": [
+        {
+          "arrangement": "Dd",
+          "thorn": "DD",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "DD",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/o",
+          "range": null,
+          "needs": [
+            "O"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

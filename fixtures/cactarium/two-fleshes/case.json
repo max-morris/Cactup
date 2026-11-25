@@ -1,0 +1,26 @@
+{
+  "about": "Never two fleshes",
+  "packages": [
+    "et--cactus",
+    "max--cactus-mp--covers-2026-4",
+    "max--cactus-other"
+  ],
+  "specs": [
+    "max/cactus-mp",
+    "max/cactus-other"
+  ],
+  "present": [
+    {
+      "package": "et/cactus",
+      "version": "2026.4.0",
+      "base": "flesh",
+      "enabled": []
+    }
+  ],
+  "expect": {
+    "refusal": "TwoFleshes",
+    "message": [
+      "The plan needs two fleshes, max/cactus-mp@1.0.0 and max/cactus-other@1.0.0"
+    ]
+  }
+}

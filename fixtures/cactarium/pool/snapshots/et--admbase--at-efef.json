@@ -1,0 +1,57 @@
+{
+  "slug": "et/admbase",
+  "at": "efefefefefefefefefefefefefefefefefefefef",
+  "untrusted": false,
+  "served": {
+    "version": "efefefefefefefefefefefefefefefefefefefef",
+    "track": null,
+    "tag": null,
+    "commit": "efefefefefefefefefefefefefefefefefefefef",
+    "tree": "0000000000000000000000000000000000000000",
+    "yanked": false,
+    "yank-reason": null,
+    "state": "ok",
+    "curated": false,
+    "published": 1793000000,
+    "url": "https://github.com/et/admbase.git",
+    "thorns": [
+      {
+        "arrangement": "Admbase",
+        "thorn": "ADMBase",
+        "repo-path": "$1/$2",
+        "facts": {
+          "implements": "ADMBase",
+          "inherits": [],
+          "friends": [],
+          "requires-functions": [],
+          "uses-functions": [],
+          "provides-functions": [],
+          "uses-includes": [],
+          "requires": [],
+          "requires-thorns": [],
+          "optional": [],
+          "provides": []
+        }
+      },
+      {
+        "arrangement": "Admbase",
+        "thorn": "StaticConformal",
+        "repo-path": "$1/$2",
+        "facts": {
+          "implements": "StaticConformal",
+          "inherits": [],
+          "friends": [],
+          "requires-functions": [],
+          "uses-functions": [],
+          "provides-functions": [],
+          "uses-includes": [],
+          "requires": [],
+          "requires-thorns": [],
+          "optional": [],
+          "provides": []
+        }
+      }
+    ],
+    "claims": []
+  }
+}

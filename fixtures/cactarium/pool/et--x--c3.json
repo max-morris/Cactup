@@ -1,0 +1,83 @@
+{
+  "slug": "et/x",
+  "versions": [
+    {
+      "version": "2.0.0",
+      "track": null,
+      "tag": "v2.0.0",
+      "commit": "332cc1b3ff2353331787f71e7dc76e7a7f5ad021",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/x.git",
+      "thorns": [
+        {
+          "arrangement": "X",
+          "thorn": "X",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "X",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": []
+    },
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "d2775abcea8066e790f61667a0c42bb89cc185b3",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/x.git",
+      "thorns": [
+        {
+          "arrangement": "X",
+          "thorn": "X",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "X",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/p3",
+          "range": "^2",
+          "needs": [
+            "P"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

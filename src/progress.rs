@@ -1014,7 +1014,12 @@ impl prodash::Progress for Line {
             // Held, not applied, until this phase starts moving: see
             // `Shared::holds_bar`.
             Handle::Phase(token) => self.shared.announce(token, max, unit),
-            Handle::Root if self.shared.root_draws => self.shared.draw(max, unit),
+            // A new init is a new count: a line that downloads, then hashes,
+            // then unpacks re-inits for each, and must not add them up.
+            Handle::Root if self.shared.root_draws => {
+                self.scratch.store(0, Ordering::Relaxed);
+                self.shared.draw(max, unit)
+            }
             _ => {}
         }
     }
@@ -1078,6 +1083,27 @@ impl prodash::NestedProgress for Line {
 
     fn add_child_with_id(&mut self, name: impl Into<String>, id: Id) -> Line {
         self.child(name.into(), id)
+    }
+}
+
+/// A progress handle that can give work moved to a thread of its own a
+/// handle of its own on the same display, keeping this one to say how the
+/// work ended (`crate::fetch::watch`).
+pub trait Handoff: prodash::NestedProgress<SubProgress: 'static> + 'static {
+    fn handoff(&mut self) -> Self;
+}
+
+impl Handoff for Line {
+    fn handoff(&mut self) -> Line {
+        self.another_handle()
+    }
+}
+
+/// A child item: the work reports one level down (what tests hand gix).
+impl Handoff for prodash::tree::Item {
+    fn handoff(&mut self) -> prodash::tree::Item {
+        let name = prodash::Progress::name(self).unwrap_or_default();
+        self.add_child(name)
     }
 }
 

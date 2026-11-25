@@ -1,0 +1,35 @@
+{
+  "about": "A present package that moves takes its old release's constraints with it (et/d ^1), so they never refuse what its new release needs",
+  "packages": [
+    "et--p--needs-d",
+    "et--d"
+  ],
+  "specs": [
+    "et/p"
+  ],
+  "present": [
+    {
+      "package": "et/p",
+      "version": "1.0.0",
+      "enabled": [
+        "P"
+      ]
+    },
+    {
+      "package": "et/d",
+      "version": "1.0.0",
+      "enabled": [
+        "D"
+      ]
+    }
+  ],
+  "options": {
+    "upgrade": true
+  },
+  "expect": {
+    "plan": [
+      "upgrade et/p 1.0.0 -> 2.0.0 P named",
+      "upgrade et/d 1.0.0 -> 2.0.0 D needed by et/p@2.0.0, ^2 (--upgrade)"
+    ]
+  }
+}

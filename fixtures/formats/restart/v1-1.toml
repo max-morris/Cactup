@@ -1,0 +1,34 @@
+schema = 1
+created = "2026-05-01T12:00:00Z"
+started = "2026-05-01T12:05:00Z"
+finished = "2026-05-01T13:05:00Z"
+job-stopped = "2026-05-01T13:06:00Z"
+nodes = 2
+tasks = 8
+tpn = 4
+cpus = 1
+gpus-per-task = 1
+queue = "workq"
+allocation = "proj1"
+walltime = "01-00:00:00"
+checkpt-buffer = "00:30:00"
+job-id = "1234"
+job-host = "login1"
+job-start = 99887766
+foreground = true
+chained-job-id = "1233"
+status = "R"
+terminated = true
+
+[universe]
+name = "container"
+wrapper-argv = ["apptainer", "exec", "img.sif", "@COMMAND@"]
+wrapper = "apptainer exec img.sif @COMMAND@"
+
+[vars]
+SIMULATION_NAME = "bbh"
+NUM_PROCS = 8
+FOREGROUND = false
+
+[knobs]
+queue = "workq"

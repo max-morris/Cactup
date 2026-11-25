@@ -1,0 +1,20 @@
+{
+  "about": "Two packages the plan brings in with one thorn name: the claim bringing the second is named",
+  "packages": [
+    "max--z4c--carpet-plain",
+    "et--carpet",
+    "et--aslab"
+  ],
+  "specs": [
+    "max/z4c",
+    "et/aslab"
+  ],
+  "expect": {
+    "refusal": "SameThorn",
+    "message": [
+      "both have a thorn CarpetSlab",
+      "or pass --ignore-claim max/z4c:dependency:et/carpet",
+      "or `cactup claims override satisfies"
+    ]
+  }
+}

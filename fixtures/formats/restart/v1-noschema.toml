@@ -1,0 +1,14 @@
+created = "2026-05-01T12:00:00Z"
+nodes = 1
+tasks = 4
+tpn = 4
+cpus = 1
+queue = "workq"
+walltime = "01-00:00:00"
+checkpt-buffer = "00:30:00"
+job-id = "-1"
+terminated = false
+
+[vars]
+
+[knobs]

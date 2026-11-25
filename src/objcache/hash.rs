@@ -80,11 +80,11 @@ pub fn bytes_digest(bytes: &[u8]) -> String {
 
 /// The lowercase hex SHA-256 of the file at `path`, unframed.
 pub fn file_digest(path: &Path) -> Res<String> {
-    let mut file = File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+    let mut file = File::open(path).with_context(|| format!("Failed to open '{}'", path.display()))?;
     let mut context = digest::Context::new(&digest::SHA256);
     let mut buf = vec![0u8; 64 * 1024];
     loop {
-        let n = file.read(&mut buf).with_context(|| format!("Failed to read {}", path.display()))?;
+        let n = file.read(&mut buf).with_context(|| format!("Failed to read '{}'", path.display()))?;
         if n == 0 {
             break;
         }

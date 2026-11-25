@@ -1,0 +1,128 @@
+{
+  "schema": 1,
+  "cactup-version": "0.1.0",
+  "installations": {
+    "ET_2026_05_v0": {
+      "alias": "ET_2026_05_v0",
+      "release": "ET_2026_05_v0",
+      "path": "/home/user/.cactup/cacti/ET_2026_05_v0"
+    },
+    "speedup-build": {
+      "alias": "speedup-build",
+      "release": "master",
+      "path": "/home/user/.cactup/cacti/speedup-build",
+      "current-thornlist": "/home/user/.cactup/cacti/speedup-build/Cactus/thornlists/speedup-source.th",
+      "unfetched-repos": {
+        "CarpetX": {
+          "reason": "skipped",
+          "thorns": [
+            "CarpetX/Algo",
+            "CarpetX/PDESolvers",
+            "CarpetX/PoissonX",
+            "CarpetX/ADMBaseX",
+            "CarpetX/Arith",
+            "CarpetX/BoxInBox",
+            "CarpetX/CarpetX",
+            "CarpetX/CarpetXRegrid",
+            "CarpetX/CoordinatesX",
+            "CarpetX/Derivs",
+            "CarpetX/ErrorEstimator",
+            "CarpetX/FluxWaveToyX",
+            "CarpetX/HydroBaseX",
+            "CarpetX/Loop",
+            "CarpetX/ODESolvers",
+            "CarpetX/SIMDWaveToyX",
+            "CarpetX/SpacetimeWaveToyX",
+            "CarpetX/StaggeredWaveToyX",
+            "CarpetX/TestArrayGroup",
+            "CarpetX/TestBoundaries",
+            "CarpetX/TestBoxInBox",
+            "CarpetX/TestDerivs",
+            "CarpetX/TestInterpolate",
+            "CarpetX/TestNorms",
+            "CarpetX/TestODESolvers",
+            "CarpetX/TestODESolvers2",
+            "CarpetX/TestOutput",
+            "CarpetX/TestProlongate",
+            "CarpetX/TestSymmetries",
+            "CarpetX/TmunuBaseX",
+            "CarpetX/WaveToyX"
+          ],
+          "detail": "local modifications (Loop/src/loop.cxx)"
+        },
+        "ExternalLibraries-ADIOS2": {
+          "reason": "skipped",
+          "thorns": [
+            "ExternalLibraries/ADIOS2"
+          ],
+          "detail": "could not inspect the repo (no remote-tracking ref refs/remotes/origin/mpi-cmake-hints)"
+        },
+        "ExternalLibraries-AMReX": {
+          "reason": "skipped",
+          "thorns": [
+            "ExternalLibraries/AMReX"
+          ],
+          "detail": "could not inspect the repo (no remote-tracking ref refs/remotes/origin/mpi-cmake-hints)"
+        },
+        "ExternalLibraries-MPI": {
+          "reason": "skipped",
+          "thorns": [
+            "ExternalLibraries/MPI"
+          ],
+          "detail": "could not inspect the repo (no remote-tracking ref refs/remotes/origin/export-hwloc-in-mpi-libs)"
+        },
+        "ExternalLibraries-openPMD": {
+          "reason": "skipped",
+          "thorns": [
+            "ExternalLibraries/openPMD"
+          ],
+          "detail": "could not inspect the repo (no remote-tracking ref refs/remotes/origin/mpi-cmake-hints)"
+        },
+        "flesh": {
+          "reason": "skipped",
+          "thorns": [
+            ".clang-format",
+            "CONTRIBUTORS",
+            "COPYRIGHT",
+            "doc",
+            "lib",
+            "Makefile",
+            "README.md",
+            "src"
+          ],
+          "detail": "could not inspect the repo (no remote-tracking ref refs/remotes/origin/build-speedup)"
+        }
+      }
+    },
+    "rust": {
+      "alias": "rust",
+      "release": "master",
+      "path": "/home/user/.cactup/cacti/rust"
+    },
+    "build-cache": {
+      "alias": "build-cache",
+      "release": "master",
+      "path": "/home/user/.cactup/cacti/build-cache"
+    },
+    "build-cache-b": {
+      "alias": "build-cache-b",
+      "release": "master",
+      "path": "/home/user/.cactup/cacti/build-cache-b"
+    },
+    "test-arg-list-too-long": {
+      "alias": "test-arg-list-too-long",
+      "release": "ET_2026_05_v0",
+      "path": "/home/user/.cactup/cacti/test-arg-list-too-long"
+    }
+  },
+  "active-installation": "ET_2026_05_v0",
+  "knobs": {
+    "user": "user",
+    "email": "user@example.org"
+  },
+  "detected": {
+    "name": "workstation",
+    "hostname": "workstation",
+    "session": "4242:1234567"
+  }
+}

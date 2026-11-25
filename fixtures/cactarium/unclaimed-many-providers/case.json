@@ -1,0 +1,31 @@
+{
+  "about": "Several providers: refused, each named",
+  "packages": [
+    "max--z4c--hyperslab"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "providers": {
+    "implementation:hyperslab": [
+      {
+        "package": "et/carpet",
+        "version": "2026.5.0",
+        "arrangement": "Carpet",
+        "thorn": "CarpetSlab"
+      },
+      {
+        "package": "et/cactuspugh",
+        "version": "2026.5.0",
+        "arrangement": "CactusPUGH",
+        "thorn": "PUGHSlab"
+      }
+    ]
+  },
+  "expect": {
+    "refusal": "Unclaimed",
+    "message": [
+      "cactup add et/carpet/CarpetSlab cactup add et/cactuspugh/PUGHSlab"
+    ]
+  }
+}

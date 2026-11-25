@@ -70,12 +70,8 @@ pub fn resolve_with(
     match resolve_inner(db, mdb, machine_flag, hostname_override, verbose)? {
         Resolution::Known(machine) => Ok(machine),
         Resolution::Unrecognized(hostname) => {
-            println!(
-                "Unrecognized host {}; using the built-in {} machine. Run `{}` to persist a tuned local machine.",
-                hostname.bold(),
-                "generic".bold(),
-                "cactup machine create".bold()
-            );
+            println!("Unrecognized host {}; using the built-in {} machine.", hostname.bold(), "generic".bold());
+            println!("Run `{}` to create one for this host.", "cactup machine create".bold());
             load_checked(mdb, "generic")
         }
     }
@@ -125,7 +121,7 @@ pub fn ensure_local_machine_with(
         Resolution::Known(machine) => Ok(machine),
         Resolution::Unrecognized(hostname) => {
             println!(
-                "Unrecognized host {}; persisting a tuned local machine in the user MDB.",
+                "Unrecognized host {}; creating a machine for it in the user MDB.",
                 hostname.bold()
             );
             let name = create_machine(db, mdb, None, None, true, false, hostname_override)?;
@@ -159,8 +155,7 @@ fn resolve_inner(
     let session = session_key();
     let cached_failed = |name: &str, e: anyhow::Error| {
         e.context(format!(
-            "the cached detected machine \"{name}\" failed to load; \
-             `cactup machine forget` clears the cache, --machine overrides it"
+            "the cached machine \"{name}\" failed to load; run `cactup machine forget` or pass --machine"
         ))
     };
 
@@ -202,8 +197,7 @@ fn resolve_inner(
             // to `generic` (§4.3).
             Some(previous) => {
                 println!(
-                    "{} no machine claims host {}; keeping {} (`cactup machine forget` re-detects, \
-                     --machine overrides).",
+                    "{} no machine claims host {}; keeping {} (`cactup machine forget` re-detects).",
                     "note:".yellow().bold(),
                     hostname.bold(),
                     previous.bold()
@@ -217,7 +211,7 @@ fn resolve_inner(
         several => {
             if !std::io::stdin().is_terminal() {
                 bail!(
-                    "host {hostname} is claimed by several machines ({}); \
+                    "Host {hostname} is claimed by several machines ({}); \
                      pass --machine <name> to pick one",
                     several.join(", ")
                 );
@@ -284,8 +278,8 @@ fn load_checked(mdb: &Mdb, name: &str) -> Res<Machine> {
             eprintln!(
                 "{}",
                 format!(
-                    "Warning: the system-MDB machine \"{}\" has changed since {name} was created from it; \
-                     {name} will NOT pick up the change (re-create it to refresh).",
+                    "Warning: system-MDB machine \"{}\" has changed since {name} was created from it.\n\
+                     Re-create {name} to pick up the change.",
                     origin.from
                 )
                 .yellow()
@@ -306,6 +300,9 @@ fn list(ctx: &Ctx, mdb: &Mdb) -> Res<()> {
     for (name, layer) in machines {
         // One overlay of another MDB generation must not hide the rest of
         // the list: it is shown, annotated, instead of failing the command.
+        // An older one is brought forward right here, and the notice that
+        // says so lands on stderr just above its line; one that could not be
+        // (a step refused, a lock timed out, a write failed) is annotated.
         let machine = match mdb.load(&name) {
             Ok(machine) => machine,
             Err(e) => match e.downcast_ref::<OverlayGenerationError>() {
@@ -336,7 +333,37 @@ fn list(ctx: &Ctx, mdb: &Mdb) -> Res<()> {
         }
         println!();
     }
+    for dir in hidden_machine_dirs(&mdb.user_root) {
+        eprintln!(
+            "{}",
+            format!(
+                "Note: ignoring '{}': a machine name may not start with '.'.\nRename the directory to use it.",
+                dir.display()
+            )
+            .yellow()
+        );
+    }
     Ok(())
+}
+
+/// Hidden directories in the user layer that hold a machine (`.foo`, made
+/// before such names were refused), which `machine list` would otherwise
+/// leave out without a word. The copies "start over" parks
+/// (`.<name>.old`, `.<name>.old.2`, …) are meant to be out of the way and are
+/// not mentioned.
+fn hidden_machine_dirs(user_root: &Path) -> Vec<std::path::PathBuf> {
+    let parked = regex::Regex::new(r"^\..+\.old(\.[0-9]+)?$").expect("valid pattern");
+    let Ok(entries) = fs::read_dir(user_root) else { return Vec::new() };
+    let mut dirs: Vec<_> = entries
+        .flatten()
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.starts_with('.') && !parked.is_match(&name) && e.path().join("meta.toml").is_file()
+        })
+        .map(|e| e.path())
+        .collect();
+    dirs.sort();
+    dirs
 }
 
 /// `cactup machine show [name]`: the machine this host resolves to (§4.3), or
@@ -349,7 +376,7 @@ fn show(ctx: &Ctx, mdb: &Mdb, name: Option<String>, flavors: bool) -> Res<()> {
     if flavors {
         return show_flavors(&machine);
     }
-    print_summary(&machine)
+    print_summary(&machine, mdb)
 }
 
 /// Read-only machine section for the aggregate `cactup show` (§3): honors the
@@ -364,12 +391,15 @@ pub(crate) fn show_cached_summary(ctx: &Ctx) -> Res<()> {
         },
     };
     let Some(name) = name else {
-        println!("{}", "(machine not yet detected — run `cactup machine show`)".yellow());
+        println!("{}", "(machine not yet detected; run `cactup machine show`)".yellow());
         return Ok(());
     };
     let mdb = Mdb::open(ctx.globals.mdb_path.as_deref(), &ctx.db)?;
+    // Loading may bring an older user-MDB overlay forward on disk. That
+    // writes the user's machine directory, but never prompts and never
+    // touches the DB, so this stays fit for a read-only overview.
     let machine = load_checked(&mdb, &name)?;
-    print_summary(&machine)?;
+    print_summary(&machine, &mdb)?;
     if let Some(hostname) = verified_for {
         println!("  detected for host: {hostname}");
     }
@@ -377,9 +407,9 @@ pub(crate) fn show_cached_summary(ctx: &Ctx) -> Res<()> {
 }
 
 /// The `machine show` summary block for an already-loaded machine.
-fn print_summary(machine: &Machine) -> Res<()> {
+fn print_summary(machine: &Machine, mdb: &Mdb) -> Res<()> {
     let meta = &machine.meta;
-    println!("{} ({:?} MDB, {})", machine.name.bold(), machine.layer, machine.dir.display());
+    println!("{} ({:?} MDB, '{}')", machine.name.bold(), machine.layer, machine.dir.display());
     for (label, value) in [
         ("name", &meta.machine.name),
         ("nickname", &meta.machine.nickname),
@@ -398,6 +428,10 @@ fn print_summary(machine: &Machine) -> Res<()> {
     }
     if let Some(generation) = meta.cactup.mdb_generation {
         println!("  mdb generation: {generation}");
+    }
+    let backups = mdb.backup_root().join(&machine.name);
+    if machine.layer == Layer::User && backups.is_dir() {
+        println!("  earlier generations kept in: {}", backups.display());
     }
     println!(
         "  hardware: max-cpus-per-node={} default-cpus-per-task={} max-gpus-per-node={} \
@@ -418,6 +452,7 @@ fn print_summary(machine: &Machine) -> Res<()> {
         ("test-home", &paths.test_home),
         ("scratch-home", &paths.scratch_home),
         ("build-cache-home", &paths.build_cache_home),
+        ("inputs-home", &paths.inputs_home),
     ] {
         if let Some(value) = value {
             println!("  {label}: {value}");
@@ -500,11 +535,7 @@ fn print_summary(machine: &Machine) -> Res<()> {
 /// runs on, gpu/default markers, universe, per-flavor thorn toggles).
 fn show_flavors(machine: &Machine) -> Res<()> {
     let listed = machine.flavors()?;
-    println!(
-        "{} ({:?} MDB) — optionlist flavors:",
-        machine.name.bold(),
-        machine.layer
-    );
+    println!("{} ({:?} MDB) optionlist flavors:", machine.name.bold(), machine.layer);
     if listed.is_empty() {
         println!("  {}", "(none)".bright_red());
         return Ok(());
@@ -512,7 +543,7 @@ fn show_flavors(machine: &Machine) -> Res<()> {
     for flavor in &listed {
         let path = machine.optionlist_path(flavor);
         let header = optionlist::load_header(&path)
-            .with_context(|| format!("failed to read optionlist header for flavor \"{flavor}\""))?;
+            .with_context(|| format!("Failed to read optionlist header for flavor \"{flavor}\""))?;
         let runs_on = header.runs_on.clone();
         print!("- {}", flavor.bold());
         if header.default {
@@ -555,6 +586,11 @@ fn create_machine(
     let hostname = discover::resolve_hostname(hostname_override);
     let short = hostname.split('.').next().unwrap_or(&hostname).to_owned();
     let name = name.unwrap_or_else(|| short.clone());
+    // Hidden directories are not machines: one by that name would never be
+    // listed, discovered or loaded.
+    if name.starts_with('.') {
+        bail!("A machine name may not start with '.': \"{name}\"");
+    }
 
     // The base to clone: generic, a named machine, or the detected one (§4.7).
     let base = match &from_existing {
@@ -568,10 +604,7 @@ fn create_machine(
                     let hits = mdb.discover(&hostname, false)?;
                     match hits.as_slice() {
                         [only] => only.clone(),
-                        _ => bail!(
-                            "--from-existing with no value clones the detected machine, \
-                             but no machine is detected; name a base explicitly"
-                        ),
+                        _ => bail!("No detected machine to clone; pass --from-existing <machine>"),
                     }
                 }
             }
@@ -580,18 +613,16 @@ fn create_machine(
 
     let (base_dir, base_layer) = mdb
         .machine_dir(&base)
-        .ok_or_else(|| anyhow::anyhow!("base machine \"{base}\" does not exist in the MDB"))?;
+        .ok_or_else(|| anyhow::anyhow!("Base machine \"{base}\" does not exist in the MDB"))?;
     // A user-MDB base of another generation would be copied forward under a
-    // generation stamp it does not deserve.
+    // generation stamp it does not deserve: an older one is brought forward
+    // first, and one that cannot be (or is newer) is refused.
     if base_layer == Layer::User {
         mdb.check_overlay(&base, &base_dir)?;
     }
     let target = mdb.user_root.join(&name);
     if target.exists() {
-        bail!(
-            "machine \"{name}\" already exists in the user MDB ({}); delete it first",
-            target.display()
-        );
+        bail!("Machine \"{name}\" already exists at '{}'; delete it first", target.display());
     }
 
     copy_dir(&base_dir, &target)?;
@@ -603,18 +634,19 @@ fn create_machine(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
                 return Err(e)
-                    .with_context(|| format!("Failed to remove {}", target.join(matcher).display()));
+                    .with_context(|| format!("Failed to remove '{}'", target.join(matcher).display()));
             }
         }
     }
 
     // Patch the copied meta.toml: identity, concrete autodetected hardware
-    // (§4.6 done once, at create time), homes, and origin provenance (D2).
+    // where the base has none (§4.6 done once, at create time), homes, and
+    // origin provenance (D2).
     // Round-tripping through toml::Table drops the base's comments — accepted.
     let meta_path = target.join("meta.toml");
     let mut table: toml::Table = fs::read_to_string(&meta_path)?
         .parse()
-        .with_context(|| format!("Failed to parse {}", meta_path.display()))?;
+        .with_context(|| format!("Failed to parse '{}'", meta_path.display()))?;
 
     let machine_tbl = subtable(&mut table, "machine");
     machine_tbl.insert("name".into(), name.clone().into());
@@ -622,16 +654,34 @@ fn create_machine(
     machine_tbl.insert("hostname".into(), hostname.clone().into());
     machine_tbl.insert("status".into(), "personal".into());
 
+    // A machine whose jobs run on this host (`job-ids = "pids"`: generic, a
+    // workstation) gets this host's hardware, whatever the base says — this
+    // host is the node. A batch machine keeps what its base declares: that
+    // describes the base's nodes, which this host (a login node) need not be
+    // one of. Only what it lacks is filled from here, and never
+    // `max-cpus-per-node`, which is left to load-time detection (§4.6). An
+    // overlay's top-level value counts as detected either way (§8.5).
+    let jobs_here = table
+        .get("scheduler")
+        .and_then(|s| s.get("job-ids"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|v| v == "pids");
     let hw = crate::mdb::autodetect::detect();
     let hardware_tbl = subtable(&mut table, "hardware");
     hardware_tbl.remove("autodetect");
-    hardware_tbl.insert("max-cpus-per-node".into(), (hw.cores as i64).into());
-    if let Some(memory) = hw.memory_mb {
+    if jobs_here {
+        hardware_tbl.insert("max-cpus-per-node".into(), (hw.cores as i64).into());
+    }
+    if let Some(memory) = hw.memory_mb
+        && (jobs_here || !hardware_tbl.contains_key("memory"))
+    {
         hardware_tbl.insert("memory".into(), (memory as i64).into());
     }
     // Only written when GPUs were actually found: the key's absence is a valid
     // state (§4.2), so a GPU-less host must not record a hard `0`.
-    if let Some(gpus) = hw.gpus {
+    if let Some(gpus) = hw.gpus
+        && (jobs_here || !hardware_tbl.contains_key("max-gpus-per-node"))
+    {
         hardware_tbl.insert("max-gpus-per-node".into(), (gpus as i64).into());
     }
 
@@ -663,7 +713,7 @@ fn create_machine(
     }
 
     fs::write(&meta_path, toml::to_string_pretty(&table)?)
-        .with_context(|| format!("Failed to write {}", meta_path.display()))?;
+        .with_context(|| format!("Failed to write '{}'", meta_path.display()))?;
 
     // Selectable only via --machine when --no-discover: no matcher file at
     // all. Otherwise a hostname.regexp claiming this host's FQDN or short
@@ -672,13 +722,15 @@ fn create_machine(
     if !no_discover {
         let regexp_path = target.join("hostname.regexp");
         fs::write(&regexp_path, format!("^(?:{}|{})$\n", regex::escape(&hostname), regex::escape(&short)))
-            .with_context(|| format!("Failed to write {}", regexp_path.display()))?;
+            .with_context(|| format!("Failed to write '{}'", regexp_path.display()))?;
         remember(db, &name, &hostname, session_key())?;
     }
 
     // The user/email/allocation knobs (§4.7, §5) — global, since this
     // `~/.cactup` lives on the machine being created. Only knobs never set
-    // before are prompted for (silent takes the derived defaults).
+    // before are prompted for (silent takes the derived defaults). A blank
+    // answer is stored blank, so the question is not asked again; a silent
+    // run stores nothing for an empty default, since nobody answered it.
     let snapshot = db.read()?;
     let mut answers = Vec::new();
     for (knob, question) in [
@@ -688,10 +740,11 @@ fn create_machine(
     ] {
         if snapshot.knob(knob).is_none() {
             let default = snapshot.knob_or_default(knob).unwrap_or_default();
-            let answer = if silent { default } else { prompt_with_default(question, &default)? };
-            if !answer.is_empty() {
-                answers.push((knob, answer));
+            if silent && default.is_empty() {
+                continue;
             }
+            let answer = if silent { default } else { prompt_with_default(question, &default)? };
+            answers.push((knob, answer));
         }
     }
     if !answers.is_empty() {
@@ -712,21 +765,21 @@ fn create_machine(
     mdb.load(&name)?;
     println!(
         "{}",
-        format!("Created machine {} in the user MDB ({}).", name.bold(), target.display()).bright_green()
+        format!("Created machine {} at '{}'.", name.bold(), target.display()).bright_green()
     );
     Ok(name)
 }
 
 fn delete_machine(db: &Db, mdb: &Mdb, name: &str) -> Res<()> {
     match mdb.machine_dir(name) {
-        None => bail!("no machine named \"{name}\" in the MDB"),
+        None => bail!("No machine named \"{name}\" in the MDB"),
         Some((_, Layer::System)) => bail!(
-            "\"{name}\" is a system-MDB machine and cannot be deleted; \
-             override it instead with `cactup machine create {name} --from-existing {name}`"
+            "\"{name}\" is a system-MDB machine and cannot be deleted.\n\
+             Override it with `cactup machine create {name} --from-existing {name}`."
         ),
         Some((dir, Layer::User)) => {
             fs::remove_dir_all(&dir)
-                .with_context(|| format!("Failed to remove {}", dir.display()))?;
+                .with_context(|| format!("Failed to remove '{}'", dir.display()))?;
             db.update(|db| {
                 if db.detected.as_ref().is_some_and(|d| d.name == name) {
                     db.detected = None;
@@ -748,8 +801,8 @@ fn subtable<'t>(table: &'t mut toml::Table, key: &str) -> &'t mut toml::Table {
 }
 
 fn copy_dir(from: &Path, to: &Path) -> Res<()> {
-    fs::create_dir_all(to).with_context(|| format!("Failed to create {}", to.display()))?;
-    for entry in fs::read_dir(from).with_context(|| format!("Failed to list {}", from.display()))? {
+    fs::create_dir_all(to).with_context(|| format!("Failed to create '{}'", to.display()))?;
+    for entry in fs::read_dir(from).with_context(|| format!("Failed to list '{}'", from.display()))? {
         let entry = entry?;
         let name = entry.file_name();
         if name.to_string_lossy() == "__pycache__" {
@@ -760,7 +813,7 @@ fn copy_dir(from: &Path, to: &Path) -> Res<()> {
             copy_dir(&entry.path(), &target)?;
         } else {
             fs::copy(entry.path(), &target)
-                .with_context(|| format!("Failed to copy {}", entry.path().display()))?;
+                .with_context(|| format!("Failed to copy '{}'", entry.path().display()))?;
         }
     }
     Ok(())
@@ -783,14 +836,14 @@ pub fn hash_machine_dir(dir: &Path) -> Res<String> {
     for rel in files {
         feed(rel.as_bytes());
         feed(&[0]);
-        feed(&fs::read(dir.join(&rel)).with_context(|| format!("Failed to read {rel} under {}", dir.display()))?);
+        feed(&fs::read(dir.join(&rel)).with_context(|| format!("Failed to read '{rel}' under '{}'", dir.display()))?);
         feed(&[0]);
     }
     Ok(format!("{hash:016x}"))
 }
 
 fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Res<()> {
-    for entry in fs::read_dir(dir).with_context(|| format!("Failed to list {}", dir.display()))? {
+    for entry in fs::read_dir(dir).with_context(|| format!("Failed to list '{}'", dir.display()))? {
         let entry = entry?;
         let name = entry.file_name();
         let lossy = name.to_string_lossy();
@@ -832,7 +885,8 @@ mod tests {
     fn sandbox() -> Sandbox {
         let user = tempfile::tempdir().unwrap();
         let dbdir = tempfile::tempdir().unwrap();
-        let mdb = Mdb::with_roots(dev_system_root(), user.path().to_owned());
+        // `<tmp>/machines`, so migration backups stay inside the scratch dir.
+        let mdb = Mdb::with_roots(dev_system_root(), user.path().join("machines"));
         let db = Db::in_dir(dbdir.path());
         Sandbox { mdb, db, _user: user, _dbdir: dbdir }
     }
@@ -949,9 +1003,13 @@ mod tests {
 
         let machine = sb.mdb.load("mybox").unwrap();
         assert_eq!(machine.layer, Layer::User);
-        // Concrete autodetected hardware was persisted; autodetect flag gone.
+        // This host's hardware persisted (mel5's jobs run on the host they
+        // are submitted from, so this host is the node); autodetect flag gone.
         assert!(!machine.meta.hardware.autodetect);
-        assert!(machine.meta.hardware.max_cpus_per_node.unwrap() >= 1);
+        let host = crate::mdb::autodetect::detect();
+        assert_eq!(machine.meta.hardware.max_cpus_per_node, Some(host.cores));
+        // An overlay's top-level node size counts as detected (§8.5).
+        assert!(machine.meta.hardware.max_cpus_per_node_detected);
         // Origin provenance recorded with the base's current hash.
         let origin = machine.meta.cactup.origin.as_ref().unwrap();
         assert_eq!(origin.from, "mel5");
@@ -979,6 +1037,43 @@ mod tests {
         delete_machine(&sb.db, &sb.mdb, "mybox").unwrap();
         assert!(sb.mdb.machine_dir("mybox").is_none());
         assert_eq!(cached(&sb), None);
+    }
+
+    /// A clone of a batch machine keeps the hardware its base declares: a
+    /// login node's cores are no compute node's. One whose jobs run here
+    /// (generic) gets this host's.
+    #[test]
+    fn create_keeps_the_bases_declared_hardware() {
+        let sb = sandbox();
+        let base = Some(Some("qbd".into()));
+        create_machine(&sb.db, &sb.mdb, Some("myqbd".into()), base, true, true, Some("qbd1")).unwrap();
+        let clone = sb.mdb.load("myqbd").unwrap();
+        assert_eq!(clone.meta.hardware.max_cpus_per_node, Some(64));
+        assert_eq!(clone.meta.hardware.memory, Some(514913));
+        // Kept, but as an overlay's top-level value it counts as detected.
+        assert!(clone.meta.hardware.max_cpus_per_node_detected);
+
+        create_machine(&sb.db, &sb.mdb, Some("mine".into()), None, true, true, Some("mine.example.org"))
+            .unwrap();
+        let mine = sb.mdb.load("mine").unwrap();
+        assert_eq!(mine.meta.hardware.max_cpus_per_node, Some(crate::mdb::autodetect::detect().cores));
+    }
+
+    /// A machine created from `generic` (the default base, and what an
+    /// unknown host gets) has a script of every kind, a build-submit script
+    /// included, and still builds in the foreground by default.
+    #[test]
+    fn create_from_generic_has_every_kind_of_script() {
+        let sb = sandbox();
+        create_machine(&sb.db, &sb.mdb, Some("mine".into()), None, true, true, Some("mine.example.org")).unwrap();
+        let mine = sb.mdb.load("mine").unwrap();
+        for kind in [ScriptKind::Submit, ScriptKind::Run, ScriptKind::BuildSubmit] {
+            let (script, _) = mine.meta.scripts(kind).route("local", crate::mdb::HOST_UNIVERSE, false).unwrap();
+            assert_eq!(script, "default");
+            assert!(mine.script_path(kind, script).is_ok(), "{kind:?} script file copied");
+        }
+        assert!(mine.meta.can_submit_builds());
+        assert_eq!(mine.meta.build.default_action, Some(crate::mdb::BuildAction::Run));
     }
 
     #[test]
@@ -1055,11 +1150,59 @@ mod tests {
                 installation: None,
                 hostname: None,
                 knob: Vec::new(),
+                risky_allow_untrusted_artifacts: false,
             },
             db: Db::in_dir(sb._dbdir.path()),
         };
         list(&ctx, &sb.mdb).unwrap();
         assert!(sb.mdb.load("old").is_err());
+    }
+
+    #[test]
+    fn list_mentions_a_hidden_machine_but_not_a_parked_copy() {
+        let root = tempfile::tempdir().unwrap();
+        for name in [".foo", ".box.old", ".box.old.2", ".empty", "box"] {
+            fs::create_dir_all(root.path().join(name)).unwrap();
+            if name != ".empty" {
+                fs::write(root.path().join(name).join("meta.toml"), "").unwrap();
+            }
+        }
+        assert_eq!(hidden_machine_dirs(root.path()), [root.path().join(".foo")]);
+    }
+
+    #[test]
+    fn a_machine_name_may_not_be_hidden() {
+        let sb = sandbox();
+        let e = create_machine(&sb.db, &sb.mdb, Some(".hid".into()), None, true, true, Some("h.example")).unwrap_err();
+        assert!(e.to_string().contains("may not start with '.'"), "{e:#}");
+        assert!(!sb.mdb.user_root.join(".hid").exists());
+    }
+
+    #[test]
+    fn an_older_base_is_brought_forward_before_it_is_copied() {
+        let sb = sandbox();
+        create_machine(&sb.db, &sb.mdb, Some("base".into()), None, true, true, Some("base.example"))
+            .unwrap();
+        let want = crate::build_info::MDB_GENERATION;
+        let meta_path = sb.mdb.user_root.join("base/meta.toml");
+        let text = fs::read_to_string(&meta_path).unwrap();
+        let stamp = format!("mdb-generation = {want}");
+        fs::write(&meta_path, text.replace(&stamp, &format!("mdb-generation = {}", want - 1))).unwrap();
+
+        create_machine(
+            &sb.db,
+            &sb.mdb,
+            Some("copy".into()),
+            Some(Some("base".into())),
+            true,
+            true,
+            Some("copy.example"),
+        )
+        .unwrap();
+        assert!(fs::read_to_string(&meta_path).unwrap().contains(&stamp));
+        assert_eq!(sb.mdb.load("copy").unwrap().meta.cactup.mdb_generation, Some(want));
+        let backup = sb.mdb.backup_root().join("base").join(format!("generation-{}", want - 1));
+        assert!(backup.join(".complete").is_file());
     }
 
     #[test]

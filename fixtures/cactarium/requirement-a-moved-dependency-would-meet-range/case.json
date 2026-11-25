@@ -1,0 +1,29 @@
+{
+  "about": "A thorn requires a thorn only a newer release of an installed dependency has, and declares that dependency: the dependency's range is the conflict, with --upgrade, never an undeclared requirement",
+  "packages": [
+    "max--duser",
+    "max--fieldlib"
+  ],
+  "specs": [
+    "max/duser"
+  ],
+  "present": [
+    {
+      "package": "max/fieldlib",
+      "version": "1.0.0",
+      "enabled": [
+        "FieldA"
+      ]
+    }
+  ],
+  "expect": {
+    "refusal": "PresentOutsideRange",
+    "message": [
+      "The installation has max/fieldlib@1.0.0, outside ^3",
+      "Pass --upgrade to move it"
+    ],
+    "not_in_message": [
+      "no manifest declares"
+    ]
+  }
+}

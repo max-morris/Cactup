@@ -1,0 +1,54 @@
+{
+  "slug": "max/duser",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "271d8f2204b67c29d1dda3d0e1e9e85abb3f660b",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/duser.git",
+      "thorns": [
+        {
+          "arrangement": "Duser",
+          "thorn": "DUser",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "DUser",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [
+              "FieldD"
+            ],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "max/fieldlib",
+          "range": "^3",
+          "needs": [
+            "FieldD"
+          ],
+          "needed-by": [
+            "DUser"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

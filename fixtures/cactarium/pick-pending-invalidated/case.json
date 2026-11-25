@@ -1,0 +1,21 @@
+{
+  "about": "A release awaiting review picked for et/x 2.0.0 is not kept once an approved one fits",
+  "packages": [
+    "et--c--pending",
+    "et--x--needs-c3",
+    "et--y--needs-x1"
+  ],
+  "specs": [
+    "et/c",
+    "et/x",
+    "et/y"
+  ],
+  "expect": {
+    "plan": [
+      "add et/c@2.0.0 C named",
+      "add et/x@1.0.0 X named",
+      "add et/y@1.0.0 Y named"
+    ],
+    "pending": []
+  }
+}

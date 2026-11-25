@@ -1,0 +1,231 @@
+# rostam flavor "x86-cpu-image" (the x86 CPU partitions medusa and buran):
+# Steve Brandt's docker://stevenrbrandt/cactus image, the CPU-only sibling of
+# the cactus-cuda image that x86-cuda-image uses, converted from the image's
+# /opt/cactus-deps/cactus-mpich.cfg (MPICH variant; Debian trixie, gcc 14).
+# Built on the login node and run inside the cactus-cpu universe
+# (Apptainer). The long comments under [options] are the image file's own;
+# VERSION is required by cactup and was not in the image file, so bump it if
+# the image optionlist changes.
+#
+# One change from the image file: -march. The image compiles with
+# -march=native, meaning "the CPU the build runs on", which here is the login
+# node's Skylake with AVX-512, and that binary dies with an illegal
+# instruction on buran's EPYC Rome. x86-64-v3 (AVX2, FMA) is what Haswell,
+# Skylake and Rome all have in common, so one build runs on both partitions.
+# The image's prebuilt libraries (AMReX, ADIOS2, openPMD-api) use no AVX-512
+# either. marvin (Sandy Bridge, AVX without AVX2 or FMA) cannot run this
+# build; see the note above [queues.medusa] in meta.toml.
+
+[cactup]
+universe            = "cactus-cpu"
+# The runscript does its own `srun --mpi=pmi2 … apptainer exec` launch;
+# wrapping the whole run in the universe would hide SLURM's PMI.
+coerce-run-universe = false
+description         = "x86 CPU (x86-64-v3): Steve Brandt's cactus image, MPICH"
+
+[cactup.runs-on]
+queues = ["medusa", "buran"]
+gpu    = false
+# Without -q, a sim of this flavor goes to medusa, Rostam's default
+# partition, rather than to the machine's default cuda-A100, which it may not
+# use.
+default-queue = "medusa"
+
+[options]
+# cactup requires VERSION (emitted first; a change forces a full rebuild).
+VERSION = "x86-cpu-image-2026-10-12"
+
+# Cactus optionlist for this image's prebuilt ExternalLibraries, MPICH
+# variant. See cactus-openmpi.cfg for the OpenMPI counterpart -- pick
+# whichever matches the PMI variant the target HPC site's Slurm exposes
+# (MPICH/Hydra here is linked against libslurm and speaks PMI-1/PMI-2
+# natively; pair it with `srun --mpi=pmi2`; see cactus-openmpi.cfg's own
+# header for the PMIx side).
+#
+# This points Cactus's ExternalLibraries `detect.sh`/`configure.sh` scripts
+# at dependencies already built into the image (see Dockerfile), so a build
+# does NOT re-download or rebuild any of them -- it only configures,
+# compiles, and links Cactus itself.
+#
+# Scope: everything the official einsteintoolkit.th (ET_2026_05) manifest's
+# ExternalLibraries enable, except:
+#   - NSIMD: deliberately left unset below. NSIMD dispatches to specific
+#     SIMD ISA extensions detected from the build host's CPU -- baking it
+#     into this Docker image would hard-code whatever CPU `docker build`
+#     happened to run on, not the actual HPC node. Cactus builds it fresh,
+#     and its detect.sh defaults NSIMD_SIMD to CPU (no explicit SIMD).
+#   - LORENE, SGRID: large, special-purpose initial-data codes with their
+#     own non-CMake build systems -- out of scope for this general-purpose
+#     image. Add them by hand (LORENE_DIR / SGRID_DIR) if a specific build
+#     needs them.
+#
+# All *_DIR / *_INC_DIRS / *_LIB_DIRS / *_LIBS below are set explicitly
+# rather than left for each thorn's own auto-detection, on purpose: Debian
+# manages multiple parallel MPI/HDF5 installs (openmpi vs mpich) through
+# `update-alternatives`, whose generic names (`mpicc`, `mpirun`, `hdf5.pc`,
+# ...) can silently point at a different implementation than the one these
+# libraries were actually built against if alternatives are ever
+# reconfigured. Pinning explicit, implementation-specific paths here makes
+# this optionlist correct regardless of that state.
+
+# ---------------------------------------------------------------------------
+# Compilers
+# ---------------------------------------------------------------------------
+CC  = "gcc"
+CXX = "g++"
+F90 = "gfortran"
+F77 = "gfortran"
+LD  = "g++"
+
+# AMReX 25.11 (see Dockerfile) only requires C++17, matching ADIOS2 and
+# openPMD-api and SimFactory's own reference optionlist. Deliberately not
+# opting into a newer standard than the toolchain actually needs.
+CXXFLAGS = "-g -std=c++17"
+CFLAGS   = "-g"
+# gfortran >=10 defaults argument-mismatch / BOZ-literal checks to hard
+# errors, which breaks a lot of Cactus's legacy F77-style Fortran.
+# -ffixed-line-length-none: several thorns (e.g. Exact) have fixed-form
+# source with logical lines wrapped past column 72.
+# -fcray-pointer: several thorns (e.g. Exact/tmunu.F90) bridge a C pointer
+# from CCTK_VarDataPtrI into Fortran via `pointer (cptr, fptr)`.
+F90FLAGS = "-g -fallow-argument-mismatch -fallow-invalid-boz -ffixed-line-length-none -fcray-pointer"
+F77FLAGS = "-g -fallow-argument-mismatch -fallow-invalid-boz -ffixed-line-length-none -fcray-pointer"
+
+# -rdynamic: exports symbols to the dynamic symbol table (backtraces /
+# runtime symbol lookups some thorns and libraries rely on).
+LDFLAGS = "-rdynamic"
+# gfortran: LD is g++, not gfortran, so nothing puts libgfortran on the
+# link line -- but Cactus links Fortran thorns into the same executable.
+LIBS = "gfortran"
+# Without this, the PTHREADS ExternalLibraries thorn doesn't know pthreads
+# is already part of glibc and will try to download and build its own.
+PTHREADS_DIR = "NO_BUILD"
+
+# autoconf's AC_PROG_CC probes for the newest C standard the compiler
+# accepts and appends it to $CC; C23 makes `bool` a keyword, which breaks
+# old C thorns that do `typedef int bool;` (e.g. Numerical/AEILocalInterp).
+# Pre-seeding autoconf's cache variable short-circuits that probe.
+ac_cv_prog_cc_c23 = "no"
+
+# With LD set explicitly, `lib/make/configure` skips copying the CXX OpenMP
+# flags onto LD, so the final link would miss -fopenmp (and -lgomp).
+LD_OPENMP_FLAGS = "-fopenmp"
+
+OPENMP = "yes"
+
+# Cactus preprocesses Fortran with FPP (cpp -traditional) as a separate step,
+# which -fopenmp on the compiler does not reach; without this every
+# `#ifdef _OPENMP` block in a .F90 is deleted before compilation.
+FPP_OPENMP_FLAGS = "-D_OPENMP"
+
+# ---------------------------------------------------------------------------
+# Build modes. The base *FLAGS above carry only language and ABI settings
+# plus -g, never optimization, so a debug or profiling build actually
+# changes something.
+# ---------------------------------------------------------------------------
+
+# Carpet's own vectorization, independent of CarpetX's SIMD. (VECTORISE and
+# OPTIMISE are Cactus's own option names, so they keep its spelling;
+# spelling-check: skip.)
+VECTORISE                = "yes"
+VECTORISE_ALIGNED_ARRAYS = "no"
+VECTORISE_INLINE         = "no"
+
+DEBUG            = "no"
+CPP_DEBUG_FLAGS  = "-DCARPET_DEBUG"
+FPP_DEBUG_FLAGS  = "-DCARPET_DEBUG"
+C_DEBUG_FLAGS    = "-O0"
+CXX_DEBUG_FLAGS  = "-O0"
+F90_DEBUG_FLAGS  = "-O0 -fcheck=bounds -fcheck=pointer"
+F77_DEBUG_FLAGS  = "-O0 -fcheck=bounds -fcheck=pointer"
+
+# -O2 rather than -O3: -O3 has been observed to make unsafe transformations
+# in this code base. Vectorization is wanted regardless, hence the explicit
+# cost model. -march: x86-64-v3 rather than the image's native (see the
+# header).
+OPTIMISE            = "yes"
+CPP_OPTIMISE_FLAGS  = ""
+FPP_OPTIMISE_FLAGS  = ""
+C_OPTIMISE_FLAGS    = "-O2 -fvect-cost-model=dynamic -march=x86-64-v3"
+CXX_OPTIMISE_FLAGS  = "-O2 -fvect-cost-model=dynamic -march=x86-64-v3"
+F90_OPTIMISE_FLAGS  = "-O2 -fvect-cost-model=dynamic -march=x86-64-v3"
+F77_OPTIMISE_FLAGS  = "-O2 -fvect-cost-model=dynamic -march=x86-64-v3"
+
+PROFILE           = "no"
+CPP_PROFILE_FLAGS = ""
+FPP_PROFILE_FLAGS = ""
+C_PROFILE_FLAGS   = "-pg"
+CXX_PROFILE_FLAGS = "-pg"
+F90_PROFILE_FLAGS = "-pg"
+F77_PROFILE_FLAGS = "-pg"
+
+WARN            = "yes"
+CPP_WARN_FLAGS  = "-Wall"
+FPP_WARN_FLAGS  = ""
+C_WARN_FLAGS    = "-Wall"
+CXX_WARN_FLAGS  = "-Wall"
+F90_WARN_FLAGS  = "-Wall"
+F77_WARN_FLAGS  = "-Wall"
+
+# ---------------------------------------------------------------------------
+# MPI: MPICH explicitly. The source-built C++ stack below (AMReX/ADIOS2/
+# openPMD-api) is linked against this same MPICH, and OpenMPI and MPICH are
+# not ABI-compatible. MPI_HOME is what CMake's FindMPI honors as a search
+# hint for any ExternalLibrary built with CMake. MPICH splits its runtime
+# across separate per-language libraries; all three are listed since Cactus
+# links C, C++, and Fortran thorns into one executable.
+# ---------------------------------------------------------------------------
+MPI_DIR      = "/opt/mpi/mpich"
+MPI_HOME     = "/opt/mpi/mpich"
+MPI_INC_DIRS = "/opt/mpi/mpich/include"
+MPI_LIB_DIRS = "/opt/mpi/mpich/lib"
+MPI_LIBS     = "mpichcxx mpichfort mpich"
+
+# ---------------------------------------------------------------------------
+# Apt-provided ExternalLibraries (Debian trixie ships all of these). HDF5 is
+# the one MPI-flavor-specific exception -- Debian ships separate
+# openmpi/mpich builds of it.
+# ---------------------------------------------------------------------------
+HDF5_DIR            = "/usr"
+HDF5_INC_DIRS       = "/usr/include/hdf5/mpich"
+HDF5_LIB_DIRS       = "/usr/lib/x86_64-linux-gnu/hdf5/mpich"
+HDF5_LIBS           = "hdf5hl_fortran hdf5_fortran hdf5_hl hdf5"
+HDF5_ENABLE_FORTRAN = "yes"
+HDF5_ENABLE_CXX     = "no"
+
+ZLIB_DIR     = "/usr"
+GSL_DIR      = "/usr"
+FFTW3_DIR    = "/usr"
+BOOST_DIR    = "/usr"
+HWLOC_DIR    = "/usr"
+LIBJPEG_DIR  = "/usr"
+OPENSSL_DIR  = "/usr"
+YAML_CPP_DIR = "/usr"
+SILO_DIR     = "/usr"
+
+# BLAS/LAPACK's own configure.sh searches a fixed list of directories that
+# does NOT include Debian's multiarch path.
+BLAS_DIR   = "/usr/lib/x86_64-linux-gnu"
+LAPACK_DIR = "/usr/lib/x86_64-linux-gnu"
+
+# ---------------------------------------------------------------------------
+# Source-built ExternalLibraries (the CarpetX I/O/driver stack; built into
+# the image, linked against MPICH -- see above)
+# ---------------------------------------------------------------------------
+AMREX_DIR = "/opt/cactus-deps/amrex-mpich"
+
+ADIOS2_DIR      = "/opt/cactus-deps/adios2-mpich"
+ADIOS2_INC_DIRS = "/opt/cactus-deps/adios2-mpich/include"
+ADIOS2_LIB_DIRS = "/opt/cactus-deps/adios2-mpich/lib"
+# Explicit, rather than left to detect.sh's own find_lib: ADIOS2 >=2.9
+# renamed libadios2_cxx11 -> libadios2_cxx, which the ET_2026_05 thorn's
+# detect.sh (written for the older name) doesn't know to look for.
+ADIOS2_LIBS       = "adios2_cxx_mpi adios2_c_mpi adios2_core_mpi adios2_cxx adios2_c adios2_core"
+ADIOS2_ENABLE_SST = "no"
+
+OPENPMD_DIR = "/opt/cactus-deps/openpmd-mpich"
+
+# Not built into this image -- set by hand if needed:
+#
+# LORENE_DIR = ...
+# SGRID_DIR  = ...

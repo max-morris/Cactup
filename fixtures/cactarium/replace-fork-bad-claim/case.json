@@ -1,0 +1,31 @@
+{
+  "about": "A fork-of claim that does not read is no claim: the newcomer takes over only its colliding checkouts",
+  "packages": [
+    "et--carpetx",
+    "max--carpetx-mp--bad-sha"
+  ],
+  "specs": [
+    "max/carpetx-mp"
+  ],
+  "present": [
+    {
+      "package": "et/carpetx",
+      "version": "2026.5.1",
+      "base": "carpetx",
+      "enabled": [
+        "Arith",
+        "CarpetX",
+        "Loop"
+      ]
+    }
+  ],
+  "options": {
+    "replace": true
+  },
+  "expect": {
+    "plan": [
+      "add max/carpetx-mp@1.0.0 CarpetX, Loop named",
+      "replace CarpetX, Loop of base repo carpetx with max/carpetx-mp"
+    ]
+  }
+}

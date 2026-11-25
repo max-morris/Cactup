@@ -1,0 +1,56 @@
+{
+  "about": "A thorn of a read stand-in wanted only by a package of a later wave needs a thorn of another stand-in: that one is read too",
+  "packages": [
+    "max--zzn2",
+    "max--zzy2",
+    "et--zzs"
+  ],
+  "snapshots": [
+    "et--zzq--at-3434",
+    "et--zzs--at-5656"
+  ],
+  "specs": [
+    "max/zzn2"
+  ],
+  "present": [
+    {
+      "package": "et/zzq",
+      "unknown": "3434343434343434343434343434343434343434",
+      "thorns": [
+        "A1",
+        "A2",
+        "A3"
+      ],
+      "base": "zzq",
+      "enabled": [
+        "A1"
+      ],
+      "stand_in": true
+    },
+    {
+      "package": "et/zzs",
+      "unknown": "5656565656565656565656565656565656565656",
+      "thorns": [
+        "S1",
+        "S2"
+      ],
+      "base": "zzs",
+      "enabled": [
+        "S1"
+      ],
+      "stand_in": true
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/zzn2@1.0.0 N2 named",
+      "add et/zzq#343434343434 A2, A3 needed by max/zzn2@1.0.0",
+      "add max/zzy2@1.0.0 Y2 needed by max/zzn2@1.0.0",
+      "add et/zzs#565656565656 S2 needed by et/zzq#343434343434 (A3)"
+    ],
+    "reads": [
+      "et/zzq@343434343434",
+      "et/zzs@565656565656"
+    ]
+  }
+}

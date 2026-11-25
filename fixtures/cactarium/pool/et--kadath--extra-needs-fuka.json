@@ -1,0 +1,68 @@
+{
+  "slug": "et/kadath",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "2b430d1a158ec6dd7c9510d457071556d781575e",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/kadath.git",
+      "thorns": [
+        {
+          "arrangement": "Kadath",
+          "thorn": "Kadath",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Kadath",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        },
+        {
+          "arrangement": "Kadath",
+          "thorn": "KadathExtra",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "KadathExtra",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/fuka",
+          "range": "^1",
+          "into": "src/fuka",
+          "needed-by": [
+            "KadathExtra"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

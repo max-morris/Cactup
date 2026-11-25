@@ -1,0 +1,20 @@
+{
+  "about": "Two packages placing one library at versions no release meets together",
+  "packages": [
+    "max--kadath",
+    "max--fuka-gw--fuka-2",
+    "et--fuka"
+  ],
+  "specs": [
+    "max/kadath",
+    "max/fuka-gw"
+  ],
+  "expect": {
+    "refusal": "LibraryClash",
+    "message": [
+      "No release of library et/fuka meets every package placing it",
+      "et/fuka ^1 (from max/kadath@1.0.0)",
+      "et/fuka ^2 (from max/fuka-gw@1.0.0)"
+    ]
+  }
+}

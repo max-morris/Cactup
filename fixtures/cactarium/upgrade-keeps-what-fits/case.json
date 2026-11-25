@@ -1,0 +1,29 @@
+{
+  "about": "--upgrade leaves a touched package that still fits where it is",
+  "packages": [
+    "max--z4c--admbase-2026-4",
+    "et--admbase"
+  ],
+  "specs": [
+    "max/z4c"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "version": "2026.4.0",
+      "base": "admbase",
+      "enabled": [
+        "ADMBase",
+        "StaticConformal"
+      ]
+    }
+  ],
+  "options": {
+    "upgrade": true
+  },
+  "expect": {
+    "plan": [
+      "add max/z4c@1.2.0 Z4c, Z4cTest named"
+    ]
+  }
+}

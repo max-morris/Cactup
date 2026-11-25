@@ -62,7 +62,7 @@ status-pattern   = '@JOB_ID@ '
 queued-pattern   = ' PD '
 running-pattern  = ' (CF|CG|R|TO) '
 holding-pattern  = '\(JobHeldUser\)'
-unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'
+unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified|^ *JOBID '
 exec-host        = "hostname -s"
 exec-host-pattern = '(\S+)'
 

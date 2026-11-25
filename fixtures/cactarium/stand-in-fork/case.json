@@ -1,0 +1,32 @@
+{
+  "about": "A base package at an unfrozen commit that shares thorn names with what the plan brings in is read: a fork standing in, it takes the dependency",
+  "packages": [
+    "et--carpet",
+    "max--d--carpetslab"
+  ],
+  "snapshots": [
+    "max--carpet-mp--at-cdcd"
+  ],
+  "specs": [
+    "max/d"
+  ],
+  "present": [
+    {
+      "package": "max/carpet-mp",
+      "unknown": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "thorns": ["Carpet", "CarpetSlab"],
+      "base": "carpet-mp",
+      "enabled": [
+        "Carpet"
+      ],
+      "stand_in": true
+    }
+  ],
+  "expect": {
+    "plan": [
+      "add max/d@1.0.0 D named",
+      "add max/carpet-mp#cdcdcdcdcdcd CarpetSlab needed by max/d@1.0.0, ^2026.5",
+      "keep max/carpet-mp max/carpet-mp#cdcdcdcdcdcd stands in for et/carpet"
+    ]
+  }
+}

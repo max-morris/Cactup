@@ -1,0 +1,25 @@
+{
+  "about": "A named base package with nothing to add says so",
+  "packages": [
+    "et--admbase"
+  ],
+  "specs": [
+    "et/admbase/ADMBase"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "version": "2026.4.0",
+      "base": "admbase",
+      "enabled": [
+        "ADMBase"
+      ]
+    }
+  ],
+  "expect": {
+    "plan": [
+      "keep et/admbase et/admbase@2026.4.0 is in the installation's base already"
+    ],
+    "records": []
+  }
+}

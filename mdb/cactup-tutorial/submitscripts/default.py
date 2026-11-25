@@ -38,8 +38,9 @@ if typed['GPU']:
     lines.append("#SBATCH --gpus-per-task={0}".format(GPUS_PER_TASK))
 if CHAINED_JOB_ID:
     lines.append("#SBATCH --dependency=afterany:{0}".format(CHAINED_JOB_ID))
-if ALLOCATION:
-    lines.append("#SBATCH --account={0}".format(ALLOCATION))
+allocation = knob("allocation", "")
+if allocation:
+    lines.append("#SBATCH --account={0}".format(allocation))
 if MAIL:
     lines.append("#SBATCH --mail-user={0}".format(MAIL))
     lines.append("#SBATCH --mail-type={0}".format(MAIL_TYPE.upper()))

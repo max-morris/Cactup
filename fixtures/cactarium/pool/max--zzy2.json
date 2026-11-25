@@ -1,0 +1,49 @@
+{
+  "slug": "max/zzy2",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "6c8edb879d24db41a52f8645982ceb8dda880bb7",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/max/zzy2.git",
+      "thorns": [
+        {
+          "arrangement": "Zzy2",
+          "thorn": "Y2",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "Y2",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/zzq",
+          "range": null,
+          "needs": [
+            "A3"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

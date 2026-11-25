@@ -1,0 +1,49 @@
+{
+  "slug": "et/cyc-a",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "track": null,
+      "tag": "v1.0.0",
+      "commit": "bd8a19cf4d71a5220fce3e7504f0646e29494fb8",
+      "tree": null,
+      "yanked": false,
+      "yank-reason": null,
+      "state": "ok",
+      "curated": false,
+      "published": 1793000000,
+      "url": "https://github.com/et/cyc-a.git",
+      "thorns": [
+        {
+          "arrangement": "Cyc-a",
+          "thorn": "CycA",
+          "repo-path": "$1/$2",
+          "facts": {
+            "implements": "CycA",
+            "inherits": [],
+            "friends": [],
+            "requires-functions": [],
+            "uses-functions": [],
+            "provides-functions": [],
+            "uses-includes": [],
+            "requires": [],
+            "requires-thorns": [],
+            "optional": [],
+            "provides": []
+          }
+        }
+      ],
+      "claims": [
+        {
+          "kind": "dependency",
+          "target": "et/cyc-b",
+          "range": null,
+          "needs": [
+            "CycB"
+          ],
+          "note": null
+        }
+      ]
+    }
+  ]
+}

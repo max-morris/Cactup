@@ -1,0 +1,34 @@
+{
+  "about": "A thorn of an unread base package named with --upgrade: it moves to a release, with a note on keeping it",
+  "packages": [
+    "et--admbase"
+  ],
+  "specs": [
+    "et/admbase/StaticConformal"
+  ],
+  "present": [
+    {
+      "package": "et/admbase",
+      "unknown": "abababababababababababababababababababab",
+      "thorns": [
+        "ADMBase",
+        "ADMCoupling",
+        "StaticConformal"
+      ],
+      "base": "admbase",
+      "enabled": [
+        "ADMBase"
+      ],
+      "stand_in": true
+    }
+  ],
+  "options": {
+    "upgrade": true
+  },
+  "expect": {
+    "plan": [
+      "upgrade et/admbase #abababababab -> 2026.5.1 ADMBase, StaticConformal named",
+      "replace base repo admbase with et/admbase"
+    ]
+  }
+}
