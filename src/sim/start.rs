@@ -291,11 +291,11 @@ pub fn submit(ctx: &Ctx, args: SimSubmitArgs) -> Res<()> {
     wait_for_restarts(&sim, &Scheduler::for_machine(&machine), &submitted, WAIT_JOB_CHECK_INTERVAL)
 }
 
-/// How often `sim submit --block` asks the scheduler whether a job it waits
-/// for is still there; the restart's own record is read every second.
+/// How often `sim submit --block` asks the scheduler whether a job being
+/// waited for is still there; the restart's own record is read every second.
 const WAIT_JOB_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// How a restart `sim submit --block` waited for ended.
+/// How a restart ended, as `sim submit --block` sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RestartEnd {
     /// Its run recorded its end, and whether the run-script succeeded.
@@ -307,8 +307,8 @@ enum RestartEnd {
     Vanished,
 }
 
-/// `sim submit --block` (§8.3): wait for every restart this submission
-/// queued, in chain order, and fail unless each one's run ended and
+/// `sim submit --block` (§8.3): wait for every restart queued by this
+/// submission, in chain order, and fail unless each one's run ended and
 /// succeeded. Always polled, never the machine's `blocking-submit` (§7.9): a
 /// chain pre-submits all its jobs at once, which a command that returns
 /// only when its job has ended cannot do. The verdict is each restart's own
@@ -322,11 +322,12 @@ fn wait_for_restarts(
 ) -> Res<()> {
     let jobs: Vec<&str> = submitted.iter().map(|(_, job)| job.as_str()).collect();
     println!(
-        "Waiting for {} (job{} {}) — Ctrl-C stops waiting; the queued jobs keep running.",
+        "Waiting for simulation {} (job{} {}).",
         sim.name.bold(),
         if jobs.len() == 1 { "" } else { "s" },
         jobs.join(", ")
     );
+    println!("Ctrl-C stops the wait, not the jobs.");
     let mut unfinished = Vec::new();
     for (id, job) in submitted {
         let dir = restart::dir_name(*id);
@@ -335,11 +336,11 @@ fn wait_for_restarts(
             RestartEnd::Ran(true) => println!("Restart {dir} (job {job}) finished."),
             RestartEnd::Ran(false) => println!("{}", format!("Restart {dir} (job {job}) failed.").red()),
             RestartEnd::Stopped => {
-                println!("{}", format!("Restart {dir} (job {job}) was stopped before its run ended.").yellow())
+                println!("{}", format!("Restart {dir} (job {job}) was stopped.").yellow())
             }
             RestartEnd::Vanished => println!(
                 "{}",
-                format!("Restart {dir} (job {job}) left the queue without its run recording an end.").red()
+                format!("Restart {dir} (job {job}) ended without recording a result.").red()
             ),
         }
         if end != RestartEnd::Ran(true) {
@@ -348,7 +349,7 @@ fn wait_for_restarts(
     }
     if !unfinished.is_empty() {
         bail!(
-            "simulation \"{}\" did not finish: {} (its output is in {})",
+            "Simulation \"{}\" did not finish: {}\nIts output is in '{}'.",
             sim.name,
             unfinished.join(", "),
             sim.dir.display()
@@ -377,11 +378,7 @@ fn leave_queue(sim: &Simulation, sched: &Scheduler, r: &Restart) -> Res<()> {
         }
         for _ in 0..10 {
             if gix::interrupt::is_triggered() {
-                bail!(
-                    "interrupted: stopped waiting for simulation \"{}\"; its queued jobs keep running \
-                     (`cactup sim list` shows them)",
-                    sim.name
-                );
+                bail!("Interrupted\nThe jobs of simulation \"{}\" stay queued.", sim.name);
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
@@ -425,11 +422,7 @@ fn wait_for_restart(
         }
         for _ in 0..10 {
             if gix::interrupt::is_triggered() {
-                bail!(
-                    "interrupted: stopped waiting for simulation \"{}\"; its queued jobs keep running \
-                     (`cactup sim list` shows them)",
-                    sim.name
-                );
+                bail!("Interrupted\nThe jobs of simulation \"{}\" stay queued.", sim.name);
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }

@@ -136,7 +136,7 @@ pub struct RestartMeta {
     pub terminated: bool,
     /// Whether the run-script exited successfully, recorded with the run's
     /// end (what `sim submit --block` reports, §8.3). Absent where no run
-    /// recorded its end: a restart `stop` or `clean` ended, or one not over.
+    /// recorded its end: a restart ended by `stop` or `clean`, or one not over.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub succeeded: Option<bool>,
     /// The frozen run universe; absent = host context (§4.8).

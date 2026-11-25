@@ -108,11 +108,11 @@ then says how each restart ended:
 cactup sim submit mysim mysim.par -w 1:00:00 --block && ./analyze.sh mysim
 ```
 
-It exits with an error unless every run finished successfully: a run that
-failed, one stopped (`sim stop`) before it ended, and a job that left the
-queue without its run recording an end all count against it. That makes it
-the way to run something after a simulation without a polling loop of your
-own. Ctrl-C stops the wait, not the jobs: they keep running in the queue.
+It exits with an error unless every run finished successfully. A run that
+failed, one stopped with `sim stop`, and a job that ended without its run
+recording a result all count against it. That makes it the way to run
+something after a simulation without a polling loop of your own. Ctrl-C
+stops the wait, not the jobs: they stay in the queue.
 
 ## Implicit creation with submit/run
 

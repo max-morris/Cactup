@@ -3971,24 +3971,23 @@ Port of `submit()` (`simfactory-docs.txt` §14.2):
   conditional — §6). Each segment continues from the prior one only insofar as
   its **parfile** recovers the newest checkpoint — cactup does not arrange that
   and takes no position on it (§8.8).
-- **`--block`** waits, once everything is submitted, for every restart this
-  submission queued (the whole chain), in order, and then reports each one's
-  end. The verdict is the restart's own record, as for a build (§7.9): the
-  run writes `succeeded` (did the run-script exit 0) into `restart.toml`
-  with `terminated`. A restart whose run succeeded finished; one whose run
-  failed, one `stop`/`clean` ended (`terminated` without `succeeded`), and
-  one whose job the scheduler no longer lists while no run holds its lock
-  and nothing was recorded did not, and any of these makes `sim submit`
-  fail once the last restart is over. A restart that recorded its end is
-  over once the scheduler no longer lists its job (Slurm's completing `CG`
-  lingers), so a `sim delete` right after does not meet it; that wait is
-  given up after a minute or on a failed query. The wait polls the record
-  (every second) and the scheduler (every 5 s; a failed query keeps
-  waiting), and
-  never uses `[scheduler].blocking-submit`: a chain pre-submits all its
-  jobs at once, which a submit command that returns only when its job has
-  ended cannot do. Ctrl-C ends the wait with an "interrupted" error and
-  leaves the jobs queued.
+- **`--block`** waits, once everything is submitted, for every restart
+  queued by this submission (the whole chain), in order, and then reports
+  each one's end. The verdict is the restart's own record, as for a build
+  (§7.9): the run writes `succeeded` (did the run-script exit 0) into
+  `restart.toml` with `terminated`. A restart whose run succeeded finished.
+  These did not: a restart whose run failed; one ended by `stop` or `clean`
+  (`terminated` without `succeeded`); one whose job is no longer listed by
+  the scheduler while no run holds its lock and nothing was recorded. Any of
+  them makes `sim submit` fail once the last restart is over. A restart that
+  recorded its end is over once its job is no longer listed (Slurm's
+  completing `CG` lingers), so a `sim delete` right after does not meet it;
+  that wait is given up after a minute or on a failed query. The wait polls
+  the record (every second) and the scheduler (every 5 s; a failed query
+  keeps waiting). It never uses `[scheduler].blocking-submit`: a chain
+  submits all its jobs at once, which a submit command that returns only
+  when its job has ended cannot do. Ctrl-C ends the wait with an
+  "Interrupted" error and leaves the jobs queued.
 
 #### 8.3.1 Compute-node re-invocation
 
