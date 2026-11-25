@@ -170,7 +170,7 @@ fn provisioning_hits(text: &str) -> Vec<&'static str> {
             // Activating in a subshell would lose its effect: the hint is
             // to set what it sets instead.
             (
-                "activate: replace it with the exports it makes",
+                "activate: replace it with the exports that it makes",
                 r"(?:(?:\.|source)\s+\S*activate\b|(?:conda|mamba|micromamba)\s+activate\b)",
             ),
         ]
@@ -1626,7 +1626,7 @@ pub(crate) mod tests {
         for line in [". ~/venv/bin/activate", "source $HOME/env/bin/activate", "conda activate e"] {
             let found = hits(line);
             assert_eq!(found.len(), 1, "{line}");
-            assert!(found[0].contains("exports it makes"), "{line}");
+            assert!(found[0].contains("exports that it makes"), "{line}");
         }
     }
 

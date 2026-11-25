@@ -506,7 +506,7 @@ fn sentence(text: String) -> String {
 
 /// What `stop` and `delete` say of a [`Job::Unread`] job.
 fn unread(job_id: &str) -> String {
-    format!("the scheduler lists test job {job_id} in a state cactup does not recognize")
+    format!("the scheduler lists test job {job_id} in a state not recognized by cactup")
 }
 
 /// Refuse to delete `run` while it runs, unless `force` and it is a job the
@@ -907,7 +907,7 @@ mod tests {
         let exiting = Scheduler::new(&exiting);
         let mut ending = open(true, false, "JOB-6");
         let _held_ending = crate::lock::LinkLock::acquire(&ending.running_lock_path()).unwrap();
-        assert!(clear_to_delete(&ending, &exiting, "t", false).unwrap_err().to_string().contains("in a state cactup does not recognize"));
+        assert!(clear_to_delete(&ending, &exiting, "t", false).unwrap_err().to_string().contains("in a state not recognized by cactup"));
         assert!(!stopped.exists());
         stop_run(&mut ending, &exiting, "t").unwrap();
         assert!(stopped.exists());

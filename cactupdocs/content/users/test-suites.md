@@ -57,9 +57,9 @@ cactup test run -n 2 --gpu -c 2     # 2 nodes, GPU, 2 CPUs per task
 The queue decides which test scripts run, just as it does for simulations;
 to get different ones, choose a different queue with `-q`.
 
-Testsuites run only on queues the machine has a test script for. On any other
-queue, `test run`/`test submit` stops with an error listing the queues your
-config can run its testsuite on instead, for example
+Testsuites run only on queues that the machine has a test script for. On any
+other queue, `test run`/`test submit` stops with an error listing the queues
+that your config can run its testsuite on instead, for example
 `no test run script serves queue "bigmem"; config "sim" can run its testsuite
 on gpu2, gpu4; pick one of those with -q`. If there are none, the error says
 the machine cannot run that config's testsuite at all.
@@ -179,26 +179,26 @@ If a test fails:
 
 ## Stopping and managing test runs
 
-Stop a test run you submitted to the queue (`test stop` asks the
+Stop a test run that you submitted to the queue (`test stop` asks the
 scheduler to cancel its job):
 
 ```sh
 cactup test stop mytest
 ```
 
-A test run you started in the foreground has no queued job: cactup does
-not stop it for you (the run's own process number is not something a
-scheduler knows). Interrupt it with Ctrl-C in the terminal running it.
+A test run that you started in the foreground has no queued job: cactup does
+not stop it for you (the run's own process number is not something known to
+a scheduler). Interrupt it with Ctrl-C in the terminal running it.
 `test delete` refuses to remove a test run that is running; for one
-you submitted whose job the scheduler lists, `--force` cancels its job
+that you submitted whose job the scheduler lists, `--force` cancels its job
 first. If canceling fails, nothing is deleted and cactup shows what the
 scheduler's cancel command said: a timeout, or Torque refusing a
 completed job, is an error until the scheduler answers or stops listing
 the job. Only where the scheduler says it does not know the job (by the
 machine's `unknown-job-pattern`) does `--force` delete the run, unless
 its lock is held: it is running, or it ended without letting go of the
-lock, which then expires within 15 minutes. A job the
-scheduler lists in a state cactup does not know (suspended, exiting, or
+lock, which then expires within 15 minutes. A job listed by the
+scheduler in a state that cactup does not know (suspended, exiting, or
 ended) is not deleted without `--force`; `test stop` asks the scheduler
 to stop it, and once it is over `test delete` goes ahead. One whose lock is held while the scheduler does not list its job
 (it runs on another host, it ended without letting go of its lock, which
@@ -206,7 +206,7 @@ expires within 15 minutes, or, on a machine that cannot tell, the scheduler
 could not be asked) is left as it is, `--force` too.
 
 On a batch system, for 14 days after a test run ended (asked only on the
-machine the run was made for), a job the scheduler still lists is taken for what it may be: put back in the queue
+machine that the run was made for), a job still listed by the scheduler is taken for what it may be: put back in the queue
 (preemption, `scontrol requeue`), or just leaving it (Slurm lists an ended
 job as completing for a moment, or timed out for a few minutes), which
 cactup cannot tell apart; a job listed as completed (Slurm's `CD`, Torque's
@@ -214,7 +214,7 @@ cactup cannot tell apart; a job listed as completed (Slurm's `CD`, Torque's
 LISTED`, `test stop` cancels it, `test delete` refuses it without `--force`,
 and a new `test run` or `test submit` waits for it to leave (or for `test
 stop`). Where the machine definition
-says how the scheduler reports a job it does not know, a status query that
+says how the scheduler reports a job that it does not know, a status query that
 fails stops `test stop`, `test delete` and a new `test run` or `test submit`
 with the scheduler's output rather than taking the job for ended, and `test
 list` shows `UNKNOWN`. For a run that had already finished, `test list`
@@ -227,7 +227,7 @@ refuses it saying it does not know the job (by the machine's
 `unknown-job-pattern`), that settles it: cactup records the stop and from
 then on takes the job as ended (`--force` cancels the job and goes
 ahead). A cancel that fails otherwise (the controller not reached), or
-fails for a job the scheduler has just listed, is an error and records
+fails for a job just listed by the scheduler, is an error and records
 nothing: try again once the scheduler answers, or fix the pattern if the
 scheduler's message for a forgotten job is among what it printed. When `test stop` has nothing to cancel, it says what it knows (the
 scheduler does not know the job, or lists it as over, or the run has
@@ -242,8 +242,8 @@ while the run holds its lock. A run submitted by an older cactup is not
 stopped for you while a process with its number runs: check it and stop it
 yourself, as cactup says (`kill -- -<group>` where its process group holds
 only the job; else it names the processes to stop). Nor is a job whose
-process group holds processes it did not start: stop it and the processes
-it started yourself (`pstree -p <pid>` shows them).
+process group holds processes that it did not start: stop it and the processes
+that it started yourself (`pstree -p <pid>` shows them).
 
 Move a test to trash:
 

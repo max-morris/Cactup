@@ -128,7 +128,7 @@ pub fn download_component(
         if actual != *expected {
             let _ = std::fs::remove_file(&tmp_path);
             bail!(
-                "{fetch_url} is not the file the thornlist pins: its SHA-256 is {actual}, not {expected}"
+                "{fetch_url} is not the file pinned by the thornlist: its SHA-256 is {actual}, not {expected}"
             );
         }
     }
@@ -355,7 +355,7 @@ mod tests {
         c.url = Some(base);
         c.checksum = Some(other);
         let err = format!("{:#}", download_component(dir.path(), &c, &mut test_progress(), &crate::cow::Cow::default()).unwrap_err());
-        assert!(err.contains("not the file the thornlist pins") && err.contains(&payload_hash), "{err}");
+        assert!(err.contains("not the file pinned by the thornlist") && err.contains(&payload_hash), "{err}");
         assert_eq!(server.join().expect("server thread").len(), 1, "a mismatch is not retried");
         assert_eq!(std::fs::read(&got.path).unwrap(), b"payload");
         assert!(!dir.path().join("Cactus/arrangements/Thorns/file.txt.part").exists());

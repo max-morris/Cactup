@@ -5,7 +5,7 @@ description = "Complete cactup command-line interface documentation"
 
 # cactup Command-Line Interface
 
-The reference below is **generated directly from cactup's command definitions**, so it always matches the version you have installed. For task-oriented guides, start with the [User Guide](../users/getting-started.html).
+The reference below is **generated directly from cactup's command definitions**, so it always matches the version that you have installed. For task-oriented guides, start with the [User Guide](../users/getting-started.html).
 
 ## Full command reference
 
@@ -39,7 +39,7 @@ knobs with `@KNOB(name)@`; see [Running Simulations](../users/running-simulation
 - `~/.cactup/` — cactup's root: metadata, database, and caches.
 - `~/.cactup/bin/cactup` — a symbolic link to the current build,
   `~/.cactup/bin/cactup-<build>`. Every build keeps its own file so that jobs
-  run the build they were submitted with; a build replaced by an update is
+  run the build that they were submitted with; a build replaced by an update is
   marked by `cactup-<build>.retired`; only `cactup update --prune` deletes
   builds retired more than 30 days ago. See
   [Updating cactup](../users/updating.html).
@@ -72,8 +72,8 @@ knobs with `@KNOB(name)@`; see [Running Simulations](../users/running-simulation
   delta` reports how these differ from the last fetch; `cactup config delta`
   reports how they differ from a config's last build.
 - `<installation root>/Cactus/configs/<name>/cactup-config.toml` — a config's
-  build metadata, including the per-repo source state it was built from, which
+  build metadata, including the per-repo source state that it was built from, which
   is what lets a later `cactup build` notice edited or refetched sources.
 - `simulation-home` / `test-home` — simulation and test-suite output roots, set per machine or by the knobs of the same names (fallbacks `~/.cactup/simulations/` and `~/.cactup/tests/`).
-- `~/.cactup/inputs/` — inputs `cactup import` downloaded for simulations, and archives it unpacked (the machine's `inputs-home`, or the knob of that name, moves it; `cactup cache inputs` lists it).
+- `~/.cactup/inputs/` — inputs downloaded by `cactup import` for simulations, and archives that it unpacked (the machine's `inputs-home`, or the knob of that name, moves it; `cactup cache inputs` lists it).
 - `<install-home>/.cactup-build-cache/` — the build cache's objects, beside the installations (the `build-cache-home` knob moves it; `cactup cache stats` says where it is).

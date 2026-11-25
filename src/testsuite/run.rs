@@ -165,7 +165,7 @@ fn route_test_script<'t>(
         let what = format!("test {}", scripts.kind.noun());
         if usable.is_empty() {
             anyhow::anyhow!(
-                "No {what} serves queue \"{queue}\" or any other queue config \"{}\" may run on",
+                "No {what} serves queue \"{queue}\" or any other queue on which config \"{}\" may run",
                 fit.label
             )
         } else {
@@ -709,7 +709,7 @@ mod tests {
         let msg = err(&cfg(""));
         assert!(msg.contains("on cpu, gpu ("), "any-queue binary: every test queue qualifies: {msg}");
         let msg = err(&cfg("\"big\""));
-        assert!(msg.contains("or any other queue config"), "{msg}");
+        assert!(msg.contains("or any other queue on which config"), "{msg}");
     }
 
     /// A machine with BOTH normal and test-marked scripts (§11.2) and

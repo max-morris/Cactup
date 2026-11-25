@@ -118,15 +118,15 @@ frequently, to be kind to shared filesystems like Lustre/NFS.
 
 ### Copying
 
-A full-screen view can take away the one thing a plain `tail -f` gets for
+A full-screen view can take away the one thing that a plain `tail -f` gets for
 free from the terminal: selecting text with the mouse. This one doesn't.
 
 The TUI holds the mouse, because the panes are what a selection has to
 respect and your terminal can't see them — to it the screen is one grid, so
-a drag it owns highlights a rectangle across both panes and the footer and
+a drag that it owns highlights a rectangle across both panes and the footer and
 copies the two logs interleaved. Captured, a click focuses the pane under
 it and click-drag selects that pane's text character by character: from the
-character you pressed on to the one under the pointer, so you can pull one
+character that you pressed on to the one under the pointer, so you can pull one
 field out of one line instead of taking the whole line. Drag past the right
 edge of a line and it runs to the end of it; drag off the top or bottom of
 the pane and it keeps extending to the edge of what's on screen. The
@@ -204,7 +204,7 @@ clears what's typed so far.
 Once a pattern is committed, `n`/`N` jump to the next/previous match,
 wrapping around the buffer with a "search hit BOTTOM, continuing at TOP"
 notice (vim's phrasing) when they do. All matches stay highlighted; the one
-you're on is picked out from the rest. Landing on a match centers it
+that you're on is picked out from the rest. Landing on a match centers it
 vertically and pans sideways if it's off-screen, and — like any other jump
 — pauses that pane's follow until you scroll back to the bottom or press
 `End`.
@@ -287,7 +287,7 @@ cactup build stop myconfig -f     # kill it directly instead of a graceful stop
 ```
 
 On a batch system, for 14 days after a build recorded its result (asked only
-on the machine the build was made for), a job the scheduler still lists (put back in the queue by preemption or `scontrol
+on the machine that the build was made for), a job still listed by the scheduler (put back in the queue by preemption or `scontrol
 requeue`, or just leaving it: Slurm lists an ended job as completing for a
 moment, or timed out for a few minutes; one listed as completed, Slurm's
 `CD` or Torque's `C`, has simply ended) still counts as live: `build stop`
@@ -302,7 +302,7 @@ it saying it does not know the job (by the machine's
 `unknown-job-pattern`), that settles it: cactup records the stop and from
 then on takes the job as ended (`-f` cancels the job and builds). A
 cancel that fails otherwise (the controller not reached), or fails for a
-job the scheduler has just listed, is an error and records nothing.
+job just listed by the scheduler, is an error and records nothing.
 When `build stop` has nothing to cancel, it says what it knows (the
 scheduler does not know the job, or lists it as over, or the build has
 finished). An unfinished build whose status query fails is shown
@@ -404,7 +404,7 @@ If a simulation fails:
    ```sh
    cactup --trace sim run mysim
    ```
-   The `--trace` flag prints every shell command cactup runs, useful for diagnosing scheduler issues.
+   The `--trace` flag prints every shell command run by cactup, useful for diagnosing scheduler issues.
 
 ## Cleaning incomplete restarts
 

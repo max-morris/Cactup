@@ -397,7 +397,7 @@ fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) ->
         (Some(_), None) => return Err(predates_multi_sim(client, &shown, "its answer names no sim")),
         (Some(want), Some(got)) => bail!("Asked Cactarium for the sim {want} of {owner}/{name}, and it answered with {got}"),
         (None, Some(got)) => bail!(
-            "Cactarium answered {req} with the sim {got}; name the sim you want, as {owner}/{name}/{got}"
+            "Cactarium answered {req} with the sim {got}; name the sim that you want, as {owner}/{name}/{got}"
         ),
         (None, None) => {}
     }
@@ -460,6 +460,10 @@ fn fetch_published(client: &crate::cactarium::Client, root: &Path, req: &str) ->
                 .yellow()
         ),
         Some(_) => {}
+    }
+    // A reviewed copy now stands for this version: one kept while it awaited review is stale.
+    if !unreviewed {
+        let _ = std::fs::remove_file(simfile_cache_path(root, owner, name, sim, &version, true));
     }
     Ok(dest)
 }
@@ -1432,6 +1436,26 @@ pub(crate) mod tests {
         }
     }
 
+    /// Once a version is reviewed, its download takes the place of the copy kept while it awaited
+    /// review: that one is deleted. The copy of another version is not touched.
+    #[test]
+    fn a_reviewed_download_deletes_the_copy_kept_while_it_awaited_review() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("max/bbh");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("1.2.0.unreviewed.sim"), stamped("max/bbh@1.2.0")).unwrap();
+        std::fs::write(dir.join("1.3.0.unreviewed.sim"), stamped("max/bbh@1.3.0")).unwrap();
+        let (client, heads) = cactarium(
+            2,
+            |_| ("200 OK", resolved("max/bbh@1.2.0", "1.2.0", None, None)),
+            |_| stamped("max/bbh@1.2.0"),
+        );
+        assert_eq!(fetch_published(&client, tmp.path(), "max/bbh@=1.2.0").unwrap(), dir.join("1.2.0.sim"));
+        heads.join().unwrap();
+        assert!(!dir.join("1.2.0.unreviewed.sim").exists());
+        assert!(dir.join("1.3.0.unreviewed.sim").exists());
+    }
+
     /// The inputs' repository is read from a version awaiting review with a warning, and a
     /// published import that already warned about the same sim does not warn twice.
     #[test]
@@ -1584,7 +1608,7 @@ pub(crate) mod tests {
         let err = format!("{:#}", fetch_published(&client, tmp.path(), "et/s/a").unwrap_err());
         assert!(err.contains("the sim a of et/s, and it answered with b"), "{err}");
         let err = format!("{:#}", fetch_published(&client, tmp.path(), "et/s@1").unwrap_err());
-        assert!(err.contains("with the sim b; name the sim you want, as et/s/b"), "{err}");
+        assert!(err.contains("with the sim b; name the sim that you want, as et/s/b"), "{err}");
         assert!(!tmp.path().join("et").exists(), "nothing downloaded");
     }
 

@@ -6,12 +6,12 @@ description = "Every table and field of a .sim file, formats 1 to 4"
 # The .sim format
 
 A `.sim` file is TOML. It holds a simulation's parfile and thornlist
-verbatim, the exact source each repository was at, the inputs the parfile
-needs from outside the source tree, and a little description. `cactup sim
-export` and `cactup sim pack` write one; `cactup import` reproduces it;
-Cactarium publishes it. This page lists everything a `.sim` may contain.
+verbatim, the exact source that each repository was at, the inputs that the
+parfile needs from outside the source tree, and a little description. `cactup
+sim export` and `cactup sim pack` write one; `cactup import` reproduces it;
+Cactarium publishes it. This page lists everything that a `.sim` may contain.
 
-Unknown keys are an error in every table: a file that uses something a
+Unknown keys are an error in every table: a file that uses something that a
 reader does not know is refused, never half understood.
 
 ## `format`
@@ -91,7 +91,7 @@ text = """
 |---|---|---|
 | `filename` | yes | A plain file name, ending in `.par` or `.py` to match `kind`. |
 | `kind` | yes | `par` (a Cactus parameter file) or `py` (a Python script that prints one). |
-| `vars` | no | The `@VAR@` tokens the parfile uses. |
+| `vars` | no | The `@VAR@` tokens used by the parfile. |
 | `text` | yes | The parfile, verbatim and not substituted. |
 
 ## `[[input]]`
@@ -116,12 +116,12 @@ with = "eos = {dir}/bhns_gw230529_ID/gam2.polytrope"
 
 | Key | Format | Meaning |
 |---|---|---|
-| `knob` | 1 | The knob the parfile reads. Each knob at most once. |
+| `knob` | 1 | The knob read by the parfile. Each knob at most once. |
 | `description` | 1 | What it is, for whoever imports the simulation. |
 | `url` | 1 | Where its file can be downloaded. |
 | `sha256` | 1 | The SHA-256 of that file (the archive itself, when unpacked): 64 lowercase hex digits. A download that does not match is refused. |
 | `unpack` | 2 | The file is an archive to unpack: `.tar`, `.tar.gz`/`.tgz`, `.tar.xz`/`.txz` or `.zip`, told by the extension. Needs a `sha256` (or a `repo-file`): an archive is never unpacked unverified. |
-| `path` | 2 | With `unpack`: the file (or directory) in the unpacked tree the knob points at, relative to its root. Without it, the knob gets the unpacked directory itself. |
+| `path` | 2 | With `unpack`: the file (or directory) in the unpacked tree that the knob points at, relative to its root. Without it, the knob gets the unpacked directory itself. |
 | `repo-file` | 3 | A file of the simulation's own repository, at the published version's commit, instead of `url` and `sha256` (the commit pins its content). Only a simulation published by Cactarium from its repository can have one. May be unpacked like a download. |
 
 Paths inside an archive or a repository (`path`, `repo-file`, a fixup's
@@ -136,19 +136,19 @@ archive is kept as a tree named for its content and its fixups, and reused.
 ### `[[input.fixup]]`
 
 A text edit made to a file of an unpacked archive, once, right after
-unpacking, in order. Typically a path the archive's author left as a
+unpacking, in order. Typically a path that the archive's author left as a
 placeholder.
 
 | Key | Meaning |
 |---|---|
 | `file` | The file to edit, relative to the unpacked tree's root. Must be a regular file reached through no link. |
 | `replace` | Literal text; every occurrence is replaced, and there must be at least one. Not empty. |
-| `with` | Its replacement. `{dir}` stands for the absolute directory the archive was unpacked into, the only placeholder. |
+| `with` | Its replacement. `{dir}` stands for the absolute directory that the archive was unpacked into, the only placeholder. |
 
 ## `[[repo]]`
 
-One table per source repository the thornlist names (per repository, not per
-section): the exact source the simulation was built from.
+One table per source repository named by the thornlist (per repository, not
+per section): the exact source that the simulation was built from.
 
 ```toml
 [[repo]]
@@ -162,7 +162,7 @@ commit = "3f2c9e1a00112233445566778899aabbccddeeff"
 |---|---|
 | `name` | The repository's name as the thornlist derives it (`!NAME`, else the URL's last part). |
 | `url` | Where it is fetched from. |
-| `ref` | The branch or tag the thornlist names. A label only: `commit` is what is fetched. |
+| `ref` | The branch or tag named by the thornlist. A label only: `commit` is what is fetched. |
 | `commit` | The full commit id (40 or 64 hex digits). |
 | `sha256` | For a downloaded file instead of a git repository: its SHA-256. At most one of `commit` and `sha256`. |
 | `cactarium` | The Cactarium package of this git repo: `owner/pkg@version` when that version froze the commit, else `owner/pkg`. Written by export from Cactarium's answer; never on a download. |
@@ -175,7 +175,7 @@ specified file can be published.
 ## `[run]`
 
 Suggested run shape, defaults for `cactup import --submit`; machine-shaped
-settings (nodes, queue) follow from the machine it runs on instead.
+settings (nodes, queue) follow from the machine that it runs on instead.
 
 | Key | Meaning |
 |---|---|
@@ -192,10 +192,10 @@ Where the file came from. Informational: `import` needs none of it.
 |---|---|
 | `exported-by` | The cactup that wrote it. |
 | `exported-at` | When. |
-| `machine` | The machine the simulation ran on. |
+| `machine` | The machine that the simulation ran on. |
 | `flavor` / `optionlist` | How its configuration was built: a machine flavor, or an optionlist file's name. At most one. |
 | `universe` | The build universe (a container image, say), when not the host. |
 | `flags` | Build flags. |
-| `machine-disabled` | Thorns that machine's configuration turned off. |
-| `base` | The Cactarium stack the installation was based on, if any. |
+| `machine-disabled` | Thorns turned off by that machine's configuration. |
+| `base` | The Cactarium stack that the installation was based on, if any. |
 | `extra` | Anything else, as strings. Export writes `claims-overrides` here: the installation's claim overrides, joined by `; `. |

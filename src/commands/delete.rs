@@ -104,7 +104,7 @@ pub fn dispatch(ctx: &Ctx, alias: String, force: bool) -> Res<()> {
     }
     if kept_home {
         println!(
-            "Kept '{}': it holds files cactup did not put there.",
+            "Kept '{}': it holds files not put there by cactup.",
             inst.root.display()
         );
     }

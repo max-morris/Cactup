@@ -1226,7 +1226,17 @@ pub(crate) fn present(
             }
         }
     }
+    // An added package recorded as awaiting review when it was added: without the flag,
+    // Cactarium hides that release, which is why it went unread.
+    let hidden: BTreeSet<usize> = if reg.client.asks_for_unreviewed() {
+        BTreeSet::new()
+    } else {
+        added.iter().zip(&want_of_added).filter(|(a, _)| a.pending).filter_map(|(_, w)| *w).collect()
+    };
     let why = |i: usize| match (&refused[i], &wants[i].version) {
+        _ if hidden.contains(&i) => "it was added from a release awaiting review, which Cactarium serves only under \
+                                     --risky-allow-untrusted-artifacts"
+            .to_owned(),
         (Some(u), _) => format!("Cactarium did not read it there: {}", u.why),
         (None, Some(v)) => format!("Cactarium does not serve version {v} at commit {}", short(&wants[i].commit)),
         (None, None) => format!("Cactarium cannot read it at commit {}", short(&wants[i].commit)),

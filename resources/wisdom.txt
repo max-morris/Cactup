@@ -53,8 +53,8 @@ cactup sim list --long --all
 Preview exactly what a refetch would do to every repo — clone, fetch,
 align, or skip — without touching anything: cactup inst refetch -n
 %
-Force-refetch just the repos you name — a name matches a repo or any thorn
-it provides: cactup inst refetch --overwrite SpacetimeX
+Force-refetch just the repos that you name — a name matches a repo or any
+thorn that it provides: cactup inst refetch --overwrite SpacetimeX
 %
 Refetch never destroys your local modifications: overwritten repos are
 backed up first, under ~/.cactup/refetch-backups/
@@ -97,7 +97,7 @@ instead of failing.
 Target another installation for a single command instead of switching:
 cactup -I/--installation <alias> sim list
 %
-See every shell command cactup runs, as it runs it — the fastest way to
+See every shell command that cactup runs, as it runs it — the fastest way to
 debug a scheduler rejection: cactup --trace sim submit <name>
 %
 The progress tree goes deeper than it shows. Peel it back:

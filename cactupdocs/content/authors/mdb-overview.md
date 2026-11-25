@@ -99,7 +99,7 @@ All three are shell (`.sh`) or Python (`.py`) scripts. See [Scripts & Variables]
 
 ### hostname.regexp and discover.py
 
-The **hostname.regexp** file holds one regular expression; the machine claims every host it matches (tested against the full hostname and its short form):
+The **hostname.regexp** file holds one regular expression; the machine claims every host that it matches (tested against the full hostname and its short form):
 
 ```
 ^mike\d+(\.hpc\.lsu\.edu)?$
@@ -179,7 +179,7 @@ cactup machine list
 ```
 
 One of them is always present: **generic**, a single-node workstation with no
-batch system, the fallback for any machine nothing else claims.
+batch system, the fallback for any machine that nothing else claims.
 
 ## Understanding universe
 
@@ -192,7 +192,7 @@ A **universe** is an optional build wrapper. Examples:
 The build universe is **recorded** with your config and affects:
 
 - How the config is built (container vs native, which modules are loaded)
-- How simulations are submitted and run (they run in the same universe they were built in)
+- How simulations are submitted and run (they run in the same universe that they were built in)
 
 Machines can define universes in meta.toml to support hybrid builds (native + Singularity on the same cluster).
 

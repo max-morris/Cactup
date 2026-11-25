@@ -56,7 +56,7 @@ This creates `~/.cactup/machines/myclu/` with:
 `buildsubmitscripts/` directory above is `generic`'s.)
 
 `generic`'s `buildsubmitscripts/default.sh` backgrounds a build on the
-workstation it was submitted from (`cactup build submit`); `generic` itself
+workstation that it was submitted from (`cactup build submit`); `generic` itself
 sets `[build].default-action = "run"`, so a bare `cactup build` still compiles
 in the foreground. On a cluster you either rewrite that script with your
 scheduler's directives or delete it along with its `[buildsubmitscripts]`
@@ -109,9 +109,9 @@ sinfo -o "%n %c %m" | head -1  # CPUs and memory per node
 
 To get node counts derived (`sim submit -T 256` asking for as many nodes as
 256 tasks need), declare `max-cpus-per-node` per queue, under
-`[queues.<name>]`. A machine you create is an overlay, and its top-level
+`[queues.<name>]`. A machine that you create is an overlay, and its top-level
 `[hardware]` value counts as detected: `machine create` may have copied it
-from the host it ran on, which on a cluster is a login node. A detected
+from the host that it ran on, which on a cluster is a login node. A detected
 value still sizes the default layout, but cactup derives no node count from
 it: `sim submit -T 256` stays on one node unless you give `-n` or `-t`.
 
@@ -150,10 +150,10 @@ max-walltime = "24:00:00"
 > **Note:** `allocation` is **not** a `[scheduler]` key — the account to charge
 > is a per-user *knob* (`cactup knob allocation my_project`), not part of the
 > machine definition. Writing it here is an error, not a no-op: every
-> `meta.toml` table rejects keys cactup does not know, naming the offender and
+> `meta.toml` table rejects keys that cactup does not know, naming the offender and
 > listing the accepted spellings. That is deliberate — a typo like
 > `max-cpu-per-node` should fail loudly rather than silently do nothing. Keep a
-> value cactup has no key for in a `#` comment.
+> value that cactup has no key for in a `#` comment.
 
 Test each pattern against real scheduler output:
 
@@ -246,13 +246,13 @@ script file (`submitscripts/default.sh`, `runscripts/test.sh`, ...):
 "test" = { queues = ["default"], test = true }
 ```
 
-Optionlists need no table here: every `*.toml` file you put in `optionlists/`
+Optionlists need no table here: every `*.toml` file that you put in `optionlists/`
 (next step) is one of the machine's flavors.
 
 ## Step 3: Create optionlists
 
 An optionlist is a `[cactup]` header (cactup-only metadata) plus an `[options]`
-table of raw Cactus `NAME = value` pairs — the same names you'd put in a
+table of raw Cactus `NAME = value` pairs — the same names that you'd put in a
 hand-written Einstein Toolkit `.cfg` optionlist. Values are strings, booleans, or
 integers (floats are rejected); `VERSION` is required and is always emitted
 first. See [Optionlists](optionlists.html) for the full reference.
@@ -377,7 +377,7 @@ srun @EXECUTABLE@ @PARFILE@
 
 Most clusters let you compile on the login node, and don't need anything
 here: delete the `buildsubmitscripts/` directory and the `[buildsubmitscripts]`
-table a clone of `generic` came with, and skip the rest of this subsection.
+table that a clone of `generic` came with, and skip the rest of this subsection.
 Some clusters (often GPU clusters with
 a strict login-node policy) forbid it, the same way they'd forbid running a
 simulation there. If yours is one of them, keep (or add) a fourth script
@@ -397,7 +397,7 @@ its own table:
 "default" = { queues = ["default", "gpu"] }
 ```
 
-The queue a build job lands on only decides where `make` runs, so any queue
+The queue that a build job lands on only decides where `make` runs, so any queue
 may build any flavor: the CUDA flavor can compile on `default`, and the CPU
 flavor on `gpu`. Neither the flavor's `[cactup.runs-on]` nor a queue's
 `build-universes` is checked for a build job.
@@ -446,7 +446,7 @@ locate exactly which build attempt to run without touching cactup's global
 state on this machine at all. Don't hand-write these two — they come from
 cactup itself when it generates the script, not from anything you configure.
 
-If your cluster needs the same GPU-reservation logic your run submitscript
+If your cluster needs the same GPU-reservation logic that your run submitscript
 has (see the qbd example in [Scripts & Variables](scripts-and-variables.html)),
 write `buildsubmitscripts/default.py` instead of `.sh` — the calling
 convention is identical to a `.py` submit script.
@@ -673,13 +673,13 @@ This shows the full script before submission. Run it manually to debug.
 Once your machine is working:
 
 1. **Share with your team**: Copy `~/.cactup/machines/myclu/` to colleagues
-2. **Merge to system MDB**: Submit your machine definition to the cactup project (GitHub), as a directory under `mdb/`. The `mdb-generation` key under `[cactup]` in its `meta.toml` only matters in your overlay (the system MDB's generation is `mdb/GENERATION`), so you can remove it from the copy you submit
+2. **Merge to system MDB**: Submit your machine definition to the cactup project (GitHub), as a directory under `mdb/`. The `mdb-generation` key under `[cactup]` in its `meta.toml` only matters in your overlay (the system MDB's generation is `mdb/GENERATION`), so you can remove it from the copy that you submit
 3. **Document**: Add a README or notes about your cluster setup
 
 A new machine that uses only what existing machines already use merges as it
 is. If it needs something new from cactup — a `meta.toml` key, a template
 variable, a changed default — the published MDB would stop loading in cactup
-builds users already have, and the change must come with a **generation
+builds that users already have, and the change must come with a **generation
 bump**. See [MDB Generations](mdb-generations.html) for the rule and the
 procedure.
 

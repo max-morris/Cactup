@@ -241,7 +241,7 @@ impl Refusal {
                     "Pass --ignore-claim {ignore}, or `cactup claims override satisfies {fork} {}`",
                     live.target
                 ),
-                None => "Name a version the fork stands in for".to_owned(),
+                None => "Name a version that the fork stands in for".to_owned(),
             },
             Refusal::NoReleaseFits { constraints, .. }
             | Refusal::FleshUnmet { constraints, .. }
@@ -258,7 +258,7 @@ impl Refusal {
             }
             Refusal::MissingThorns { live, .. } => match &live.ignore {
                 Some(ignore) => format!("Pass --ignore-claim {ignore}"),
-                None => "Name thorns the package has".to_owned(),
+                None => "Name thorns that the package has".to_owned(),
             },
             Refusal::ReplacementLacksThorns { by, upstream, .. } => {
                 format!("Pass --ignore-claim {by}:fork-of:{upstream} to install it as a package of its own")

@@ -3130,6 +3130,33 @@ refetch post-pass records per-repo fetched HEADs in
 decision is a planned follow-up (TODO in `_impl_fetch.md`), which will
 retire the warning.
 
+**The closure check.** A thornlist must build every thorn together with what
+it cannot compile or link without. `cactup build` checks it once the rebuild
+decision says a build will run, before `make` and before any queue, and `sim
+export` and `sim pack -I` check the list a `.sim` is written from; each
+refuses, naming every thorn, what it needs and which fetched thorn would meet
+it, so a missing thorn costs seconds, not a queue wait, and never leaves the
+machine in a `.sim` (the Cactarium refuses such a `.sim` or stack release
+too). What a thorn needs is the shared crate's rule (`ccl::needs_of`, the one
+the Cactarium and `--trim` read): the implementations it `INHERITS` or
+befriends, the capabilities, thorns and functions it `REQUIRES`, and the
+`USES INCLUDE` headers its sources `#include` outside any preprocessor
+conditional (an include guard is none). Cactus compiles a used header from
+every provider in the configuration and from none as an empty file, so such
+a header fails to compile without its provider: EinsteinInitialData/
+TwoPuncturesX includes TwoPunctures' `TP_Guts.h` and is the case this exists
+for. A header counts only where a thorn cactup knows of provides it
+(`ccl::counts`): the thorns of every repo the installation fetched, read
+whole from `repos/`, not only those linked into `arrangements/`. One nothing
+provides is a hook others may fill (ADMMacros' `CalcTmunu.inc`) or reaches
+the thorn through a capability's include directory, and is no need. Sources
+are read only where they can matter (a thorn's, when a known thorn the list
+does not build provides one of its `USES INCLUDE` headers), so a closed list
+reads no source file. A built thorn whose `interface.ccl` cannot be read
+turns the check off: Cactus reports that one, and nothing is guessed about
+what it provides. Checked against every config built in an ET 2026_05 tree,
+the rule flags nothing.
+
 ### 7.6 Build precedence & flags
 
 Carried over verbatim from `simfactory-docs.txt` §6.3 / §16, substituting
@@ -4901,7 +4928,10 @@ not build", since Cactus's ThornList reader skips `!` lines; the parser's
 and a trim leaves it exactly as it is) — every provider of a `REQUIRES`d capability (which one a build
 settles on is not ours to guess), `REQUIRES THORNS`, and the implementers of
 an `INHERITS`/`FRIEND` implementation or providers of a `REQUIRES FUNCTION`
-only when no kept thorn already offers it. The flesh and every component that
+only when no kept thorn already offers it, and every provider of a header a
+kept thorn includes outside any conditional (§7.5's closure check; sources are
+read only for a thorn using a header some listed thorn provides). The trimmed
+list then passes the closure check like any other. The flesh and every component that
 is not an arrangement thorn stay, as does a thorn whose `interface.ccl` cannot
 be read (missing, not a regular file, or over the crate's size limit). Bytes
 that are no UTF-8 (a Latin-1 comment) do not make a file unreadable: they are
@@ -5177,7 +5207,8 @@ What uses it, all on the login node (D11):
   downloads to `<v>.unreviewed.sim` (`import::simfile_cache_path`), which the
   offline fallback never reads, and a failed download of one fails instead of
   falling back to an older copy; `download_sim` fails when the download says
-  unreviewed where `/resolve` did not.
+  unreviewed where `/resolve` did not. A reviewed download of a version deletes
+  that version's `.unreviewed.sim`.
 - The dependency endpoints (`/lookup`, `/providers`, `POST /packages/read`,
   `/whoami`, `POST /repos`) and what `add`, `remove`, `claims`, `package init`
   and `stack init` do with them are §8.12.
@@ -5602,6 +5633,13 @@ note = "why"                    # drop only, optional
   root when the package was added (`Makefile`, `lib`, `src`, …; frozen at that
   time, so a refetch to a base with more items does not pick them up);
   empty means no flesh package. `replaces` names the base's flesh repos too.
+  `pending = true` (written only when true): the release awaited review when it
+  was added, under `--risky-allow-untrusted-artifacts`. Without the flag
+  Cactarium hides that release, so the package goes unread; its reason then
+  says it was added from a release awaiting review, served only under the flag,
+  and `inst show` marks it "awaited review when added". Additive, no bump: an
+  older writer drops it (put-back never enters arrays), losing only that
+  explanation.
 - **Base extensions.** An `[[added]]` entry that only gives a base clone more
   thorns (it replaces nothing, and the base has that clone under the same name
   from the same repository: `add::base_clone_of`) lives in that clone, at the
@@ -5806,13 +5844,10 @@ in DIR and calls `publish_stack` as `<owner>/<name>@V`.
 - An override redirects every checkout of a base repo; `compose` drops only the
   checkouts that a package claims, so `stack init` overrides only when the package
   takes all of them.
-- Nothing records that an installed package was pending, so commands run
-  without the flag cannot say so beyond what the server answers; old
-  `.unreviewed.sim` files are never cleaned up.
+- An `.unreviewed.sim` whose version is never downloaded again once reviewed
+  (or is rejected) stays in the cache.
 - A restoring remote that does not answer leaves the clone on the pinned label,
   said on its line.
-- `scan_sources` of the shared crate does not poll Ctrl-C, so a stop waits for
-  the thorns in flight.
 
 ---
 

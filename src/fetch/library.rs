@@ -229,7 +229,7 @@ fn check_clone(dir: &Path, what: &str, url: &str, commit: Option<&str>) -> Res<g
         if head != want {
             let short = |s: &str| s[..12.min(s.len())].to_owned();
             bail!(
-                "{what} at '{}' is at {}, not at {}, the commit the thornlist pins",
+                "{what} at '{}' is at {}, not at {}, the commit pinned by the thornlist",
                 dir.display(),
                 short(&head),
                 short(want)
@@ -844,7 +844,7 @@ pub fn unplace(
                     done.link_removed = true;
                 }
                 Some(kind) => notes.push(format!(
-                    "'{}' is a {} cactup did not make; left as it is",
+                    "'{}' is a {} that cactup did not make; left as it is",
                     target.display(),
                     kind_name(kind)
                 )),
@@ -1511,7 +1511,7 @@ mod tests {
         assert!(e.contains("not of KadathThorn's repository"), "{e}");
         // At another commit than the pin.
         let e = err(&Placement { dependent_commit: Some("0".repeat(40)), ..p.clone() });
-        assert!(e.contains("the commit the thornlist pins"), "{e}");
+        assert!(e.contains("the commit pinned by the thornlist"), "{e}");
 
         // Nothing above left anything behind, and the real one still places.
         assert!(!link.exists() && std::fs::symlink_metadata(&link).is_err());
