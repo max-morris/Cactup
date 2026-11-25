@@ -122,7 +122,7 @@ blocking-submit = "sbatch --wait @SCRIPTFILE@"
 allocation-env = "SLURM_JOB_ID"
 get-status = "squeue -j @JOB_ID@"
 get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
-unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'
+unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified|^ *JOBID '
 stop = "scancel @JOB_ID@"
 submit-pattern = "Submitted batch job ([0-9]+)"
 status-pattern = "@JOB_ID@ "
@@ -263,7 +263,7 @@ blocking-submit = "sbatch --wait @SCRIPTFILE@"
 allocation-env = "SLURM_JOB_ID"
 get-status = "squeue -j @JOB_ID@"
 get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
-unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'
+unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified|^ *JOBID '
 stop = "scancel @JOB_ID@"
 submit-pattern = "Submitted batch job ([0-9]+)"
 status-pattern = "@JOB_ID@ "
@@ -285,9 +285,13 @@ delete`; every other command asks job by job with `get-status`.
 `unknown-job-pattern` (optional) is a regular expression matching a line of
 `get-status`'s output, stdout or stderr, that says the scheduler does not
 know the job, `@JOB_ID@` substituted as in the other patterns. For Slurm's
-`squeue -j` that is `slurm_load_jobs error: Invalid job id specified`; for
-Torque's `qstat`, `Unknown Job Id`; for PBS Pro's, `Unknown Job Id|Job has
-finished` (the second for a finished job, when job history is on).
+`squeue -j` that is
+`slurm_load_jobs error: Invalid job id specified|^ *JOBID `: the error once
+the controller has forgotten the job, and the
+header line, which is all `squeue -j` prints (exiting 0) for a job that
+ended a few minutes ago and is not yet forgotten. For Torque's `qstat`, it is
+`Unknown Job Id`; for PBS Pro's, `Unknown Job Id|Job has finished` (the
+second for a finished job, when job history is on).
 
 With it set, cactup tells a job the scheduler has forgotten from a status
 query that failed: output with no line for the job (no line matching
