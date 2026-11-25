@@ -26,15 +26,17 @@ UPDATE_ROOT = Path("/opt/cactup-tutorial/update-root")
 UPDATE_URL = "http://127.0.0.1:8765"
 MACHINE = "cactup-tutorial"
 RELEASE = "ET_2026_05_v0"
+# The stock install of RELEASE, named as notebook 1 names it.
+ALIAS = "MyCactus"
 SAVED = HOME / "tutorial-saved"
 
 # What each notebook needs before its first cell, beyond cactup itself.
 NOTEBOOKS = {
     "1": {"cactup": False},
     "2": {"cactup": True, "install": True},
-    # Notebook 3 compares its own installation with the stock one, but
-    # makes et-mp the active one itself (and may be run again after that).
-    "3": {"cactup": True, "install": True, "use": False},
+    # Notebook 3 makes its own installation, et-mp: run again, it starts
+    # without one.
+    "3": {"cactup": True, "install": True, "et-mp": True},
     "4a": {"cactup": True, "install": True},
     # Notebook 4b ends by switching back to the stock tutorial config.
     "4b": {"cactup": True, "install": True, "tutorial": True},
@@ -170,7 +172,7 @@ MYLAB_LINES = [
     (r"^nickname\s*=.*$", 'nickname = "mylab"'),
     (r"^max-cpus?-per-node\s*=.*$", "max-cpus-per-node = 4"),
     (r"^memory\s*=.*$", "memory = 7372"),
-    (r"^mdb-generation\s*=.*$", "mdb-generation = 1"),
+    (r"^mdb-generation\s*=.*$", "mdb-generation = 3"),
 ]
 
 
@@ -257,25 +259,46 @@ def ensure_cactup() -> None:
 # -- the install ----------------------------------------------------------------
 
 
-def ensure_install(use: bool = True) -> None:
+def ensure_install() -> None:
     listing = cactup("list").stdout
-    if not re.search(rf"^- {re.escape(RELEASE)}(?=[ \t]|$)", listing, re.M):
-        say(f"installing {RELEASE} from the mirrors (notebook 1 does this; under a minute)")
-        cactup("install", RELEASE, "--silent")
+    if not re.search(rf"^- {re.escape(ALIAS)}(?=[ \t]|$)", listing, re.M):
+        say(f"installing {RELEASE} as {ALIAS} from the mirrors (notebook 1 does this; under a minute)")
+        cactup("install", RELEASE, "--alias", ALIAS, "--silent")
         listing = cactup("list").stdout
-    if use and not re.search(rf"^- {re.escape(RELEASE)}[ \t].*\(active\)", listing, re.M):
-        cactup("use", RELEASE)
-        say(f"made {RELEASE} the active installation")
+    if not re.search(rf"^- {re.escape(ALIAS)}[ \t].*\(active\)", listing, re.M):
+        cactup("use", ALIAS)
+        say(f"made {ALIAS} the active installation")
     link = HOME / "Cactus"
-    target = CACTUP_HOME / "cacti" / RELEASE / "Cactus"
+    target = CACTUP_HOME / "cacti" / ALIAS / "Cactus"
     if not (link.is_symlink() and Path(os.readlink(link)) == target):
         if link.is_symlink() or not link.exists():
             if link.is_symlink():
                 link.unlink()
             link.symlink_to(target)
-            say(f"pointed ~/Cactus at {RELEASE}'s source tree")
+            say(f"pointed ~/Cactus at {ALIAS}'s source tree")
         else:
             say("~/Cactus is not a link to the stock install; notebooks that use it will not find it")
+
+
+ET_MP = "et-mp"
+
+
+def remove_et_mp() -> None:
+    """Notebook 3 makes the installation et-mp, its link ~/et-mp and the
+    simulation real4 in it: take away what an earlier run left, so the
+    notebook runs from the top. Its simulations are kept, in ~/tutorial-saved."""
+    if re.search(rf"^- {re.escape(ET_MP)}(?=[ \t]|$)", cactup("list").stdout, re.M):
+        cactup("uninstall", ET_MP, "--force")
+        say(f"removed the installation {ET_MP} an earlier run of notebook 3 made")
+    link = HOME / ET_MP
+    if link.is_symlink() and not link.exists():
+        link.unlink()
+        say(f"removed the link ~/{ET_MP}, which pointed at it")
+    sims = CACTUP_HOME / "simulations" / ET_MP
+    if sims.exists():
+        dest = saved_dir() / f"simulations-{ET_MP}"
+        shutil.move(str(sims), dest)
+        say(f"moved its simulations to ~/{dest.relative_to(HOME)}")
 
 
 def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -287,7 +310,7 @@ def restore_edited() -> None:
     """Put the files notebooks edit back to their committed state, saving
     the attendee's versions outside the Cactus tree (a copy beside one would
     change its thorn's shape)."""
-    cactus = CACTUP_HOME / "cacti" / RELEASE / "Cactus"
+    cactus = CACTUP_HOME / "cacti" / ALIAS / "Cactus"
     saved = None
     for rel, notebook in EDITED.items():
         path = cactus / rel
@@ -315,7 +338,7 @@ def restore_edited() -> None:
 
 def active_is_tutorial(listing: str) -> bool:
     """Whether `cactup config list` shows `tutorial` itself as the active
-    config (not `tutorial-pinned` or another config whose name starts so)."""
+    config (not `tutorial-taskset` or another config whose name starts so)."""
     return re.search(r"^- tutorial[ \t].*\(active\)", listing, re.M) is not None
 
 
@@ -324,31 +347,31 @@ def ensure_tutorial() -> None:
     2's build), and the active config. Quiet when cactup calls it up to date
     (seconds); otherwise one line saying why, then cactup's own output as it
     comes, so a build never looks like a hang."""
-    exists = (CACTUP_HOME / "cacti" / RELEASE / "Cactus" / "configs" / "tutorial").is_dir()
-    proc = subprocess.Popen([str(CACTUP), "-I", RELEASE, "build", "tutorial", "--thornlist", THORNLIST],
+    exists = (CACTUP_HOME / "cacti" / ALIAS / "Cactus" / "configs" / "tutorial").is_dir()
+    proc = subprocess.Popen([str(CACTUP), "-I", ALIAS, "build", "tutorial", "--thornlist", THORNLIST],
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, env=plain_env())
     first = proc.stdout.readline()
     if re.search(r"\bis up to date\b", first):
         proc.stdout.read()
     elif exists:
-        say(f"rebuilding the tutorial config in {RELEASE}: its sources changed since it was built "
+        say(f"rebuilding the tutorial config in {ALIAS}: its sources changed since it was built "
             "(notebooks 5 and 9 edit some):")
         sys.stdout.write(first)
         for line in proc.stdout:
             sys.stdout.write(line)
             sys.stdout.flush()
     else:
-        say(f"building the tutorial config in {RELEASE} (notebook 2 does this):")
+        say(f"building the tutorial config in {ALIAS} (notebook 2 does this):")
         sys.stdout.write(first)
         for line in proc.stdout:
             sys.stdout.write(line)
             sys.stdout.flush()
     if proc.wait() != 0:
         raise SystemExit("catch-up: building the tutorial config failed")
-    if not active_is_tutorial(cactup("-I", RELEASE, "config", "list").stdout):
-        cactup("-I", RELEASE, "config", "use", "tutorial")
-        say(f"made tutorial the active config of {RELEASE}")
+    if not active_is_tutorial(cactup("-I", ALIAS, "config", "list").stdout):
+        cactup("-I", ALIAS, "config", "use", "tutorial")
+        say(f"made tutorial the active config of {ALIAS}")
 
 
 def main(argv: list[str]) -> int:
@@ -366,8 +389,10 @@ def main(argv: list[str]) -> int:
         return 0
     ensure_cactup()
     machine()
+    if needs.get("et-mp"):
+        remove_et_mp()
     if needs.get("install"):
-        ensure_install(use=needs.get("use", True))
+        ensure_install()
         # Restoring always comes before building.
         restore_edited()
     if needs.get("tutorial"):

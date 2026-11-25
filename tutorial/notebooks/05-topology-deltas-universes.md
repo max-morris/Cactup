@@ -44,24 +44,23 @@ it as options:
 | `-q` | queue | `debug` |
 
 WaveToyX, a small CarpetX example thorn, has a test whose run takes a
-second, so it is good for trying things out. Submit it with the defaults.
-(`--overwrite` replaces a simulation of the same name, if there is one, so
-that the cells of this notebook can be run again. Replacing one whose job is
-still queued or running would leave that job behind, so a cell that submits
-first waits until no job of that name is in SLURM's queue: `squeue -n NAME`
-lists them.)
+second, so it is good for trying things out. Submit it with the defaults,
+and wait for it with `--block`, as in notebook 2. (`--overwrite` replaces a
+simulation of the same name, if there is one, so that the cells of this
+notebook can be run again. It doesn't stop that simulation's job: if you
+interrupt a cell while it waits, `cactup sim stop NAME` before running it
+again.)
 
 ```{code-cell} ipython3
 %%shell
-while squeue -h -n shape-4x1 | grep -q .; do sleep 1; done
-cactup sim submit shape-4x1 ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par -w 00:05:00 --overwrite
+cactup sim submit shape-4x1 ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par -w 00:05:00 --overwrite --block
 ```
 
 cactup turned the topology into the batch script it handed to `sbatch`.
 Each restart keeps its own copy, beside its output:
 
 ```{code-cell} ipython3
-%show ~/.cactup/simulations/ET_2026_05_v0/tutorial/shape-4x1/output-0000/.cactup/submit-script
+%show ~/.cactup/simulations/MyCactus/tutorial/shape-4x1/output-0000/.cactup/submit-script
 ```
 
 With no topology options, the run fills the node: four tasks of one CPU
@@ -72,12 +71,11 @@ Two tasks of two threads each, still filling the node's four CPUs:
 
 ```{code-cell} ipython3
 %%shell
-while squeue -h -n shape-2x2 | grep -q .; do sleep 1; done
-cactup sim submit shape-2x2 ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par -T 2 -c 2 -w 00:05:00 --overwrite
+cactup sim submit shape-2x2 ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par -T 2 -c 2 -w 00:05:00 --overwrite --block
 ```
 
 ```{code-cell} ipython3
-%show ~/.cactup/simulations/ET_2026_05_v0/tutorial/shape-2x2/output-0000/.cactup/submit-script --lines 1:9
+%show ~/.cactup/simulations/MyCactus/tutorial/shape-2x2/output-0000/.cactup/submit-script --lines 1:9
 ```
 
 The machine's entry decides what makes sense here. This one is a single
@@ -95,16 +93,13 @@ error: cactup splits the run into a chain of jobs, each continuing from
 the last one's checkpoint, if the parameter file checkpoints and recovers.
 Notebook 7 does that.
 
-Each run takes a second once SLURM starts it. The next cell waits until
-neither job is in SLURM's queue any more, then picks out the lines where
-Cactus says how it was started: how many MPI processes, and how many
-OpenMP threads each.
+Both runs are over. The next cell picks out the lines where Cactus says how
+it was started: how many MPI processes, and how many OpenMP threads each.
 
 ```{code-cell} ipython3
 %%shell
-while squeue -h -n shape-4x1,shape-2x2 | grep -q .; do sleep 1; done
 cactup sim list
-(cd ~/.cactup/simulations/ET_2026_05_v0/tutorial &&
+(cd ~/.cactup/simulations/MyCactus/tutorial &&
  grep -E 'MPI processes|OMP threads' shape-4x1/output-0000/shape-4x1.out shape-2x2/output-0000/shape-2x2.out)
 ```
 
@@ -123,59 +118,74 @@ cactup sim delete shape-2n
 
 ## Universes
 
-A *universe* wraps the commands cactup runs for a config: its build and,
-unless the optionlist says otherwise, its simulations. Clusters use them to
-build and run inside a container image (Singularity or Apptainer) or a
-shell with modules loaded. This machine has one universe, `pinned`, which
-runs everything under `taskset` (which keeps a process on a given set of
-CPUs), restricted to this container's CPUs: a simple stand-in for a
-container image, to see what wrapping does.
+Everything cactup has run for you so far (a build's `make`, a job's run
+script) ran directly on this machine, with the compilers and libraries
+installed on it, just as if you had typed it. That is the default, and it
+has no name: a config built without a universe builds and runs on the host
+as it is.
+
+A *universe* is a wrapper, defined in the machine's entry, that cactup puts
+in front of every command it runs for a config: its build, and (unless the
+optionlist says otherwise) its simulations' runs. On a cluster, a universe
+typically runs them inside a container image (`apptainer exec image.sif
+...`, with Apptainer or Singularity) or in a shell with certain modules
+loaded, so that a config is built and run with the same software, wherever
+that happens.
+
+This machine has no container runtime, so its one universe is a simpler
+stand-in, easy to watch: `taskset`, which runs each command under the
+`taskset` program (which keeps a process on a given set of CPUs), restricted
+to this container's CPUs. Its definition in the machine's entry is one line,
+the command to put in front:
 
 ```{code-cell} ipython3
 %%shell
 cactup machine show | grep universes
+sed -n '/^\[universes\./,$p' ~/.cactup/mdb/gen-3/cactup-tutorial/meta.toml
 ```
 
-A config's universe is chosen when it is built. Build one in `pinned`:
-`tutorial-pinned`, from the same thornlist as `tutorial`. The first command,
+`@ENV(CACTUP_TUTORIAL_CPUS)@` is filled in from the environment when the
+command runs: here `CACTUP_TUTORIAL_CPUS` holds this container's CPUs.
+
+A config's universe is chosen when it is built. Build one in `taskset`:
+`tutorial-taskset`, from the same thornlist as `tutorial` (which has no
+universe). The first command,
 `cactup-tutorial-sources-clean`, is the tutorial's, not cactup's: it checks
-that the stock installation's sources are as fetched (the fetched commits,
+that `MyCactus`'s sources are as fetched (the fetched commits,
 no edits, no extra files in its thorns), because this build was prepared
 ahead of time from them (it takes about a minute). Notebook 4b covered the
-other way to vary a build, optionlist variants.
+other way to vary a build, optionlist flavors.
 
 ```{code-cell} ipython3
 %%shell
-cactup-tutorial-sources-clean && cactup build tutorial-pinned --universe pinned --thornlist /opt/cactup-tutorial/thornlists/tutorial.th
+cactup-tutorial-sources-clean && cactup build tutorial-taskset --universe taskset --thornlist /opt/cactup-tutorial/thornlists/tutorial.th
 ```
 
 ```{code-cell} ipython3
 %%shell
-cactup config show tutorial-pinned
+cactup config show tutorial-taskset
 ```
 
-`universe: pinned` is recorded with the config, and its simulations run in
+`universe: taskset` is recorded with the config, and its simulations run in
 it (`coerce-run-universe: true`), unless a submit says `--universe` or
 `--no-universe`. Each restart records the universe it runs in. (`-T 1`:
 one process is plenty for a one-second test.)
 
 ```{code-cell} ipython3
 %%shell
-while squeue -h -n wave-pinned | grep -q .; do sleep 1; done
-cactup sim submit wave-pinned ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par --config tutorial-pinned -T 1 -w 00:05:00 --overwrite
-sed -n '/^\[universe\]/,/^\]/p' ~/.cactup/simulations/ET_2026_05_v0/tutorial-pinned/wave-pinned/output-0000/.cactup/restart.toml
+cactup sim submit wave-taskset ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par --config tutorial-taskset -T 1 -w 00:05:00 --overwrite --block
+sed -n '/^\[universe\]/,/^\]/p' ~/.cactup/simulations/MyCactus/tutorial-taskset/wave-taskset/output-0000/.cactup/restart.toml
 ```
 
-`@ENV(NAME)@` is filled in from the environment when the job starts; here
-`CACTUP_TUTORIAL_CPUS` holds this container's CPUs, so the run is pinned to
-them.
+The restart keeps `@ENV(CACTUP_TUTORIAL_CPUS)@` as it is: it is filled in
+when the job starts, on the node that runs it.
 
-One thing to know: unlike the thornlist, the variant and the build flags, a
+One thing to know: unlike the thornlist, the flavor and the build flags, a
 config's universe is not reused by later builds. Every build works out its
 universe again, from `--universe`, or else the optionlist or the machine's
 default, and a universe
 other than the one the config was built in means a rebuild from scratch.
-So build `tutorial-pinned` with `--universe pinned` every time.
+So build `tutorial-taskset` with `--universe taskset` every time.
 
 ## Hacking on a thorn
 
@@ -183,7 +193,7 @@ Now the everyday loop: edit a thorn, rebuild, run. cactup tracks the
 source tree each config was built from, so a plain `cactup build` sees
 your edits and rebuilds only what they affect.
 
-You will edit three files in the stock installation. The cells below make
+You will edit three files in `MyCactus`. The cells below make
 each edit, so the notebook runs from top to bottom. Open the files in the
 editor (the file browser on the left, under `Cactus/`) to see them, or make
 an edit yourself instead of running its cell; type it exactly as the cell
@@ -245,10 +255,8 @@ hello line out of its log:
 
 ```{code-cell} ipython3
 %%shell
-while squeue -h -n hello | grep -q .; do sleep 1; done
-cactup sim submit hello ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par -T 1 -w 00:05:00 --overwrite
-while squeue -h -n hello | grep -q .; do sleep 1; done
-grep Hello ~/.cactup/simulations/ET_2026_05_v0/tutorial/hello/output-0000/hello.out
+cactup sim submit hello ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par -T 1 -w 00:05:00 --overwrite --block
+grep Hello ~/.cactup/simulations/MyCactus/tutorial/hello/output-0000/hello.out
 ```
 
 ### A thorn's parameters
@@ -308,10 +316,8 @@ it takes a new `hello`, made with the new build, to run the new code;
 %%shell
 cp ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par ~/hello.par
 echo 'WaveToyX::greeting = "Hello from a parameter file"' >> ~/hello.par
-while squeue -h -n hello | grep -q .; do sleep 1; done
-cactup sim submit hello ~/hello.par -T 1 -w 00:05:00 --overwrite
-while squeue -h -n hello | grep -q .; do sleep 1; done
-grep Hello ~/.cactup/simulations/ET_2026_05_v0/tutorial/hello/output-0000/hello.out
+cactup sim submit hello ~/hello.par -T 1 -w 00:05:00 --overwrite --block
+grep Hello ~/.cactup/simulations/MyCactus/tutorial/hello/output-0000/hello.out
 ```
 
 ### The flesh
@@ -348,11 +354,9 @@ notebook 3 showed.
 
 ```{code-cell} ipython3
 %%shell
-while squeue -h -n hello | grep -q .; do sleep 1; done
-cactup sim submit hello ~/hello.par -T 1 -w 00:05:00 --overwrite
-while squeue -h -n hello | grep -q .; do sleep 1; done
-grep -B 2 'Edited in' ~/.cactup/simulations/ET_2026_05_v0/tutorial/hello/output-0000/hello.out
-grep Hello ~/.cactup/simulations/ET_2026_05_v0/tutorial/hello/output-0000/hello.out
+cactup sim submit hello ~/hello.par -T 1 -w 00:05:00 --overwrite --block
+grep -B 2 'Edited in' ~/.cactup/simulations/MyCactus/tutorial/hello/output-0000/hello.out
+grep Hello ~/.cactup/simulations/MyCactus/tutorial/hello/output-0000/hello.out
 ```
 
 ## Putting it back
@@ -386,7 +390,7 @@ of this notebook:
 ```{code-cell} ipython3
 %%shell
 cactup sim delete hello
-cactup sim delete wave-pinned
+cactup sim delete wave-taskset
 rm -f ~/hello.par
 ```
 

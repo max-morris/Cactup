@@ -20,9 +20,7 @@ In this notebook you will
 - refetch, and see how cactup guards what you have on disk,
 - see how cactup decides what to rebuild once the sources have moved.
 
-*Time: about 30 minutes.* (To run this notebook a second time from the top,
-see "Starting over" at its end first: run again as it is, most cells only
-report that their work is already done.)
+*Time: about 30 minutes.*
 
 ```{code-cell} ipython3
 %%shell
@@ -41,11 +39,12 @@ want to experiment on the installation you work with, so make a new one.
 the tutorial's thornlist again: a small installation, quick to fetch. Two
 flags matter here:
 
-- `--alias et-mp` names the installation (by default it is named after the
-  release, or the thornlist file: `tutorial` here, which says little);
+- `--alias et-mp` names the installation, as `--alias MyCactus` did in
+  notebook 1 (without it, an installation from a thornlist is named after the
+  file: `tutorial` here, which says little);
 - `--symlink-name et-mp` names the link cactup makes in your home to its
   source tree. Without it, the link would be `~/Cactus` again, and would no
-  longer point at the stock installation.
+  longer point at `MyCactus`.
 
 ```{code-cell} ipython3
 %%shell
@@ -188,12 +187,12 @@ cactup build tutorial
 a `CCTK_REAL4` grid function with the same function, syncs them, and checks
 every point of both, and does the same for grid scalars and arrays and for
 functions called with either precision. Its parameter files are in the
-thorn's `par` directory; run the first, as one process with four threads:
+thorn's `par` directory; run the first, as one process with four threads,
+and wait for it (`--block`, as in notebook 2):
 
 ```{code-cell} ipython3
 %%shell
-cactup sim submit real4 ~/et-mp/arrangements/CarpetX/TestReal4/par/testreal4.par -T 1 -c 4 -w 00:05:00 --overwrite
-while [ -n "$(squeue -h -u "$USER")" ]; do sleep 2; done
+cactup sim submit real4 ~/et-mp/arrangements/CarpetX/TestReal4/par/testreal4.par -T 1 -c 4 -w 00:05:00 --overwrite --block
 cactup sim list
 ```
 
@@ -206,36 +205,20 @@ grep -oE 'TestReal4(\[[^]]*\]|-aliasfn| \(GF3D5 accessor\)): (PASS|FAIL)' \
     "$(cactup sim show real4 --output-dir)/real4.out" | sort | uniq -c
 ```
 
-The stock installation is just as you left it: `cactup -I NAME` runs one
+`MyCactus` is just as you left it: `cactup -I NAME` runs one
 command on another installation, without switching to it.
 
 ```{code-cell} ipython3
 %%shell
-cactup -I ET_2026_05_v0 config list
+cactup -I MyCactus config list
 git -C ~/Cactus/repos/flesh log --oneline -1
 ```
 
-Switch back to the stock installation, which the following notebooks use:
+Switch back to `MyCactus`, which the following notebooks use:
 
 ```{code-cell} ipython3
 %%shell
-cactup use ET_2026_05_v0
-```
-
-## Starting over
-
-To run this notebook again from the top, remove the installation, its link
-and its simulations (`cactup uninstall` keeps an installation's simulations
-on disk, under `~/.cactup/simulations/et-mp`; here they would only get in
-the way): take the `#` off the three commands below, run the cell, and put
-the `#` back.
-
-```{code-cell} ipython3
-%%shell
-# cactup uninstall et-mp --force
-# rm ~/et-mp
-# rm -rf ~/.cactup/simulations/et-mp
-cactup list
+cactup use MyCactus
 ```
 
 ## Where this is documented

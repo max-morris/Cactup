@@ -38,7 +38,7 @@ every library it can use, so a build of it has all of CarpetX's features:
 
 Install it as you installed `et-mp` in notebook 3: name it with `--alias`,
 and give its link in your home its own name with `--symlink-name`, so that
-`~/Cactus` keeps meaning the stock installation.
+`~/Cactus` keeps meaning `MyCactus`.
 
 ```{code-cell} ipython3
 %%shell
@@ -82,14 +82,14 @@ it `-I NAME`:
 ```{code-cell} ipython3
 %%shell
 cactup -I et-master inst show
-cactup -I ET_2026_05_v0 config list
+cactup -I MyCactus config list
 ```
 
-Switch back to the stock installation, which the following notebooks use:
+Switch back to `MyCactus`, which the following notebooks use:
 
 ```{code-cell} ipython3
 %%shell
-cactup use ET_2026_05_v0
+cactup use MyCactus
 ```
 
 ## Where an installation came from

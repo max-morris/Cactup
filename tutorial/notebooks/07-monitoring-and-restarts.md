@@ -65,7 +65,7 @@ diff <(grep -v -e '^#' -e '^!' -e '^$' /opt/cactup-tutorial/thornlists/tutorial.
 
 (`diff` reports a difference with exit status 1, so the cell is marked as
 expected to fail.) Build a config from it, `tutorial-ckpt`. As in notebook
-5, the first command checks that the stock installation's sources are as
+5, the first command checks that `MyCactus`'s sources are as
 fetched, because this build was prepared ahead of time from them:
 
 ```{code-cell} ipython3
@@ -151,7 +151,6 @@ a run as it starts.)
 
 ```{code-cell} ipython3
 %%shell
-while squeue -h -n chain | grep -q .; do sleep 1; done
 cactup sim submit chain ~/wave_ckpt.par --config tutorial-ckpt -T 4 -c 1 -q short -w 00:24:00 --checkpt-buffer 00:02:00 --overwrite
 squeue
 ```
@@ -202,7 +201,9 @@ A follow stays with the restart it started on: when the chain moves on to
 
 The whole run takes about three minutes on a quiet machine, longer on a busy
 one. The next cell waits for all eight jobs to finish (the ones after the
-run's end take a few seconds each):
+run's end take a few seconds each). It waits on SLURM's queue, because the
+jobs were submitted without `--block`, so that you could watch them: on a
+real cluster you would come back later instead.
 
 ```{code-cell} ipython3
 %%shell
@@ -216,7 +217,7 @@ to it:
 
 ```{code-cell} ipython3
 %%shell
-cat ~/.cactup/simulations/ET_2026_05_v0/tutorial-ckpt/chain/log.txt
+cat ~/.cactup/simulations/MyCactus/tutorial-ckpt/chain/log.txt
 ```
 
 And Cactus's own account, from each restart's output (each line starts with
@@ -228,7 +229,7 @@ iteration a job stopped at (the jobs that ended at 9600 share one).
 
 ```{code-cell} ipython3
 %%shell
-(cd ~/.cactup/simulations/ET_2026_05_v0/tutorial-ckpt/chain &&
+(cd ~/.cactup/simulations/MyCactus/tutorial-ckpt/chain &&
  grep -a -E '^INFO \(CarpetX\): (Checkpointing before terminating|RecoverGH)' output-[0-9][0-9][0-9][0-9]/chain.out &&
  ls checkpoints)
 ```
@@ -283,15 +284,15 @@ ends: a later restart can carry on from there. Without one, cactup cancels
 the job, and whatever it computed since its last checkpoint is lost.
 
 On a chain, `sim stop` stops only the running job, and the next one, already
-in the queue, then starts (more below), so this is shown on a single job:
+in the queue, then starts (more below), so this is shown on a single job,
+submitted without `--block` so that the cell can stop it:
 the same parameter file, on `debug`, stopped once it is past iteration 1000
 (the cell waits for Cactus to say so in its output):
 
 ```{code-cell} ipython3
 %%shell
-while squeue -h -n stopme | grep -q .; do sleep 1; done
 cactup sim submit stopme ~/wave_ckpt.par --config tutorial-ckpt -T 4 -c 1 -w 00:10:00 --checkpt-buffer 00:01:00 --overwrite
-out=~/.cactup/simulations/ET_2026_05_v0/tutorial-ckpt/stopme/output-0000/stopme.out
+out=~/.cactup/simulations/MyCactus/tutorial-ckpt/stopme/output-0000/stopme.out
 until grep -a -q 'OutputGH: iteration [0-9]\{4\}' $out 2>/dev/null || ! squeue -h -n stopme | grep -q .; do sleep 1; done
 cactup sim stop stopme
 while squeue -h -n stopme | grep -q .; do sleep 1; done
@@ -301,21 +302,22 @@ What the run said when it got the request:
 
 ```{code-cell} ipython3
 %%shell
-grep -a -h -o -E 'Found termination signal in termination file|Checkpointing before terminating at iteration [0-9]+' ~/.cactup/simulations/ET_2026_05_v0/tutorial-ckpt/stopme/output-0000/stopme.out | awk '!seen[$0]++'
+grep -a -h -o -E 'Found termination signal in termination file|Checkpointing before terminating at iteration [0-9]+' ~/.cactup/simulations/MyCactus/tutorial-ckpt/stopme/output-0000/stopme.out | awk '!seen[$0]++'
 ```
 
 On a chain, the jobs still in the queue start one after another once the
-running one stops, each carrying on from the checkpoint. To stop the chain,
-cancel those first (`scancel` with their ids, which `squeue` lists), then
-`cactup sim stop NAME`. `cactup sim delete -f NAME` cancels every job too,
-but deletes the simulation and its checkpoints with it.
+running one stops, each carrying on from the checkpoint. `sim stop` names
+each of them, with the command that cancels it (`scancel ID` here). To stop
+the whole chain, cancel those first, then `cactup sim stop NAME`. `cactup
+sim delete -f NAME` cancels every job too, but deletes the simulation and
+its checkpoints with it.
 
 ## Fixed at submit time
 
 A submitted job doesn't change when you change things after submitting it:
 
 - its batch script runs the cactup build that submitted it, by its version
-  (`cactup-0ea3398` and the like), even after a `cactup update`;
+  (`cactup-5f9f7a2` and the like), even after a `cactup update`;
 - each restart records the variables and knobs it was submitted with in its
   `restart.toml`;
 - a simulation keeps its own copy of the executable (`.cactup/exe`), made
@@ -325,12 +327,12 @@ A submitted job doesn't change when you change things after submitting it:
 
 ```{code-cell} ipython3
 %%shell
-(cd ~/.cactup/simulations/ET_2026_05_v0/tutorial-ckpt/chain &&
+(cd ~/.cactup/simulations/MyCactus/tutorial-ckpt/chain &&
  tail -n 1 output-0001/.cactup/submit-script &&
  grep -E '^(CACTUP|EXECUTABLE|CHECKPOINT_WALLTIME_SECONDS) ' output-0001/.cactup/restart.toml)
 ```
 
-The submit script's last line names the cactup build (`cactup-0ea3398`);
+The submit script's last line names the cactup build (`cactup-5f9f7a2`);
 `restart.toml` has the checkpoint walltime this job was given (60 seconds)
 and the simulation's own copy of the executable.
 

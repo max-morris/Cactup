@@ -54,11 +54,13 @@ RECORD = HOME / ".cactup-tutorial-record"
 # Each bake: what to install (once, whichever bake needs it first), what to
 # do to it first (in order, once), then the build to bake, as a notebook runs
 # them.
+# The stock install, named as notebook 1 names it.
+STOCK = ["cactup", "install", "ET_2026_05_v0", "--alias", "MyCactus", "--silent"]
 ET_MP = ["cactup", "install", "--thornlist", str(THORNLISTS / "tutorial.th"), "--alias", "et-mp",
          "--symlink-name", "et-mp", "--silent"]
 BAKES = {
     "B1": {
-        "install": [["cactup", "install", "ET_2026_05_v0", "--silent"]],
+        "install": [STOCK],
         "build": ["cactup", "build", "tutorial", "--thornlist", str(THORNLISTS / "tutorial.th")],
         "root": "Cactus",
         "config": "tutorial",
@@ -82,42 +84,42 @@ BAKES = {
         "config": "tutorial",
         "kind": "partial",
     },
-    # Notebook 4b: the GPU variant, in its own installation whose CarpetX has
+    # Notebook 4b: the GPU flavor, in its own installation whose CarpetX has
     # the fix nvcc needs (tutorial-gpu.th), baked in a container with the CUDA
     # toolkit mounted (the image has none); and the debug build.
     "B3": {
         "install": [["cactup", "install", "--thornlist", str(THORNLISTS / "tutorial-gpu.th"), "--alias",
                      "et-gpu", "--symlink-name", "et-gpu", "--silent"]],
-        "build": ["cactup", "build", "tutorial-gpu", "--variant", "gpu", "-I", "et-gpu"],
+        "build": ["cactup", "build", "tutorial-gpu", "--flavor", "gpu", "-I", "et-gpu"],
         "root": "et-gpu",
         "config": "tutorial-gpu",
         "kind": "partial",
         "cuda": True,
     },
     "B4": {
-        "install": [["cactup", "install", "ET_2026_05_v0", "--silent"]],
+        "install": [STOCK],
         "build": ["cactup", "build", "tutorial-debug", "--debug", "--thornlist", str(THORNLISTS / "tutorial.th"),
-                  "-I", "ET_2026_05_v0"],
+                  "-I", "MyCactus"],
         "root": "Cactus",
         "config": "tutorial-debug",
         "kind": "partial",
     },
     # Notebook 5: the tutorial thornlist again, built in the machine's
-    # `pinned` universe (under taskset), before the notebook edits anything.
+    # `taskset` universe (under taskset), before the notebook edits anything.
     "B5": {
-        "install": [["cactup", "install", "ET_2026_05_v0", "--silent"]],
-        "build": ["cactup", "build", "tutorial-pinned", "--universe", "pinned", "--thornlist",
-                  str(THORNLISTS / "tutorial.th"), "-I", "ET_2026_05_v0"],
+        "install": [STOCK],
+        "build": ["cactup", "build", "tutorial-taskset", "--universe", "taskset", "--thornlist",
+                  str(THORNLISTS / "tutorial.th"), "-I", "MyCactus"],
         "root": "Cactus",
-        "config": "tutorial-pinned",
+        "config": "tutorial-taskset",
         "kind": "partial",
     },
     # Notebook 7: the tutorial thornlist plus Silo, HDF5 and
     # TerminationTrigger, for checkpoints and a graceful stop.
     "B6": {
-        "install": [["cactup", "install", "ET_2026_05_v0", "--silent"]],
+        "install": [STOCK],
         "build": ["cactup", "build", "tutorial-ckpt", "--thornlist", str(THORNLISTS / "tutorial-ckpt.th"),
-                  "-I", "ET_2026_05_v0"],
+                  "-I", "MyCactus"],
         "root": "Cactus",
         "config": "tutorial-ckpt",
         "kind": "partial",
@@ -549,7 +551,7 @@ def main() -> int:
     parser.add_argument("--wanted", default="wanted",
                         help="file (in the toolchain's cache directory) listing the fingerprints the image needs")
     args = parser.parse_args()
-    # The `pinned` universe's taskset reads the container's CPUs from here;
+    # The `taskset` universe's taskset reads the container's CPUs from here;
     # the entrypoint exports it, but a bake container doesn't run that.
     if "CACTUP_TUTORIAL_CPUS" not in os.environ:
         status = Path("/proc/self/status").read_text()

@@ -25,21 +25,21 @@ In this notebook you will
 cactup-tutorial-catch-up 4b
 ```
 
-## Optionlist variants
+## Optionlist flavors
 
 How Cactus is compiled (compilers, flags, where the libraries are) is the
-*optionlist*. A machine's entry in the MDB can offer several, as *variants*.
+*optionlist*. A machine's entry in the MDB can offer several, as *flavors*.
 This machine has two:
 
 ```{code-cell} ipython3
 %%shell
-cactup machine show --variants
+cactup machine show --flavors
 ```
 
 `gpu` is a CUDA build: `nvcc` compiles CarpetX's and AMReX's kernels for
 NVIDIA GPUs. Its `[cactup]` header (`config show` prints what came of it,
-below) says what it is for: `gpu = true`, and the queues its executables
-may run on. This machine has no GPU and no CUDA toolkit of
+below) says what it is for: `gpu = true`, the queues its executables may run
+on, and the one they go to by default. This machine has no GPU and no CUDA toolkit of
 its own, much like many clusters' login nodes; the GPU build below was prepared ahead of time on a machine with the toolkit the
 optionlist describes, and this machine replays it.
 
@@ -53,19 +53,19 @@ and a thornlist for GPU builds points CarpetX at it:
 ```
 
 So GPU builds get an installation of their own, from that thornlist (as
-notebook 3 made `et-mp`), and the stock installation stays the release:
+notebook 3 made `et-mp`), and `MyCactus` stays the release:
 
 ```{code-cell} ipython3
 %%shell
 cactup install --thornlist /opt/cactup-tutorial/thornlists/tutorial-gpu.th --alias et-gpu --symlink-name et-gpu --silent
 ```
 
-A config is built with one variant; `--variant gpu` picks this one. `-I
+A config is built with one flavor; `--flavor gpu` picks this one. `-I
 et-gpu` builds it in the new installation without switching to it:
 
 ```{code-cell} ipython3
 %%shell
-cactup -I et-gpu build tutorial-gpu --variant gpu
+cactup -I et-gpu build tutorial-gpu --flavor gpu
 ```
 
 ```{code-cell} ipython3
@@ -75,14 +75,14 @@ cactup -I et-gpu config show tutorial-gpu
 
 ## GPU executables on GPU queues
 
-`gpu: true` and `compatible-queues: gpu` came from the variant's header, and
-cactup holds simulations to them. Submit to the default queue, a CPU
-partition, and cactup refuses. (It creates the simulation before checking
-the queue, so try it with a throwaway name.)
+`runs on: gpu` and `gpu: true` came from the flavor's header, and cactup
+holds simulations to them. Ask for a CPU partition, `-q debug`, and cactup
+refuses. (It creates the simulation before checking the queue, so try it
+with a throwaway name.)
 
 ```{code-cell} ipython3
 %%shell --expect-fail
-cactup -I et-gpu sim submit gpu-try ~/et-gpu/arrangements/Cottonmouth/CottonmouthZ4c4m/test/linear_wave_z4c.par --config tutorial-gpu
+cactup -I et-gpu sim submit gpu-try ~/et-gpu/arrangements/Cottonmouth/CottonmouthZ4c4m/test/linear_wave_z4c.par --config tutorial-gpu -q debug
 ```
 
 `--force-queue` would override the check: for an executable that doesn't
@@ -95,8 +95,10 @@ simulation:
 cactup -I et-gpu sim delete gpu-try
 ```
 
-The right way is a GPU queue, `-q gpu`. This machine has a `gpu` partition,
-but it is *inactive*, since there is no GPU behind it:
+Without `-q`, a simulation goes to its config's default queue, which the
+header also set (`default queue: gpu`), rather than the machine's (`debug`,
+a CPU partition). This machine has a `gpu` partition, but it is *inactive*,
+since there is no GPU behind it:
 
 ```{code-cell} ipython3
 %%shell
@@ -104,20 +106,22 @@ sinfo
 ```
 
 So this time SLURM refuses the job, not cactup. (This submit leaves out
-`--config`: `tutorial-gpu` is the only config `et-gpu` has, so it is that
-installation's *active* config, the one `sim` commands use by default. More
-on that below.)
+`--config`, too: `tutorial-gpu` is the only config `et-gpu` has, so it is
+that installation's *active* config, the one `sim` commands use by default.
+More on that below.)
 
 ```{code-cell} ipython3
 %%shell --expect-fail
-cactup -I et-gpu sim submit gpu-try ~/et-gpu/arrangements/Cottonmouth/CottonmouthZ4c4m/test/linear_wave_z4c.par -q gpu
+cactup -I et-gpu sim submit gpu-try ~/et-gpu/arrangements/Cottonmouth/CottonmouthZ4c4m/test/linear_wave_z4c.par
 ```
 
-cactup created the simulation and its first restart before handing the
-job to SLURM, so they exist without a job: `sim list` shows the simulation
-ACTIVE, with nothing queued or running behind it. (`sim delete`
-moves a simulation to a `TRASH` directory beside the others, where you can
-still look at it.)
+cactup does its part of a submit before SLURM sees the job: it makes the
+simulation, then its first restart (`output-0000`, with the batch script),
+and only then hands the script to `sbatch`. When SLURM refuses, all of
+that stays, with no job behind it. `sim list` shows such a simulation as
+ACTIVE, the state of one whose current restart is set up but has no job
+queued or running. Delete it as well. (`sim delete` moves a simulation to a
+`TRASH` directory beside the others, where you can still look at it.)
 
 ```{code-cell} ipython3
 %%shell
@@ -127,7 +131,7 @@ cactup -I et-gpu sim delete gpu-try
 
 ## A debug build
 
-Back in the stock installation: `--debug` builds with Cactus's debug
+Back in `MyCactus`: `--debug` builds with Cactus's debug
 settings: full debugging information (`-g3`) and the extra checks thorns
 compile in when debugging (Cactus defines `CCTK_DEBUG`, and CarpetX's
 array and loop code checks its indices when it is set), for a debugger or a
@@ -153,8 +157,8 @@ own name, as here.
 
 An installation's *active* config is the one `sim` commands use without
 `--config`. A build makes its config the active one only when none is
-active yet: `tutorial-gpu` became `et-gpu`'s, while the stock installation
-kept `tutorial`. `cactup config use` switches:
+active yet: `tutorial-gpu` became `et-gpu`'s, while `MyCactus` kept
+`tutorial`. `cactup config use` switches:
 
 ```{code-cell} ipython3
 %%shell
@@ -186,11 +190,11 @@ cactup config list
 ## Where this is documented
 
 - [Building configurations](https://max-morris.github.io/Cactup/users/building-configs.html)
-  (variants, flags, `config`)
+  (flavors, flags, `config`)
 - [Monitoring](https://max-morris.github.io/Cactup/users/monitoring.html)
   (`build list`, `build prune`)
 - [Optionlists](https://max-morris.github.io/Cactup/authors/optionlists.html)
-  (variants and their `[cactup]` header)
+  (flavors and their `[cactup]` header)
 - [Running simulations](https://max-morris.github.io/Cactup/users/running-simulations.html)
   (queues, `--force-queue`)
 

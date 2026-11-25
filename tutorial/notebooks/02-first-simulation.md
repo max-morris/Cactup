@@ -167,33 +167,30 @@ run it:
 - `-T 2`: two MPI processes (tasks),
 - `-c 2`: two threads (CPUs) each, so the run uses all four of the machine's
   CPUs,
-- `-w 00:10:00`: at most ten minutes (the run takes a minute or two).
+- `-w 00:10:00`: at most ten minutes (the run takes a minute or two),
+- `--block`: wait until the job is over, and say how the run ended.
 
 No queue is named, so it goes to the machine's default queue, `debug`.
-(`--overwrite` replaces the simulation if you run this cell again. Let the
-earlier run finish first: replacing a simulation doesn't stop its job.)
+Without `--block`, `sim submit` returns as soon as the job is queued, which
+is what you want on a real cluster, where a job may wait hours to start: you
+come back later, and `cactup sim list` tells you where your simulations are.
+Here the run takes a minute or two, so wait for it. (`--overwrite` replaces
+the simulation if you run this cell again.)
 
 ```{code-cell} ipython3
 %%shell
-cactup sim submit lw ~/linear_wave.par -T 2 -c 2 -w 00:10:00 --overwrite
+cactup sim submit lw ~/linear_wave.par -T 2 -c 2 -w 00:10:00 --overwrite --block
 ```
 
 cactup wrote a submit script from the machine's template and handed it to
-SLURM. `cactup sim list` shows your simulations and their state; `squeue`,
-SLURM's own view, shows the job:
+SLURM, which ran it as a job. `cactup sim list` shows your simulations and
+their state, and `cactup sim show` one of them in detail. `squeue`, SLURM's
+own view of what is queued and running, lists nothing now: the job is over.
 
 ```{code-cell} ipython3
 %%shell
 cactup sim list
 squeue
-```
-
-The next cell waits until the job has left the queue, then shows the
-simulation. (On a real cluster you would rather come back later.)
-
-```{code-cell} ipython3
-%%shell
-while [ -n "$(squeue -h -u "$USER")" ]; do sleep 5; done
 cactup sim show lw
 ```
 

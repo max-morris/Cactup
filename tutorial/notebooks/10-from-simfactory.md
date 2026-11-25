@@ -50,7 +50,7 @@ ls ~/Cactus/simfactory/mdb/machines | head -5
 | `sim checkout`, `GetComponents` | `cactup install`, `cactup inst refetch` (notebooks 1 and 3) |
 | `sim build NAME --thornlist=T` | `cactup build NAME --thornlist T` |
 | `sim build` | `cactup build NAME` (see below) |
-| `sim build --optionlist=F` | `cactup build --optionlist F`, or a machine's variant with `--variant` (notebook 6b) |
+| `sim build --optionlist=F` | `cactup build --optionlist F`, or a machine's flavor with `--flavor` (notebook 6b) |
 | `sim list-configurations` | `cactup config list` |
 | `sim create N --parfile=P` | `cactup sim create N P` |
 | `sim create-submit N --parfile=P`, `sim submit N` | `cactup sim submit N P`, `cactup sim submit N` |
@@ -123,11 +123,11 @@ machine, scripts and optionlists included. `machine show` sums it up:
 ```{code-cell} ipython3
 %%shell
 cactup machine show qbd
-ls ~/.cactup/mdb/gen-1/qbd
-cat ~/.cactup/mdb/gen-1/qbd/hostname.regexp
+ls ~/.cactup/mdb/gen-3/qbd
+cat ~/.cactup/mdb/gen-3/qbd/hostname.regexp
 ```
 
-(The summary's first line names the directory behind `~/.cactup/mdb/gen-1`,
+(The summary's first line names the directory behind `~/.cactup/mdb/gen-3`,
 the link to the machine database cactup downloaded, as notebook 6a showed.
 A `?` is a value the entry leaves unset for the whole machine: each GPU
 queue gives its own GPU count, and a process gets one GPU unless you say.)
@@ -148,15 +148,15 @@ met:
 
 ```{code-cell} ipython3
 %%shell
-sed -n '/^\[build\]/,/^\[environment\]/p' ~/.cactup/mdb/gen-1/qbd/meta.toml | grep -v -E '^ *#|^\[environment'
+sed -n '/^\[build\]/,/^\[environment\]/p' ~/.cactup/mdb/gen-3/qbd/meta.toml | grep -v -E '^ *#|^\[environment'
 ```
 
 - **Queues.** The `.ini` names one queue, `gpu2`, and its scripts branched
   on the queue's name. cactup's entry has a table per partition: the two
   GPU partitions with their GPU counts, and four CPU partitions. The queue
-  picks the submit and run scripts (the `cpu` variants on the CPU
+  picks the submit and run scripts (the `cpu` scripts on the CPU
   partitions, as in notebook 6b). A config for the CPU partitions is built
-  with `--variant cpu`, the CPU-only optionlist, and runs only on those
+  with `--flavor cpu`, the CPU-only optionlist, and runs only on those
   four queues.
 - **Threads.** The `.ini`'s `num-threads = 64` ran one process per node.
   cactup's default on the GPU partitions is one process per GPU, splitting
@@ -180,7 +180,7 @@ How the keys moved, in general:
 | `submit`, `getstatus`, `stop`, the `*pattern` keys, `exechost` | `[scheduler]`, as `submit-pattern` and so on |
 | `queue` | a `[queues.NAME]` table per queue, `default = true` on the default |
 | `maxwalltime` | `max-walltime`: in a queue's table for that queue, or in `[scheduler]` for every queue that doesn't set its own |
-| `submitscript`, `runscript`, `optionlist` | files in the entry's `submitscripts/`, `runscripts/`, `optionlists/`, chosen by `[variants]` (notebook 6b) |
+| `submitscript`, `runscript`, `optionlist` | files in the entry's `submitscripts/`, `runscripts/`, `optionlists/`: `[submitscripts]` and `[runscripts]` say which script serves which queues, and each optionlist is a flavor (notebook 6b) |
 | `cpu`, `cpufreq`, `flop/cycle`, `spn`, `mpn`, `nodes`, `min-ppn`, `max-num-threads`, `maxqueueslots` | dropped |
 | `stdout`, `stderr`, `stdout-follow` | dropped: `cactup sim log` reads the files itself |
 | `user`, `trampoline`, `rsynccmd`, `sshcmd`, and the other remote-access keys | dropped (see below) |
@@ -248,13 +248,10 @@ in SimFactory. Most names are the same: `@SIMULATION_NAME@`,
 
 Here is a parameter file as a SimFactory workflow would have it, with
 SimFactory's variable names in its run title. cactup checks it when you
-submit. (The `squeue` loops in these cells wait
-for an earlier `sf` job, so the cells can be run again; the last one also
-waits for this job before reading its output.)
+submit.
 
 ```{code-cell} ipython3
 %%shell --expect-fail
-while squeue -h -n sf | grep -q .; do sleep 1; done
 cp ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par ~/sf.par
 echo 'Cactus::cctk_run_title = "@SIMULATION_NAME@: @NUM_PROCS@ processes, @NUM_THREADS@ threads each"' >> ~/sf.par
 cactup sim submit sf ~/sf.par -T 2 -c 2 -w 00:05:00 --overwrite
@@ -268,10 +265,8 @@ though, so `--overwrite` replaces it, here and below. With cactup's names:
 
 ```{code-cell} ipython3
 %%shell
-while squeue -h -n sf | grep -q .; do sleep 1; done
 sed -i 's/@NUM_PROCS@/@TASKS@/; s/@NUM_THREADS@/@CPUS_PER_TASK@/' ~/sf.par
-cactup sim submit sf ~/sf.par -T 2 -c 2 -w 00:05:00 --overwrite
-while squeue -h -n sf | grep -q .; do sleep 1; done
+cactup sim submit sf ~/sf.par -T 2 -c 2 -w 00:05:00 --overwrite --block
 grep run_title "$(cactup sim show sf --output-dir)/sf.par"
 ```
 
@@ -302,7 +297,7 @@ directories is in `.cactup/` ones:
 
 ```{code-cell} ipython3
 %%shell
-cd ~/.cactup/simulations/ET_2026_05_v0/tutorial/sf
+cd ~/.cactup/simulations/MyCactus/tutorial/sf
 ls -A . .cactup output-0000 output-0000/.cactup
 ```
 
@@ -335,7 +330,7 @@ directory isn't one cactup knows.
   `--restart-id`.
 
 What it does that SimFactory doesn't, you have seen: releases and
-installations, build provenance and deltas, script variants and universes,
+installations, build provenance and deltas, per-queue scripts and universes,
 Python scripts and parameter files, knobs, self-update, and a machine
 database that updates itself.
 
@@ -343,7 +338,6 @@ database that updates itself.
 
 ```{code-cell} ipython3
 %%shell
-while squeue -h -n sf | grep -q .; do sleep 1; done
 cactup sim delete sf
 rm -f ~/sf.par
 ```

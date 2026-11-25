@@ -1,5 +1,5 @@
 """Catch-up's restore of the files notebooks edit, and the clean-tree check
-notebook 5 runs before building tutorial-pinned, on a fake installation."""
+notebook 5 runs before building tutorial-taskset, on a fake installation."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def install(tmp_path: Path) -> Path:
     """A home with the stock installation laid out as cactup lays it out:
     repositories under repos/, arrangements and src as links into them."""
     home = tmp_path / "home"
-    cactus = home / ".cactup/cacti/ET_2026_05_v0/Cactus"
+    cactus = home / ".cactup/cacti/MyCactus/Cactus"
     files = {
         "CarpetX": {"WaveToyX/src/wavetoyx.cxx": "int x;\n", "WaveToyX/param.ccl": "# params\n"},
         "flesh": {"src/main/Banner.c": "/* banner */\n"},
@@ -79,7 +79,7 @@ def test_a_clean_tree_is_left_alone(install: Path, capsys) -> None:
 
 
 def test_edited_files_are_put_back_and_the_attendees_versions_saved(install: Path, capsys) -> None:
-    cactus = install / ".cactup/cacti/ET_2026_05_v0/Cactus"
+    cactus = install / ".cactup/cacti/MyCactus/Cactus"
     (cactus / "arrangements/CarpetX/WaveToyX/param.ccl").write_text("# params\nCCTK_INT mine\n")
     (cactus / "src/main/Banner.c").unlink()
     catch_up(install).restore_edited()
@@ -100,8 +100,8 @@ def test_edited_files_are_put_back_and_the_attendees_versions_saved(install: Pat
 def sources_clean(home: Path, monkeypatch) -> int:
     module = load("cactup-tutorial-sources-clean")
     monkeypatch.setattr(module, "CACTUP_HOME", home / ".cactup")
-    monkeypatch.setattr(module, "INSTALL", home / ".cactup/cacti/ET_2026_05_v0")
-    monkeypatch.setattr(module, "CACTUS", home / ".cactup/cacti/ET_2026_05_v0/Cactus")
+    monkeypatch.setattr(module, "INSTALL", home / ".cactup/cacti/MyCactus")
+    monkeypatch.setattr(module, "CACTUS", home / ".cactup/cacti/MyCactus/Cactus")
     return module.main()
 
 
@@ -111,14 +111,14 @@ def test_sources_clean_passes_a_tree_as_fetched(install: Path, monkeypatch, caps
 
 
 def test_sources_clean_lists_edits_and_fails(install: Path, monkeypatch, capsys) -> None:
-    cactus = install / ".cactup/cacti/ET_2026_05_v0/Cactus"
+    cactus = install / ".cactup/cacti/MyCactus/Cactus"
     (cactus / "repos/CarpetX/WaveToyX/src/wavetoyx.cxx").write_text("int y;\n")
     assert sources_clean(install, monkeypatch) == 1
     assert "~/Cactus/repos/CarpetX/WaveToyX/src/wavetoyx.cxx is edited" in capsys.readouterr().err
 
 
 def test_sources_clean_flags_extra_files_that_change_a_thorns_shape(install: Path, monkeypatch, capsys) -> None:
-    thorn = install / ".cactup/cacti/ET_2026_05_v0/Cactus/repos/CarpetX/WaveToyX"
+    thorn = install / ".cactup/cacti/MyCactus/Cactus/repos/CarpetX/WaveToyX"
     (thorn / "src/wavetoyx-Copy1.cxx").write_text("int x;\n")
     (thorn / "NOTES").write_text("mine\n")
     # Not part of the shape: editor files the ignore file exempts, and files
@@ -128,7 +128,7 @@ def test_sources_clean_flags_extra_files_that_change_a_thorns_shape(install: Pat
     (thorn / "src/.ipynb_checkpoints/wavetoyx-checkpoint.cxx").write_text("")
     (thorn / "test/out").mkdir(parents=True)
     (thorn / "test/out/result.tsv").write_text("1\n")
-    (install / ".cactup/cacti/ET_2026_05_v0/Cactus/repos/flesh/notes.txt").write_text("mine\n")
+    (install / ".cactup/cacti/MyCactus/Cactus/repos/flesh/notes.txt").write_text("mine\n")
     assert sources_clean(install, monkeypatch) == 1
     err = capsys.readouterr().err
     assert "WaveToyX/src/wavetoyx-Copy1.cxx is an extra file in thorn WaveToyX" in err
@@ -138,7 +138,7 @@ def test_sources_clean_flags_extra_files_that_change_a_thorns_shape(install: Pat
 
 
 def test_sources_clean_flags_a_repository_off_its_fetched_commit(install: Path, monkeypatch, capsys) -> None:
-    repo = install / ".cactup/cacti/ET_2026_05_v0/Cactus/repos/flesh"
+    repo = install / ".cactup/cacti/MyCactus/Cactus/repos/flesh"
     git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "mine")
     assert sources_clean(install, monkeypatch) == 1
     assert "~/Cactus/repos/flesh is on commit" in capsys.readouterr().err
@@ -148,7 +148,7 @@ def test_the_active_config_must_be_tutorial_itself() -> None:
     module = load("cactup-tutorial-catch-up")
     assert module.active_is_tutorial("- tutorial [built 2026-10-01 09:57] (active)\n")
     assert not module.active_is_tutorial("- tutorial [built 2026-10-01 09:57]\n"
-                                         "- tutorial-pinned [built 2026-10-01 10:02] (active)\n")
+                                         "- tutorial-taskset [built 2026-10-01 10:02] (active)\n")
 
 
 def test_a_discover_py_claims_this_host_only_if_it_says_so(install: Path) -> None:
@@ -180,7 +180,7 @@ memory = 63795
 name = "batch"
 
 [cactup]
-mdb-generation = 2
+mdb-generation = 4
 """
 
 
@@ -191,7 +191,7 @@ def test_catch_up_6b_sets_6as_lines_and_keeps_the_rest(install: Path, capsys) ->
     meta.write_text(MYLAB_AS_CREATED)
     module.mylab("finished")
     text = meta.read_text()
-    for line in ('nickname = "mylab"', "max-cpus-per-node = 4", "memory = 7372", "mdb-generation = 1",
+    for line in ('nickname = "mylab"', "max-cpus-per-node = 4", "memory = 7372", "mdb-generation = 3",
                  "[queues.long]"):
         assert line in text
     out = capsys.readouterr().out

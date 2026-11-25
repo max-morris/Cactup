@@ -48,7 +48,7 @@ if [ ! -e "$seeded" ]; then
     chown "$TUTORIAL_USER:$TUTORIAL_USER" "$seeded"
 fi
 
-# The CPUs this container may use (its cpuset), for the `pinned` universe's
+# The CPUs this container may use (its cpuset), for the `taskset` universe's
 # taskset: CPU numbers differ from container to container.
 CACTUP_TUTORIAL_CPUS=$(sed -n 's/^Cpus_allowed_list:[[:space:]]*//p' /proc/self/status)
 export CACTUP_TUTORIAL_CPUS

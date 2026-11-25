@@ -49,18 +49,19 @@ cactup machine list
 ```
 
 An entry is a directory. The system MDB keeps its copy under
-`~/.cactup/mdb/`. (`gen-1` is the database generation this cactup reads, a
+`~/.cactup/mdb/`. (`gen-3` is the database generation this cactup reads, a
 link to a directory named after the MDB's commit, which is the path `machine
 show` prints; more on generations below.)
 
 ```{code-cell} ipython3
 %%shell
-(cd ~/.cactup/mdb/gen-1/cactup-tutorial && find . -type f | sort)
+(cd ~/.cactup/mdb/gen-3/cactup-tutorial && find . -type f | sort)
 ```
 
 - `meta.toml` describes the machine: its hardware, its scheduler and queues,
-  which scripts go with which queues, and which optionlists it has.
-- `optionlists/` are the build settings (notebook 4b built with `gpu`).
+  and which scripts go with which queues.
+- `optionlists/` are the build settings, one file for each flavor (notebook
+  4b built with `gpu`).
 - `submitscripts/` make the batch script for a job (notebook 5 showed one),
   and `runscripts/` the script that starts Cactus inside it.
 - `hostname.regexp` is how cactup recognizes the machine: a pattern for its
@@ -110,7 +111,7 @@ claiming a host is `hostname.regexp`'s job, which notebook 6b comes to.)
 The original's comments say what the hardware values should be, and why:
 
 ```{code-cell} ipython3
-%show ~/.cactup/mdb/gen-1/cactup-tutorial/meta.toml --lines 25:36
+%show ~/.cactup/mdb/gen-3/cactup-tutorial/meta.toml --lines 25:36
 ```
 
 ### Exercise: fix `[hardware]` and `nickname`
@@ -166,7 +167,7 @@ meta.write_text(re.sub(r"^max-cpu-per-node\s*=", "max-cpus-per-node =", meta.rea
 ```
 
 The same goes for a value of the wrong type (`memory = "7372 MB"`), a queue
-name a script variant lists but `[queues]` doesn't have, or a script the
+name a script lists but `[queues]` doesn't have, or a script the
 entry names but its directory lacks.
 
 ### Generations
@@ -191,7 +192,7 @@ sed -n '/^\[cactup\]/,$p' ~/.cactup/machines/mylab/meta.toml
 Say `mylab` were written for a newer cactup:
 
 ```{code-cell} ipython3
-meta.write_text(re.sub(r"^mdb-generation\s*=.*$", "mdb-generation = 2", meta.read_text(), flags=re.M));
+meta.write_text(re.sub(r"^mdb-generation\s*=.*$", "mdb-generation = 4", meta.read_text(), flags=re.M));
 ```
 
 ```{code-cell} ipython3
@@ -203,7 +204,7 @@ The error tells you to `cactup update`, which is what you'd do for real.
 Here the number was changed by hand, so put it back:
 
 ```{code-cell} ipython3
-meta.write_text(re.sub(r"^mdb-generation\s*=.*$", "mdb-generation = 1", meta.read_text(), flags=re.M));
+meta.write_text(re.sub(r"^mdb-generation\s*=.*$", "mdb-generation = 3", meta.read_text(), flags=re.M));
 ```
 
 ### Replacing a system entry
@@ -222,21 +223,18 @@ config (the active one). cactup refuses:
 
 ```{code-cell} ipython3
 %%shell --expect-fail
-while squeue -h -n lab1 | grep -q .; do sleep 1; done
 cactup sim submit lab1 ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par --machine mylab -T 1 -w 00:05:00 --overwrite
 ```
 
 A config remembers the machine it was built for, and cactup won't run it on
 another: an executable built with one machine's compilers and libraries
 seldom runs on another. Here `mylab` is a copy of `cactup-tutorial`, so it
-will; `--ignore-machine` says so. (As in notebook 5, these cells first wait
-for an earlier `lab1` job, and `--overwrite` replaces an earlier `lab1`.)
+will; `--ignore-machine` says so. (As in notebook 5, `--overwrite` replaces
+an earlier `lab1`, and `--block` waits for the job.)
 
 ```{code-cell} ipython3
 %%shell
-while squeue -h -n lab1 | grep -q .; do sleep 1; done
-cactup sim submit lab1 ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par --machine mylab --ignore-machine -T 1 -w 00:05:00 --overwrite
-while squeue -h -n lab1 | grep -q .; do sleep 1; done
+cactup sim submit lab1 ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par --machine mylab --ignore-machine -T 1 -w 00:05:00 --overwrite --block
 cactup sim show lab1
 ```
 
@@ -247,7 +245,7 @@ the last line of its batch script starts cactup with `--machine=mylab`.
 
 ```{code-cell} ipython3
 %%shell
-tail -n 1 ~/.cactup/simulations/ET_2026_05_v0/tutorial/lab1/output-0000/.cactup/submit-script
+tail -n 1 ~/.cactup/simulations/MyCactus/tutorial/lab1/output-0000/.cactup/submit-script
 cactup sim delete lab1
 ```
 
@@ -260,6 +258,6 @@ cactup sim delete lab1
 - [meta.toml reference](https://max-morris.github.io/Cactup/authors/meta-toml.html)
 - [MDB generations](https://max-morris.github.io/Cactup/authors/mdb-generations.html)
 
-Next: **notebook 6b**, growing `mylab`: a queue, script variants, a script
-that checks a request, knobs, an optionlist variant, a universe, and how
+Next: **notebook 6b**, growing `mylab`: a queue, its scripts, a script
+that checks a request, knobs, an optionlist flavor, a universe, and how
 cactup recognizes a machine.

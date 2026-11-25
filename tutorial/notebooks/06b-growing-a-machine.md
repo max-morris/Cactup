@@ -18,7 +18,7 @@ In this notebook you will add to `mylab`, the machine entry from notebook
 - a submit script of its own for that queue,
 - a check that refuses a request the queue can't serve,
 - a knob, a setting of yours that scripts can read,
-- an optionlist variant with a `[cactup]` header,
+- an optionlist flavor with a `[cactup]` header,
 - a universe,
 - a way for cactup to recognize the machine by itself.
 
@@ -59,12 +59,27 @@ The entry's `[queues]` are cactup's names for the scheduler's queues
 submits to, when that differs. `long`: SLURM's `batch` partition, limited to
 an hour per job.
 
+A queue also needs scripts: `[submitscripts]` and `[runscripts]` say which
+script serves which queues, and cactup refuses an entry with a queue that no
+submit script, or no run script, lists. Add `long` to the `default` scripts'
+lists, too:
+
 ```{code-cell} ipython3
 add('''
 [queues.long]
 name         = "batch"
 max-walltime = "01:00:00"
 ''')
+
+QUEUES = '''default = [
+    "debug",
+    "short",
+    "batch",
+    "gpu",
+]'''
+WITH_LONG = QUEUES.replace('"gpu",', '"gpu",\n    "long",')
+for table in ("[runscripts]", "[submitscripts]"):
+    meta.write_text(meta.read_text().replace(f"{table}\n{QUEUES}", f"{table}\n{WITH_LONG}", 1))
 ```
 
 ```{code-cell} ipython3
@@ -77,12 +92,11 @@ cactup refuses it:
 
 ```{code-cell} ipython3
 %%shell --expect-fail
-while squeue -h -n q1 | grep -q .; do sleep 1; done
 cactup sim submit q1 ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par --machine mylab --ignore-machine -T 1 -c 2 -w 00:05:00 -q long --overwrite
 ```
 
 The `tutorial` config was built from an optionlist whose header lists the
-queues its executables suit (`compatible-queues`, notebook 4b), and the
+queues its executables suit (`[cactup.runs-on]`, notebook 4b), and the
 config recorded that list when it was built. A queue added since is not on
 it. `--force-queue` overrides the check. The simulation exists already
 (cactup created it before checking the queue), so this time no parameter
@@ -90,8 +104,8 @@ file:
 
 ```{code-cell} ipython3
 %%shell
-cactup sim submit q1 --machine mylab --ignore-machine --force-queue -T 1 -c 2 -w 00:05:00 -q long
-grep -E '^(queue|QUEUE) ' ~/.cactup/simulations/ET_2026_05_v0/tutorial/q1/output-0000/.cactup/restart.toml
+cactup sim submit q1 --machine mylab --ignore-machine --force-queue -T 1 -c 2 -w 00:05:00 -q long --block
+grep -E '^(queue|QUEUE) ' ~/.cactup/simulations/MyCactus/tutorial/q1/output-0000/.cactup/restart.toml
 ```
 
 cactup's queue is `long`; what reached SLURM (`QUEUE`, the `@QUEUE@` the
@@ -102,10 +116,10 @@ A `-w` above an hour isn't refused on `long` either: as on `debug`
 
 ## A submit script for the queue
 
-Which submit script a job gets is decided per queue, in
-`[variants.submitscript]`: the variant that lists the job's queue, or else
-the one marked `default`. Copy the default script to `long.py`, with one more
-line: a comment on the job that SLURM shows.
+A job gets the submit script that lists its queue in `[submitscripts]`, and
+a queue is listed by one script only. Copy the default script to `long.py`,
+with one more line, a comment on the job that SLURM shows, and move `long`
+from `default`'s list to its own:
 
 ```{code-cell} ipython3
 scripts = mylab / "submitscripts"
@@ -116,8 +130,9 @@ if not long_py.exists():
                         'lines.append("#SBATCH --open-mode=append")\n'
                         'lines.append("#SBATCH --comment=long-queue")\n')
     long_py.write_text(text)
+meta.write_text(meta.read_text().replace(f"[submitscripts]\n{WITH_LONG}", f"[submitscripts]\n{QUEUES}", 1))
 add('''
-[variants.submitscript.long]
+[submitscripts.long]
 queues = ["long"]
 ''')
 ```
@@ -125,16 +140,15 @@ queues = ["long"]
 ```{code-cell} ipython3
 %%shell
 cactup machine show mylab | grep submitscripts
-while squeue -h -n q2 | grep -q .; do sleep 1; done
-cactup sim submit q2 ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par --machine mylab --ignore-machine --force-queue -T 1 -c 2 -w 00:05:00 -q long --overwrite
-grep comment ~/.cactup/simulations/ET_2026_05_v0/tutorial/q2/output-0000/.cactup/submit-script
+cactup sim submit q2 ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par --machine mylab --ignore-machine --force-queue -T 1 -c 2 -w 00:05:00 -q long --overwrite --block
+grep comment ~/.cactup/simulations/MyCactus/tutorial/q2/output-0000/.cactup/submit-script
 ```
 
-A queue can be listed by only one normal variant (test variants are counted
-separately); to give `short` a script of its own as well, it would come off
-the `default` variant's list. A variant marked `test = true` is one for
-`cactup test` runs (notebook 9), and never for simulations: `mylab`'s `test`
-variant lists the same queues as `default`.
+A script marked `test = true` is one for `cactup test` runs (notebook 9),
+never for simulations, and its queues are counted separately: `mylab`'s
+`test` scripts list the queues the tests may run on, which needn't be all of
+them (`long` isn't one).
+
 
 ## A script that checks the request
 
@@ -160,7 +174,6 @@ if "multithreaded" not in text:
 
 ```{code-cell} ipython3
 %%shell --expect-fail
-while squeue -h -n q3 | grep -q .; do sleep 1; done
 cactup sim submit q3 ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par --machine mylab --ignore-machine --force-queue -T 1 -w 00:05:00 -q long --overwrite
 ```
 
@@ -188,10 +201,8 @@ if note not in text:
 
 ```{code-cell} ipython3
 %%shell
-while squeue -h -n k1 | grep -q .; do sleep 1; done
-cactup sim submit k1 ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par --machine mylab --ignore-machine -T 1 -w 00:05:00 -K lab-note="set for one command" --overwrite
-while squeue -h -n k1 | grep -q .; do sleep 1; done
-grep 'Lab note' ~/.cactup/simulations/ET_2026_05_v0/tutorial/k1/output-0000/k1.out
+cactup sim submit k1 ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par --machine mylab --ignore-machine -T 1 -w 00:05:00 -K lab-note="set for one command" --overwrite --block
+grep 'Lab note' ~/.cactup/simulations/MyCactus/tutorial/k1/output-0000/k1.out
 ```
 
 `cactup knob NAME VALUE` keeps one. A knob that isn't one of cactup's own
@@ -202,10 +213,8 @@ one:
 %%shell
 cactup knob -c lab-note "kept by cactup"
 cactup knob
-while squeue -h -n k2 | grep -q .; do sleep 1; done
-cactup sim submit k2 ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par --machine mylab --ignore-machine -T 1 -w 00:05:00 --overwrite
-while squeue -h -n k2 | grep -q .; do sleep 1; done
-grep 'Lab note' ~/.cactup/simulations/ET_2026_05_v0/tutorial/k2/output-0000/k2.out
+cactup sim submit k2 ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par --machine mylab --ignore-machine -T 1 -w 00:05:00 --overwrite --block
+grep 'Lab note' ~/.cactup/simulations/MyCactus/tutorial/k2/output-0000/k2.out
 cactup knob delete lab-note
 ```
 
@@ -213,72 +222,67 @@ A restart records the knobs it was submitted with (in its `restart.toml`),
 so the job sees the values it was submitted with, even if you change a knob
 while it waits in the queue; a later submit reads the knobs anew.
 
-## An optionlist variant
+## An optionlist flavor
 
-Notebook 4b built with this machine's `gpu` variant. A variant is an
-optionlist file plus its `[cactup]` header, which is for cactup only. Among
-its keys:
+Notebook 4b built with this machine's `gpu` flavor. A flavor is an
+optionlist file in the entry's `optionlists/` directory, named after the
+flavor, plus its `[cactup]` header, which is for cactup only. Among its keys:
 
-- `description`, shown by `machine show --variants`;
-- `gpu`: whether it builds for GPUs; `compatible-queues`: which queues its
-  executables may go to;
-- `disabled-thorns`: thorns the variant leaves out of a build;
+- `description`, shown by `machine show --flavors`;
+- `[cactup.runs-on]`: `gpu`, whether its executables need a GPU; `queues`,
+  which queues they may run on; and `default-queue`, the one they go to
+  when a submit names none;
+- `disabled-thorns`: thorns the flavor leaves out of a build;
   `enabled-thorns`: thorns the thornlist has commented out as `#DISABLED`
-  that the variant puts back;
-- `default`: whether it's the variant a build uses without `--variant` (one
-  variant only), and `universe` and `coerce-run-universe` (notebook 5).
+  that the flavor puts back;
+- `default`: whether it's the flavor a build uses without `--flavor` (one
+  flavor only), and `universe` and `coerce-run-universe` (notebook 5).
 
 `small`: the default build without the Cottonmouth thorns, for `short` and
-`long` only. Making it takes three edits: copy `optionlists/default.toml` to
-`small.toml` and give it the header below (no `default`: that stays the
-default variant's); give it a `VERSION` of its own (a config is rebuilt from
-scratch whenever its optionlist's `VERSION` changes, so a variant's should
-say which it is); and add `"small"` to the `variants` list under
-`[variants.optionlist]` in `meta.toml`, which is how cactup knows the
-variant exists.
+`long` only. Copy `optionlists/default.toml` to `small.toml`, give it the
+header below (no `default`: that stays the default flavor's), and give it a
+`VERSION` of its own: a config is rebuilt from scratch whenever its
+optionlist's `VERSION` changes, so a flavor's should say which it is. The
+new file is all it takes: every file in `optionlists/` is a flavor.
 
 ```{code-cell} ipython3
 optionlists = mylab / "optionlists"
 small = optionlists / "small.toml"
 if not small.exists():
     text = (optionlists / "default.toml").read_text()
-    # The header and the comment above it, which describes the default variant.
+    # The header and the comment above it, which describes the default flavor.
     header = text[text.index("# The [cactup] header"):text.index("\n[options]\n") + 1]
-    small.write_text(text.replace(header, '''# The small variant: the default build without Cottonmouth, for the short
+    small.write_text(text.replace(header, '''# The small flavor: the default build without Cottonmouth, for the short
 # and long queues only.
 [cactup]
-gpu               = false
-description       = "The CPU build without Cottonmouth, for the short and long queues"
-compatible-queues = ["short", "long"]
-disabled-thorns   = ["Cottonmouth/CottonmouthZ4c4m", "Cottonmouth/CottonmouthLinearWaveID"]
+description     = "The CPU build without Cottonmouth, for the short and long queues"
+disabled-thorns = ["Cottonmouth/CottonmouthZ4c4m", "Cottonmouth/CottonmouthLinearWaveID"]
+
+[cactup.runs-on]
+queues = ["short", "long"]
+gpu    = false
 
 ''').replace('VERSION = "cactup-tutorial-2026-09-29"', 'VERSION = "mylab-small-1"')
-      .replace('(variant "default")', '(variant "small")', 1))
-# Add "small" to the list in [variants.optionlist].
-text = meta.read_text()
-if '"small"' not in text:
-    meta.write_text(re.sub(r'(\[variants\.optionlist\]\s*variants\s*=\s*\[[^\]]*?)(,?\s*\])',
-                           r'\1, "small"\2', text, count=1))
+      .replace('(flavor "default")', '(flavor "small")', 1))
 ```
 
 ```{code-cell} ipython3
 %%shell
-cactup machine show mylab --variants
+cactup machine show mylab --flavors
 ```
 
-`cactup build tutorial-small --machine mylab --variant small --thornlist
+`cactup build tutorial-small --machine mylab --flavor small --thornlist
 /opt/cactup-tutorial/thornlists/tutorial.th` would build it: a config of its
 own, whose processed thornlist has the two thorns `#DISABLED`, and whose
 simulations need `-q short` or `-q long`. It isn't built
 here: no build in this notebook was prepared ahead of time, so it would
-compile everything (about ten minutes). Unlike `meta.toml`, the header isn't
-checked strictly: a misspelled key in it is ignored, so `machine show
---variants` is the place to see that cactup read what you meant.
+compile everything (about ten minutes). The header is read as strictly as
+`meta.toml`: a misspelled key in it is an error, which names the file.
 
 ## A universe
 
-Notebook 5's `pinned` universe wrapped runs in `taskset`. A universe can also
-set up the environment its commands run in: `env-run-setup` is shell that
+Notebook 5's `taskset` universe wrapped runs in `taskset`. A universe can also
+set up the environment its commands run in: `run-env-setup` is shell that
 runs at the top of the run script. `nice` runs Cactus at a lower priority,
 through `env` (which sets a variable for what it runs) and `nice`:
 
@@ -286,7 +290,7 @@ through `env` (which sets a variable for what it runs) and `nice`:
 add('''
 [universes.nice]
 wrapper-argv  = ["env", "LAB_WRAPPED=yes", "nice", "-n", "5"]
-env-run-setup = """
+run-env-setup = """
 export LAB_UNIVERSE=nice
 """
 ''')
@@ -298,10 +302,8 @@ universe of its own):
 ```{code-cell} ipython3
 %%shell
 cactup machine show mylab | grep universes
-while squeue -h -n u1 | grep -q .; do sleep 1; done
-cactup sim submit u1 ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par --machine mylab --ignore-machine -T 1 -w 00:05:00 --universe nice --overwrite
-while squeue -h -n u1 | grep -q .; do sleep 1; done
-grep -E '^LAB_' ~/.cactup/simulations/ET_2026_05_v0/tutorial/u1/output-0000/.cactup/ENVIRONMENT
+cactup sim submit u1 ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par --machine mylab --ignore-machine -T 1 -w 00:05:00 --universe nice --overwrite --block
+grep -E '^LAB_' ~/.cactup/simulations/MyCactus/tutorial/u1/output-0000/.cactup/ENVIRONMENT
 ```
 
 `.cactup/ENVIRONMENT` is the environment the run started Cactus with:
@@ -366,7 +368,6 @@ they go first.
 
 ```{code-cell} ipython3
 %%shell
-while squeue -h -n q1,q2,k1,k2,u1 | grep -q .; do sleep 1; done
 for sim in q1 q2 q3 k1 k2 u1; do cactup sim delete $sim; done
 cactup machine delete mylab
 cactup machine forget
@@ -376,7 +377,7 @@ cactup machine show | sed -n '1,2p'
 ## Where this is documented
 
 - [meta.toml reference](https://max-morris.github.io/Cactup/authors/meta-toml.html)
-  (queues, variants, universes, knobs)
+  (queues, scripts, universes, knobs)
 - [Submit and run scripts](https://max-morris.github.io/Cactup/authors/scripts-and-variables.html)
   (`.py` scripts, `CactupError`, the template variables)
 - [Optionlists](https://max-morris.github.io/Cactup/authors/optionlists.html)

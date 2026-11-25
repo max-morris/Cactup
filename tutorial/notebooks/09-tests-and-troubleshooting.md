@@ -43,10 +43,11 @@ cactup test run WaveToyX -T 1
 `mpirun`.)
 
 `cactup test submit` sends it to SLURM. Name the tests to run by thorn
-(`WaveToyX`), or by thorn and test (`WaveToyX/radiative`). Other names,
-such as an arrangement (`CarpetX`) or `CarpetX/WaveToyX`, select no tests
-at all, without a warning, so check the count in the result. Three thorns,
-on one process:
+(`WaveToyX`, or `CarpetX/WaveToyX`), by thorn and test
+(`WaveToyX/radiative`), or by arrangement (`CarpetX`, every thorn in it
+that has tests); a name that selects nothing is refused before anything is
+queued. Three thorns, on one process. (`test submit` has no `--block`, so
+the cell waits until SLURM's queue has no job of yours left.)
 
 ```{code-cell} ipython3
 %%shell
@@ -64,7 +65,7 @@ their logs say why:
 
 ```{code-cell} ipython3
 %%shell
-results=$(ls -d ~/.cactup/tests/ET_2026_05_v0/tutorial/tutorial/results-[0-9][0-9][0-9][0-9] | tail -n 1)
+results=$(ls -d ~/.cactup/tests/MyCactus/tutorial/tutorial/results-[0-9][0-9][0-9][0-9] | tail -n 1)
 ls $results/tutorial/TestOutput
 grep -a -h -o -E '[A-Za-z:_]+ is set to "openpmd", but openPMD_api is not enabled|openPMD is not enabled' $results/tutorial/TestOutput/*.log | sort -u
 ```
@@ -180,23 +181,29 @@ cactup config delta
 A misspelled parameter name, in a copy of WaveToyX's test:
 
 ```{code-cell} ipython3
-%%shell
+%%shell --expect-fail
 sed 's/^WaveToyX::initial_condition/WaveToyX::initial_conditon/' ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par > ~/typo.par
-while squeue -h -n typo | grep -q .; do sleep 1; done
-cactup sim submit typo ~/typo.par -T 1 -w 00:05:00 --overwrite
-while squeue -h -n typo | grep -q .; do sleep 1; done
+cactup sim submit typo ~/typo.par -T 1 -w 00:05:00 --overwrite --block
+```
+
+`--block` read how the run ended from what the run recorded, and fails the
+command, as a script that runs after the simulation would want. `sim show`
+is another matter:
+
+```{code-cell} ipython3
+%%shell
 cactup sim show typo
 ```
 
-`FINISHED` means the job is over, not that Cactus succeeded: cactup shows
-the job's state. What happened is in the run's output, which `cactup sim
-log` shows. Cactus checks every parameter before it starts, and stops if any
-is wrong:
+`FINISHED` means the job is over, not that Cactus succeeded: `sim show`
+shows the job's state. What happened is in the run's output, which `cactup
+sim log` shows. Cactus checks every parameter before it starts, and stops if
+any is wrong:
 
 ```{code-cell} ipython3
 %%shell
 cactup sim log typo | grep -a -E 'not found|major error'
-grep failed ~/.cactup/simulations/ET_2026_05_v0/tutorial/typo/log.txt
+grep failed ~/.cactup/simulations/MyCactus/tutorial/typo/log.txt
 ```
 
 Cactus prints its warnings to both its output and its error stream, and

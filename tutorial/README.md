@@ -74,14 +74,14 @@ pages.
 
 | # | Notebook | Budget |
 |---|---|---|
-| 1 | Intro and tour: the terminal cells, installing cactup with the documented installer, auto-update, a SimFactory-to-cactup cheat sheet, `releases`, installing `ET_2026_05_v0` | 30 min |
+| 1 | Intro and tour: the terminal cells, installing cactup with the documented installer, auto-update, a SimFactory-to-cactup cheat sheet, `releases`, installing `ET_2026_05_v0` as `MyCactus` | 30 min |
 | 2 | Build a config, submit a short simulation, look at and plot the results | 30 min |
 | 3 | A second install to experiment on; point the flesh and CarpetX at the mixed-precision forks; refetch | 30 min |
 | 4a | Multiple installations: the CarpetX-only thornlist `carpetx.th`, `master`, switching, provenance | 15 min |
-| 4b | Multiple configs: a GPU variant and a debug build, config management | 20 min |
+| 4b | Multiple configs: a GPU flavor and a debug build, config management | 20 min |
 | 5 | Topology on submit, a build universe, the delta checker while hacking on a thorn and the flesh | 40 min |
 | 6a | MDB overlays, and a first machine entry of your own | 30 min |
-| 6b | Complex entries: queues, per-queue script variants, `.py` scripts, knobs, optionlist headers, universes | 40 min |
+| 6b | Complex entries: queues, per-queue scripts, `.py` scripts, knobs, optionlist flavors, universes | 40 min |
 | 7 | Monitoring and restarts: logs, the follow view, walltime chaining, checkpoint and recovery | 30 min |
 | 8 | Parfile templates, Python-generated parfiles, a small parameter sweep | 25 min |
 | 9 | Test suites, and troubleshooting a broken build and a broken run | 30 min |
@@ -144,9 +144,11 @@ Constraints the notebooks must respect (each found by reading the code):
   whose site mirrors GitHub.
 - **3:** after installing, the notebook runs `cactup use et-mp` (installing
   makes a new install active only when none is), previewing what 4a teaches.
-  Its last cell is an optional "start over" (`cactup uninstall et-mp
-  --force`, then removing `~/et-mp`), since running it again from the top
-  otherwise shows only "already exists" and "up to date". It edits only
+  Run again, it starts over: catch-up 3 uninstalls `et-mp`, removes the
+  dangling `~/et-mp` and moves `~/.cactup/simulations/et-mp` to
+  `~/tutorial-saved/`, saying so line by line, since running it again on
+  what the first run left would show only "already exists" and "up to
+  date". It edits only
   `et-mp`'s live thornlist, never
   `tutorial.th`, and et-mp's `tutorial` config is built without `--thornlist`,
   so it follows that live list (and after the refetch cactup's own report
@@ -167,8 +169,9 @@ Constraints the notebooks must respect (each found by reading the code):
   (only the bake container for B3 does), so the notebook says openly, as
   notebook 1 does for the mirrors, that the GPU build was prepared ahead of
   time for a GPU node, and the `gpu` optionlist it reads describes the
-  toolkit that build used. Its GPU config goes to the `gpu` queue with `-q
-  gpu` (not `--force-queue`, whatever cactup's refusal suggests), which
+  toolkit that build used. The `gpu` flavor's header names `gpu` as its
+  `default-queue`, so the GPU config's submit without `-q` goes there (not
+  `--force-queue`, whatever cactup's refusal of `-q debug` suggests), which
   `sinfo` shows inactive without a GPU: the submit is then refused by SLURM
   ("Required partition not available (inactive or drain)"), and the refused
   simulation stays listed as ACTIVE with no job, so the cell uses a
@@ -184,9 +187,9 @@ Constraints the notebooks must respect (each found by reading the code):
   `thornlists/tutorial-gpu.th`: `tutorial.th` with CarpetX on the branch
   `ET_2026_05-cuda13` of github.com/max-morris/CarpetX, the release plus
   one commit stating those three assertions over the template parameters.
-  The notebook says so, and the stock installation stays the release.
-- **5:** its variant build is a separate config in a build universe,
-  `build tutorial-pinned --universe pinned --thornlist tutorial.th` (bake
+  The notebook says so, and `MyCactus` stays the release.
+- **5:** its universe example is a separate config, built in a universe,
+  `build tutorial-taskset --universe taskset --thornlist tutorial.th` (bake
   B5), whose wrapper is `taskset -c @ENV(CACTUP_TUTORIAL_CPUS)@`: each
   container's cpuset has different CPU numbers, which the entrypoint
   exports. It comes before the hacking section, while
@@ -194,9 +197,11 @@ Constraints the notebooks must respect (each found by reading the code):
   their state, like every bake's). The prose explains that changing an
   existing config's universe forces a full rebuild, and that the universe is
   not sticky (a plain `build` resolves it afresh and calls any difference a
-  full rebuild), so `tutorial-pinned` is never rebuilt without `--universe
-  pinned`; its simulations run in `pinned`, which the notebook shows. It
-  points back to 4b for optionlist variants rather than baking another.
+  full rebuild), so `tutorial-taskset` is never rebuilt without `--universe
+  taskset`; its simulations run in `taskset`, which the notebook shows. It
+  points back to 4b for optionlist flavors rather than baking another.
+  `pinned` was its old name; `taskset` says what it runs, and the notebook
+  first says what running without a universe means.
 - **5 and 9:** their hacking builds only the stock `tutorial`. The other
   configs keep partial trees (no objects), so after a source edit their next
   build would be a real from-scratch one. Notebook 5's edits are all in one
@@ -204,7 +209,7 @@ Constraints the notebooks must respect (each found by reading the code):
   `greeting` parameter in its `param.ccl`), and the flesh edit is a line in
   `src/main/Banner.c`, not a widely included header; each edit shows up in a
   one-second run of WaveToyX's `radiative` test. Before building
-  `tutorial-pinned`, notebook 5 runs `cactup-tutorial-sources-clean` (in
+  `tutorial-taskset`, notebook 5 runs `cactup-tutorial-sources-clean` (in
   `image/rootfs/usr/local/bin/`). For the repositories and thorns the stock
   `tutorial` config records, it checks what B5's fingerprint covers: each
   repository on the commit the install fetched (`.cactup/fetch-state.toml`)
@@ -228,26 +233,25 @@ Constraints the notebooks must respect (each found by reading the code):
   (`cactup-tutorial`, which the first exercise fixes along with
   `[hardware]`), and `[cactup]` recording the MDB generation and the entry
   it was copied from. 6a shows the commented original
-  (`~/.cactup/mdb/gen-1/cactup-tutorial/meta.toml`: `gen-1` links to the
+  (`~/.cactup/mdb/gen-3/cactup-tutorial/meta.toml`: `gen-3` links to the
   content-addressed commit directory, whose name changes with any edit
   under `mdb/`) next to the attendee's copy, since its comments explain what
   the first exercise fixes. 6a also shows `meta.toml`'s strictness (a
-  misspelled key, put back) and the generation gate (`mdb-generation = 2`,
+  misspelled key, put back) and the generation gate (`mdb-generation = 4`,
   put back). A config built for `cactup-tutorial` is refused on `mylab`
   (`check_machine`), so submits there use `--ignore-machine` on the stock
-  `tutorial`. 6b builds nothing: its optionlist variant `small` is shown with
-  `machine show --variants` only (a `--virtual-executable` build would copy
+  `tutorial`. 6b builds nothing: its optionlist flavor `small` is shown with
+  `machine show --flavors` only (a `--virtual-executable` build would copy
   a 328 MB executable and leave the config `[incomplete]`). Its new queue
-  `long` maps onto the `batch` partition, and since the stock config's
-  recorded `compatible-queues` lack it, its `-q long` submits pass
-  `--force-queue`. Its
+  `long` maps onto the `batch` partition, is added to the `default` submit
+  and run scripts' queue lists (every queue needs both, since MDB generation
+  2), and since the stock config's recorded `runs-on` queues lack it, its `-q
+  long` submits pass `--force-queue`. Its
   discovery exercise gives `mylab` a `hostname.regexp`, then a `discover.py`,
   for another host name, and tries them with `--hostname`, so `mylab` never
   claims this host. Every submit uses a fresh simulation name (or
-  `--overwrite`): cactup treats the active restart of a simulation whose
-  `simulation.toml` is less than 60 seconds old as live without asking SLURM,
-  so a quick resubmit of the same simulation would chain behind a finished
-  job.
+  `--overwrite`) and `--block`, so a cell leaves no job behind for the next
+  one to meet.
 
   `mylab` lives from the start of 6a to the end of 6b: `machine create`
   refuses an existing name, so catch-up 6a moves a leftover `mylab` to
@@ -267,7 +271,7 @@ Constraints the notebooks must respect (each found by reading the code):
   has neither, so notebook 7 builds a config of its own, `tutorial-ckpt` from
   `thornlists/tutorial-ckpt.th` (`tutorial.th` plus HDF5, Silo and
   TerminationTrigger; bake B6), behind the same
-  `cactup-tutorial-sources-clean` guard as notebook 5's `tutorial-pinned`. Its
+  `cactup-tutorial-sources-clean` guard as notebook 5's `tutorial-taskset`. Its
   parfile (a WaveToyX standing wave, 64³ cells, 9600 iterations) stops on
   `Cactus::max_runtime = @CHECKPOINT_WALLTIME_SECONDS@ / 60.0`, checkpoints on
   termination into `@SIMULATION_DIR@/checkpoints`, recovers with `autoprobe`,
@@ -345,7 +349,7 @@ Constraints the notebooks must respect (each found by reading the code):
   here. Nothing pipes cactup into `head`: cactup panics on a closed pipe,
   so run_all forbids "panicked at".
 - **Every build runs in the foreground:** `mdb/cactup-tutorial` sets `[build]
-  default-action = "run"` (with a build-submit script variant and a
+  default-action = "run"` (with a build-submit script and a
   `[scheduler].submit`, `cactup build` would otherwise go to the queue).
 - **Simulations and tests go through SLURM, never in the foreground.** A
   foreground `sim` run records its own pid as its job id, and cactup asks
@@ -411,7 +415,10 @@ configs, simulations). So:
   whose `hostname.regexp` matches this host or whose `discover.py`, run as
   cactup runs it, claims it: for example one made without `--no-discover`
   (with two claimants cactup refuses to pick one without a terminal, and
-  asks in a cell). Its own
+  asks in a cell). Notebook 3 alone is reset rather than caught up: it
+  makes its own installation, `et-mp`, and catch-up 3 removes one an
+  earlier run left (above), so that running it again runs it from the top.
+  Its own
   cactup calls never run on a terminal (so they never trigger the update
   check). For N ≥ 2 it runs the installer if cactup is missing and applies
   the pending update with `cactup update` itself, so an attendee who skipped
@@ -426,19 +433,19 @@ configs, simulations). So:
   does the machine cleanups that need none, and, silently, forgets the last
   update check, so that running notebook 1 again (whose installer puts the
   older build back) shows the update again.
-- Catch-up only ever needs the stock `ET_2026_05_v0` install and the stock
+- Catch-up only ever needs the stock install (`ET_2026_05_v0` as `MyCactus`) and the stock
   `tutorial` build (B1): notebooks 2, 3 (which compares its own install with
   it, but makes its own active), 4a and 10 need the install, 4b (which ends
   by switching back to `tutorial`) needs the build,
   notebooks 5 to 9 also need `tutorial`, and every other install or config
-  (`et-mp`, the `carpetx.th` install, `master`, the variant configs) is made by the
+  (`et-mp`, the `carpetx.th` install, `master`, the flavor configs) is made by the
   notebook that uses it. So a late arrival waits at most for one install from
   the mirrors (within 10 minutes under load, see Sizing) and one restore.
 - Notebooks 5 and 9 edit a fixed list of files in the stock install
   (catch-up's `EDITED`: WaveToyX's source and `param.ccl`, the flesh's
   `Banner.c`, notebook 9's `TestNorms/src/test.cc`). For every N ≥ 2, catch-up puts any of them that are modified back to
   their committed state: the partial-tree configs in the stock install
-  (4b's `tutorial-debug`, `tutorial-pinned`) have no objects, so building one
+  (4b's `tutorial-debug`, `tutorial-taskset`) have no objects, so building one
   on an edited tree would be a from-scratch real build, and the bakes all
   assume clean repositories. (`tutorial-gpu` lives in `et-gpu`, which no
   notebook edits.) This
@@ -481,14 +488,14 @@ configs, simulations). So:
 
 The headless end-to-end test runs every notebook both in order and alone in a
 fresh container (the "alone" runs in parallel, relying on catch-up), plus
-out-of-order cases: notebook 3 run twice, with its "start over" cell
-between; notebook 5 run again from the top after stopping at the end of its
+out-of-order cases: notebook 3 run twice (the second pass, through its
+catch-up); notebook 5 run again from the top after stopping at the end of its
 hacking section (all three files edited and built); and notebook 4b after
 stopping there, asserting that cactup's "source tree has moved" note never
 appears; notebook 7 after stopping there too; and notebook 9 then notebook 5
 in a fresh container. Notebooks 6a and 6b are each run again after stopping
 partway. Every
-notebook's cells must be safe to run again: the `tutorial-pinned` cell in
+notebook's cells must be safe to run again: the `tutorial-taskset` cell in
 notebook 5, for instance, runs `cactup-tutorial-sources-clean` (above) and,
 if the sources aren't as fetched, lists what differs and says to run the
 notebook's catch-up cell (which restores the
@@ -783,9 +790,9 @@ submits to `mylab` use `--ignore-machine` on the stock `tutorial`).
 | catch-up 4b and N ≥ 5, otherwise | the same | up to date | no make at all |
 | 3 | `build tutorial` (et-mp, before the refetch) | new config | hit B2a: restore + replay |
 | 3 | `build tutorial` (et-mp, after the fork refetch) | full rebuild: the flesh moved | realclean real; hit B2b: restore + replay |
-| 4b | `-I et-gpu build tutorial-gpu --variant gpu` (et-gpu) | new config | hit B3 |
+| 4b | `-I et-gpu build tutorial-gpu --flavor gpu` (et-gpu) | new config | hit B3 |
 | 4b | `build tutorial-debug --debug --thornlist tutorial.th` | new config | hit B4 |
-| 5 | `build tutorial-pinned --universe pinned --thornlist tutorial.th`, before the hacking | new config | hit B5: restore + replay |
+| 5 | `build tutorial-taskset --universe taskset --thornlist tutorial.th`, before the hacking | new config | hit B5: restore + replay |
 | 5 | `build tutorial` after a thorn source edit | incremental | miss: real, one thorn |
 | 5 | `build tutorial` after a `.ccl` edit in WaveToyX | incremental, thorn shape changed | miss: real, that thorn from scratch |
 | 5 | `build tutorial` after a flesh `.c` edit (`Banner.c`) | incremental | miss: real |
@@ -842,12 +849,12 @@ restored config is complete to cactup and Cactus alike).
 
 | ID | Build | Kept |
 |---|---|---|
-| B1 | stock `ET_2026_05_v0` install, config `tutorial` from `tutorial.th` | the whole tree (notebooks 5 and 9 rebuild incrementally) |
+| B1 | stock install (`ET_2026_05_v0` as `MyCactus`), config `tutorial` from `tutorial.th` | the whole tree (notebooks 5 and 9 rebuild incrementally) |
 | B2a | install `et-mp` (from `tutorial.th`), config `tutorial` from its live thornlist, before the fork refetch | all but the objects |
 | B2b | install `et-mp` after the fork refetch, config `tutorial` | all but the objects |
-| B3 | install `et-gpu` (from `tutorial-gpu.th`), config `tutorial-gpu` (`gpu` optionlist variant) | all but the objects |
+| B3 | install `et-gpu` (from `tutorial-gpu.th`), config `tutorial-gpu` (`gpu` optionlist flavor) | all but the objects |
 | B4 | `tutorial-debug` (`--debug`) | all but the objects |
-| B5 | `tutorial-pinned` (`--universe pinned`) | all but the objects |
+| B5 | `tutorial-taskset` (`--universe taskset`) | all but the objects |
 | B6 | `tutorial-ckpt` (`tutorial-ckpt.th`) | all but the objects |
 
 Every bake also keeps the `NAME-utils` programs under `exe/NAME/`, since the
@@ -856,7 +863,7 @@ tree, what a real `NAME-clean` of it prints (which is what a replayed
 `--clean` step prints) and what make prints when interrupted in each step.
 
 B1 to B6 exist, in `bake/bake.py`'s table of bakes. B5's build runs in the
-`pinned` universe, so its `taskset` needs `CACTUP_TUTORIAL_CPUS`, which the
+`taskset` universe, so its `taskset` needs `CACTUP_TUTORIAL_CPUS`, which the
 entrypoint exports; a bake container doesn't run the entrypoint, so
 `bake.py` sets it the same way when it isn't set. A bake can first do to its installation what the notebook does
 before that build (`prepare`): for B2b, notebook 3's thornlist edit

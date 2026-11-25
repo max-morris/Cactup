@@ -93,7 +93,6 @@ simulation by then, so `--overwrite` replaces it next time):
 
 ```{code-cell} ipython3
 %%shell --expect-fail
-while squeue -h -n standing-16 | grep -q .; do sleep 1; done
 cactup sim submit standing-16 ~/standing.par -T 1 -c 1 -w 00:05:00 --overwrite
 ```
 
@@ -102,9 +101,8 @@ one thread, a few seconds.
 
 ```{code-cell} ipython3
 %%shell
-cactup sim submit standing-16 ~/standing.par -K cells=16 -T 1 -c 1 -w 00:05:00 --overwrite
-while squeue -h -n standing-16 | grep -q .; do sleep 1; done
-grep -E 'run_title|ncells_x' ~/.cactup/simulations/ET_2026_05_v0/tutorial/standing-16/output-0000/standing.par
+cactup sim submit standing-16 ~/standing.par -K cells=16 -T 1 -c 1 -w 00:05:00 --overwrite --block
+grep -E 'run_title|ncells_x' ~/.cactup/simulations/MyCactus/tutorial/standing-16/output-0000/standing.par
 ```
 
 That is the restart's copy, with the values filled in; the simulation keeps
@@ -160,10 +158,8 @@ CarpetX::out_performance = no
 
 ```{code-cell} ipython3
 %%shell
-while squeue -h -n computed | grep -q .; do sleep 1; done
-cactup sim submit computed ~/standing.py -K cells=24 -T 1 -c 1 -w 00:05:00 --overwrite
-while squeue -h -n computed | grep -q .; do sleep 1; done
-grep -E '^# Generated|cctk_final_time|ncells_x' ~/.cactup/simulations/ET_2026_05_v0/tutorial/computed/output-0000/standing.par
+cactup sim submit computed ~/standing.py -K cells=24 -T 1 -c 1 -w 00:05:00 --overwrite --block
+grep -E '^# Generated|cctk_final_time|ncells_x' ~/.cactup/simulations/MyCactus/tutorial/computed/output-0000/standing.par
 ```
 
 Unlike a `.par`, a `.py` isn't checked when you submit: cactup runs it only
@@ -179,7 +175,6 @@ side by side.
 ```{code-cell} ipython3
 %%shell
 for n in 16 32 64; do
-  while squeue -h -n standing-$n | grep -q .; do sleep 1; done
   cactup sim submit standing-$n ~/standing.par -K cells=$n -T 1 -c 1 -w 00:10:00 --overwrite
 done
 squeue
@@ -188,7 +183,9 @@ cactup sim list
 ```
 
 Right after submitting, `squeue` still shows them pending; they start within
-seconds. `sim list` lists every simulation in this installation, so
+seconds. The cell then waits on SLURM's queue, not with `--block`: that
+would make each submit wait for its own job before the next one is
+submitted, and the point here is that the three run side by side. `sim list` lists every simulation in this installation, so
 notebook 2's `lw` too, if you ran it.
 
 Each simulation's error, over the one period. `read_tsv` is notebook 2's,

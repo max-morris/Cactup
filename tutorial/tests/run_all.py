@@ -21,7 +21,8 @@ For each notebook it checks that the outputs contain what they must
 appear (NEVER), that no cell not marked --expect-fail printed an error on
 the way (a cell's status is only its last command's), and, in order, that
 catch-up had nothing to do (on the second pass, but for notebook 2
-switching back to the stock installation). The executed notebooks are saved in --out.
+switching back to MyCactus, and notebook 3 removing what its first run made). The
+executed notebooks are saved in --out.
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ EXPECT = {
         r"cactup is installed",
         r"cactup +updated to \w+",
         r"ET_2026_05_v0 \(latest\)",
-        r"Success! Installed release ET_2026_05_v0",
+        r"Success! Installed release ET_2026_05_v0 into /home/cactus/\.cactup/cacti/MyCactus",
         r"file:///opt/cactup-mirrors/",
         r"cactup-tutorial \(System MDB",
     ],
@@ -60,7 +61,7 @@ EXPECT = {
         r"Rebuilding config tutorial from scratch: the Cactus flesh is not what it was",
         r"Built config tutorial",
         r"TestReal4\[state4\]: PASS",
-        r"Switched to installation ET_2026_05_v0",
+        r"Switched to installation MyCactus",
     ],
     "04a": [
         r"Success! Installed custom thornlist /opt/cactup-tutorial/thornlists/carpetx.th",
@@ -68,14 +69,14 @@ EXPECT = {
         r"- carpetx \(custom thornlist",
         r"Switched to installation carpetx",
         r"et-master\n  release: +master",
-        r"Switched to installation ET_2026_05_v0",
+        r"Switched to installation MyCactus",
         r"Uninstalled carpetx",
     ],
     "04b": [
         r"gpu \[gpu\]",
         r"Success! Installed custom thornlist /opt/cactup-tutorial/thornlists/tutorial-gpu.th",
         r"Built config tutorial-gpu",
-        r"gpu: true +compatible-queues: gpu",
+        r"runs on: gpu +gpu: true",
         r"only compatible with queue\(s\) gpu",
         r"gpu +inact",
         r"Required partition not available",
@@ -95,10 +96,10 @@ EXPECT = {
         r"shape-2x2\.out:MPI initialized with 2 MPI processes",
         r"shape-2x2\.out:OMP initialized with 2 OMP threads",
         r"Moved simulation shape-2n to",
-        r"universes: pinned",
-        r"Built config tutorial-pinned",
-        r"universe: pinned \(coerce-run-universe: true\)",
-        r'name = "pinned"',
+        r"universes: taskset",
+        r"Built config tutorial-taskset",
+        r"universe: taskset \(coerce-run-universe: true\)",
+        r'name = "taskset"',
         r"CarpetX — locally edited since the build",
         r"Built config tutorial \(",
         r"INFO \(WaveToyX\): Hello from notebook 5: initial condition Gaussian",
@@ -108,7 +109,7 @@ EXPECT = {
         r"Edited in: +notebook 5",
         r"built with local edits, now reverted",
         r"the source tree matches what this config was built from",
-        r"Moved simulation wave-pinned to",
+        r"Moved simulation wave-taskset to",
     ],
     "06a": [
         r"- cactup-tutorial \(Cactup tutorial\) \[personal\] \(detected\)",
@@ -118,8 +119,8 @@ EXPECT = {
         r"nickname: mylab",
         r"hardware: max-cpus-per-node=4 .*\n?.*memory=7372 MB",
         r"unknown field `max-cpu-per-node`",
-        r"mdb-generation = 1",
-        r"was written for MDB\s+generation 2, which requires a newer cactup",
+        r"mdb-generation = 3",
+        r"was written for MDB\s+generation 4, which requires a newer cactup",
         r"config \"tutorial\" was built for machine \"cactup-tutorial\" but this is machine \"mylab\"",
         r"Submitted lab1 restart output-0000 as job",
         r"state:\s+FINISHED",
@@ -131,16 +132,16 @@ EXPECT = {
         r"long  max-walltime 01:00:00",
         r"only compatible with queue\(s\) debug, short, batch \(not \"long\"\)",
         r"queue = \"long\"\nQUEUE = \"batch\"",
-        r"submitscripts: default \(default\), test \[test\], long",
+        r"submitscripts: default \(debug, short, batch, gpu\), test \(debug, short, batch, gpu\) \[test\], long \(long\)",
         r"#SBATCH --comment=long-queue",
         r"the long queue is for multithreaded runs, but this one asks for 1 thread per task",
         r"Lab note: set for one command",
         r"(Created custom knob|Set) lab-note = kept by cactup",
         r"Lab note: kept by cactup",
         r"Deleted custom knob lab-note",
-        r"- small\n\s+The CPU build without Cottonmouth, for the short and long queues\n\s+compatible queues: short, long",
+        r"- small\n\s+The CPU build without Cottonmouth, for the short and long queues\n\s+runs on queues: short, long",
         r"disabled thorns: Cottonmouth/CottonmouthZ4c4m, Cottonmouth/CottonmouthLinearWaveID",
-        r"universes: pinned, nice",
+        r"universes: taskset, nice",
         r"LAB_UNIVERSE=nice\nLAB_WRAPPED=yes",
         r"Detected machine changed from cactup-tutorial to mylab",
         r"Detected machine changed from mylab to cactup-tutorial",
@@ -222,7 +223,7 @@ EXPECT = {
         r"gpu2 \(default\) \[gpu\]",
         r"gpu4 \[gpu\].*default-cpus-per-task 16",
         r"workq\s+max-walltime \S+\s+default-cpus-per-task 8",
-        r"buildsubmitscripts: default \(default\), cpu",
+        r"buildsubmitscripts: gpu-partition \(gpu2, gpu4\), cpu-partition",
         r"hostname\.regexp",
         r"\^qbd\\d\+\(\\\.loni\\\.org\|\)\$",
         r'default-action = "submit"',
@@ -256,11 +257,8 @@ RERUN = {
         r"state: +FINISHED",
         r"21 snapshots of gt along x",
     ],
-    "03": [
-        r"already exists",
-        r"is up to date",
-        r"TestReal4\[state4\]: PASS",
-    ],
+    # Catch-up removes what the first run made, so it runs as the first did.
+    "03": EXPECT["03"],
     "04a": [
         r"Success! Installed custom thornlist /opt/cactup-tutorial/thornlists/carpetx.th",
         r"already exists",
@@ -282,10 +280,10 @@ RERUN = {
         r"shape-2x2\.out:MPI initialized with 2 MPI processes",
         r"shape-2x2\.out:OMP initialized with 2 OMP threads",
         r"Moved simulation shape-2n to",
-        r"universes: pinned",
-        r"Config tutorial-pinned is up to date",
-        r"universe: pinned \(coerce-run-universe: true\)",
-        r'name = "pinned"',
+        r"universes: taskset",
+        r"Config tutorial-taskset is up to date",
+        r"universe: taskset \(coerce-run-universe: true\)",
+        r'name = "taskset"',
         r"CarpetX — locally edited since the build",
         r"Built config tutorial \(",
         r"INFO \(WaveToyX\): Hello from notebook 5: initial condition Gaussian",
@@ -295,7 +293,7 @@ RERUN = {
         r"Edited in: +notebook 5",
         r"built with local edits, now reverted",
         r"the source tree matches what this config was built from",
-        r"Moved simulation wave-pinned to",
+        r"Moved simulation wave-taskset to",
     ],
     "06a": [
         r"- cactup-tutorial \(Cactup tutorial\) \[personal\] \(detected\)",
@@ -305,8 +303,8 @@ RERUN = {
         r"nickname: mylab",
         r"hardware: max-cpus-per-node=4 .*\n?.*memory=7372 MB",
         r"unknown field `max-cpu-per-node`",
-        r"mdb-generation = 1",
-        r"was written for MDB\s+generation 2, which requires a newer cactup",
+        r"mdb-generation = 3",
+        r"was written for MDB\s+generation 4, which requires a newer cactup",
         r"config \"tutorial\" was built for machine \"cactup-tutorial\" but this is machine \"mylab\"",
         r"Submitted lab1 restart output-0000 as job",
         r"state:\s+FINISHED",
@@ -318,16 +316,16 @@ RERUN = {
         r"long  max-walltime 01:00:00",
         r"only compatible with queue\(s\) debug, short, batch \(not \"long\"\)",
         r"queue = \"long\"\nQUEUE = \"batch\"",
-        r"submitscripts: default \(default\), test \[test\], long",
+        r"submitscripts: default \(debug, short, batch, gpu\), test \(debug, short, batch, gpu\) \[test\], long \(long\)",
         r"#SBATCH --comment=long-queue",
         r"the long queue is for multithreaded runs, but this one asks for 1 thread per task",
         r"Lab note: set for one command",
         r"(Created custom knob|Set) lab-note = kept by cactup",
         r"Lab note: kept by cactup",
         r"Deleted custom knob lab-note",
-        r"- small\n\s+The CPU build without Cottonmouth, for the short and long queues\n\s+compatible queues: short, long",
+        r"- small\n\s+The CPU build without Cottonmouth, for the short and long queues\n\s+runs on queues: short, long",
         r"disabled thorns: Cottonmouth/CottonmouthZ4c4m, Cottonmouth/CottonmouthLinearWaveID",
-        r"universes: pinned, nice",
+        r"universes: taskset, nice",
         r"LAB_UNIVERSE=nice\nLAB_WRAPPED=yes",
         r"Detected machine changed from cactup-tutorial to mylab",
         r"Detected machine changed from mylab to cactup-tutorial",
@@ -409,7 +407,7 @@ RERUN = {
         r"gpu2 \(default\) \[gpu\]",
         r"gpu4 \[gpu\].*default-cpus-per-task 16",
         r"workq\s+max-walltime \S+\s+default-cpus-per-task 8",
-        r"buildsubmitscripts: default \(default\), cpu",
+        r"buildsubmitscripts: gpu-partition \(gpu2, gpu4\), cpu-partition",
         r"hostname\.regexp",
         r"\^qbd\\d\+\(\\\.loni\\\.org\|\)\$",
         r'default-action = "submit"',
@@ -622,25 +620,17 @@ def scratch_notebook(box: Container, name: str, cells: list[str]) -> None:
                     f"cat > /home/cactus/notebooks/{name}"], input=json.dumps(nb), text=True, check=True)
 
 
-def start_over(box: Container, nb3: str, out_dir: Path) -> list[str]:
-    """Notebook 3's optional "start over" cell, uncommented and run, then
-    the whole notebook again: as on its first run."""
-    cells = code_cells(box, nb3)
-    cell = next((c for c in cells if "# cactup uninstall et-mp" in c), None)
-    if cell is None:
-        return ["start over: notebook 3 has no start-over cell"]
-    uncommented = re.sub(r"(?m)^# (cactup|rm) ", r"\1 ", cell)
-    scratch_notebook(box, "zz-start-over.ipynb", [uncommented])
-    first = box.run("zz-start-over.ipynb", out_dir)
-    if first["error"]:
-        return [f"start over: the start-over cell failed:\n{first['error']}"]
-    return check("after starting over:", nb3, box.run(nb3, out_dir), EXPECT, False)
-
-
 def code_cells(box: Container, notebook: str) -> list[str]:
     source = subprocess.run(["docker", "exec", box.name, "cat", f"/opt/cactup-tutorial/notebooks/{notebook}"],
                             capture_output=True, text=True, check=True).stdout
     return ["".join(c["source"]) for c in json.loads(source)["cells"] if c["cell_type"] == "code"]
+
+
+# What catch-up may say on the second pass, when the notebooks before it ran.
+AGAIN_CATCH_UP = {
+    "02": r"made MyCactus the active installation",
+    "03": r"et-mp|its simulations to",
+}
 
 
 # What catch-up may say after an attendee stopped in the middle of notebook
@@ -711,7 +701,7 @@ def reset_then_catch_up(box: Container, out_dir: Path) -> list[str]:
     if result["error"]:
         problems.append(f"reset: a cell failed:\n{result['error']}")
     for pattern in (r"as it was at the start", r"installed cactup", r"installing ET_2026_05_v0",
-                    r"- ET_2026_05_v0 .*\(active\)", r"/home/cactus/notebooks\n01-getting-started\.ipynb"):
+                    r"- MyCactus .*\(active\)", r"/home/cactus/notebooks\n01-getting-started\.ipynb"):
         if not re.search(pattern, text):
             problems.append(f"reset: expected output not found: {pattern}\n{text[-1500:]}")
     # A kernel started by the notebook server itself (nbclient starts its own,
@@ -761,18 +751,13 @@ def main() -> int:
                 print(f"{'ok  ' if not found else 'FAIL'} editor files after {nb}", flush=True)
         for nb in notebooks:
             started = time.monotonic()
-            # (Except one thing: running notebook 2 after notebook 3 switches
-            # back to the stock installation, and says so.)
-            found = check("again:", nb, box.run(nb, out / "again"), RERUN, True,
-                          r"made ET_2026_05_v0 the active installation" if nb.startswith("02") else r"$^")
+            # (Except: running notebook 2 after notebook 3 switches back to
+            # MyCactus, and notebook 3's catch-up takes away what its first
+            # run made; each says so.)
+            found = check("again:", nb, box.run(nb, out / "again"), RERUN, True, AGAIN_CATCH_UP.get(number(nb), r"$^"))
             problems += found
             print(f"{'ok  ' if not found else 'FAIL'} again: {nb} ({time.monotonic() - started:.0f} s)",
                   flush=True)
-        for nb3 in (nb for nb in notebooks if nb.startswith("03")):
-            (out / "start-over").mkdir(exist_ok=True)
-            found = start_over(box, nb3, out / "start-over")
-            problems += found
-            print(f"{'ok  ' if not found else 'FAIL'} notebook 3 again, after its start-over cell", flush=True)
         for nb5 in (nb for nb in notebooks if nb.startswith("05")):
             (out / "stopped").mkdir(exist_ok=True)
             for then in [nb for nb in notebooks if nb.startswith(("04b", "07"))] + [nb5]:

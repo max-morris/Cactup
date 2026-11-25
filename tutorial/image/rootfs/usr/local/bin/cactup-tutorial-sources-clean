@@ -3,7 +3,7 @@
 
     cactup-tutorial-sources-clean
 
-Notebooks 5 and 7 run it before building `tutorial-pinned` and
+Notebooks 5 and 7 run it before building `tutorial-taskset` and
 `tutorial-ckpt`: those builds are precomputed for the sources as fetched,
 and a config with no objects built from anything else would compile
 everything. For the repositories and thorns the stock `tutorial` config is
@@ -34,9 +34,10 @@ import sys
 import tomllib
 from pathlib import Path
 
-RELEASE = "ET_2026_05_v0"
+# The stock install, as notebook 1 names it.
+ALIAS = "MyCactus"
 CACTUP_HOME = Path.home() / ".cactup"
-INSTALL = CACTUP_HOME / "cacti" / RELEASE
+INSTALL = CACTUP_HOME / "cacti" / ALIAS
 CACTUS = INSTALL / "Cactus"
 
 

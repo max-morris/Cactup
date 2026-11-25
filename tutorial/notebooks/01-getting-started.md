@@ -149,7 +149,7 @@ If you have used SimFactory (`sim`), most of what you know carries over:
 
 | SimFactory | cactup |
 |---|---|
-| `GetComponents --parallel thornlist.th` | `cactup install ET_2026_05_v0` (or `--thornlist thornlist.th`) |
+| `GetComponents --parallel thornlist.th` | `cactup install ET_2026_05_v0 --alias MyCactus` (or `--thornlist thornlist.th`) |
 | `sim build tutorial --thornlist=tutorial.th` | `cactup build tutorial --thornlist tutorial.th` |
 | `sim create-submit N --parfile=P --procs=8 --num-threads=2` | `cactup sim submit N P -T 4 -c 2` (four processes of two threads) |
 | `sim list-simulations` | `cactup sim list` |
@@ -164,13 +164,18 @@ Notebook 10 goes through the differences in depth.
 ## Installing a release
 
 `cactup releases` above listed the Einstein Toolkit's releases, newest first.
-Install the latest one. `--silent` accepts the defaults for everything
-`cactup install` would otherwise ask (where to put it, what to call it). Run
-it again and the cell says that installation exists already.
+Install the latest one. An *installation* is a source tree you work in, and
+it has a name of its own, which commands use to tell your installations
+apart. `--alias MyCactus` names this one. Without it, cactup would name it
+after the release, but an installation isn't the release: you will edit it,
+and you can move it to other sources later (notebook 3), so give it a name
+that says what it is to you. `--silent` accepts the defaults for everything
+else `cactup install` would ask (where to put it, for one). Run it again and
+the cell says that installation exists already.
 
 ```{code-cell} ipython3
 %%shell
-cactup install ET_2026_05_v0 --silent
+cactup install ET_2026_05_v0 --alias MyCactus --silent
 ```
 
 That took seconds, not the several minutes some 80 repositories would take
