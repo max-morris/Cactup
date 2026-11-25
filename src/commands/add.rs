@@ -549,6 +549,26 @@ fn restore_plan(
             gone.join(", ")
         );
     }
+    // One whose branch only its remote can tell, when the remote cannot be asked: the plan falls
+    // back to its pinned fetch's label, which the fetch would not go to (a silent remote) or could
+    // not fetch, after the confirmation. Refused here; the package stays added either way.
+    if let Some((g, unasked)) = (fetch_plan.git.iter())
+        .filter(|g| touched.contains(g.repo.as_str()))
+        .find_map(|g| g.unasked.as_ref().map(|u| (g, u)))
+    {
+        let url = crate::fetch::git::redacted(&g.url);
+        let why = if unasked.silent {
+            format!("Its remote {}.", unasked.error)
+        } else {
+            format!("Its remote {url} could not be asked for its default branch ({}).", unasked.error)
+        };
+        bail!(
+            "Repo {} cannot go back to a branch.\n{}\n{} is still added.\nRun the command again once the remote answers.",
+            g.repo,
+            crate::fetch::git::scrub(&why, &g.url),
+            gone.join(", ")
+        );
+    }
     if let Some(skipped) = fetch_plan.skipped.iter().find(|s| touched.contains(s.repo.as_str())) {
         bail!(
             "Repo {} has {}.\n{} is still added.",

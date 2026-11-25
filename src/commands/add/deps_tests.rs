@@ -2664,6 +2664,44 @@ fn a_restore_with_no_branch_is_refused_before_the_prompt() {
     assert!(matches!(skipped.reason, crate::fetch::git::DirtyReason::DetachedHead(_)), "{:?}", skipped.reason);
 }
 
+/// A clone being restored whose branch only its remote can tell, when the remote cannot be
+/// asked, is refused before the prompt: the fetch would only fail after the confirmation (the
+/// recorded label of a pinned fetch is no branch to follow), and the package would stay added
+/// anyway. Nothing changes, and the refusal says to run the command again.
+#[test]
+fn a_restore_whose_remote_cannot_be_asked_is_refused_before_the_prompt() {
+    // 2.0.0 frozen from a tag: the replacement's fetch is pinned, with the tag as its label.
+    let (s, fake) = replaced_base(false, true, Some("v2.0.0"));
+    {
+        let mut f = fake.lock().unwrap();
+        let needs = depends("et/carpet", ">=1.0.0", &["Carpet"]);
+        let ef = &mut f.packages.iter_mut().find(|(p, _)| p == "et/f").unwrap().1[0];
+        *ef = ef.replace(&format!("[{needs}]"), "[]");
+        for (_, _, x) in f.snapshots.iter_mut().filter(|(p, _, _)| p == "et/x") {
+            *x = x.replace(&format!("[{needs}]"), "[]");
+        }
+    }
+    s.add(&["et/carpet@=2.0.0"], AddFlags { upgrade: true, yes: true, ..AddFlags::default() }).unwrap();
+    let clone = s.inst.root.join("Cactus/repos/carpet");
+    let before = crate::fetch::git::head_of(&clone).unwrap();
+    // The clone knows no remote branch; its record keeps the label of its pinned fetch.
+    let git_dir = gix::open(&clone).unwrap().git_dir().to_owned();
+    let _ = std::fs::remove_dir_all(git_dir.join("refs/remotes"));
+    let _ = std::fs::remove_file(git_dir.join("packed-refs"));
+    assert_eq!(crate::fetch::git::default_branch(&clone), None);
+    let state = std::fs::read_to_string(s.inst.root.join(".cactup/fetch-state.toml")).unwrap();
+    assert!(state.contains("branch = \"v2.0.0\""), "{state}");
+    std::fs::remove_dir_all(s.inst.root.parent().unwrap().join("up/carpet")).unwrap();
+    for dry_run in [true, false] {
+        let err = format!("{:#}", s.remove(&["et/carpet"], RemoveFlags { dry_run, ..remove_yes() }).unwrap_err());
+        assert!(err.starts_with("Repo carpet cannot go back to a branch.\nIts remote "), "{err}");
+        assert!(err.contains("et/carpet is still added.\nRun the command again once the remote answers."), "{err}");
+        assert!(!err.contains("Refetch"), "{err}");
+    }
+    assert_eq!(crate::fetch::git::head_of(&clone).unwrap(), before, "the clone is as it was");
+    assert!(s.meta().added.iter().any(|a| a.package == "et/carpet"));
+}
+
 /// Only what a removal can bring back is asked for: the bases of the
 /// targets and of what may be swept with them, never of a package the
 /// user named that stays. And an interrupt is never a reading, even with

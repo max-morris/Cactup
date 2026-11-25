@@ -5633,7 +5633,14 @@ with overrides and any-of choices applied.
   back on a branch, never kept as a user's detached checkout
   (`fetch::branch_to_follow`: the thornlist's `!REPO_BRANCH`, the recorded
   branch if the last fetch was not pinned, the clone's default branch, the
-  remote's default asked of the remote, and only then the pinned label).
+  remote's default asked of the remote, and only then the pinned label). When
+  only the remote can tell the branch and it cannot be asked (silent,
+  unreachable), `remove` refuses before its prompt and changes nothing: the
+  fetch would not go to the label after the confirmation (a silent remote) or
+  could not fetch it, and the package would stay added either way. The
+  refusal names the repo and the remote's error, says which packages are
+  still added, and says to run the command again once the remote answers. A
+  refetch still falls back to the label and says so on the clone's line.
   Flesh packages go as §8.11 says; the last line says every config needs a
   rebuild.
 
@@ -5790,8 +5797,6 @@ in DIR and calls `publish_stack` as `<owner>/<name>@V`.
 - An override redirects every checkout of a base repo; `compose` drops only the
   checkouts that a package claims, so `stack init` overrides only when the package
   takes all of them.
-- A restoring remote that does not answer leaves the clone on the pinned label,
-  said on its line.
 
 ---
 
