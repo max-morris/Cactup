@@ -889,6 +889,24 @@ fn upgrades_carry_the_present_enabled_set_and_the_flags_agree() {
     let _ = &it.a1;
 }
 
+/// A base package that an add upgraded for a dependency stays upgraded when the package that
+/// needed it is removed (Max's decision): it is recorded as named, never swept, and its base repo
+/// is not given back.
+#[test]
+fn an_upgrade_an_add_made_outlives_the_removal() {
+    let it = admbase("^2.0");
+    let s = &it.setup;
+    s.add(&["max/app"], AddFlags { upgrade: true, yes: true, ..AddFlags::default() }).unwrap_or_else(|e| panic!("{e:#}"));
+    s.remove(&["max/app"], remove_yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let meta = s.meta();
+    let packages: Vec<&str> = meta.added.iter().map(|a| a.package.as_str()).collect();
+    assert_eq!(packages, ["et/admbase"]);
+    assert_eq!(meta.added[0].version, "2.0.0");
+    let state = crate::fetch::FetchState::read(&s.inst.root).unwrap().unwrap();
+    assert_eq!(state.repos["admbase"].head, it.a2, "the clone stays at 2.0.0");
+    assert!(s.inst.root.join("Cactus/arrangements/ADMBase/StaticConformal/interface.ccl").is_file());
+}
+
 /// Every pinned repo of the base goes out in one `/lookup` request (the
 /// endpoint is rate-limited), and a `commit-known` of null (the server could
 /// not check its mirror) still maps the repo: nothing reads it as unpushed.
@@ -1002,6 +1020,7 @@ fn a_replaced_thorn_must_keep_the_base_s_checkout() {
         contact: None,
         libraries: Vec::new(),
         flesh: Vec::new(),
+        pending: false,
     };
     let replaced = Replaced::Base { repo: "carpetx".into() };
     let by = PkgId::parse("max/carpetx-mp").unwrap();
@@ -1221,6 +1240,45 @@ fn an_installed_package_not_served_is_named_by_its_recorded_version() {
     let z = set.present.iter().find(|p| p.release.id.as_str() == "max/z4c").expect("present");
     assert_eq!(z.release.label(), "max/z4c@1.0.0");
     assert_eq!(set.unread.len(), 1);
+}
+
+/// A release added while it awaited review is recorded so (`pending`); without
+/// `--risky-allow-untrusted-artifacts`, which hides that release, the package goes unread and the
+/// reason names the flag. With the flag it is read as before.
+#[test]
+fn a_package_added_awaiting_review_is_recorded_and_named_without_the_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (zurl, z) = upstream(tmp.path(), "z4c", &[("Z4c/interface.ccl", "IMPLEMENTS: z4c\n")]);
+    let (curl, c) = upstream(tmp.path(), "carpetx", &[("CarpetX/interface.ccl", "IMPLEMENTS: carpetx\n")]);
+    let claims = format!("[{}]", depends("et/carpetx", "^1.0", &["CarpetX"]));
+    let pending = version("1.0.0", &z, &zurl, "Z4c", &["Z4c"], &claims).replace(r#""state":"ok""#, r#""state":"ok","review":"pending""#);
+    let (base, _log, _fake) = Fake::new()
+        .package("max/z4c", vec![pending])
+        .package("et/carpetx", vec![version("1.0.0", &c, &curl, "CarpetX", &["CarpetX"], "[]")])
+        .serve_shared();
+    let mut s = Setup::new(tmp, "", &base);
+    s.ctx.globals.risky_allow_untrusted_artifacts = true;
+    s.add(&["max/z4c"], yes()).unwrap_or_else(|e| panic!("{e:#}"));
+    let meta = s.meta();
+    let pending_of = |p: &str| meta.added.iter().find(|a| a.package == p).unwrap().pending;
+    assert!(pending_of("max/z4c") && !pending_of("et/carpetx"));
+
+    let pristine = std::fs::read_to_string(s.inst.source_thornlist()).unwrap();
+    let list = thornlist::parse(&pristine).unwrap();
+    let unread = |flag: bool| {
+        let client = crate::cactarium::Client::new(&s.ctx.db.read().unwrap()).including_unreviewed(flag);
+        let names: Vec<&str> = meta.added.iter().map(|a| a.package.as_str()).collect();
+        let mut reg = super::super::resolution::Registry::new(&client, names);
+        let set = super::super::resolution::present(&mut reg, &s.inst.root, &list, &meta.added, None, &Default::default());
+        reg.finish();
+        set.unwrap_or_else(|e| panic!("{e:#}")).unread.iter().map(|u| u.line()).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        unread(false),
+        ["max/z4c@1.0.0: it was added from a release awaiting review, which Cactarium serves only under \
+          --risky-allow-untrusted-artifacts"]
+    );
+    assert!(unread(true).is_empty());
 }
 
 /// The first request a command makes, lowercased, to a server that answers every request 404
@@ -1593,6 +1651,7 @@ fn thorns_added_to_a_second_base_clone_of_a_package_stay_present() {
         contact: None,
         libraries: Vec::new(),
         flesh: Vec::new(),
+        pending: false,
     };
     let pristine = std::fs::read_to_string(s.inst.source_thornlist()).unwrap();
     let list = thornlist::parse(&pristine).unwrap();
@@ -2861,6 +2920,7 @@ fn a_base_repo_renamed_to_a_pseudo_package_is_no_stand_in() {
         contact: None,
         libraries: Vec::new(),
         flesh: Vec::new(),
+        pending: false,
     };
     let pristine = std::fs::read_to_string(s.inst.source_thornlist()).unwrap();
     let list = thornlist::parse(&pristine).unwrap();

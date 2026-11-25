@@ -389,13 +389,17 @@ includes one is warned about, and `cactup add` lists each such release in red
 awaiting review is taken only when named exactly (`@=1.2.0`), or when no
 approved version fits. An installed package is never moved to an older
 version for being awaiting review; a move to an older version is shown as a
-`downgrade`.
+`downgrade`. A package added from a release awaiting review is marked so in
+`installation.toml`. Without the flag, Cactarium hides that release, so later
+commands can't read the package. They say why, and `cactup inst show` lists it
+as "awaited review when added".
 
 A sim awaiting review downloads to
 `~/.cactup/simfiles/<owner>/<name>/[<sim>/]<version>.unreviewed.sim`
 (`<sim>/` only for one sim of a multi-sim entry).
 When Cactarium cannot be asked, `cactup import` uses the cached copy of an
-approved version and never one of these.
+approved version and never one of these. Once the version is approved, its next
+download replaces the unreviewed copy.
 
 A stack release is installed as it was frozen: nothing is resolved. After
 `install` and `inst refetch --release` to a stack, once their own output is

@@ -282,6 +282,9 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
                 let what = crate::commands::add::describe(&library.package, &library.version);
                 println!("  {:<13}   library {what} at {}/{}", "", library.inside, library.into);
             }
+            if package.pending {
+                println!("{}", format!("  {:<13}   awaited review when added", "").red());
+            }
             if let Some(why) = yanked.get(&format!("{}@{}", package.package, package.version)) {
                 println!("{}", format!("  {:<13}   yanked on Cactarium{}", "", reason(why)).yellow());
             }
@@ -427,6 +430,7 @@ mod tests {
             contact: None,
             libraries: Vec::new(),
             flesh: vec!["Makefile".into(), "lib".into(), "src".into()],
+            pending: false,
         };
         assert_eq!(added_line(&package, None), "max/mp@1.0.0 (the flesh), in place of base repo flesh");
         // After a refetch to a base with no repo flesh: nothing it is in place of.

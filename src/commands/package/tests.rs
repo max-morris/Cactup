@@ -623,6 +623,7 @@ fn carpet_fork(fork: bool, files: &[(&str, &str)]) -> (World, String) {
             contact: None,
             libraries: Vec::new(),
             flesh: Vec::new(),
+            pending: false,
         })
     });
     // Its clone, with the whole history.
@@ -973,6 +974,10 @@ fn an_interrupt_during_the_source_scan_writes_nothing() {
     // One thorn, with many sources: the scan stops after the first, not after all of them.
     std::fs::remove_dir_all(it.world.repo("z4c").join("Extra")).unwrap();
     let src = it.world.repo("z4c").join("Z4c/src");
+    // A header it uses, so the crate's scan has something to read.
+    let iface = it.world.repo("z4c").join("Z4c/interface.ccl");
+    let text = std::fs::read_to_string(&iface).unwrap();
+    std::fs::write(&iface, format!("{text}\nUSES INCLUDE: cctk.h\n")).unwrap();
     for i in 0..300 {
         std::fs::write(src.join(format!("f{i:03}.cc")), "#include \"cctk.h\"\n").unwrap();
     }
@@ -987,7 +992,7 @@ fn an_interrupt_during_the_source_scan_writes_nothing() {
     assert!(err.contains("Interrupted"), "{err}");
     assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
     assert_eq!(READ.load(std::sync::atomic::Ordering::SeqCst), 1, "stopped at the first file");
-    assert_eq!(CRATE_SCANS.load(std::sync::atomic::Ordering::SeqCst), 0, "the crate's scan, which takes no flag, never started");
+    assert_eq!(CRATE_STOPPED.load(std::sync::atomic::Ordering::SeqCst), 1, "the crate's scan stopped at the flag too");
     assert!(!it.world.repo("z4c").join(PACKAGE_FILE).exists());
 }
 
@@ -1122,6 +1127,7 @@ fn added(package: &str, version: &str, tag: Option<&str>, commit: &str, repo: &s
         contact: None,
         libraries: Vec::new(),
         flesh: Vec::new(),
+        pending: false,
     }
 }
 

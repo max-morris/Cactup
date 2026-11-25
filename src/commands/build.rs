@@ -1760,6 +1760,7 @@ mod tests {
         let package = AddedPackage {
             libraries: Vec::new(),
             flesh: Vec::new(),
+            pending: false,
             package: "max/carpetx".into(),
             version: "1.0.0".into(),
             tag: None,

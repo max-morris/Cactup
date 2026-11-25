@@ -15,6 +15,7 @@ repo = "pkg"
 replaces = ["OldRepo"]
 contact = "https://github.com/owner/pkg/issues"
 flesh = ["Makefile", "lib", "src"]
+pending = true
 
 [[added.thorns]]
 checkout = "Arr/Thorn"
