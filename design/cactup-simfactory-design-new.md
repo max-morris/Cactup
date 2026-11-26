@@ -5692,7 +5692,8 @@ command changes and stops at the first conflict) reads the installation as
 its way past, in a fixed order: forks installed beside their upstream;
 incompatibilities (either direction); a thorn name enabled by two packages;
 unmet CCL requirements of enabled thorns (with providers from `GET
-/providers`); dependency claims of installed packages not met by what is
+/providers`), the `USES INCLUDE` headers that Cactarium found in their sources
+among them; dependency claims of installed packages not met by what is
 installed (a release outside the range, needed thorns not enabled, an any-of
 with no alternative met; a fork standing in meets one); and `satisfies`
 overrides naming a `local:` repo that is not installed. What was left
@@ -5703,6 +5704,21 @@ Problems and those lines go to stdout, then the command fails with "1 problem."
 or "N problems." (the one command that reports findings by exit status). With
 no problem it prints "No problems.", or "No problems in what was checked." when
 something was left unchecked.
+
+A header counts as the closure check counts it (§7.5, `ccl::counts`): only
+where a known thorn provides it and no provider is optional to the thorn that
+includes it. The known thorns are every thorn of the installed releases,
+enabled or not, and each registered provider, read from the versions of its
+package (one more wave, only for a header that nothing enabled provides). A
+provider whose thorn cannot be read there leaves the header unreported, since
+it may be optional. The tree is read for its CCL alone, so an installed
+release keeps the header needs that Cactarium found in its sources, those of
+headers still named by the thorn's `USES INCLUDE`; a repo of no registered
+release has none, and the closure check of a build stays the one that covers
+it. A Cactarium from before header providers answers the query with a 400,
+taken as one that cannot list providers. The same count applies when
+`--replace` takes away a header provider from an installed thorn: one optional
+to the thorn is no need.
 
 #### 8.12.8 Checks at stack install and refetch
 

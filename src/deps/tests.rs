@@ -169,7 +169,7 @@ impl ThornSpec {
         let mut facts = serde_json::json!({
             "implements": thorn, "inherits": [], "friends": [], "requires-functions": [],
             "uses-functions": [], "provides-functions": [], "uses-includes": [], "requires": [],
-            "requires-thorns": [], "optional": [], "provides": []
+            "requires-thorns": [], "optional": [], "provides": [], "provides-includes": [], "needs-includes": []
         });
         for (k, v) in given {
             assert!(facts.get(&k).is_some(), "{k} is no fact");
@@ -1627,6 +1627,88 @@ fn check_reports_each_problem_with_its_way_past() {
     assert!(lines.iter().all(|l| l.ends_with("Run `cactup add et/carpet/CarpetSlab`.")), "{lines:?}");
     let met = installed("et/grid", "1.0.0", &[("Grid", "IMPLEMENTS: grid\n")], vec![], base());
     assert!(checked(&[needy("et/n1"), met], &none, &[]).is_empty());
+}
+
+/// A header an enabled thorn includes counts as the closure check counts it: only where a known
+/// thorn provides it (an installed release's thorn, enabled or not, or a registered provider read
+/// from its versions) and no provider is optional to the thorn. A hook nothing provides, an
+/// optional provider, and a provider that cannot be read are no problem.
+#[test]
+fn check_counts_a_header_as_the_closure_check_does() {
+    let none = Rules::default();
+    let thorn = |name: &str, f: ThornFacts| (name.to_owned(), f);
+    let x = |optional: &[&str]| ThornFacts {
+        implements: Some("twopuncturesx".into()),
+        needs_includes: vec!["TP_Guts.h".into()],
+        optional: optional.iter().map(|o| o.to_string()).collect(),
+        ..ThornFacts::default()
+    };
+    let tp = || ThornFacts {
+        implements: Some("TwoPunctures".into()),
+        provides_includes: vec!["TP_Guts.h".into()],
+        ..ThornFacts::default()
+    };
+    let eid = |x_facts: ThornFacts, enabled: &[&str]| Present {
+        release: synthetic_release("et/eid", "1.0.0", &[thorn("TwoPuncturesX", x_facts), thorn("TwoPunctures", tp())], vec![]),
+        enabled: enabled.iter().map(|e| e.to_string()).collect(),
+        origin: Origin::Base { repo: "eid".into() },
+        libraries: vec![],
+        stand_in: false,
+    };
+    let provider = |package: &str, thorn: &str| Provider {
+        package: PkgId::parse(package).unwrap(),
+        version: "1.0.0".into(),
+        arrangement: "Arr".into(),
+        thorn: thorn.into(),
+    };
+    let run = |present: &[Present], providers: Vec<Provider>, releases: Vec<Release>| {
+        let mut facts = FixtureFacts::default();
+        facts.providers.insert("include:tp_guts.h".into(), providers);
+        for r in releases {
+            facts.releases.entry(r.id.clone()).or_default().push(r);
+        }
+        let lines = check(present, &none, &mut facts).unwrap();
+        (lines, facts.waves)
+    };
+
+    // The provider is a thorn of the installed release, not enabled: one line, nothing loaded.
+    let (lines, waves) = run(&[eid(x(&[]), &["TwoPuncturesX"])], vec![provider("et/eid", "TwoPunctures")], vec![]);
+    assert_eq!(
+        lines,
+        ["TwoPuncturesX (et/eid@1.0.0) includes the header TP_Guts.h; no installed thorn provides it. Run `cactup add et/eid/TwoPunctures`."]
+    );
+    assert!(waves.is_empty(), "{waves:?}");
+    // Enabled, it meets the need; optional to the thorn, it is no need.
+    assert!(run(&[eid(x(&[]), &["TwoPuncturesX", "TwoPunctures"])], vec![], vec![]).0.is_empty());
+    assert!(run(&[eid(x(&["twopunctures"]), &["TwoPuncturesX"])], vec![provider("et/eid", "TwoPunctures")], vec![]).0.is_empty());
+
+    // A hook: nothing installed or registered provides it.
+    let alone = |x_facts: ThornFacts| Present {
+        release: synthetic_release("et/eid", "1.0.0", &[thorn("TwoPuncturesX", x_facts)], vec![]),
+        enabled: ["TwoPuncturesX".to_owned()].into(),
+        origin: Origin::Added,
+        libraries: vec![],
+        stand_in: false,
+    };
+    let (lines, waves) = run(&[alone(x(&[]))], vec![], vec![]);
+    assert!(lines.is_empty() && waves.is_empty(), "{lines:?} {waves:?}");
+
+    // A registered provider not installed: its package is read, and its thorn decides.
+    let elsewhere = || synthetic_release("max/tp", "1.0.0", &[thorn("TP", tp())], vec![]);
+    let (lines, waves) = run(&[alone(x(&[]))], vec![provider("max/tp", "TP")], vec![elsewhere()]);
+    assert_eq!(
+        lines,
+        ["TwoPuncturesX (et/eid@1.0.0) includes the header TP_Guts.h; no installed thorn provides it. Run `cactup add max/tp/TP`."]
+    );
+    assert_eq!(waves, [vec![PkgId::parse("max/tp").unwrap()]]);
+    assert!(run(&[alone(x(&["TwoPunctures"]))], vec![provider("max/tp", "TP")], vec![elsewhere()]).0.is_empty());
+    // Its thorn cannot be read (no such version served): it may be optional, so nothing is said.
+    assert!(run(&[alone(x(&[]))], vec![provider("max/tp", "TP")], vec![]).0.is_empty());
+    let other_version = synthetic_release("max/tp", "2.0.0", &[thorn("TP", tp())], vec![]);
+    assert!(run(&[alone(x(&[]))], vec![provider("max/tp", "TP")], vec![other_version]).0.is_empty());
+    // So too beside an installed provider: the unread one may still be optional.
+    let both = vec![provider("et/eid", "TwoPunctures"), provider("max/tp", "TP")];
+    assert!(run(&[eid(x(&[]), &["TwoPuncturesX"])], both, vec![]).0.is_empty());
 }
 
 fn needing(id: &str, thorn: &str, claims: Vec<ClaimInfo>) -> Present {

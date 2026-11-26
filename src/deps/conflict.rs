@@ -113,14 +113,6 @@ pub(super) fn conflicts(
     None
 }
 
-/// A thorn's hard requirements, header includes left out: what `claims check` reads. Whether a
-/// header counts depends on the thorns the check knows (`ccl::counts`), and Cactarium's
-/// providers answer names packages, not thorn facts; the closure check (`crate::closure`)
-/// refuses an unmet header where it matters, before a build.
-pub(super) fn needs_of(facts: &ThornFacts) -> Vec<Requirement> {
-    ccl::needs_of(facts).into_iter().filter(|r| !matches!(r, Requirement::Include(_))).collect()
-}
-
 /// The enabled thorns, with their facts.
 fn enabled_facts(chosen: &BTreeMap<PkgId, Entry>) -> Vec<(&str, &ThornFacts)> {
     chosen
@@ -157,7 +149,8 @@ pub(super) fn unmet_requirements(
 
 /// The requirements of thorns the installation keeps that `before` (the thorns it had) met and
 /// the set no longer does: what replacing a base repo's checkouts, or the flesh, takes away.
-/// (A header `before` provided is one a known thorn provides, so it always counts.)
+/// A header counts as `ccl::counts` says over `before`: a thorn of `before` provides it, so it
+/// counts unless one of its providers is optional to the thorn.
 pub(super) fn broken_requirements(
     chosen: &BTreeMap<PkgId, Entry>,
     before: &[(String, ThornFacts)],
@@ -169,24 +162,12 @@ pub(super) fn broken_requirements(
             let Some(thorn) = e.release.thorn(name) else { continue };
             for r in ccl::needs_of(&thorn.facts) {
                 let now = enabled.iter().any(|(n, f)| ccl::meets(n, f, &r));
-                if !now && before.iter().any(|(n, f)| ccl::meets(n, f, &r)) {
+                let had = before.iter().any(|(n, f)| ccl::meets(n, f, &r));
+                if !now && had && ccl::counts(&thorn.facts, &r, before.iter().map(|(_, f)| f)) {
                     out.push((thorn.thorn.clone(), id.clone(), r));
                 }
             }
         }
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    /// A header a thorn includes is no requirement to `claims check`; every other kind is as
-    /// the crate gives it.
-    #[test]
-    fn includes_are_left_out() {
-        let mut facts = cactup_ecosystem_common::ccl::ThornFacts::scan("IMPLEMENTS: z\nINHERITS: grid", None);
-        facts.needs_includes = vec!["loop.hxx".into()];
-        assert_eq!(cactup_ecosystem_common::ccl::needs_of(&facts).len(), 2);
-        assert_eq!(super::needs_of(&facts), [super::Requirement::Implementation("grid".into())]);
-    }
 }

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use cactup_ecosystem_common::ccl::{self, ThornFacts};
 
-use super::conflict::{incompatible, needs_of};
+use super::conflict::incompatible;
 use super::{
     claim_target, fork_claims, forks, Facts, Fit, Origin, Override, PkgId, Present, Provider, Release, Req, Requirement,
     Rules,
@@ -79,7 +79,8 @@ pub fn check(present: &[Present], rules: &Rules, facts: &mut dyn Facts) -> Res<V
         out.push(format!("The thorn {} is enabled by {}. {way}", holders[0].1, labels.join(" and ")));
     }
 
-    // A requirement of an enabled thorn that no enabled thorn meets.
+    // A requirement of an enabled thorn that no enabled thorn meets. A header counts only as the
+    // closure check counts it (`header_counts`): one that nothing provides is a hook.
     let enabled: Vec<(&str, &ThornFacts)> = ps
         .iter()
         .flat_map(|p| p.enabled.iter().filter_map(|t| p.release.thorn(t)))
@@ -89,7 +90,7 @@ pub fn check(present: &[Present], rules: &Rules, facts: &mut dyn Facts) -> Res<V
     for p in &ps {
         for name in &p.enabled {
             let Some(thorn) = p.release.thorn(name) else { continue };
-            for need in needs_of(&thorn.facts) {
+            for need in ccl::needs_of(&thorn.facts) {
                 if enabled.iter().any(|(n, f)| ccl::meets(n, f, &need)) {
                     continue;
                 }
@@ -101,6 +102,9 @@ pub fn check(present: &[Present], rules: &Rules, facts: &mut dyn Facts) -> Res<V
                         found
                     }
                 };
+                if matches!(need, Requirement::Include(_)) && !header_counts(&thorn.facts, &need, &ps, &providers, facts)? {
+                    continue;
+                }
                 out.push(unmet_line(&thorn.thorn, &p.release, &need, &providers));
             }
         }
@@ -118,6 +122,39 @@ pub fn check(present: &[Present], rules: &Rules, facts: &mut dyn Facts) -> Res<V
         }
     }
     Ok(out)
+}
+
+/// Whether an unmet header `need` of the thorn with `needing` counts (`ccl::counts`, the rule of
+/// the closure check and of Cactarium): some known thorn provides the header, and none of its
+/// providers is optional to the thorn. The known thorns are every thorn of the installed
+/// releases, enabled or not, and each registered provider, read from the versions of its package
+/// (one wave for those not installed). A provider whose thorn cannot be read there leaves the
+/// header uncounted: it may be optional, and a false problem would follow every stack install.
+fn header_counts(
+    needing: &ThornFacts,
+    need: &Requirement,
+    ps: &[Present],
+    providers: &[Provider],
+    facts: &mut dyn Facts,
+) -> Res<bool> {
+    let installed = |p: &Provider| {
+        ps.iter().find(|i| i.release.id == p.package).and_then(|i| i.release.thorn(&p.thorn)).is_some()
+    };
+    let elsewhere: Vec<&Provider> = providers.iter().filter(|p| !installed(p)).collect();
+    let ids: Vec<PkgId> = elsewhere.iter().map(|p| p.package.clone()).collect();
+    if !ids.is_empty() {
+        facts.load(&ids)?;
+    }
+    let mut known: Vec<&ThornFacts> = ps.iter().flat_map(|p| p.release.thorns.iter().map(|t| &t.facts)).collect();
+    for p in elsewhere {
+        let release = (facts.releases(&p.package).unwrap_or_default().iter())
+            .find(|r| r.at.version().is_some_and(|v| v.to_string() == p.version));
+        match release.and_then(|r| r.thorn(&p.thorn)) {
+            Some(t) => known.push(&t.facts),
+            None => return Ok(false),
+        }
+    }
+    Ok(ccl::counts(needing, need, known))
 }
 
 /// One way to meet a dependency: target, range, commit, thorns needed.
