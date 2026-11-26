@@ -1,0 +1,68 @@
+{
+  "about": "--replace taking over a base checkout whose thorn provided a header that another installed thorn includes from it as an optional thorn: no need",
+  "packages": [
+    "max--carpetx-mp--arithx"
+  ],
+  "specs": [
+    "max/carpetx-mp"
+  ],
+  "present": [
+    {
+      "package": "local:carpetx",
+      "unknown": "2222222222222222222222222222222222222222",
+      "thorns": [
+        "CarpetX",
+        "Loop",
+        {
+          "thorn": "Arith",
+          "facts": {
+            "implements": "arith",
+            "provides-includes": [
+              "arith.h"
+            ]
+          }
+        }
+      ],
+      "base": "carpetx",
+      "enabled": [
+        "Arith",
+        "CarpetX",
+        "Loop"
+      ]
+    },
+    {
+      "package": "local:other",
+      "unknown": "5555555555555555555555555555555555555555",
+      "thorns": [
+        {
+          "thorn": "Other",
+          "facts": {
+            "implements": "other",
+            "uses-includes": [
+              "arith.h"
+            ],
+            "needs-includes": [
+              "arith.h"
+            ],
+            "optional": [
+              "arith"
+            ]
+          }
+        }
+      ],
+      "base": "other",
+      "enabled": [
+        "Other"
+      ]
+    }
+  ],
+  "options": {
+    "replace": true
+  },
+  "expect": {
+    "plan": [
+      "add max/carpetx-mp@1.0.0 Arith, CarpetX named",
+      "replace Arith, CarpetX of base repo carpetx with max/carpetx-mp"
+    ]
+  }
+}

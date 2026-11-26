@@ -50,6 +50,9 @@ struct Fake {
     providers: String,
     lookup: bool,
     providers_endpoint: bool,
+    /// `/providers` knows `include` (a Cactarium from before header
+    /// providers answers 400 to one).
+    include_providers: bool,
     /// Reads at a commit no version froze so far: the real server reads the
     /// package now (a fetch of its repository), at most 12 in a window that
     /// opens at the first counted read, then answers 429 (refused reads do
@@ -156,6 +159,7 @@ impl Fake {
             providers: r#"{"providers":[]}"#.to_owned(),
             lookup: true,
             providers_endpoint: true,
+            include_providers: true,
             unfrozen_reads: 0,
             in_window: 0,
             window_start: None,
@@ -284,6 +288,11 @@ impl Fake {
             return ok(format!(r#"{{"pins":[{}]}}"#, pins.join(",")));
         }
         if path.starts_with("/providers?") {
+            if self.providers_endpoint && !self.include_providers && path.contains("include=") {
+                let message = "give exactly one of implements, capability, function or thorn";
+                let body = serde_json::json!({"error": {"code": "bad-request", "message": message}}).to_string();
+                return ("400 Bad Request", "api-generation: 1\r\n".to_owned(), body.into_bytes());
+            }
             return if self.providers_endpoint { ok(self.providers.clone()) } else { no_route() };
         }
         if path == "/packages/read" {
@@ -3851,6 +3860,45 @@ fn check_says_when_cactarium_cannot_list_providers() {
         lines(&s),
         ["Plain (max/plain@1.0.0) inherits or befriends grid; no installed thorn provides it. Cactarium cannot list providers."]
     );
+}
+
+/// A header that an enabled thorn includes, served with the needs found by Cactarium in its sources
+/// (the tree is read for its CCL alone), provided by a thorn of the package that is not enabled:
+/// the line names that thorn. Once the CCL no longer uses the header, it is no need. A Cactarium
+/// from before header providers (a 400 to the query) cannot list them, and the line says so.
+#[test]
+fn check_names_the_provider_of_a_header() {
+    let (s, fake) = overridable_with_fake(false);
+    s.add(&["max/plain"], yes()).unwrap();
+    let ccl = s.inst.root.join("Cactus/repos/plain/Plain/interface.ccl");
+    std::fs::write(&ccl, "IMPLEMENTS: plain\nUSES INCLUDE: Plain_Guts.h\n").unwrap();
+    {
+        let mut f = fake.lock().unwrap();
+        let plain = ThornFacts {
+            implements: Some("plain".into()),
+            uses_includes: vec!["Plain_Guts.h".into()],
+            needs_includes: vec!["Plain_Guts.h".into()],
+            ..ThornFacts::default()
+        };
+        let guts = ThornFacts { implements: Some("guts".into()), provides_includes: vec!["Plain_Guts.h".into()], ..ThornFacts::default() };
+        let (_, versions) = f.packages.iter_mut().find(|(p, _)| p == "max/plain").unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&versions[0]).unwrap();
+        v["thorns"] = serde_json::from_str(&format!("[{},{}]", thorn("Plain", "Plain", &plain), thorn("Plain", "Guts", &guts))).unwrap();
+        versions[0] = v.to_string();
+        f.providers = r#"{"providers":[{"package":"max/plain","version":"1.0.0","arrangement":"Plain","thorn":"Guts"}]}"#.into();
+    }
+    let lines = |s: &Setup| crate::commands::claims::problems(&s.ctx, &s.inst, &s.meta()).unwrap().lines;
+    assert_eq!(
+        lines(&s),
+        ["Plain (max/plain@1.0.0) includes the header Plain_Guts.h; no installed thorn provides it. Run `cactup add max/plain/Guts`."]
+    );
+    fake.lock().unwrap().include_providers = false;
+    assert_eq!(
+        lines(&s),
+        ["Plain (max/plain@1.0.0) includes the header Plain_Guts.h; no installed thorn provides it. Cactarium cannot list providers."]
+    );
+    std::fs::write(&ccl, "IMPLEMENTS: plain\n").unwrap();
+    assert!(lines(&s).is_empty());
 }
 
 /// `claims list` marks an override that does not read or names a repo the base lacks, and the

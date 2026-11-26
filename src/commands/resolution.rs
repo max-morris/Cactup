@@ -907,8 +907,9 @@ impl Facts for Registry {
         let need = requirement.clone();
         let found = match self.one(&label, "asking what provides it", move |c| c.providers(&need)) {
             Ok(found) => found,
-            // An older Cactarium: the refusal stands, without the list.
-            Err(e) if e.downcast_ref::<crate::cactarium::OldCactarium>().is_some() => {
+            // An older Cactarium: the refusal stands, without the list. One
+            // from before header providers refuses a header query (400).
+            Err(e) if e.downcast_ref::<crate::cactarium::OldCactarium>().is_some() || header_unasked(requirement, &e) => {
                 self.no_providers = true;
                 return Ok(Vec::new());
             }
@@ -933,6 +934,13 @@ impl Facts for Registry {
             line.phase(counted(steps, "step"));
         }
     }
+}
+
+/// Whether `e` is a 400 to a query for the providers of a header: Cactarium
+/// predates header providers and does not know the `include` query.
+fn header_unasked(requirement: &deps::Requirement, e: &anyhow::Error) -> bool {
+    matches!(requirement, deps::Requirement::Include(_))
+        && e.downcast_ref::<crate::cactarium::Refused>().is_some_and(|r| r.status == 400)
 }
 
 /// A base repo of the installation, as the resolver needs it.
@@ -1631,14 +1639,20 @@ fn arrangement_of(checkout: &str) -> &str {
 
 /// A present release with the facts of its enabled thorns as the tree has
 /// them (where they could be read), and every enabled thorn listed even if
-/// the release does not name it.
+/// the release does not name it. The tree is read for its CCL alone, so a
+/// thorn keeps the header needs that Cactarium found in its sources, those
+/// of the headers that its CCL still uses.
 fn with_local_facts(mut r: Release, checkouts: &[(&str, &str)], local: Option<&LocalFacts>) -> Release {
     let Some(local) = local else { return r };
     for (checkout, repo_path) in checkouts {
         let read = local.get(*checkout).cloned().flatten();
         match r.thorns.iter_mut().find(|t| t.thorn.eq_ignore_ascii_case(thorn_of(checkout))) {
             Some(t) => {
-                if let Some(facts) = read {
+                if let Some(mut facts) = read {
+                    if facts.needs_includes.is_empty() {
+                        let used = |h: &String| facts.uses_includes.iter().any(|u| u.eq_ignore_ascii_case(h));
+                        facts.needs_includes = t.facts.needs_includes.iter().filter(|h| used(h)).cloned().collect();
+                    }
                     t.facts = facts;
                 }
             }

@@ -610,7 +610,10 @@ installation, as information only. `cactup inst show` lists the overrides too.
 
 `cactup claims check` looks at the installed packages as they are: forks
 installed beside their upstream, incompatible packages, a thorn name enabled
-twice, CCL requirements that no installed thorn meets, dependencies that
+twice, CCL requirements that no installed thorn meets (headers included:
+a header that a thorn includes counts only when a thorn of an installed or
+registered package provides it, and that thorn is not optional to the one
+including it), dependencies that
 nothing installed meets (a release outside the range, thorns not enabled),
 and `satisfies` overrides naming a repo that is not installed. It prints one
 line for each problem, with the way past, and changes nothing. What it could

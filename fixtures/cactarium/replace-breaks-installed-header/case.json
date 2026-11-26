@@ -1,0 +1,65 @@
+{
+  "about": "--replace taking over a base checkout whose thorn provided a header that another installed thorn includes: the header it met is checked",
+  "packages": [
+    "max--carpetx-mp--arithx"
+  ],
+  "specs": [
+    "max/carpetx-mp"
+  ],
+  "present": [
+    {
+      "package": "local:carpetx",
+      "unknown": "2222222222222222222222222222222222222222",
+      "thorns": [
+        "CarpetX",
+        "Loop",
+        {
+          "thorn": "Arith",
+          "facts": {
+            "implements": "arith",
+            "provides-includes": [
+              "arith.h"
+            ]
+          }
+        }
+      ],
+      "base": "carpetx",
+      "enabled": [
+        "Arith",
+        "CarpetX",
+        "Loop"
+      ]
+    },
+    {
+      "package": "local:other",
+      "unknown": "5555555555555555555555555555555555555555",
+      "thorns": [
+        {
+          "thorn": "Other",
+          "facts": {
+            "implements": "other",
+            "uses-includes": [
+              "arith.h"
+            ],
+            "needs-includes": [
+              "arith.h"
+            ]
+          }
+        }
+      ],
+      "base": "other",
+      "enabled": [
+        "Other"
+      ]
+    }
+  ],
+  "options": {
+    "replace": true
+  },
+  "expect": {
+    "refusal": "Unclaimed",
+    "message": [
+      "Other (local:other) includes the header arith.h"
+    ]
+  }
+}
