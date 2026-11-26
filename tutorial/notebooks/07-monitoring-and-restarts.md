@@ -53,7 +53,7 @@ ends at once. A real run is sized the same way, with room to spare.
 CarpetX writes checkpoints through a file format library (Silo or openPMD),
 and it can only if its config was built with one. The `tutorial` config
 wasn't. `tutorial-ckpt.th` is the tutorial thornlist plus Silo, the HDF5
-library Silo stores its data in, and TerminationTrigger, which lets cactup
+library that Silo stores its data in, and TerminationTrigger, which lets cactup
 ask a run to stop (more on that below). Leaving out comments, blank lines and
 the `!` lines (which say where each repository comes from), the two lists
 differ in exactly those three thorns:
@@ -75,9 +75,9 @@ cactup-tutorial-sources-clean && cactup build tutorial-ckpt --thornlist /opt/cac
 
 ## The parameter file
 
-A standing wave in a periodic box, evolved by WaveToyX. The comments explain the parts that matter
-here; `@...@` are cactup's variables, which it fills in for each restart
-(notebook 8 is about them).
+A standing wave in a periodic box, evolved by WaveToyX. The comments explain
+the parts that matter here; `@...@` are cactup's variables, which it fills
+in for each restart (notebook 8 is about them).
 
 ```{code-cell} ipython3
 %%file ~/wave_ckpt.par
@@ -145,7 +145,7 @@ TerminationTrigger::termination_file        = "@RUNDIR@/TERMINATE"
 ## Submitting a chain
 
 24 minutes on `short`, four processes of one thread each. (One thread per
-process, because TerminationTrigger, the thorn `sim stop` relies on below,
+process, because TerminationTrigger, the thorn that `sim stop` relies on below,
 isn't safe to run on several threads under CarpetX: now and then it aborts
 a run as it starts.)
 
@@ -196,7 +196,7 @@ cactup sim log chain -o
 
 Cactus reports every iteration, so the output runs fast: the box shows the
 newest lines, and the `OutputGH: iteration N` lines show the run's progress.
-A follow stays with the restart it started on: when the chain moves on to
+A follow stays with the restart that it started on: when the chain moves on to
 `output-0001`, start it again.
 
 The whole run takes about three minutes on a quiet machine, longer on a busy
@@ -221,11 +221,11 @@ cat ~/.cactup/simulations/MyCactus/tutorial-ckpt/chain/log.txt
 ```
 
 And Cactus's own account, from each restart's output (each line starts with
-the restart it came from): each job checkpointed when its time was up, and
+the restart that it came from): each job checkpointed when its time was up, and
 the next recovered from that same iteration, until the last iteration,
 9600; a job that starts after that recovers at 9600 and ends at once. The
 checkpoints themselves are in `checkpoints/`, one for each
-iteration a job stopped at (the jobs that ended at 9600 share one).
+iteration that a job stopped at (the jobs that ended at 9600 share one).
 
 ```{code-cell} ipython3
 %%shell
@@ -317,8 +317,8 @@ its checkpoints with it.
 A submitted job doesn't change when you change things after submitting it:
 
 - its batch script runs the cactup build that submitted it, by its version
-  (`cactup-5f9f7a2` and the like), even after a `cactup update`;
-- each restart records the variables and knobs it was submitted with in its
+  (`cactup-62a5e6d` and the like), even after a `cactup update`;
+- each restart records the variables and knobs that it was submitted with in its
   `restart.toml`;
 - a simulation keeps its own copy of the executable (`.cactup/exe`), made
   when the simulation was created: rebuilding the config doesn't change it,
@@ -332,16 +332,16 @@ A submitted job doesn't change when you change things after submitting it:
  grep -E '^(CACTUP|EXECUTABLE|CHECKPOINT_WALLTIME_SECONDS) ' output-0001/.cactup/restart.toml)
 ```
 
-The submit script's last line names the cactup build (`cactup-5f9f7a2`);
-`restart.toml` has the checkpoint walltime this job was given (60 seconds)
+The submit script's last line names the cactup build (`cactup-62a5e6d`);
+`restart.toml` has the checkpoint walltime given to this job (60 seconds)
 and the simulation's own copy of the executable.
 
 ## When a job is interrupted
 
 Say this container stops while a job runs: over lunch, the tutorial server
-stops containers nobody is using. SLURM then *requeues* the job, and it
+stops containers that nobody is using. SLURM then *requeues* the job, and it
 runs again from the start when the container is back. A run that recovers
-from the newest checkpoint it finds loses only the work since that
+from the newest checkpoint that it finds loses only the work since that
 checkpoint. This one checkpoints only when it stops, so it would lose the
 whole job's work; a long run also checkpoints as it goes
 (`IO::checkpoint_every_walltime_hours`, say).

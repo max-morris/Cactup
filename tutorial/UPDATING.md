@@ -138,4 +138,4 @@ to check that the pages they name still exist.
 | Date | Commit | Why |
 |---|---|---|
 | 2026-10-07 | 0ea33983 | First pin: the cactup the tutorial was written against (notebooks 1 to 9), including the `inst show -I` fix it needed. |
-| 2026-10-21 | a7b4923 | Catch up with master: MDB generation 3 (flavors, `[submitscripts]`/`[runscripts]`, `[cactup.runs-on]`, `run-env-setup`), the build cache, test selection by arrangement, a strict optionlist header; `sim submit --block` for the notebooks' waits; the `taskset` universe (was `pinned`). |
+| 2026-11-25 | 62a5e6d | Catch up with master: MDB generation 5 (flavors, `[submitscripts]`/`[runscripts]`, `[cactup.runs-on]`, `run-env-setup`, the allocation knob), versioned on-disk records, the build cache, `inst delete` (was `uninstall`), test selection by arrangement, a strict optionlist header; `sim submit --block` for the notebooks' waits; the `taskset` universe (was `pinned`); the stock install named `MyCactus`. |

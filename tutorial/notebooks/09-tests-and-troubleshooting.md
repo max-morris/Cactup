@@ -14,8 +14,8 @@ kernelspec:
 In this notebook you will
 
 - run thorns' test suites, and find out why some tests fail,
-- break a thorn on purpose, and find the error the way you would in real
-  life: the build's output, its log, and what cactup ran,
+- break a thorn on purpose, and find the error as you would in real life:
+  the build's output, its log, and what cactup ran,
 - fix it, and put the thorn back,
 - read what a run with a broken parameter file left behind.
 
@@ -29,7 +29,7 @@ cactup-tutorial-catch-up 9
 ## Test suites
 
 Most thorns come with tests: parameter files in their `test/` directory,
-each with the output it should produce. Cactus's test harness runs each one
+each with the output that it should produce. Cactus's test harness runs each one
 and compares. `cactup test` runs the harness for a config, on a compute
 node like any job. This machine won't run it in the foreground, where you
 are (the tests start processes with `mpirun`, which belongs inside a job):
@@ -38,9 +38,6 @@ are (the tests start processes with `mpirun`, which belongs inside a job):
 %%shell --expect-fail
 cactup test run WaveToyX -T 1
 ```
-
-(The error names `srun` as an example; this machine starts tests with
-`mpirun`.)
 
 `cactup test submit` sends it to SLURM. Name the tests to run by thorn
 (`WaveToyX`, or `CarpetX/WaveToyX`), by thorn and test
@@ -70,8 +67,9 @@ ls $results/tutorial/TestOutput
 grep -a -h -o -E '[A-Za-z:_]+ is set to "openpmd", but openPMD_api is not enabled|openPMD is not enabled' $results/tutorial/TestOutput/*.log | sort -u
 ```
 
-openPMD isn't in this config's thornlist (notebook 7's `tutorial-ckpt` added Silo, not
-openPMD): not a bug in CarpetX, but a test this config can't run.
+openPMD isn't in this config's thornlist (notebook 7's `tutorial-ckpt` added
+Silo, not openPMD): not a bug in CarpetX, but a test that this config can't
+run.
 
 ## A broken build
 
@@ -99,16 +97,16 @@ is missing: a compiler notices a missing semicolon where the next statement
 begins. The second error, at line 54, follows from the first. The last lines
 name the build's two log files.
 
-cactup keeps every build *attempt*, with its output and the script it ran:
+cactup keeps every build *attempt*, with its output and the script that it ran:
 
 ```{code-cell} ipython3
 %%shell
 cactup build show tutorial
 ```
 
-`FAILED` is this attempt; the list is every attempt this config has had,
-the earlier ones from earlier notebooks, or from catch-up cells. (For a build in the foreground, as
-here, the `job-id` is cactup's process id.)
+`FAILED` is this attempt; the list is every attempt that this config has
+had, the earlier ones from earlier notebooks, or from catch-up cells. (For a
+build in the foreground, as here, the `job-id` is cactup's process id.)
 
 `cactup build log tutorial` shows the end of the latest attempt's output;
 `-e` follows its error stream, which is where the compiler's errors are
@@ -133,11 +131,12 @@ cat "$(ls -d ~/Cactus/configs/tutorial/.cactup-builds/[0-9][0-9][0-9][0-9] | tai
 ### The fix
 
 Put the semicolon back. Here the fix is written a little differently from
-the original (`constexpr`, which a constant like this can be): cactup
-compares the sources with the last build that worked, and the original text
-would be exactly that build's, so cactup would call the config up to date
-and compile nothing. That would be right (that build's executable is still
-there), but here the point is the rebuild.
+the original (`constexpr`, which a constant like this can be), so that it
+is an edit of its own, which `git diff` shows and the build names. The
+original text would be exactly that of the last build that worked: cactup
+would still rebuild, because the file was written after that build, but it
+would only say `thorn sources were edited`, and `git diff` would show
+nothing.
 
 ```{code-cell} ipython3
 text = test_cc.read_text()

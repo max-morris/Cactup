@@ -14,17 +14,17 @@ kernelspec:
 In this notebook you will
 
 - get to know the notebook's terminal cells,
-- install cactup the way its documentation says to, and watch it update itself,
+- install cactup as its documentation says to, and watch it update itself,
 - see how SimFactory's commands map to cactup's,
 - install the Einstein Toolkit's latest release, `ET_2026_05_v0`, and take a
   first look around.
 
 *Time: about 30 minutes.*
 
-Every notebook starts with a **catch-up cell**. It brings this machine to the
-state the notebook expects, in case you skipped a notebook or are starting
-late, and prints a line for each thing it had to do. Here, at the very start,
-there is nothing to catch up on, so it prints nothing.
+Every notebook starts with a **catch-up cell**. It brings this machine to
+the state expected by the notebook, in case you skipped a notebook or are
+starting late, and prints a line for each thing that it had to do. Here, at
+the very start, there is nothing to catch up on, so it prints nothing.
 
 ```{code-cell} ipython3
 %%shell
@@ -55,8 +55,8 @@ ls
 
 A command that runs too long can be stopped with the notebook's stop button
 (■), or by pressing <kbd>I</kbd> twice outside the cell: that is Ctrl-C for
-the command in the cell. This one stops itself after three seconds, the way
-the stop button would:
+the command in the cell. This one stops itself after three seconds, as the
+stop button would:
 
 ```{code-cell} ipython3
 %%shell --timeout 3 --expect-fail
@@ -65,7 +65,7 @@ for i in $(seq 60); do sleep 1; echo "$i"; done
 ```
 
 Two more kinds of cells appear in these notebooks: `%%file` writes a file
-(with its contents highlighted as the kind of file it is), and `%show`
+(with its contents highlighted for its file type), and `%show`
 displays one.
 
 ```{code-cell} ipython3
@@ -74,7 +74,7 @@ displays one.
 
 The plain Python cells are ordinary Python; later notebooks use them to plot
 simulation output. A **Terminal** (File > New > Terminal) is available too,
-for anything you would rather type yourself.
+for anything that you would rather type yourself.
 
 ## Installing cactup
 
@@ -98,7 +98,7 @@ curl -sSf http://127.0.0.1:8765/cactup-init.sh | CACTUP_UPDATE_ROOT=http://127.0
 
 The installer put `cactup` in `~/.cactup/bin`, added that directory to your
 `PATH` in `~/.profile` and `~/.bashrc`, and pointed you at the documentation.
-The documentation links it printed are on this machine, not on your laptop:
+The documentation links that it printed are on this machine, not on your laptop:
 read the documentation at <https://max-morris.github.io/Cactup/> instead.
 
 These cells already have `~/.cactup/bin` on their `PATH`, so `cactup` works
@@ -112,7 +112,7 @@ cactup --version
 ## cactup keeps itself up to date
 
 cactup checks for a newer build of itself once a day, on the first command
-you run in a terminal (`cactup --version` aside), and switches to it before
+that you run in a terminal (`cactup --version` aside), and switches to it before
 doing what you asked. The installer on this machine deliberately installed an
 older build, so you can watch that happen now: the first line below is the
 update.
@@ -128,8 +128,8 @@ cactup --version
 ls -l ~/.cactup/bin
 ```
 
-`cactup` is a link to the build in use. The build it replaced stays next to
-it, so a bad update can be undone by hand. Whether cactup updates itself is a
+`cactup` is a link to the build in use. The build that it replaced stays next
+to it, so a bad update can be undone by hand. Whether cactup updates itself is a
 *knob*, one of cactup's settings. `cactup knob NAME` shows one, and `cactup
 knob` lists them all:
 
@@ -163,26 +163,26 @@ Notebook 10 goes through the differences in depth.
 
 ## Installing a release
 
-`cactup releases` above listed the Einstein Toolkit's releases, newest first.
-Install the latest one. An *installation* is a source tree you work in, and
-it has a name of its own, which commands use to tell your installations
-apart. `--alias MyCactus` names this one. Without it, cactup would name it
-after the release, but an installation isn't the release: you will edit it,
-and you can move it to other sources later (notebook 3), so give it a name
-that says what it is to you. `--silent` accepts the defaults for everything
-else `cactup install` would ask (where to put it, for one). Run it again and
-the cell says that installation exists already.
+`cactup releases` above listed the Einstein Toolkit's releases, newest
+first. Install the latest one. An *installation* is a source tree that you
+work in, and it has a name of its own, which commands use to tell your
+installations apart. `--alias MyCactus` names this one. Without it, cactup
+would name it after the release, but an installation isn't the release: you
+will edit it, and you can move it to other sources later (notebook 3), so
+give it a name that says what it is to you. `--silent` accepts the defaults
+for everything else that `cactup install` would ask (where to put it, for
+one). Run it again and the cell says that installation exists already.
 
 ```{code-cell} ipython3
 %%shell
 cactup install ET_2026_05_v0 --alias MyCactus --silent
 ```
 
-That took seconds, not the several minutes some 80 repositories would take
-from GitHub and Bitbucket: this machine serves the Einstein Toolkit's repositories
-from local mirrors, as a site that mirrors GitHub would. cactup, the
-repositories' `origin` and the thornlists all name the real repositories;
-only git itself, asked directly, shows where it fetches from:
+That took seconds, not the several minutes that some 80 repositories would
+take from GitHub and Bitbucket: this machine serves the Einstein Toolkit's
+repositories from local mirrors, as a site that mirrors GitHub would.
+cactup, the repositories' `origin` and the thornlists all name the real
+repositories; only git itself, asked directly, shows where it fetches from:
 
 ```{code-cell} ipython3
 %%shell
@@ -195,7 +195,7 @@ cd ~
 ## A first look around
 
 `cactup list` lists your installations; the one marked active is the one
-cactup commands work on unless told otherwise.
+that cactup commands work on unless told otherwise.
 
 ```{code-cell} ipython3
 %%shell
@@ -203,8 +203,8 @@ cactup list
 ```
 
 `cactup show` summarizes where you are: the active installation, its active
-configuration (none yet: notebook 2 builds one), and the machine cactup
-thinks it is running on.
+configuration (none yet: notebook 2 builds one), and the machine that
+cactup thinks it is running on.
 
 ```{code-cell} ipython3
 %%shell
@@ -215,8 +215,8 @@ cactup recognized this machine without being told: the machine database
 (MDB) has an entry for it, `cactup-tutorial`, which matches its hostname and
 describes its scheduler (SLURM), its queues, its hardware and how to compile
 and run on it. `cactup machine show` shows that last part alone, and
-`cactup machine show NAME` any other machine's. Clusters you use get entries
-of their own (notebook 6).
+`cactup machine show NAME` any other machine's. Clusters that you use get
+entries of their own (notebook 6).
 
 The installation is an ordinary Cactus tree. cactup made a link to it,
 `~/Cactus`, and keeps its own files under `~/.cactup`:

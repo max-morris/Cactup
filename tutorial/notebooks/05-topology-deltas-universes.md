@@ -13,8 +13,9 @@ kernelspec:
 
 In this notebook you will
 
-- shape a run with the topology options, and see the batch script they make,
-- build a config inside a *universe*, a wrapper around everything the
+- shape a run with the topology options, and see the batch script that they
+  make,
+- build a config inside a *universe*, a wrapper around everything that the
   config runs,
 - edit a thorn, a thorn's parameters and the Cactus flesh, and watch what
   cactup rebuilds each time,
@@ -35,7 +36,7 @@ it as options:
 
 | Option | Meaning | Default here |
 |---|---|---|
-| `-n` | nodes | 1 |
+| `-n` | nodes | enough for `-T`: 1, unless `-T` needs more than 4 CPUs |
 | `-T` | MPI processes (*tasks*) in all | nodes × tasks per node |
 | `-t` | tasks per node | as many as fit: 4 CPUs ÷ CPUs per task |
 | `-c` | CPUs (OpenMP threads) per task | 1 |
@@ -56,7 +57,7 @@ again.)
 cactup sim submit shape-4x1 ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par -w 00:05:00 --overwrite --block
 ```
 
-cactup turned the topology into the batch script it handed to `sbatch`.
+cactup turned the topology into the batch script that it handed to `sbatch`.
 Each restart keeps its own copy, beside its output:
 
 ```{code-cell} ipython3
@@ -118,14 +119,14 @@ cactup sim delete shape-2n
 
 ## Universes
 
-Everything cactup has run for you so far (a build's `make`, a job's run
+Everything that cactup has run for you so far (a build's `make`, a job's run
 script) ran directly on this machine, with the compilers and libraries
 installed on it, just as if you had typed it. That is the default, and it
 has no name: a config built without a universe builds and runs on the host
 as it is.
 
 A *universe* is a wrapper, defined in the machine's entry, that cactup puts
-in front of every command it runs for a config: its build, and (unless the
+in front of every command that it runs for a config: its build, and (unless the
 optionlist says otherwise) its simulations' runs. On a cluster, a universe
 typically runs them inside a container image (`apptainer exec image.sif
 ...`, with Apptainer or Singularity) or in a shell with certain modules
@@ -141,7 +142,7 @@ the command to put in front:
 ```{code-cell} ipython3
 %%shell
 cactup machine show | grep universes
-sed -n '/^\[universes\./,$p' ~/.cactup/mdb/gen-3/cactup-tutorial/meta.toml
+sed -n '/^\[universes\./,$p' ~/.cactup/mdb/gen-5/cactup-tutorial/meta.toml
 ```
 
 `@ENV(CACTUP_TUTORIAL_CPUS)@` is filled in from the environment when the
@@ -168,7 +169,7 @@ cactup config show tutorial-taskset
 
 `universe: taskset` is recorded with the config, and its simulations run in
 it (`coerce-run-universe: true`), unless a submit says `--universe` or
-`--no-universe`. Each restart records the universe it runs in. (`-T 1`:
+`--no-universe`. Each restart records the universe that it runs in. (`-T 1`:
 one process is plenty for a one-second test.)
 
 ```{code-cell} ipython3
@@ -184,13 +185,13 @@ One thing to know: unlike the thornlist, the flavor and the build flags, a
 config's universe is not reused by later builds. Every build works out its
 universe again, from `--universe`, or else the optionlist or the machine's
 default, and a universe
-other than the one the config was built in means a rebuild from scratch.
+other than the one that the config was built in means a rebuild from scratch.
 So build `tutorial-taskset` with `--universe taskset` every time.
 
 ## Hacking on a thorn
 
 Now the everyday loop: edit a thorn, rebuild, run. cactup tracks the
-source tree each config was built from, so a plain `cactup build` sees
+source tree that each config was built from, so a plain `cactup build` sees
 your edits and rebuilds only what they affect.
 
 You will edit three files in `MyCactus`. The cells below make
@@ -204,7 +205,7 @@ does it for you, and saves your versions in `~/tutorial-saved/`.
 Close the files' editor tabs when you finish: an open tab would offer to
 save its old text over the restored file.
 
-Editors can leave files of their own next to the ones you open: stock
+Editors can leave files of their own next to the ones that you open: stock
 JupyterLab keeps checkpoints in `.ipynb_checkpoints/` (this one keeps them
 elsewhere), and vim keeps swap files. They aren't part of a thorn, and
 the global ignore file tells cactup to skip them (a repository can have a
@@ -250,6 +251,13 @@ executable is linked again:
 cactup build tutorial
 ```
 
+Near the end, `cactup: build cache: 0 of 1 objects reused; 1 compiled: 1
+new` reports on cactup's *build cache*. It keeps every object compiled by a
+build, for all the installations in `~/.cactup`, and a later build that
+compiles the same source in the same way takes the object from it instead:
+a rebuild from scratch, say, or the same thorns in another installation.
+No build had compiled the edited file before, so it is `new`.
+
 Run the test with the new executable, wait for it as before, and pick the
 hello line out of its log:
 
@@ -265,7 +273,7 @@ Next, make the greeting a parameter. Parameters are declared in the thorn's
 `param.ccl`, one of the `.ccl` files that define a thorn's interface to
 Cactus. Cactus generates code from them, so an edit to one changes the
 thorn's *shape* (another sense of the word than a run's shape: the set of
-files cactup fingerprints, which the build reports as "thorn contents
+files fingerprinted by cactup, which the build reports as "thorn contents
 changed"), as a file added to or removed from its `src/` does. cactup then
 rebuilds that thorn from scratch rather than trusting `make` to notice
 everything that changed; WaveToyX has one source file, so that is still
@@ -304,11 +312,11 @@ cactup build tutorial
 
 Scroll to the top of the box: cactup's first lines name the reason,
 `thorn contents changed`, and the thorn, WaveToyX, whose own build files it
-removes so that all of it recompiles, with the bindings Cactus generates
-from its `.ccl` files.
+removes so that all of it recompiles, with the bindings generated by
+Cactus from its `.ccl` files.
 
 Set the new parameter in a copy of the test's parameter file, and run
-again. A simulation keeps a copy of the executable it was created with, so
+again. A simulation keeps a copy of the executable that it was created with, so
 it takes a new `hello`, made with the new build, to run the new code;
 `--overwrite` replaces the old one:
 
@@ -322,8 +330,8 @@ grep Hello ~/.cactup/simulations/MyCactus/tutorial/hello/output-0000/hello.out
 
 ### The flesh
 
-The *flesh* is Cactus's core: the code every config is built around. Here,
-it prints the banner every run starts with. Add a line to it:
+The *flesh* is Cactus's core: the code that every config is built around.
+Here, it prints the banner that every run starts with. Add a line to it:
 
 ```{code-cell} ipython3
 # Add a line to the banner; does nothing if it's already there.
@@ -384,7 +392,7 @@ cactup build tutorial
 cactup config delta
 ```
 
-Close the editor tabs of the files you opened, and delete the simulations
+Close the editor tabs of the files that you opened, and delete the simulations
 of this notebook:
 
 ```{code-cell} ipython3
@@ -400,6 +408,6 @@ rm -f ~/hello.par
   (topology, queues, universes on submit)
 - [Building configurations](https://max-morris.github.io/Cactup/users/building-configs.html)
   (what a rebuild does after an edit, `config delta`, `.cactupignore`,
-  universes)
+  universes, the build cache)
 
 Next: **notebook 6a**, your own machine entry.

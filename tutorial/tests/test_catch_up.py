@@ -180,7 +180,7 @@ memory = 63795
 name = "batch"
 
 [cactup]
-mdb-generation = 4
+mdb-generation = 6
 """
 
 
@@ -191,7 +191,7 @@ def test_catch_up_6b_sets_6as_lines_and_keeps_the_rest(install: Path, capsys) ->
     meta.write_text(MYLAB_AS_CREATED)
     module.mylab("finished")
     text = meta.read_text()
-    for line in ('nickname = "mylab"', "max-cpus-per-node = 4", "memory = 7372", "mdb-generation = 3",
+    for line in ('nickname = "mylab"', "max-cpus-per-node = 4", "memory = 7372", "mdb-generation = 5",
                  "[queues.long]"):
         assert line in text
     out = capsys.readouterr().out

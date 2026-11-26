@@ -172,7 +172,7 @@ MYLAB_LINES = [
     (r"^nickname\s*=.*$", 'nickname = "mylab"'),
     (r"^max-cpus?-per-node\s*=.*$", "max-cpus-per-node = 4"),
     (r"^memory\s*=.*$", "memory = 7372"),
-    (r"^mdb-generation\s*=.*$", "mdb-generation = 3"),
+    (r"^mdb-generation\s*=.*$", "mdb-generation = 5"),
 ]
 
 
@@ -288,7 +288,7 @@ def remove_et_mp() -> None:
     simulation real4 in it: take away what an earlier run left, so the
     notebook runs from the top. Its simulations are kept, in ~/tutorial-saved."""
     if re.search(rf"^- {re.escape(ET_MP)}(?=[ \t]|$)", cactup("list").stdout, re.M):
-        cactup("uninstall", ET_MP, "--force")
+        cactup("inst", "delete", ET_MP, "--force")
         say(f"removed the installation {ET_MP} an earlier run of notebook 3 made")
     link = HOME / ET_MP
     if link.is_symlink() and not link.exists():

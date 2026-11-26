@@ -105,11 +105,11 @@ cpus=$(docker exec "$name" sh -c 'for p in /proc/[0-9]*; do tr "\0" "\n" < "$p/e
 check "$r" "the notebook server knows the container's CPUs (CACTUP_TUTORIAL_CPUS=$cpus)"
 
 started=$(date +%s)
-as_user 'cactup install ET_2026_05_v0 --silent' > $logs/install.log 2>&1 && r=ok || r=no
+as_user 'cactup install ET_2026_05_v0 --alias MyCactus --silent' > $logs/install.log 2>&1 && r=ok || r=no
 check "$r" "cactup install ET_2026_05_v0 from the mirrors ($(( $(date +%s) - started )) s)"
 [ "$r" = ok ] || tail -20 $logs/install.log
 
-origin=$(as_user 'git -C ~/.cactup/cacti/ET_2026_05_v0/Cactus/repos/flesh config --get remote.origin.url || git -C "$(ls -d ~/.cactup/cacti/ET_2026_05_v0/Cactus/repos/* | head -1)" config --get remote.origin.url' 2>&1 || true)
+origin=$(as_user 'git -C ~/.cactup/cacti/MyCactus/Cactus/repos/flesh config --get remote.origin.url || git -C "$(ls -d ~/.cactup/cacti/MyCactus/Cactus/repos/* | head -1)" config --get remote.origin.url' 2>&1 || true)
 case $origin in https://*) r=ok ;; *) r=no ;; esac
 check "$r" "installed repositories still name their upstream (origin: $origin)"
 
@@ -216,7 +216,7 @@ until docker exec "$name" curl -fs http://127.0.0.1:8888/api > /dev/null 2>&1; d
     i=$((i + 1)); [ "$i" -gt 120 ] && break; sleep 1
 done
 kept=$(as_user 'cactup list; grep -c cactup ~/.bashrc' 2>&1 || true)
-case $kept in *ET_2026_05_v0*) r=ok ;; *) r=no ;; esac
+case $kept in *MyCactus*) r=ok ;; *) r=no ;; esac
 case $kept in *"No installations"*) r=no ;; esac
 [ "$(printf '%s\n' "$kept" | tail -1)" -ge 1 ] 2>/dev/null || r=no
 check "$r" "seeding a home again keeps the attendee's cactup state and shell setup"

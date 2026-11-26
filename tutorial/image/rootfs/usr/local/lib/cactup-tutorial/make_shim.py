@@ -53,7 +53,7 @@ STAGING = ".make-staging"
 TRASH = ".make-trash-"
 # Bumped whenever the harvest's layout changes: a cached bake of another
 # format is baked again.
-FORMAT = 8
+FORMAT = 9
 STEPS = ("config", "clean", "build", "utils")
 # A replay's longest silence, in seconds, and the fraction of the replay
 # the build step's output must still have to go when the copy has to catch up.
@@ -876,6 +876,71 @@ class Replay:
             raise ShimError(f"restoring the precomputed build failed: {e.strerror or e}") from e
         discard(self.cfg, staging)
 
+    def place_configuration(self) -> None:
+        """Put the bake's `config-data/` in place, as a real configure leaves
+        it, at the end of a restoring config step. The build script reads it
+        before the build step (cactup's build cache probe reads its compile
+        rules); the rest of the tree waits for the swap, which replaces this
+        copy with the staged one, the same files."""
+        if not self.session.get("restore"):
+            return
+        m = manifest(self.bake)
+        entries = [e for e in m["entries"] if e["path"] == "config-data" or e["path"].startswith("config-data/")]
+        if not entries:
+            return
+        lo, hi = m["build-start"], m["mtime-max"]
+        start, end = self.session["t0"], self.session["build-end"]
+        staged = self.cfg / f"{STAGING}-config-data-{os.getpid()}-{time.time_ns()}"
+        live = self.cfg / "config-data"
+        try:
+            dirs = []
+            for entry in entries:
+                rel = Path(entry["path"]).relative_to("config-data")
+                dst = staged / rel
+                if entry["type"] == "dir":
+                    dst.mkdir(parents=True, exist_ok=True)
+                    dirs.append((dst, entry))
+                elif entry["type"] == "link":
+                    os.symlink(entry["target"], dst)
+                    os.utime(dst, (time.time(), map_mtime(entry["mtime"], lo, hi, start, end)),
+                             follow_symlinks=False)
+                else:
+                    shutil.copyfile(self.bake / "tree" / entry["path"], dst)
+                    os.chmod(dst, entry["mode"])
+                    mt = map_mtime(entry["mtime"], lo, hi, start, end)
+                    os.utime(dst, (mt, mt))
+            for dst, entry in reversed(dirs):
+                os.chmod(dst, entry["mode"])
+                mt = map_mtime(entry["mtime"], lo, hi, start, end)
+                os.utime(dst, (mt, mt))
+            if live.exists() or live.is_symlink():
+                discard(self.cfg, live)
+            os.rename(staged, live)
+        except OSError as e:
+            shutil.rmtree(staged, ignore_errors=True)
+            self.fail(e.strerror or str(e))
+
+    def place_cache_events(self) -> None:
+        """The build cache's record of the bake's compiles, in this attempt's
+        `cc/`, where the build script reads it after the build step to say
+        what the cache did. Only when the cache took part, as it did in the
+        bake: its probe passed, and the build script then runs this step
+        with MAKEFILES naming the attempt's `cc/inject.mk`."""
+        src = self.bake / "cc-events.jsonl"
+        cc = Path(self.session["attempt"]) / "cc"
+        inject = (cc / "inject.mk").resolve()
+        if not src.is_file() or not any(Path(w).resolve() == inject
+                                         for w in os.environ.get("MAKEFILES", "").split()):
+            return
+        text = src.read_text(errors="surrogateescape").replace(self.info["attempt"], self.session["attempt"])
+        tmp = cc / f".events.{os.getpid()}.tmp"
+        try:
+            tmp.write_text(text, errors="surrogateescape")
+            os.replace(tmp, cc / "events.jsonl")
+        except OSError as e:
+            tmp.unlink(missing_ok=True)
+            raise ShimError(f"restoring the precomputed build failed: {e.strerror or e}") from e
+
     def place_missing_executables(self) -> None:
         """Without a restore (the tree is already this bake's), put back an
         executable that has gone missing, through a temporary file."""
@@ -1015,6 +1080,8 @@ def replay_step(step: str, cfg: Path, session: dict) -> int:
     replay = Replay(cfg, session)
     if step != "build":
         status = replay.play(step)
+        if step == "config" and status == 0:
+            replay.place_configuration()
     else:
         done = []
 
@@ -1035,6 +1102,8 @@ def replay_step(step: str, cfg: Path, session: dict) -> int:
         status = replay.play(step, (b"Done creating", finish))
         if not done:
             finish()
+        if status == 0:
+            replay.place_cache_events()
     if step == "utils":
         try:
             (cfg / SESSION).unlink()

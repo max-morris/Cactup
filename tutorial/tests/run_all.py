@@ -46,7 +46,7 @@ EXPECT = {
         r"cactup is installed",
         r"cactup +updated to \w+",
         r"ET_2026_05_v0 \(latest\)",
-        r"Success! Installed release ET_2026_05_v0 into /home/cactus/\.cactup/cacti/MyCactus",
+        r"Success! Installed release ET_2026_05_v0 into '/home/cactus/\.cactup/cacti/MyCactus",
         r"file:///opt/cactup-mirrors/",
         r"cactup-tutorial \(System MDB",
     ],
@@ -55,26 +55,26 @@ EXPECT = {
         r"Switched to installation et-mp",
         r"Built config tutorial",
         r"\+CarpetX/TestReal4",
-        r"flesh — SKIP: remote URL",
+        r"flesh: SKIP: remote URL",
         r"origin now points at https://github.com/max-morris/Cactus.git",
         r"now on a different commit",
-        r"Rebuilding config tutorial from scratch: the Cactus flesh is not what it was",
+        r"Rebuilding config tutorial from scratch: the Cactus flesh changed",
         r"Built config tutorial",
         r"TestReal4\[state4\]: PASS",
         r"Switched to installation MyCactus",
     ],
     "04a": [
-        r"Success! Installed custom thornlist /opt/cactup-tutorial/thornlists/carpetx.th",
+        r"Success! Installed custom thornlist '/opt/cactup-tutorial/thornlists/carpetx.th'",
         r"Success! Installed release master",
         r"- carpetx \(custom thornlist",
         r"Switched to installation carpetx",
         r"et-master\n  release: +master",
         r"Switched to installation MyCactus",
-        r"Uninstalled carpetx",
+        r"Deleted installation carpetx",
     ],
     "04b": [
         r"gpu \[gpu\]",
-        r"Success! Installed custom thornlist /opt/cactup-tutorial/thornlists/tutorial-gpu.th",
+        r"Success! Installed custom thornlist '/opt/cactup-tutorial/thornlists/tutorial-gpu.th'",
         r"Built config tutorial-gpu",
         r"runs on: gpu +gpu: true",
         r"only compatible with queue\(s\) gpu",
@@ -100,12 +100,12 @@ EXPECT = {
         r"Built config tutorial-taskset",
         r"universe: taskset \(coerce-run-universe: true\)",
         r'name = "taskset"',
-        r"CarpetX — locally edited since the build",
+        r"CarpetX: locally edited since the build",
         r"Built config tutorial \(",
         r"INFO \(WaveToyX\): Hello from notebook 5: initial condition Gaussian",
-        r"changed contents \(removing their stale per-thorn build state\): WaveToyX",
+        r"changed contents \(removing stale build state\): WaveToyX",
         r"INFO \(WaveToyX\): Hello from a parameter file: initial condition Gaussian",
-        r"flesh — locally edited since the build",
+        r"flesh: locally edited since the build",
         r"Edited in: +notebook 5",
         r"built with local edits, now reverted",
         r"the source tree matches what this config was built from",
@@ -114,14 +114,14 @@ EXPECT = {
     "06a": [
         r"- cactup-tutorial \(Cactup tutorial\) \[personal\] \(detected\)",
         r"\./hostname\.regexp",
-        r"Created machine mylab in the user MDB",
+        r"Created machine mylab at '/home/cactus/\.cactup/machines/mylab'",
         r"max-cpus-per-node = \d+",
         r"nickname: mylab",
         r"hardware: max-cpus-per-node=4 .*\n?.*memory=7372 MB",
         r"unknown field `max-cpu-per-node`",
-        r"mdb-generation = 3",
-        r"was written for MDB\s+generation 4, which requires a newer cactup",
-        r"config \"tutorial\" was built for machine \"cactup-tutorial\" but this is machine \"mylab\"",
+        r"mdb-generation = 5",
+        r"is MDB generation 6, and this cactup reads 5",
+        r"config \"tutorial\" was built for machine \"cactup-tutorial\", not \"mylab\"",
         r"Submitted lab1 restart output-0000 as job",
         r"state:\s+FINISHED",
         r"machine:\s+mylab",
@@ -132,7 +132,7 @@ EXPECT = {
         r"long  max-walltime 01:00:00",
         r"only compatible with queue\(s\) debug, short, batch \(not \"long\"\)",
         r"queue = \"long\"\nQUEUE = \"batch\"",
-        r"submitscripts: default \(debug, short, batch, gpu\), test \(debug, short, batch, gpu\) \[test\], long \(long\)",
+        r"submitscripts: default \(debug, short, batch, gpu\), test \(debug, short, batch, gpu\) \[test\], long",
         r"#SBATCH --comment=long-queue",
         r"the long queue is for multithreaded runs, but this one asks for 1 thread per task",
         r"Lab note: set for one command",
@@ -157,7 +157,7 @@ EXPECT = {
         r"> ExternalLibraries/Silo",
         r"Built config tutorial-ckpt",
         r"(Over)?[Ww]rote ~/wave_ckpt.par",
-        r"pre-submitting 8 chained jobs",
+        r"submitting 8 chained jobs",
         r"Submitted chain restart output-0001 as job \d+ \(chained after job \d+\)",
         r"\(Dependency\)",
         r"output-0001: PRESUBMITTED",
@@ -171,7 +171,7 @@ EXPECT = {
         r"output-0000/chain\.out:INFO \(CarpetX\): Checkpointing before terminating at iteration (\d+),(?:[^\n]*\n){1,2}?output-0001/chain\.out:INFO \(CarpetX\): RecoverGH: iteration \1,",
         r"Checkpointing before terminating at iteration 9600",
         r"checkpoint\.chkpt\.it\d+\.silo",
-        r"Requested graceful termination of output-0000 \(wrote 1 into TERMINATE\)",
+        r"Requested graceful termination of output-0000",
         r"output-0000 stopped",
         r"Found termination signal in termination file",
         r"Checkpointing before terminating at iteration",
@@ -192,10 +192,10 @@ EXPECT = {
         r"Moved simulation computed to",
     ],
     "09": [
-        r"Run `cactup test submit` to execute the suite on a compute node",
+        r"Use `cactup test submit`, or run inside an interactive allocation",
         r"state:\s+DONE \(12 passed, 3 failed\)",
         r"openPMD is not enabled",
-        r"test\.cc:52:3: err\s*or: expected",
+        r"test\.cc:52:3: err\s*or:",
         r"the build failed \(exit status: 2\)",
         r"state:\s+FAILED",
         r"\(latest\): FAILED",
@@ -218,7 +218,7 @@ EXPECT = {
         r"aliaspattern\s+= \^qbd",
         r"make\s+= srun -p gpu2",
         r"maxwalltime\s+= 72:00:00",
-        r"qbd \(System MDB, /home/cactus/\.cactup/mdb/[0-9a-f]{40}/qbd\)",
+        r"qbd \(System MDB, '/home/cactus/\.cactup/mdb/[0-9a-f]{40}/qbd'\)",
         r"max-cpus-per-node=64 default-cpus-per-task=32",
         r"gpu2 \(default\) \[gpu\]",
         r"gpu4 \[gpu\].*default-cpus-per-task 16",
@@ -229,7 +229,7 @@ EXPECT = {
         r'default-action = "submit"',
         r"cpus-per-task = 64",
         r"allocation \(unset\)",
-        r"unknown substitution variable @NUM_PROCS@ on line \d+",
+        r"Unknown substitution variable @NUM_PROCS@ on line \d+",
         r"Submitted sf restart output-0000 as job \d+",
         r'Cactus::cctk_run_title = "sf: 2 processes, 2 threads each"',
         r"restart\.toml",
@@ -260,9 +260,9 @@ RERUN = {
     # Catch-up removes what the first run made, so it runs as the first did.
     "03": EXPECT["03"],
     "04a": [
-        r"Success! Installed custom thornlist /opt/cactup-tutorial/thornlists/carpetx.th",
+        r"Success! Installed custom thornlist '/opt/cactup-tutorial/thornlists/carpetx.th'",
         r"already exists",
-        r"Uninstalled carpetx",
+        r"Deleted installation carpetx",
     ],
     "04b": [
         r"already exists",
@@ -281,15 +281,18 @@ RERUN = {
         r"shape-2x2\.out:OMP initialized with 2 OMP threads",
         r"Moved simulation shape-2n to",
         r"universes: taskset",
-        r"Config tutorial-taskset is up to date",
+        # Up to date, or restored from its bake: notebooks 5 and 9 put the files
+        # they edit back with git, which gives them new mtimes, and cactup's
+        # thorn stamps follow mtimes as make does.
+        r"Config tutorial-taskset is up to date|Built config tutorial-taskset",
         r"universe: taskset \(coerce-run-universe: true\)",
         r'name = "taskset"',
-        r"CarpetX — locally edited since the build",
+        r"CarpetX: locally edited since the build",
         r"Built config tutorial \(",
         r"INFO \(WaveToyX\): Hello from notebook 5: initial condition Gaussian",
-        r"changed contents \(removing their stale per-thorn build state\): WaveToyX",
+        r"changed contents \(removing stale build state\): WaveToyX",
         r"INFO \(WaveToyX\): Hello from a parameter file: initial condition Gaussian",
-        r"flesh — locally edited since the build",
+        r"flesh: locally edited since the build",
         r"Edited in: +notebook 5",
         r"built with local edits, now reverted",
         r"the source tree matches what this config was built from",
@@ -298,14 +301,14 @@ RERUN = {
     "06a": [
         r"- cactup-tutorial \(Cactup tutorial\) \[personal\] \(detected\)",
         r"\./hostname\.regexp",
-        r"Created machine mylab in the user MDB",
+        r"Created machine mylab at '/home/cactus/\.cactup/machines/mylab'",
         r"max-cpus-per-node = \d+",
         r"nickname: mylab",
         r"hardware: max-cpus-per-node=4 .*\n?.*memory=7372 MB",
         r"unknown field `max-cpu-per-node`",
-        r"mdb-generation = 3",
-        r"was written for MDB\s+generation 4, which requires a newer cactup",
-        r"config \"tutorial\" was built for machine \"cactup-tutorial\" but this is machine \"mylab\"",
+        r"mdb-generation = 5",
+        r"is MDB generation 6, and this cactup reads 5",
+        r"config \"tutorial\" was built for machine \"cactup-tutorial\", not \"mylab\"",
         r"Submitted lab1 restart output-0000 as job",
         r"state:\s+FINISHED",
         r"machine:\s+mylab",
@@ -316,7 +319,7 @@ RERUN = {
         r"long  max-walltime 01:00:00",
         r"only compatible with queue\(s\) debug, short, batch \(not \"long\"\)",
         r"queue = \"long\"\nQUEUE = \"batch\"",
-        r"submitscripts: default \(debug, short, batch, gpu\), test \(debug, short, batch, gpu\) \[test\], long \(long\)",
+        r"submitscripts: default \(debug, short, batch, gpu\), test \(debug, short, batch, gpu\) \[test\], long",
         r"#SBATCH --comment=long-queue",
         r"the long queue is for multithreaded runs, but this one asks for 1 thread per task",
         r"Lab note: set for one command",
@@ -339,9 +342,12 @@ RERUN = {
         r"> CactusUtils/TerminationTrigger",
         r"> ExternalLibraries/HDF5",
         r"> ExternalLibraries/Silo",
-        r"Config tutorial-ckpt is up to date",
+        # Up to date, or restored from its bake: notebooks 5 and 9 put the files
+        # they edit back with git, which gives them new mtimes, and cactup's
+        # thorn stamps follow mtimes as make does.
+        r"Config tutorial-ckpt is up to date|Built config tutorial-ckpt",
         r"(Over)?[Ww]rote ~/wave_ckpt.par",
-        r"pre-submitting 8 chained jobs",
+        r"submitting 8 chained jobs",
         r"Submitted chain restart output-0001 as job \d+ \(chained after job \d+\)",
         r"\(Dependency\)",
         r"output-0001: PRESUBMITTED",
@@ -355,7 +361,7 @@ RERUN = {
         r"output-0000/chain\.out:INFO \(CarpetX\): Checkpointing before terminating at iteration (\d+),(?:[^\n]*\n){1,2}?output-0001/chain\.out:INFO \(CarpetX\): RecoverGH: iteration \1,",
         r"Checkpointing before terminating at iteration 9600",
         r"checkpoint\.chkpt\.it\d+\.silo",
-        r"Requested graceful termination of output-0000 \(wrote 1 into TERMINATE\)",
+        r"Requested graceful termination of output-0000",
         r"output-0000 stopped",
         r"Found termination signal in termination file",
         r"Checkpointing before terminating at iteration",
@@ -376,10 +382,10 @@ RERUN = {
         r"Moved simulation computed to",
     ],
     "09": [
-        r"Run `cactup test submit` to execute the suite on a compute node",
+        r"Use `cactup test submit`, or run inside an interactive allocation",
         r"state:\s+DONE \(12 passed, 3 failed\)",
         r"openPMD is not enabled",
-        r"test\.cc:52:3: err\s*or: expected",
+        r"test\.cc:52:3: err\s*or:",
         r"the build failed \(exit status: 2\)",
         r"state:\s+FAILED",
         r"\(latest\): FAILED",
@@ -402,7 +408,7 @@ RERUN = {
         r"aliaspattern\s+= \^qbd",
         r"make\s+= srun -p gpu2",
         r"maxwalltime\s+= 72:00:00",
-        r"qbd \(System MDB, /home/cactus/\.cactup/mdb/[0-9a-f]{40}/qbd\)",
+        r"qbd \(System MDB, '/home/cactus/\.cactup/mdb/[0-9a-f]{40}/qbd'\)",
         r"max-cpus-per-node=64 default-cpus-per-task=32",
         r"gpu2 \(default\) \[gpu\]",
         r"gpu4 \[gpu\].*default-cpus-per-task 16",
@@ -413,7 +419,7 @@ RERUN = {
         r'default-action = "submit"',
         r"cpus-per-task = 64",
         r"allocation \(unset\)",
-        r"unknown substitution variable @NUM_PROCS@ on line \d+",
+        r"Unknown substitution variable @NUM_PROCS@ on line \d+",
         r"Submitted sf restart output-0000 as job \d+",
         r'Cactus::cctk_run_title = "sf: 2 processes, 2 threads each"',
         r"restart\.toml",
@@ -425,6 +431,9 @@ RERUN = {
 # showing through, cactup noticing edits nobody made, a Python traceback.
 NEVER = [
     r"not precomputed",
+    # A replay that left the build script without what configure writes.
+    # (Anchored: notebook 9 prints the build script, which has the message.)
+    r"(?m)^cactup: build cache off",
     r"the source tree has moved",
     r"Traceback \(most recent call last\)",
     r"make_shim",
@@ -573,8 +582,10 @@ def check(label: str, notebook: str, result: dict, expect: dict, quiet_catch_up:
 
 def editor_files(box: Container) -> list[str]:
     """Opening and saving a thorn's source in JupyterLab, and a vim swap file
-    beside it, must not change the thorn (see "Editor files" in the README):
-    the build stays up to date and no checkpoint lands in the source tree."""
+    beside it, must not change the thorn's shape (see "Editor files" in the
+    README): the save alone may earn an incremental rebuild of the saved file
+    (its mtime moved, as make sees it), never "thorn contents changed"; the
+    build after it is up to date; and no checkpoint lands in the source tree."""
     rel = "Cactus/arrangements/Cottonmouth/CottonmouthZ4c4m/src/CottonmouthZ4c4m_sync_state.cpp"
     script = f"""
 import json, urllib.request
@@ -595,14 +606,17 @@ print(status)
     if posted.stdout.strip() != "201":
         problems.append(f"editor files: creating a checkpoint returned {posted.stdout.strip() or posted.stderr}")
     out = box.shell(f"touch ~/{rel.rsplit('/', 1)[0]}/.CottonmouthZ4c4m_sync_state.cpp.swp; "
-                    "cactup build tutorial 2>&1; echo '@@stray'; "
+                    "cactup build tutorial 2>&1; echo '@@again'; cactup build tutorial 2>&1; echo '@@stray'; "
                     "find -L ~/Cactus -name .ipynb_checkpoints | sed -n 1p; echo '@@kept'; "
                     "find ~/.local/share/jupyter/checkpoints -name 'CottonmouthZ4c4m_sync_state*' | sed -n 1p").stdout
-    build, rest = (out.split("@@stray", 1) + [""])[:2]
+    first, rest = (out.split("@@again", 1) + [""])[:2]
+    again, rest = (rest.split("@@stray", 1) + [""])[:2]
     stray, kept = (rest.split("@@kept", 1) + [""])[:2]
-    if "is up to date" not in build:
-        problems.append(f"editor files: the build after a checkpoint, a save and a swap file wasn't up to date:\n"
-                        f"{build}")
+    if "thorn contents changed" in first or not re.search(r"is up to date|thorn sources were edited", first):
+        problems.append(f"editor files: the build after a checkpoint, a save and a swap file changed the thorn's "
+                        f"shape, or did not run:\n{first}")
+    if "is up to date" not in again:
+        problems.append(f"editor files: the build after that one wasn't up to date:\n{again}")
     if stray.strip():
         problems.append(f"editor files: a checkpoint landed in the source tree: {stray.strip()}")
     if not kept.strip():

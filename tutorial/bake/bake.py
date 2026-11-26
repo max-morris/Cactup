@@ -348,6 +348,11 @@ def harvest(spec: dict, rec: Path, out: Path, cuda: str | None = None) -> None:
             copy_nofollow(rec / name_, out / name_)
     check_libraries(root, name, cfg)
     attempt = rec_attempt(root, name, rec)
+    # The build cache's record of the compiles, from which the build script
+    # says what the cache did: a replay puts it back (see place_cache_events).
+    events = attempt / "cc" / "events.jsonl"
+    if events.is_file():
+        copy_nofollow(events, out / "cc-events.jsonl")
     after = float(os.environ.get("CACTUP_TUTORIAL_INTERRUPT_AFTER", "1.5"))
 
     def record_interrupt(step: str, goal: list[str]) -> None:

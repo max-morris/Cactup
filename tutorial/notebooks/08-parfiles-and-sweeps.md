@@ -30,8 +30,8 @@ cactup-tutorial-catch-up 8
 
 When a restart starts, cactup copies the simulation's parameter file into
 the restart's directory (`output-NNNN/`), replacing every `@NAME@` in it
-with that variable's value. These are the same variables the submit and
-run scripts use (notebook 6b), among them:
+with that variable's value. These are the same variables used by the
+submit and run scripts (notebook 6b), among them:
 
 | Variable | Value |
 |---|---|
@@ -39,7 +39,7 @@ run scripts use (notebook 6b), among them:
 | `@RUNDIR@` | the restart's directory |
 | `@SIMULATION_DIR@` | the simulation's directory, which all its restarts share (notebook 7 kept checkpoints there) |
 | `@TASKS@`, `@CPUS_PER_TASK@` | the run's processes, and threads per process |
-| `@HOSTNAME@` | the machine you submitted from |
+| `@HOSTNAME@` | the machine that you submitted from |
 | `@KNOB(name)@` | a knob's value: refused if the knob is unset |
 | `@KNOB-OPTIONAL(name, default)@` | a knob's value, or the default |
 | `@ENV(NAME)@` | an environment variable, as the job sees it on the compute node |
@@ -185,8 +185,9 @@ cactup sim list
 Right after submitting, `squeue` still shows them pending; they start within
 seconds. The cell then waits on SLURM's queue, not with `--block`: that
 would make each submit wait for its own job before the next one is
-submitted, and the point here is that the three run side by side. `sim list` lists every simulation in this installation, so
-notebook 2's `lw` too, if you ran it.
+submitted, and the point here is that the three run side by side. `sim
+list` lists every simulation in this installation, so notebook 2's `lw`
+too, if you ran it.
 
 Each simulation's error, over the one period. `read_tsv` is notebook 2's,
 and `output_dir` notebook 7's without a restart number: `cactup sim show

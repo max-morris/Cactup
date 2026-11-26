@@ -84,6 +84,10 @@ else:
         if not (d / "x.o").exists() or src.stat().st_mtime > (d / "x.o").stat().st_mtime:
             say(f"COMPILING {thorn}/x.c")
             (d / "x.o").write_text(src.read_text())
+            # Through cactup's build cache, when the build script let it in.
+            for mk in os.environ.get("MAKEFILES", "").split():
+                with (Path(mk).parent / "events.jsonl").open("a") as ev:
+                    ev.write('{"unit": "' + str(src) + '", "cc": "' + str(Path(mk).parent) + '"}\n')
     (cfg / "lib").mkdir(exist_ok=True)
     (cfg / "lib" / "libthorns.a").write_text("lib\n")
     (cfg / "scratch" / "external").mkdir(parents=True, exist_ok=True)
@@ -139,7 +143,8 @@ class Tree:
         self.sources = {"repo": "abc123"}
         self.thornlist = "# a comment\n!TARGET = $ARR\n!URL = u\nA/A\nB/B\n"
 
-    def attempt(self, full: bool = True, clean: bool = False, realclean: bool = True) -> Path:
+    def attempt(self, full: bool = True, clean: bool = False, realclean: bool = True,
+                cache: bool = False) -> Path:
         """Prepare a build attempt as cactup's `prepare` does."""
         att = self.cfg / ".cactup-builds" / f"{self.next_id:04d}"
         self.next_id += 1
@@ -182,7 +187,22 @@ class Tree:
                      f"THORNLIST='{att}/cactup-thornlist.th'")
         if clean:
             steps.append(f"make -j4 {NAME}-clean")
-        steps += [f"make -j4 {NAME}", f"make -j4 {NAME}-utils"]
+        if cache:
+            # The shape of cactup's: a probe that reads what configure wrote,
+            # the build step with the cache's fragment in MAKEFILES, and a
+            # summary from the cache's record of the compiles.
+            cc = att / "cc"
+            steps += [
+                f"mkdir -p '{cc}' && rm -f '{cc}/events.jsonl' && : > '{cc}/inject.mk'",
+                f"if [ -f '{self.cfg}/config-data/make.config.defn' ]; then mk='{cc}/inject.mk'; "
+                f"else mk=; echo 'build cache off: no configuration' >&2; fi",
+                f"if [ -n \"$mk\" ]; then ( MAKEFILES=$mk; export MAKEFILES; make -j4 {NAME} ); "
+                f"echo \"build cache: $(cat '{cc}/events.jsonl' 2>/dev/null | wc -l) compiled\"; "
+                f"else make -j4 {NAME}; fi",
+                f"make -j4 {NAME}-utils",
+            ]
+        else:
+            steps += [f"make -j4 {NAME}", f"make -j4 {NAME}-utils"]
         script = att / "build-script"
         script.write_text(f"#!/bin/sh\nset -e\ncd '{self.root}'\n" + "\n".join(steps) + "\n")
         script.chmod(0o755)
@@ -197,9 +217,9 @@ class Tree:
         self.log.unlink(missing_ok=True)
         return calls
 
-    def bake(self) -> tuple[Path, subprocess.CompletedProcess]:
+    def bake(self, cache: bool = False) -> tuple[Path, subprocess.CompletedProcess]:
         """Record a from-scratch build and harvest it, as the bake container does."""
-        att = self.attempt()
+        att = self.attempt(cache=cache)
         record = self.tmp / "record"
         rec = self.run(att, CACTUP_TUTORIAL_SHIM="record", CACTUP_TUTORIAL_RECORD=str(record))
         assert rec.returncode == 0, rec.stderr
@@ -344,6 +364,35 @@ def test_a_bake_replays_exactly_and_restores_the_tree(tree):
     obj = (tree.cfg / "build" / "A" / "x.o").stat().st_mtime
     assert obj >= (tree.root / "arrangements" / "A" / "x.c").stat().st_mtime
     assert (tree.root / "exe" / f"cactus_{NAME}").stat().st_mtime >= obj
+
+
+def test_a_replay_leaves_the_configuration_and_the_cache_record_as_a_build_does(tree):
+    bake_dir, recorded = tree.bake(cache=True)
+    assert recorded.stdout.decode().splitlines()[-2:-1] == ["build cache: 2 compiled"], recorded.stdout
+    assert "/0000/cc" in (bake_dir / "cc-events.jsonl").read_text()
+    tree.wipe()
+    tree.next_id = 3
+    att = tree.attempt(cache=True)
+    got = tree.run(att)
+    assert got.returncode == 0, got.stderr
+    # What the build script read between the steps was there, as configure
+    # and the compiles leave it: the same output, nothing about the cache off.
+    fifo = re.compile(rb"GMfifo\d+")
+    assert fifo.sub(b"GMfifo", got.stdout) == fifo.sub(b"GMfifo", recorded.stdout.replace(b"/0000/", b"/0003/"))
+    assert got.stderr == recorded.stderr
+    events = (att / "cc" / "events.jsonl").read_text()
+    assert f"{att}/cc" in events and "/0000/" not in events
+    assert (tree.cfg / "config-data" / "make.config.defn").read_text() == "defn\n"
+    assert wait_no_staging(tree.cfg)
+
+
+def test_without_the_cache_a_replay_leaves_no_cache_record(tree):
+    tree.bake(cache=True)
+    tree.wipe()
+    att = tree.attempt()
+    got = tree.run(att)
+    assert got.returncode == 0, got.stderr
+    assert not (att / "cc" / "events.jsonl").exists()
 
 
 def test_rewrites_the_attempt_directory_in_replayed_output(tree):

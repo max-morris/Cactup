@@ -35,12 +35,12 @@ submit a job and how to start Cactus in one) comes from the machine's entry
 in the *machine database*, the MDB. There are two layers:
 
 - the *system MDB*, which cactup downloads and keeps up to date, with an
-  entry for each cluster the Cactup project supports;
+  entry for each cluster supported by the Cactup project;
 - your *user MDB*, in `~/.cactup/machines/`: entries of your own, for a
-  machine the system MDB doesn't know, or to change one it does.
+  machine that the system MDB doesn't know, or to change one that it does.
 
 `cactup machine list` shows both: entries of yours are marked `(user MDB)`
-(you have none yet), and the one this machine was recognized as is marked
+(you have none yet), and the one that this machine was recognized as is marked
 `(detected)`:
 
 ```{code-cell} ipython3
@@ -49,13 +49,13 @@ cactup machine list
 ```
 
 An entry is a directory. The system MDB keeps its copy under
-`~/.cactup/mdb/`. (`gen-3` is the database generation this cactup reads, a
+`~/.cactup/mdb/`. (`gen-5` is the database generation read by this cactup, a
 link to a directory named after the MDB's commit, which is the path `machine
 show` prints; more on generations below.)
 
 ```{code-cell} ipython3
 %%shell
-(cd ~/.cactup/mdb/gen-3/cactup-tutorial && find . -type f | sort)
+(cd ~/.cactup/mdb/gen-5/cactup-tutorial && find . -type f | sort)
 ```
 
 - `meta.toml` describes the machine: its hardware, its scheduler and queues,
@@ -71,10 +71,10 @@ show` prints; more on generations below.)
 
 `cactup machine create` makes a new entry in your user MDB.
 `--from-existing` starts it as a copy of another entry, which is the quickest
-way to describe a machine much like one cactup knows. Two more options matter
+way to describe a machine much like one known to cactup. Two more options matter
 here:
 
-- `--no-discover`: by default, the new entry claims the host it was made on
+- `--no-discover`: by default, the new entry claims the host that it was made on
   (it gets a `hostname.regexp` for it) and becomes the detected machine. This
   container must stay `cactup-tutorial` for the other notebooks, so `mylab`
   claims nothing, and commands use it when you say so with `--machine mylab`.
@@ -96,32 +96,30 @@ with some values found out afresh. Its first lines:
 %show ~/.cactup/machines/mylab/meta.toml --lines 1:13
 ```
 
-Two of them are wrong for this machine:
-
-- `[hardware]` was detected from `/proc`, which inside a container reports
-  the computer the container runs on, not the 4 CPUs and the memory this
-  container is given.
-- `nickname`, a short label for people (cactup only displays it, in
-  `machine show`), was set to this host's name, `cactup-tutorial`, the same
-  as the original's: the wrong label for `mylab`.
-
-(`hostname`, like the rest of `[machine]`, only describes the machine;
-claiming a host is `hostname.regexp`'s job, which notebook 6b comes to.)
-
-The original's comments say what the hardware values should be, and why:
+`[hardware]` is the original's: it states this machine's 4 CPUs and its
+memory, and a copy keeps what the original states. (For a machine whose
+entry leaves them out, `machine create` detects them on the host that it
+runs on, which inside a container would be the computer that the container
+runs on, not the 4 CPUs and the memory given to this container.) The
+original's comments say why it states them:
 
 ```{code-cell} ipython3
-%show ~/.cactup/mdb/gen-3/cactup-tutorial/meta.toml --lines 25:36
+%show ~/.cactup/mdb/gen-5/cactup-tutorial/meta.toml --lines 25:36
 ```
 
-### Exercise: fix `[hardware]` and `nickname`
+One value is wrong for `mylab`: `nickname`, a short label for people (cactup
+only displays it, in `machine show`), was set to this host's name,
+`cactup-tutorial`, the same as the original's. (`hostname`, like the rest of
+`[machine]`, only describes the machine; claiming a host is
+`hostname.regexp`'s job, which notebook 6b comes to.)
 
-Set `max-cpus-per-node` to 4, `memory` to 7372 and `nickname` to `"mylab"`.
-Open `~/.cactup/machines/mylab/meta.toml` in the editor (*File > Open from
-Path…*, then `.cactup/machines/mylab/meta.toml`) and edit it there, or run
-the next cell, which makes the same three edits. If you edit in the editor,
-save, and close the tab before going on: the next cells change the file
-again, and an open tab doesn't follow changes made on disk.
+### Exercise: fix `nickname`
+
+Set `nickname` to `"mylab"`. Open `~/.cactup/machines/mylab/meta.toml` in
+the editor (*File > Open from Path…*, then `.cactup/machines/mylab/meta.toml`)
+and edit it there, or run the next cell, which makes the same edit. If you
+edit in the editor, save, and close the tab before going on: the next cells
+change the file again, and an open tab doesn't follow changes made on disk.
 
 ```{code-cell} ipython3
 import re
@@ -129,13 +127,10 @@ from pathlib import Path
 
 meta = Path("~/.cactup/machines/mylab/meta.toml").expanduser()
 text = meta.read_text()
-text = re.sub(r"^nickname = .*$", 'nickname = "mylab"', text, count=1, flags=re.M)
-text = re.sub(r"^max-cpus-per-node = .*$", "max-cpus-per-node = 4", text, count=1, flags=re.M)
-text = re.sub(r"^memory = .*$", "memory = 7372", text, count=1, flags=re.M)
-meta.write_text(text);
+meta.write_text(re.sub(r"^nickname = .*$", 'nickname = "mylab"', text, count=1, flags=re.M));
 ```
 
-`cactup machine show NAME` reads an entry the way every command does:
+`cactup machine show NAME` reads an entry as every command does:
 
 ```{code-cell} ipython3
 %%shell
@@ -147,8 +142,8 @@ cactup machine show mylab
 
 ## How strictly cactup reads an entry
 
-cactup checks a `meta.toml` every time it reads one, and refuses one it
-doesn't understand rather than guess. A misspelled key, for instance
+cactup checks a `meta.toml` whenever it reads one, and refuses one that
+it doesn't understand rather than guess. A misspelled key, for instance
 (`max-cpu-per-node`):
 
 ```{code-cell} ipython3
@@ -167,7 +162,7 @@ meta.write_text(re.sub(r"^max-cpu-per-node\s*=", "max-cpus-per-node =", meta.rea
 ```
 
 The same goes for a value of the wrong type (`memory = "7372 MB"`), a queue
-name a script lists but `[queues]` doesn't have, or a script the
+name that a script lists but `[queues]` doesn't have, or a script that the
 entry names but its directory lacks.
 
 ### Generations
@@ -179,11 +174,13 @@ The end of the file is cactup's own:
 sed -n '/^\[cactup\]/,$p' ~/.cactup/machines/mylab/meta.toml
 ```
 
-- `mdb-generation` is the version of the entry format this file was written
-  in. When a cactup release changes the format in a way older entries can't
-  follow, the system MDB moves to a new generation along with it, and cactup
-  refuses a user entry of another generation with instructions, rather than
-  misread it.
+- `mdb-generation` is the version of the entry format that this file was
+  written in. When a cactup release changes the format, the system MDB moves
+  to a new generation along with it. cactup brings an older user entry
+  forward itself, when it first reads it, and keeps a copy of the old files
+  in `~/.cactup/machine-backups/`; where it can't be sure the entry would
+  still mean the same, it stops and says what to change. An entry written
+  for a newer cactup is refused rather than misread.
 - `[cactup.origin]` records which entry this one was copied from, and a hash
   of that entry. If the original changes later (a fix in the system MDB),
   cactup warns that `mylab` is a copy of an older version: a copy doesn't
@@ -192,7 +189,7 @@ sed -n '/^\[cactup\]/,$p' ~/.cactup/machines/mylab/meta.toml
 Say `mylab` were written for a newer cactup:
 
 ```{code-cell} ipython3
-meta.write_text(re.sub(r"^mdb-generation\s*=.*$", "mdb-generation = 4", meta.read_text(), flags=re.M));
+meta.write_text(re.sub(r"^mdb-generation\s*=.*$", "mdb-generation = 6", meta.read_text(), flags=re.M));
 ```
 
 ```{code-cell} ipython3
@@ -204,7 +201,7 @@ The error tells you to `cactup update`, which is what you'd do for real.
 Here the number was changed by hand, so put it back:
 
 ```{code-cell} ipython3
-meta.write_text(re.sub(r"^mdb-generation\s*=.*$", "mdb-generation = 3", meta.read_text(), flags=re.M));
+meta.write_text(re.sub(r"^mdb-generation\s*=.*$", "mdb-generation = 5", meta.read_text(), flags=re.M));
 ```
 
 ### Replacing a system entry
@@ -226,7 +223,7 @@ config (the active one). cactup refuses:
 cactup sim submit lab1 ~/Cactus/arrangements/CarpetX/WaveToyX/test/radiative.par --machine mylab -T 1 -w 00:05:00 --overwrite
 ```
 
-A config remembers the machine it was built for, and cactup won't run it on
+A config remembers the machine that it was built for, and cactup won't run it on
 another: an executable built with one machine's compilers and libraries
 seldom runs on another. Here `mylab` is a copy of `cactup-tutorial`, so it
 will; `--ignore-machine` says so. (As in notebook 5, `--overwrite` replaces

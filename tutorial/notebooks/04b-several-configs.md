@@ -15,7 +15,7 @@ In this notebook you will
 
 - build a GPU configuration from the machine's GPU optionlist,
 - see how cactup keeps GPU executables off CPU queues,
-- build a debug configuration, and see the flags a config records,
+- build a debug configuration, and see the flags recorded by a config,
 - list, switch and delete configurations, and see their build attempts.
 
 *Time: about 20 minutes.*
@@ -38,15 +38,16 @@ cactup machine show --flavors
 
 `gpu` is a CUDA build: `nvcc` compiles CarpetX's and AMReX's kernels for
 NVIDIA GPUs. Its `[cactup]` header (`config show` prints what came of it,
-below) says what it is for: `gpu = true`, the queues its executables may run
-on, and the one they go to by default. This machine has no GPU and no CUDA toolkit of
-its own, much like many clusters' login nodes; the GPU build below was prepared ahead of time on a machine with the toolkit the
-optionlist describes, and this machine replays it.
+below) says what it is for: `gpu = true`, the queues that its executables
+may run on, and the one that they go to by default. This machine has no GPU
+and no CUDA toolkit of its own, much like many clusters' login nodes; the
+GPU build below was prepared ahead of time on a machine with the toolkit
+described by the optionlist, and this machine replays it.
 
-One more thing a GPU build needs here: the release's CarpetX doesn't compile
-with CUDA 13's `nvcc` (three assertions trip over CUDA's own `all()` and
-`any()`). A branch of a CarpetX fork carries the release plus that one fix,
-and a thornlist for GPU builds points CarpetX at it:
+One more thing that a GPU build needs here: the release's CarpetX doesn't
+compile with CUDA 13's `nvcc` (three assertions trip over CUDA's own `all()`
+and `any()`). A branch of a CarpetX fork carries the release plus that one
+fix, and a thornlist for GPU builds points CarpetX at it:
 
 ```{code-cell} ipython3
 %show /opt/cactup-tutorial/thornlists/tutorial-gpu.th --lines 1:12
@@ -86,7 +87,7 @@ cactup -I et-gpu sim submit gpu-try ~/et-gpu/arrangements/Cottonmouth/Cottonmout
 ```
 
 `--force-queue` would override the check: for an executable that doesn't
-need a GPU after all, or a queue the machine's entry gets wrong. Here it
+need a GPU after all, or a queue that the machine's entry gets wrong. Here it
 would only start a GPU program on a node without one. Delete the throwaway
 simulation:
 
@@ -106,8 +107,9 @@ sinfo
 ```
 
 So this time SLURM refuses the job, not cactup. (This submit leaves out
-`--config`, too: `tutorial-gpu` is the only config `et-gpu` has, so it is
-that installation's *active* config, the one `sim` commands use by default.
+`--config`, too: `tutorial-gpu` is the only config that `et-gpu` has, so it
+is that installation's *active* config, the one that `sim` commands use by
+default.
 More on that below.)
 
 ```{code-cell} ipython3
@@ -131,16 +133,16 @@ cactup -I et-gpu sim delete gpu-try
 
 ## A debug build
 
-Back in `MyCactus`: `--debug` builds with Cactus's debug
-settings: full debugging information (`-g3`) and the extra checks thorns
-compile in when debugging (Cactus defines `CCTK_DEBUG`, and CarpetX's
-array and loop code checks its indices when it is set), for a debugger or a
-bug the checks can catch. Optimization is a flag of its own (`optimize`):
-it is always on, debug builds included (`-O2` with `-g3` here), and cactup
-has no switch to turn it off. These are *build flags*: a config records the ones it was
-built with (`config show` lists them), and later builds of it reuse them, so
-a plain `cactup build tutorial-debug` stays a debug build. Build a debug
-config of its own, so the plain one stays as it is:
+Back in `MyCactus`: `--debug` builds with Cactus's debug settings: full
+debugging information (`-g3`) and the extra checks that thorns compile in
+when debugging (Cactus defines `CCTK_DEBUG`, and CarpetX's array and loop
+code checks its indices when it is set), for a debugger or a bug that the
+checks can catch. Optimization is a flag of its own (`optimize`): it is
+always on, debug builds included (`-O2` with `-g3` here), and cactup has no
+switch to turn it off. These are *build flags*: a config records the ones
+that it was built with (`config show` lists them), and later builds of it
+reuse them, so a plain `cactup build tutorial-debug` stays a debug build.
+Build a debug config of its own, so the plain one stays as it is:
 
 ```{code-cell} ipython3
 %%shell
@@ -155,7 +157,7 @@ own name, as here.
 
 ## Managing configurations
 
-An installation's *active* config is the one `sim` commands use without
+An installation's *active* config is the one used by `sim` commands without
 `--config`. A build makes its config the active one only when none is
 active yet: `tutorial-gpu` became `et-gpu`'s, while `MyCactus` kept
 `tutorial`. `cactup config use` switches:
@@ -177,7 +179,7 @@ NAME` removes old attempts once they pile up, keeping the most recent ten
 cactup build list
 ```
 
-A config you no longer need goes with `cactup config delete`. It refuses
+A config that you no longer need goes with `cactup config delete`. It refuses
 while simulations or tests still use the config (`--force` deletes it
 anyway); nothing uses `tutorial-debug`:
 

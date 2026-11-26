@@ -33,7 +33,7 @@ Say you want to try the mixed-precision branches of the flesh and CarpetX:
 `github.com/max-morris/Cactus` and `github.com/max-morris/CarpetX`, branch
 `mixed-precision`, which add single-precision (`CCTK_REAL4`) and
 half-precision grid functions, with test thorns that check them. You don't
-want to experiment on the installation you work with, so make a new one.
+want to experiment on the installation that you work with, so make a new one.
 
 `cactup install` can install from a thornlist file instead of a release. Use
 the tutorial's thornlist again: a small installation, quick to fetch. Two
@@ -42,7 +42,7 @@ flags matter here:
 - `--alias et-mp` names the installation, as `--alias MyCactus` did in
   notebook 1 (without it, an installation from a thornlist is named after the
   file: `tutorial` here, which says little);
-- `--symlink-name et-mp` names the link cactup makes in your home to its
+- `--symlink-name et-mp` names the link made by cactup in your home to its
   source tree. Without it, the link would be `~/Cactus` again, and would no
   longer point at `MyCactus`.
 
@@ -87,7 +87,7 @@ Change the flesh's and CarpetX's `!URL` and `!REPO_BRANCH` to the forks', and
 add the fork's single-precision test thorn, `CarpetX/TestReal4`, to CarpetX's
 thorns. You could do this in the editor (double-click the file in
 `et-mp/thornlists`); the next cell does it in Python, and shows the result
-against the thornlist the installation came from:
+against the thornlist that the installation came from:
 
 ```{code-cell} ipython3
 import difflib
@@ -132,11 +132,11 @@ cactup inst refetch -n
 
 The other eight repositories would be fetched and fast-forwarded as usual.
 The flesh and CarpetX would be **skipped**: their `origin` is not the URL
-the thornlist names. cactup never silently replaces a repository that
+named by the thornlist. cactup never silently replaces a repository that
 differs from what it expects, since that could be your own work: a
-repository you re-pointed yourself, local commits, edits. It asks you to say
-so, for all the repositories it would skip (`--overwrite-modified`) or for
-the ones you name (`--overwrite`):
+repository that you re-pointed yourself, local commits, edits. It asks you to
+say so, for all the repositories that it would skip (`--overwrite-modified`)
+or for the ones that you name (`--overwrite`):
 
 ```{code-cell} ipython3
 %%shell
@@ -144,11 +144,11 @@ cactup inst refetch --overwrite flesh,CarpetX
 ```
 
 Both repositories now follow the forks: their `origin` was re-pointed, and
-they are on `mixed-precision`. Anything you had changed in them would have
+they are on `mixed-precision`. Anything that you had changed in them would have
 been copied to `~/.cactup/refetch-backups/et-mp/` first. `cactup inst delta`
 compares the installation with what the last fetch put there, repository by
 repository and thorn by thorn. Right after a refetch everything matches: that
-is the baseline any later edit, checkout or deleted thorn shows against.
+is the baseline that any later edit, checkout or deleted thorn shows against.
 
 ```{code-cell} ipython3
 %%shell

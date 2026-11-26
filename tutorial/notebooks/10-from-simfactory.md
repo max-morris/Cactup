@@ -34,7 +34,7 @@ it always was: the release's thornlist checks it out, and cactup installs
 whatever the thornlist names. cactup itself never runs it and never reads
 its files, so while you move over, `sim` keeps working in the same tree.
 Give SimFactory's configs names of their own, though: `sim build` refuses a
-config cactup built, which has no SimFactory `properties.ini`.
+config built by cactup, which has no SimFactory `properties.ini`.
 
 ```{code-cell} ipython3
 %%shell
@@ -75,15 +75,15 @@ The options that shape a run differ more than their names suggest:
   `--procs=8 --num-threads=2` is four MPI processes of two threads each:
   `-T 4 -c 2` in cactup. SimFactory's `--num-threads` is cactup's `-c`, and
   `--ppn-used` is `-t` (processes per node, notebook 5) times `-c`.
-- **Nodes.** SimFactory works out the nodes from `--procs` (one, unless you
-  say) and the machine's `ppn`. cactup asks you for nodes instead: `-n` is
-  the number of nodes (one unless you say), and the processes fill them. On
-  QueenBee4, LONI's cluster at LSU that the next section looks at, the CPU
-  partition `workq` has 64 cores a node and eight threads per process
-  unless you say: `-q workq -n 2` is 16 processes of eight threads, and `-q
-  workq -n 2 -c 1` is 128 processes of one. `-T` alone never adds nodes: ask
-  for more processes than one node holds without `-n`, and the scheduler
-  refuses the job.
+- **Nodes.** SimFactory works out the nodes from `--procs` and the
+  machine's `ppn`. cactup does too, from `-T` and the processes held by a node,
+  and says so when that comes to more than one node; or `-n` gives the nodes,
+  and the processes fill them. On QueenBee4, LONI's cluster at LSU that the
+  next section looks at, the CPU partition `workq` has 64 cores a node and
+  eight threads per process unless you say: `-q workq -T 32` asks for four
+  nodes, `-q workq -n 2` is 16 processes of eight threads, and `-q workq -n
+  2 -c 1` is 128 processes of one. An `-n` too small for `-T` is refused
+  before anything reaches the scheduler.
 - **Nothing carries over between submits.** When you submit a simulation
   again, SimFactory reuses the previous restart's processes, threads and
   walltime. cactup takes each `sim submit`'s own options, and without them
@@ -123,13 +123,13 @@ machine, scripts and optionlists included. `machine show` sums it up:
 ```{code-cell} ipython3
 %%shell
 cactup machine show qbd
-ls ~/.cactup/mdb/gen-3/qbd
-cat ~/.cactup/mdb/gen-3/qbd/hostname.regexp
+ls ~/.cactup/mdb/gen-5/qbd
+cat ~/.cactup/mdb/gen-5/qbd/hostname.regexp
 ```
 
-(The summary's first line names the directory behind `~/.cactup/mdb/gen-3`,
-the link to the machine database cactup downloaded, as notebook 6a showed.
-A `?` is a value the entry leaves unset for the whole machine: each GPU
+(The summary's first line names the directory behind `~/.cactup/mdb/gen-5`,
+the link to the machine database downloaded by cactup, as notebook 6a
+showed. A `?` is a value left unset by the entry for the whole machine: each GPU
 queue gives its own GPU count, and a process gets one GPU unless you say.)
 
 The entry describes QueenBee4 as it is today; the release's `.ini` is
@@ -140,15 +140,15 @@ met:
 - **Building on the compute nodes.** QueenBee4 wants builds there, not on
   the login nodes. The `.ini` did it by wrapping `make` in `srun`, which
   held your terminal until `make` finished. cactup's entry says a build
-  goes to the queue, and in what shape (with the `buildsubmitscripts` the
-  summary lists). `cactup build` then submits it as a job and returns, like
+  goes to the queue, and in what shape (with the `buildsubmitscripts` listed
+  in the summary). `cactup build` then submits it as a job and returns, like
   `sim submit`; `cactup build NAME --block` waits for it, `cactup build log
   NAME -f` follows its output, and `build list` and `build show` report it
   like any build:
 
 ```{code-cell} ipython3
 %%shell
-sed -n '/^\[build\]/,/^\[environment\]/p' ~/.cactup/mdb/gen-3/qbd/meta.toml | grep -v -E '^ *#|^\[environment'
+sed -n '/^\[build\]/,/^\[environment\]/p' ~/.cactup/mdb/gen-5/qbd/meta.toml | grep -v -E '^ *#|^\[environment'
 ```
 
 - **Queues.** The `.ini` names one queue, `gpu2`, and its scripts branched
@@ -187,7 +187,7 @@ How the keys moved, in general:
 
 Three things work differently:
 
-- **cactup refuses keys it doesn't know**, so a typo in `meta.toml` is an
+- **cactup refuses keys that it doesn't know**, so a typo in `meta.toml` is an
   error, not a setting quietly ignored.
 - **Finding the machine**: `hostname.regexp` is matched against this host's
   name and its short form, without a DNS lookup (SimFactory matched one
@@ -197,9 +197,10 @@ Three things work differently:
   to `sim setup`.
 - **Moving your own `.ini` over** is by hand: cactup has no converter.
   `cactup machine create NAME --from-existing M` (notebook 6a) starts you
-  from the closest existing entry, and fills in `[hardware]` from the host
-  you run it on: on a cluster, that is the login node, so check it against
-  the compute nodes. The documentation's "Porting a cluster" page goes
+  from the closest existing entry. It keeps the `[hardware]` values stated
+  by that entry, and detects the ones left out on the host that you run it
+  on: on a cluster, that is the login node, so check them against the
+  compute nodes. The documentation's "Porting a cluster" page goes
   through the rest. A SimFactory optionlist (`.cfg`) works as it is:
   `cactup build NAME --optionlist my-cluster.cfg`.
 
@@ -259,7 +260,7 @@ cactup sim submit sf ~/sf.par -T 2 -c 2 -w 00:05:00 --overwrite
 
 SimFactory would have left an unknown variable in place, unreplaced, for
 Cactus to trip over; cactup refuses it before the job is queued. It names
-the first unknown variable it meets, in its own copy of your file (the
+the first unknown variable that it meets, in its own copy of your file (the
 line number is the same in yours). It has made the simulation by then,
 though, so `--overwrite` replaces it, here and below. With cactup's names:
 
@@ -285,7 +286,7 @@ Other differences in how the variables are filled in:
 - **Checkpoints stay where Cactus writes them.** SimFactory linked the
   previous restart's checkpoint files into each new restart's directory.
   cactup doesn't: point `IO::checkpoint_dir` and `IO::recover_dir` at a
-  directory all the restarts share, such as `@SIMULATION_DIR@/checkpoints`
+  directory shared by all the restarts, such as `@SIMULATION_DIR@/checkpoints`
   (notebook 7).
 
 ## The simulation directory
@@ -308,15 +309,15 @@ ls -A . .cactup output-0000 output-0000/.cactup
 | `output-NNNN/SIMFACTORY/properties.ini` | `output-NNNN/.cactup/restart.toml` |
 | `output-NNNN/SIMFACTORY/SubmitScript`, `RunScript` | `output-NNNN/.cactup/submit-script`, `run-script` |
 
-`output-NNNN/.cactup/ENVIRONMENT` is the environment the run started Cactus
-with (notebook 6b), and `heartbeat` is a file the running job touches
-regularly, which is how cactup tells a running job from a dead one.
+`output-NNNN/.cactup/ENVIRONMENT` is the environment that the run started
+Cactus with (notebook 6b), and `heartbeat` is a file touched regularly by the
+running job, which is how cactup tells a running job from a dead one.
 
 So a script of yours that reads SimFactory's `properties.ini` files needs
 rewriting for `restart.toml`, whose keys differ (`tasks`, `cpus`, `nodes`,
 `walltime`, `job-id`, ...). cactup finds simulations through its own record
 of them, not by looking through a directory, so a SimFactory simulation
-directory isn't one cactup knows.
+directory isn't one known to cactup.
 
 ## What cactup doesn't do
 

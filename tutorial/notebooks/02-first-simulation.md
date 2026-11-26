@@ -28,7 +28,7 @@ cactup-tutorial-catch-up 2
 ## Building a configuration
 
 A configuration ("config") is one build of Cactus: a set of thorns compiled
-with one set of options into one executable. The release you installed in
+with one set of options into one executable. The release that you installed in
 notebook 1 has over 300 thorns; this tutorial builds a smaller set, the
 CarpetX driver with Cottonmouth's Z4c evolution and what they need, listed in
 a thornlist. Each part says where its thorns come from, then lists them; here
@@ -50,13 +50,14 @@ cactup build tutorial --thornlist /opt/cactup-tutorial/thornlists/tutorial.th
 
 The output is Cactus's own (scroll up in its box for the start): configure,
 the CCL files, then every thorn's sources, the external libraries (AMReX and
-NSIMD) first, and finally the link. It took under a minute because this
-build was prepared ahead of time for the tutorial: cactup ran for real, but
-the build itself was done earlier, and its recorded output played back while
-its results were put in place. On a cluster, a first build of these thorns
-takes about ten minutes. cactup ran it as a build *attempt* and kept a
-record of it, and of the config itself: what it was built from, with which
-flags, on which machine.
+NSIMD) first, and finally the link. Near the end, the `cactup: build cache`
+line is cactup's own, about its build cache (notebook 5). It took under a
+minute because this build was prepared ahead of time for the tutorial:
+cactup ran for real, but the build itself was done earlier, and its recorded
+output played back while its results were put in place. On a cluster, a
+first build of these thorns takes about ten minutes. cactup ran it as a
+build *attempt* and kept a record of it, and of the config itself: what it
+was built from, with which flags, on which machine.
 
 ```{code-cell} ipython3
 %%shell
@@ -74,8 +75,8 @@ its process id, not a SLURM job; notebook 9 comes back to that.)
 
 The attempt's full output is in its directory (`build.out` and `build.err`),
 and `cactup build log tutorial` shows it. Since the build succeeded,
-`tutorial` is now the installation's active config, the one simulations use
-unless told otherwise:
+`tutorial` is now the installation's active config, the one used by
+simulations unless told otherwise:
 
 ```{code-cell} ipython3
 %%shell
@@ -218,8 +219,8 @@ ls $(cactup sim show lw --output-dir)/linear_wave/norms
 ```
 
 CarpetX writes plain tab-separated files, one per group of variables,
-iteration and direction for the 1D output, and one per group for the norms. The first
-line names the columns. Read them with pandas:
+iteration and direction for the 1D output, and one per group for the norms.
+The first line names the columns. Read them with pandas:
 
 ```{code-cell} ipython3
 import subprocess

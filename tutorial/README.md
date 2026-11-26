@@ -115,11 +115,11 @@ Constraints the notebooks must respect (each found by reading the code):
 - **Every install after notebook 1's passes `--symlink-name <alias>`.** With
   `--silent`, `cactup install` creates a symlink in `$HOME` named after the
   source tree's root (`~/Cactus`) and silently replaces an existing one, and
-  `uninstall` leaves it behind. So `~/Cactus` always means the stock install,
+  `inst delete` removes only a link at that default place. So `~/Cactus` always means the stock install,
   which notebooks 5 and 9 and catch-up address through it, and each other
   install gets its own link (`~/et-mp`, `~/carpetx`, `~/et-master`,
   `~/et-gpu`). 4a points
-  this out, and removes an uninstalled install's link. Catch-up puts
+  this out, and removes a deleted install's link. Catch-up puts
   `~/Cactus` back if it is missing or points elsewhere.
 
 - **1:** cactup is not preinstalled. The notebook shows the one-line
@@ -144,7 +144,7 @@ Constraints the notebooks must respect (each found by reading the code):
   whose site mirrors GitHub.
 - **3:** after installing, the notebook runs `cactup use et-mp` (installing
   makes a new install active only when none is), previewing what 4a teaches.
-  Run again, it starts over: catch-up 3 uninstalls `et-mp`, removes the
+  Run again, it starts over: catch-up 3 deletes `et-mp` (`inst delete`), removes the
   dangling `~/et-mp` and moves `~/.cactup/simulations/et-mp` to
   `~/tutorial-saved/`, saying so line by line, since running it again on
   what the first run left would show only "already exists" and "up to
@@ -220,24 +220,24 @@ Constraints the notebooks must respect (each found by reading the code):
   Opening a thorn's files in the editor must not change the thorn: see
   Editor files below.
 - **6a/6b:** `machine create` without `--no-discover` claims this host (it
-  writes a `hostname.regexp` and caches itself as the detected machine), and
-  it autodetects `[hardware]` from `/proc`, which reports the VM's cores, not
-  the container's cpuset. So: `machine create mylab --from-existing
+  writes a `hostname.regexp` and caches itself as the detected machine). It
+  keeps the original's stated `[hardware]` for a batch machine like this one
+  (it would detect it from `/proc` for an entry that leaves it out, which
+  reports the VM's cores, not the container's cpuset). So: `machine create mylab --from-existing
   cactup-tutorial --no-discover --silent` (without `--silent` it prompts for
   homes and knobs), `--machine mylab` on the commands that use it, fixing
-  `[hardware]` as the first exercise, and `machine delete mylab` plus
+  `nickname` as the first exercise, and `machine delete mylab` plus
   `machine forget` at the end. `--from-existing` copies the optionlists and
   scripts verbatim but writes `mylab/meta.toml` afresh: without the
   original's comments, with `[paths]` naming the simulation and install
-  homes, `[hardware]` autodetected, `nickname` set to this host's short name
-  (`cactup-tutorial`, which the first exercise fixes along with
-  `[hardware]`), and `[cactup]` recording the MDB generation and the entry
+  homes, `[hardware]` the original's, `nickname` set to this host's short name
+  (`cactup-tutorial`, which the first exercise fixes), and `[cactup]` recording the MDB generation and the entry
   it was copied from. 6a shows the commented original
-  (`~/.cactup/mdb/gen-3/cactup-tutorial/meta.toml`: `gen-3` links to the
+  (`~/.cactup/mdb/gen-5/cactup-tutorial/meta.toml`: `gen-5` links to the
   content-addressed commit directory, whose name changes with any edit
-  under `mdb/`) next to the attendee's copy, since its comments explain what
-  the first exercise fixes. 6a also shows `meta.toml`'s strictness (a
-  misspelled key, put back) and the generation gate (`mdb-generation = 4`,
+  under `mdb/`) next to the attendee's copy, since its comments explain why
+  it states `[hardware]`. 6a also shows `meta.toml`'s strictness (a
+  misspelled key, put back) and the generation gate (`mdb-generation = 6`,
   put back). A config built for `cactup-tutorial` is refused on `mylab`
   (`check_machine`), so submits there use `--ignore-machine` on the stock
   `tutorial`. 6b builds nothing: its optionlist flavor `small` is shown with
@@ -377,14 +377,17 @@ from-scratch miss. Two things prevent it:
   JupyterLab leaves when a save fails (`.~*`). The bake home gets the same
   file, so baked shapes and attendees' shapes are computed alike.
 
-`cactup config delta` compares only repositories' commits and tracked edits,
-so it cannot see a shape change; the build can. The end-to-end test therefore,
-after notebook 2's build: creates a checkpoint of a thorn source through the
-contents API (`POST /api/contents/<path>/checkpoints`, which is what
-JupyterLab does on opening a file) and saves the file unchanged; plants a
-vim swap file (`src/.x.cc.swp`) beside it; asserts that `cactup build
-tutorial` says the config is up to date; and asserts that there is no
-`.ipynb_checkpoints` anywhere under the Cactus tree. So the check can't pass
+`cactup config delta` names a thorn whose shape changed, and so does the
+build. The end-to-end test therefore, after notebook 2's build: creates a
+checkpoint of a thorn source through the contents API (`POST
+/api/contents/<path>/checkpoints`, which is what JupyterLab does on opening a
+file) and saves the file unchanged; plants a vim swap file (`src/.x.cc.swp`)
+beside it; asserts that the next `cactup build tutorial` is up to date or an
+incremental rebuild for "thorn sources were edited" (the save moved the
+file's mtime, which cactup's thorn stamps follow as `make` does), never
+"thorn contents changed"; asserts that the build after that one is up to
+date; and asserts that there is no `.ipynb_checkpoints` anywhere under the
+Cactus tree. So the check can't pass
 vacuously, it also asserts that the checkpoint request returned 201 and that
 the checkpoint is under `~/.local/share/jupyter/checkpoints`. The swap file
 stays for the rest of the run, so every later bake hit also shows the global
@@ -448,7 +451,11 @@ configs, simulations). So:
   (4b's `tutorial-debug`, `tutorial-taskset`) have no objects, so building one
   on an edited tree would be a from-scratch real build, and the bakes all
   assume clean repositories. (`tutorial-gpu` lives in `et-gpu`, which no
-  notebook edits.) This
+  notebook edits.) A file put back has a new mtime, which cactup's thorn
+  stamps notice as `make` would: the next build of such a config is an
+  incremental rebuild for "thorn sources were edited", which the make shim
+  turns into a bake restore (the bake fingerprint covers commits, tracked
+  edits and shapes, not mtimes), never a real compile. This
   covers restarting the kernel and running all of notebook 5 in the middle of
   its hacking section, skipped revert cells, doing notebook 9 before
   notebook 5, and going back to 4b after either. Before restoring a file,
@@ -570,6 +577,12 @@ make -jN NAME-clean              # only with --clean
 make -jN NAME
 make -jN NAME-utils
 ```
+
+Between the config and build steps, the script runs cactup's build cache
+probe, which reads `config-data/make.config.rules` (written by configure),
+and a self-test of plain makes; when both pass, the `NAME` step runs with
+`MAKEFILES` naming the attempt's `cc/inject.mk`, and after it the script
+prints what the cache did, from the attempt's `cc/events.jsonl`.
 
 `image/rootfs/usr/local/bin/make` sits ahead of `/usr/bin/make` on `PATH`. It
 is a few lines of `bash`: a recursive make (`MAKELEVEL` set) `exec`s
@@ -701,6 +714,18 @@ objects), and nothing leaks into a later attempt.
   replay's pacing waits on the copy's progress, so output never stalls into
   an apparent hang, however slow the disk. Only the `NAME` step swaps entries
   in, after the copy has finished.
+- Two things go in place before that, because the build script reads them
+  between steps, and without them the replay would print what a real build
+  does not. A restoring config step ends by putting the bake's `config-data/`
+  in place (mtimes mapped as below), so the build cache's probe and
+  self-test pass as after a real configure, instead of turning the cache off
+  with "cannot read … make.config.rules". The `NAME` step, when `MAKEFILES`
+  names the attempt's `cc/inject.mk` (the cache took part), ends by writing
+  the bake's record of its compiles (`cc-events.jsonl`, harvested from the
+  real build's `cc/events.jsonl`, attempt directory rewritten) to
+  `cc/events.jsonl`, so the script's summary is the real build's ("0 of 383
+  objects reused; 383 compiled: 383 new"). The cache's store gets none of
+  those objects: a later real build compiles what it compiles.
 - If the copy fails (most likely a full disk), the replay stops, the step
   exits non-zero with a message naming the cause, and the staging directory is
   removed. Nothing was swapped, so the marker and the tree are as they were;
@@ -874,7 +899,7 @@ bakes run in the order the notebooks build them.
 Notebook 4a installs `carpetx.th` (the CarpetX-only thornlist the mirrors
 include) and `master` but does not build them. Notebook 3 already installed
 from a thornlist file; 4a is about living with several installations:
-`list`, `use`, `-I`, provenance with `inst show`, and `uninstall`. It builds
+`list`, `use`, `-I`, provenance with `inst show`, and `inst delete`. It builds
 nothing, so those installs have no bakes.
 
 **Bake cache keys** add the toolchain's identity to the fingerprint: a hash

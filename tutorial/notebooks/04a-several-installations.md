@@ -28,9 +28,10 @@ cactup-tutorial-catch-up 4a
 
 ## A project's thornlist
 
-Many projects keep a thornlist of their own: the thorns they use, from the
-repositories and branches they trust. This one is CarpetX on its own, with
-every library it can use, so a build of it has all of CarpetX's features:
+Many projects keep a thornlist of their own: the thorns that they use, from
+the repositories and branches that they trust. This one is CarpetX on its
+own, with every library that it can use, so a build of it has all of
+CarpetX's features:
 
 ```{code-cell} ipython3
 %show /opt/cactup-tutorial/thornlists/carpetx.th --lines 1:10
@@ -67,8 +68,8 @@ cactup list
 ls -ld ~/Cactus ~/carpetx ~/et-master
 ```
 
-`cactup use` switches. Everything after that goes to the installation you
-switched to, until you switch again:
+`cactup use` switches. Everything after that goes to the installation that
+you switched to, until you switch again:
 
 ```{code-cell} ipython3
 %%shell
@@ -96,16 +97,11 @@ cactup use MyCactus
 
 Each installation remembers what it was made from: a release, `master`, or a
 thornlist file (`inst show` above says which). It also remembers the commit
-its last fetch left every repository on, and `cactup inst delta` compares
+that its last fetch left every repository on, and `cactup inst delta` compares
 that with the clones as they are now, repository by repository: right after
-an install, every repository is where the fetch put it. The one repository
-it does list is the Einstein Toolkit's own doing: the thornlist checks
-FUKA's sources out into a directory inside the `KadathThorn` repository, so
-git counts them as untracked files there. Builds ignore untracked files;
-they matter only to `cactup inst refetch --prune`, which won't delete a
-repository with files in it that git doesn't track. Each repository is an
-ordinary git clone, so git can say more; here, the commit `master`'s CarpetX
-is on, against the release's. (CarpetX's development branch is called
+an install, every repository is where the fetch put it. Each repository is an
+ordinary git clone, so git can say more; here, the commit that `master`'s
+CarpetX is on, against the release's. (CarpetX's development branch is called
 `main`; the Einstein Toolkit's `master` follows it.)
 
 ```{code-cell} ipython3
@@ -117,16 +113,16 @@ git -C ~/Cactus/repos/CarpetX log --oneline -1
 
 ## Removing an installation
 
-`cactup uninstall` removes an installation: its source tree and its
+`cactup inst delete` removes an installation: its source tree and its
 configurations. It asks first; `--force` doesn't. It never removes
 simulations: those live apart, under `~/.cactup/simulations/<alias>`, and
 stay where they are, results included.
 
-The link `--symlink-name` made stays behind too; remove it yourself.
+The link made by `--symlink-name` stays behind too; remove it yourself.
 
 ```{code-cell} ipython3
 %%shell
-cactup uninstall carpetx --force
+cactup inst delete carpetx --force
 rm ~/carpetx
 cactup list
 ```
@@ -134,7 +130,7 @@ cactup list
 ## Where this is documented
 
 - [Installing releases](https://max-morris.github.io/Cactup/users/installing-releases.html)
-  (releases, `master`, thornlists, `use`, `-I`, `uninstall`)
+  (releases, `master`, thornlists, `use`, `-I`, `inst delete`)
 - [Command reference](https://max-morris.github.io/Cactup/reference/cli.html)
 
 Next: **notebook 4b**, several configurations of one installation.

@@ -104,7 +104,7 @@ as_user 'curl -sSf http://127.0.0.1:8765/cactup-init.sh | CACTUP_UPDATE_ROOT=htt
 current=$(docker exec "$name" jq -r .build /opt/cactup-tutorial/update-root/latest.json)
 as_user 'cactup --version' 2>&1 | grep -q "$current" || r=no
 check "$r" "cactup is installed and updated to the current build ($current)"
-as_user 'cactup install ET_2026_05_v0 --silent' > "$logs/install.log" 2>&1 && r=ok || r=no
+as_user 'cactup install ET_2026_05_v0 --alias MyCactus --silent' > "$logs/install.log" 2>&1 && r=ok || r=no
 check "$r" "ET_2026_05_v0 is installed from the mirrors"
 
 set -- $(timed build "cactup build tutorial --thornlist $thornlist")
@@ -149,7 +149,7 @@ spread=$(as_user 'find ~/Cactus/configs/tutorial/build -name "*.o" -printf "%TT\
 check "$r" "restored objects' mtimes spread over the build ($spread distinct seconds)"
 
 info=$(as_user 'cat ~/Cactus/configs/tutorial/config-info')
-attempt=$(as_user 'ls -d ~/.cactup/cacti/ET_2026_05_v0/Cactus/configs/tutorial/.cactup-builds/* | tail -1')
+attempt=$(as_user 'ls -d ~/.cactup/cacti/MyCactus/Cactus/configs/tutorial/.cactup-builds/* | tail -1')
 configured=$(printf '%s\n' "$info" | sed -n 's/^# CONFIG-DATE *: \(.*\) (GMT)$/\1/p')
 configured=$(as_user "date -u -d '$configured' +%s" 2>/dev/null || echo 0)
 [ $((linked - configured)) -ge 0 ] && [ $((linked - configured)) -le 120 ] && r=ok || r=no

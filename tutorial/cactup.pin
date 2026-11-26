@@ -4,4 +4,4 @@
 # from the checkout, so cactup can change on any branch without changing the
 # tutorial until this line moves. Moving it is a procedure of its own: see
 # tutorial/UPDATING.md.
-commit = a7b4923be4d69d0ec7c6f9d8456db444eb18c1c0
+commit = 62a5e6d72ad07692c8347092aed360773043dd71
