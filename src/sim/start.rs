@@ -349,8 +349,9 @@ fn wait_for_restarts(
     }
     if !unfinished.is_empty() {
         bail!(
-            "Simulation \"{}\" did not finish: {}\nIts output is in '{}'.",
+            "Simulation \"{}\" did not finish ({} {}).\nIts output is in '{}'.",
             sim.name,
+            if unfinished.len() == 1 { "restart" } else { "restarts" },
             unfinished.join(", "),
             sim.dir.display()
         );
@@ -1682,7 +1683,7 @@ mod tests {
         assert_eq!(wait_for_restart(&sim, &sched, 1, none).unwrap(), RestartEnd::Ran(true));
         assert_eq!(wait_for_restart(&sim, &sched, 2, none).unwrap(), RestartEnd::Vanished);
         let err = format!("{:#}", wait_for_restarts(&sim, &sched, &submitted, none).unwrap_err());
-        assert!(err.contains("did not finish: output-0000, output-0002"), "{err}");
+        assert!(err.contains("did not finish (restarts output-0000, output-0002)."), "{err}");
         wait_for_restarts(&sim, &sched, &submitted[1..2], none).unwrap();
 
         let mut r1 = Restart::load(&sim.dir, 1).unwrap();
