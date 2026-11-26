@@ -12,7 +12,7 @@ use crate::lock::{LinkLock, HEARTBEAT_SECS};
 use crate::mdb::{discover, Machine, Phase, ScriptKind, Universe, WrappedCommand, HOST_UNIVERSE};
 use crate::scheduler::Scheduler;
 use crate::sim::restart::{self, Restart, RestartMeta, UniverseSpec, NO_JOB_ID};
-use crate::sim::{vars, Simulation};
+use crate::sim::{vars, Provisional, Simulation};
 use crate::template::{Syntax, VarSet};
 use crate::Res;
 use anyhow::{anyhow, bail, Context};
@@ -26,21 +26,24 @@ use std::process::{Command, Stdio};
 /// Locate `<sim>`, or create it when a parfile makes that meaningful — the
 /// `create-submit` fusion (§8.3). An existing sim + a parfile is an error
 /// unless `--overwrite`/`-f` (never silently ignore a contradicting parfile).
+/// A simulation created here comes with its [`Provisional`]: the caller
+/// keeps it once the job is queued or the run starts, and undoes it if the
+/// command fails before that.
 fn obtain_sim(
     ctx: &Ctx,
     machine: &Machine,
     inst: &Installation,
     args: &SimStartArgs,
-) -> Res<Simulation> {
+) -> Res<(Simulation, Option<Provisional>)> {
     let exists = inst.simulations()?.simulations.contains_key(&args.sim);
-    match (&args.parfile, exists) {
-        (None, true) => Simulation::locate(inst, &args.sim),
+    let made = match (&args.parfile, exists) {
+        (None, true) => return Ok((Simulation::locate(inst, &args.sim)?, None)),
         // §8.3
         (None, false) => bail!(
             "No simulation named \"{}\"; pass a parfile to create it",
             args.sim
         ),
-        (Some(par), false) => crate::sim::create(
+        (Some(par), false) => crate::sim::create_provisional(
             ctx,
             machine,
             inst,
@@ -60,7 +63,7 @@ fn obtain_sim(
                     args.sim
                 );
             }
-            crate::sim::create(
+            crate::sim::create_provisional(
                 ctx,
                 machine,
                 inst,
@@ -73,6 +76,22 @@ fn obtain_sim(
                     sim_dir: None,
                 },
             )
+        }
+    };
+    made.map(|(sim, made)| (sim, Some(made)))
+}
+
+/// End a command that may have created its simulation: keep it after
+/// `done` succeeded without keeping it itself, or undo it after a failure.
+/// The command's own error stands; an undo that fails is only reported.
+fn settle(inst: &Installation, sim: &Simulation, made: Option<Provisional>, done: &Res<()>) {
+    let Some(made) = made else { return };
+    match done {
+        Ok(()) => made.keep(sim),
+        Err(_) => {
+            if let Err(e) = made.undo(inst) {
+                eprintln!("{} cannot remove simulation {} again: {e:#}", "warning:".yellow(), sim.name);
+            }
         }
     }
 }
@@ -275,24 +294,51 @@ pub fn submit(ctx: &Ctx, args: SimStartArgs) -> Res<()> {
     let machine = crate::commands::machine::resolve(ctx)?;
     let inst = Installation::resolve(ctx)?;
     let db = ctx.db.read()?;
-    let sim = obtain_sim(ctx, &machine, &inst, &args)?;
-    submit_impl(
-        &inst,
-        &machine,
-        &db,
-        &sim,
-        &args,
-        ctx.globals.verbose,
-        ctx.globals.hostname.as_deref(),
-    )
+    submit_obtained(ctx, &machine, &inst, &db, &args)
 }
 
+/// `sim submit` once the machine, installation and database are resolved:
+/// a simulation that it creates is kept only once its first job is queued.
+fn submit_obtained(ctx: &Ctx, machine: &Machine, inst: &Installation, db: &Database, args: &SimStartArgs) -> Res<()> {
+    let (sim, mut made) = obtain_sim(ctx, machine, inst, args)?;
+    let done = submit_keeping(
+        inst,
+        machine,
+        db,
+        &sim,
+        args,
+        &mut made,
+        ctx.globals.verbose,
+        ctx.globals.hostname.as_deref(),
+    );
+    settle(inst, &sim, made, &done);
+    done
+}
+
+/// [`submit_keeping`] for a simulation that exists already.
+#[cfg(test)]
 fn submit_impl(
     inst: &Installation,
     machine: &Machine,
     db: &Database,
     sim: &Simulation,
     args: &SimStartArgs,
+    verbose: bool,
+    hostname_override: Option<&str>,
+) -> Res<()> {
+    submit_keeping(inst, machine, db, sim, args, &mut None, verbose, hostname_override)
+}
+
+/// The submission itself. `made`, the simulation if this command created
+/// it, is kept the moment its first job is queued.
+#[allow(clippy::too_many_arguments)]
+fn submit_keeping(
+    inst: &Installation,
+    machine: &Machine,
+    db: &Database,
+    sim: &Simulation,
+    args: &SimStartArgs,
+    made: &mut Option<Provisional>,
     verbose: bool,
     hostname_override: Option<&str>,
 ) -> Res<()> {
@@ -535,11 +581,6 @@ fn submit_impl(
         // the MDB (§8.3.1).
         let run_script = generate_script(machine, ScriptKind::Run, &run_script_name, &vset, Phase::Run, run_uni_name)?;
 
-        fs::create_dir_all(rdir.join(".cactup"))
-            .with_context(|| format!("Failed to create '{}'", rdir.display()))?;
-        write_executable(&rdir.join(".cactup").join("submit-script"), &submit_script)?;
-        write_executable(&rdir.join(".cactup").join("run-script"), &run_script)?;
-
         let mut r = Restart {
             id,
             dir: rdir.clone(),
@@ -569,17 +610,42 @@ fn submit_impl(
                 knobs: restart::freeze_knobs(&vset),
             },
         };
-        r.store()?;
-
         // makeActive only for the restart that runs first (§8.3/§8.3.2);
         // chained pre-submissions stay un-activated until their handoff.
-        if seg == 0 && activate_first {
-            restart::make_active(&sim.dir, id)?;
+        let activate = seg == 0 && activate_first;
+        let queued = (|| -> Res<crate::scheduler::JobRecord> {
+            fs::create_dir_all(rdir.join(".cactup"))
+                .with_context(|| format!("Failed to create '{}'", rdir.display()))?;
+            write_executable(&rdir.join(".cactup").join("submit-script"), &submit_script)?;
+            write_executable(&rdir.join(".cactup").join("run-script"), &run_script)?;
+            r.store()?;
+            if activate {
+                restart::make_active(&sim.dir, id)?;
+            }
+            sched
+                .submit(&submit_vars, submit_uni.as_ref().map(|(n, u)| (n.as_str(), *u)))
+                .with_context(|| format!("Submitting restart {}", restart::dir_name(id)))
+        })();
+        let submitted = match queued {
+            Ok(submitted) => submitted,
+            Err(e) => {
+                // A restart with no job behind it is not left: active, it
+                // would refuse every later submit, and its id would be
+                // taken. The restarts queued before it stay, with their jobs.
+                if let Err(undo) = withdraw_restart(sim, id, activate) {
+                    eprintln!(
+                        "{} cannot remove restart {} again: {undo:#}",
+                        "warning:".yellow(),
+                        restart::dir_name(id)
+                    );
+                }
+                return Err(e);
+            }
+        };
+        // Its first job queued, a simulation made by this command is kept.
+        if let Some(made) = made.take() {
+            made.keep(sim);
         }
-
-        let submitted = sched
-            .submit(&submit_vars, submit_uni.as_ref().map(|(n, u)| (n.as_str(), *u)))
-            .with_context(|| format!("Submitting restart {}", restart::dir_name(id)))?;
         r.meta.set_job(&submitted);
         let job_id = submitted.id;
         r.meta.status = None;
@@ -612,6 +678,20 @@ fn submit_impl(
         );
 
         prev_job = Some(job_id);
+    }
+    Ok(())
+}
+
+/// Take back restart `id` of `sim`, made by a submit that failed before its
+/// job was queued: its active link, if this submit made one, and its
+/// directory.
+fn withdraw_restart(sim: &Simulation, id: u32, activated: bool) -> Res<()> {
+    if activated && restart::active_id(&sim.dir)? == Some(id) {
+        restart::deactivate(&sim.dir)?;
+    }
+    let rdir = restart::restart_dir(&sim.dir, id);
+    if rdir.exists() {
+        fs::remove_dir_all(&rdir).with_context(|| format!("Failed to remove '{}'", rdir.display()))?;
     }
     Ok(())
 }
@@ -659,16 +739,19 @@ pub fn run(ctx: &Ctx, args: SimRunArgs) -> Res<()> {
     let machine = crate::commands::machine::resolve(ctx)?;
     let inst = Installation::resolve(ctx)?;
     let db = ctx.db.read()?;
-    let sim = obtain_sim(ctx, &machine, &inst, &args.start)?;
-    run_interactive(
+    let (sim, mut made) = obtain_sim(ctx, &machine, &inst, &args.start)?;
+    let done = run_interactive(
         &inst,
         &machine,
         &db,
         &sim,
         &args,
+        &mut made,
         ctx.globals.verbose,
         ctx.globals.hostname.as_deref(),
-    )
+    );
+    settle(&inst, &sim, made, &done);
+    done
 }
 
 /// The interactive foreground path (§8.4): fresh restart, run universe
@@ -680,12 +763,17 @@ fn check_sim_machine(machine: &Machine, sim: &Simulation, cfg: &ConfigMeta, igno
     crate::commands::delta::check_machine(machine, &sim.meta.machine, &format!("simulation \"{}\"", sim.name), ignore)
 }
 
+/// `made`, the simulation if this command created it, is kept just before
+/// the run starts: a failure before that undoes it (§8.3), one of the run
+/// itself does not.
+#[allow(clippy::too_many_arguments)]
 fn run_interactive(
     inst: &Installation,
     machine: &Machine,
     db: &Database,
     sim: &Simulation,
     args: &SimRunArgs,
+    made: &mut Option<Provisional>,
     verbose: bool,
     hostname_override: Option<&str>,
 ) -> Res<()> {
@@ -830,6 +918,9 @@ fn run_interactive(
     r.touch_heartbeat();
     drop(lock);
 
+    if let Some(made) = made.take() {
+        made.keep(sim);
+    }
     sim.log("run", &format!("running {} in the foreground", restart::dir_name(id)));
     println!("Running {} restart {}", sim.name.bold(), restart::dir_name(id));
     execute_restart(sim, &mut r, true)
@@ -1676,11 +1767,158 @@ mod tests {
         assert!(err.contains("--overwrite"), "{err}");
         // …and recreates with it.
         args.overwrite = true;
-        obtain_sim(&ctx, &machine, &inst, &args).unwrap();
+        let (sim, made) = obtain_sim(&ctx, &machine, &inst, &args).unwrap();
+        made.expect("a simulation made anew").keep(&sim);
         // No sim and no parfile → guidance.
         let args2 = start_args("ghost", "1:00:00");
         let err = obtain_sim(&ctx, &machine, &inst, &args2).unwrap_err().to_string();
         assert!(err.contains("parfile"), "{err}");
+    }
+
+    /// What a sim-home holds beside its simulations: hidden entries left by
+    /// a create that set something aside.
+    fn set_aside_in(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|n| n.contains(".replaced-"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A submit refused by cactup itself, before any job (here, a queue
+    /// the machine lacks), leaves no simulation behind (§8.3).
+    #[test]
+    fn a_submit_refused_before_the_scheduler_leaves_no_simulation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        let parfile = tmp.path().join("bbh.par");
+        fs::write(&parfile, "x\n").unwrap();
+        let db = ctx.db.read().unwrap();
+
+        let mut args = start_args("bbh", "1:00:00");
+        args.parfile = Some(parfile.clone());
+        args.topology.queue = Some("nosuch".to_owned());
+        submit_obtained(&ctx, &machine, &inst, &db, &args).unwrap_err();
+        assert!(!inst.simulations().unwrap().simulations.contains_key("bbh"), "not registered");
+        assert!(!tmp.path().join("inst/simhome/sim/bbh").exists(), "no directory");
+
+        // The same command with the queue put right creates it.
+        args.topology.queue = None;
+        submit_obtained(&ctx, &machine, &inst, &db, &args).unwrap();
+        let sim = Simulation::locate(&inst, "bbh").unwrap();
+        assert_eq!(restart::list_ids(&sim.dir).unwrap(), vec![0]);
+    }
+
+    /// A job refused by the scheduler leaves neither the simulation made
+    /// for it nor, in a simulation that existed, the restart made for it:
+    /// active with no job, that restart refused every later submit.
+    #[test]
+    fn a_job_refused_by_the_scheduler_leaves_no_simulation_and_no_restart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let accepts = machine.meta.scheduler.submit.clone();
+        machine.meta.scheduler.submit = Some("echo 'sbatch: error: refused' >&2; exit 1".to_owned());
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        let parfile = tmp.path().join("bbh.par");
+        fs::write(&parfile, "x\n").unwrap();
+        let db = ctx.db.read().unwrap();
+
+        let mut args = start_args("bbh", "1:00:00");
+        args.parfile = Some(parfile.clone());
+        let err = format!("{:#}", submit_obtained(&ctx, &machine, &inst, &db, &args).unwrap_err());
+        assert!(err.contains("Submitting restart output-0000"), "{err}");
+        assert!(err.contains("sbatch: error: refused"), "{err}");
+        assert!(!inst.simulations().unwrap().simulations.contains_key("bbh"), "not registered");
+        assert!(!tmp.path().join("inst/simhome/sim/bbh").exists(), "no directory");
+
+        // An existing simulation keeps no restart of the refused job.
+        let sim = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
+        let args = start_args("bbh", "1:00:00");
+        submit_obtained(&ctx, &machine, &inst, &db, &args).unwrap_err();
+        assert!(restart::list_ids(&sim.dir).unwrap().is_empty(), "no restart left");
+        assert_eq!(restart::active_id(&sim.dir).unwrap(), None, "nothing active");
+
+        // Once the scheduler accepts, the next submit goes through, as
+        // restart output-0000.
+        machine.meta.scheduler.submit = accepts;
+        submit_obtained(&ctx, &machine, &inst, &db, &args).unwrap();
+        assert_eq!(restart::list_ids(&sim.dir).unwrap(), vec![0]);
+        assert_eq!(restart::active_id(&sim.dir).unwrap(), Some(0));
+    }
+
+    /// `--overwrite` sets the old simulation aside: a submit that fails puts
+    /// it back as it was, registry entry and all, and one that succeeds
+    /// removes it.
+    #[test]
+    fn a_failed_overwrite_puts_the_old_simulation_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let accepts = machine.meta.scheduler.submit.clone();
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        let db = ctx.db.read().unwrap();
+        let old_par = tmp.path().join("bbh.par");
+        fs::write(&old_par, "old\n").unwrap();
+        let mut args = start_args("bbh", "1:00:00");
+        args.parfile = Some(old_par.clone());
+        submit_obtained(&ctx, &machine, &inst, &db, &args).unwrap();
+        // Another simulation after it, so that its place in the registry shows.
+        let mut other = start_args("other", "1:00:00");
+        other.parfile = Some(old_par.clone());
+        submit_obtained(&ctx, &machine, &inst, &db, &other).unwrap();
+        let sim = Simulation::locate(&inst, "bbh").unwrap();
+        fs::write(sim.dir.join("notes.txt"), "mine\n").unwrap();
+        let before = inst.simulations().unwrap().simulations;
+        let sims = tmp.path().join("inst/simhome/sim");
+
+        let new_par = tmp.path().join("new").join("bbh.par");
+        fs::create_dir_all(new_par.parent().unwrap()).unwrap();
+        fs::write(&new_par, "new\n").unwrap();
+        let mut args = start_args("bbh", "1:00:00");
+        args.parfile = Some(new_par.clone());
+        args.overwrite = true;
+        let check_put_back = |why: &str| {
+            let after = inst.simulations().unwrap().simulations;
+            let keys = |m: &indexmap::IndexMap<String, crate::installation::SimEntry>| m.keys().cloned().collect::<Vec<_>>();
+            assert_eq!(keys(&after), keys(&before), "{why}: registry order");
+            assert_eq!(after["bbh"].created, before["bbh"].created, "{why}: the old entry");
+            assert_eq!(fs::read_to_string(sim.dir.join("notes.txt")).unwrap(), "mine\n", "{why}");
+            assert_eq!(fs::read_to_string(sim.dir.join(".cactup/par/bbh.par")).unwrap(), "old\n", "{why}");
+            assert_eq!(restart::list_ids(&sim.dir).unwrap(), vec![0], "{why}");
+            assert!(set_aside_in(&sims).is_empty(), "{why}: {:?}", set_aside_in(&sims));
+        };
+
+        // Refused by cactup…
+        args.topology.queue = Some("nosuch".to_owned());
+        submit_obtained(&ctx, &machine, &inst, &db, &args).unwrap_err();
+        check_put_back("a queue refused");
+        // …and by the scheduler, after the new simulation took the old one's
+        // directory.
+        args.topology.queue = None;
+        machine.meta.scheduler.submit = Some("echo 'sbatch: error: refused' >&2; exit 1".to_owned());
+        submit_obtained(&ctx, &machine, &inst, &db, &args).unwrap_err();
+        check_put_back("a job refused");
+
+        // Accepted, the new one replaces it, and nothing set aside stays.
+        machine.meta.scheduler.submit = accepts;
+        submit_obtained(&ctx, &machine, &inst, &db, &args).unwrap();
+        assert!(!sim.dir.join("notes.txt").exists());
+        assert_eq!(fs::read_to_string(sim.dir.join(".cactup/par/bbh.par")).unwrap(), "new\n");
+        assert!(set_aside_in(&sims).is_empty(), "{:?}", set_aside_in(&sims));
+
+        // `sim create -f` replaces at once, as before.
+        fs::write(sim.dir.join("notes.txt"), "again\n").unwrap();
+        let mut req = create_req(&old_par);
+        req.force = true;
+        crate::sim::create(&ctx, &machine, &inst, &req).unwrap();
+        assert!(!sim.dir.join("notes.txt").exists());
+        assert!(set_aside_in(&sims).is_empty(), "{:?}", set_aside_in(&sims));
     }
 
     #[test]

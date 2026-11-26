@@ -112,6 +112,8 @@ This creates `mysim` and submits it in one step. Use `--overwrite` to replace an
 cactup sim submit mysim mysim.par --overwrite
 ```
 
+A submit that fails before its job is queued leaves nothing behind, whether cactup refused the request (a queue that the config can't use, a topology that doesn't fit, a parfile that doesn't substitute) or the scheduler refused the job. A simulation that it was to create is removed again, and one that `--overwrite` was to replace stays as it was, so fix the command and run it again. The same holds for `sim run` up to the moment that the run starts, and for a submit to an existing simulation: a refused job leaves no restart behind.
+
 ## Topology and resource control
 
 Control how the simulation runs on compute nodes with topology flags. These apply to both `sim submit` and `sim run`:
