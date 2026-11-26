@@ -3888,6 +3888,19 @@ Port of `submit()` (`simfactory-docs.txt` §14.2):
   `create-submit` fusion). If `<sim>` **does** exist and a parfile is *also*
   given, that is an **error** unless `--overwrite`/`-f` is passed — cactup
   will not silently ignore a parfile that contradicts an existing sim.
+- **All or nothing.** A simulation created by the fusion is provisional
+  (`sim::Provisional`) until its first job is queued (for `sim run`, until the
+  run starts): any failure before that removes it again, registry entry and
+  all, and the simulation that `--overwrite`/`-f` was to replace, set aside
+  beside its directory rather than removed, is put back with its registry
+  entry in its place. Keeping the new simulation removes the old one, and
+  only then is "Created simulation" printed. A job refused by the scheduler
+  in an existing simulation takes its restart back the same way (its
+  `-active` link and its directory), so no active restart without a job is
+  left to refuse the next submit; restarts already queued by the same
+  command (a chain) stay. A job that the scheduler queued although its
+  `submit` command failed is not detected: its directory is gone, so its run
+  fails at start, unless a later submit has made that restart again.
 - Validate the built config's `runs-on` queues and `gpu` flag against the
   chosen queue (§4.4 / D12); error on mismatch unless `--force-queue`/`-f`. Before that,
   the config and the simulation must both have been built for the resolved

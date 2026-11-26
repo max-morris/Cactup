@@ -307,6 +307,112 @@ pub fn create(
     inst: &Installation,
     req: &CreateRequest,
 ) -> Res<Simulation> {
+    let (sim, made) = create_provisional(ctx, machine, inst, req)?;
+    made.keep(&sim);
+    Ok(sim)
+}
+
+/// A simulation made by [`create_provisional`] and not kept yet. The
+/// implicit create of `sim submit`/`sim run NAME PARFILE` (§8.3) holds one
+/// until its job is queued or its run starts, and undoes it when the command
+/// fails first: a refused submit leaves nothing behind, and a simulation
+/// that it was to replace (`-f`/`--overwrite`) is put back as it was.
+#[derive(Debug)]
+#[must_use = "keep or undo the simulation"]
+pub struct Provisional {
+    name: String,
+    dir: PathBuf,
+    sim_home: PathBuf,
+    replaced: Replaced,
+}
+
+/// What a create moved out of its way: directories set aside beside where
+/// they were (removed once the new simulation is kept), and the registry
+/// entry of the simulation of that name, with its place in the registry.
+#[derive(Debug, Default)]
+struct Replaced {
+    aside: Vec<(PathBuf, PathBuf)>,
+    entry: Option<(usize, SimEntry)>,
+}
+
+impl Replaced {
+    /// Move `dir` to a hidden sibling, so that it can come back.
+    fn set_aside(&mut self, dir: &Path) -> Res<()> {
+        let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let nanos = Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        let aside = dir.with_file_name(format!(".{name}.replaced-{}-{nanos}", std::process::id()));
+        fs::rename(dir, &aside).with_context(|| format!("Failed to move '{}' aside", dir.display()))?;
+        self.aside.push((dir.to_owned(), aside));
+        Ok(())
+    }
+}
+
+/// Take back a create, under the installation lock held by the caller:
+/// remove what it made at `made` (once it has begun making it) and its
+/// registry entry, then put back what it moved out of the way. The caller
+/// writes the registry.
+fn put_back(
+    registry: &mut indexmap::IndexMap<String, SimEntry>,
+    name: &str,
+    made: Option<&Path>,
+    replaced: &Replaced,
+) -> Res<()> {
+    if let Some(dir) = made {
+        if registry.get(name).is_some_and(|e| e.dir == dir) {
+            registry.shift_remove(name);
+        }
+        if dir.exists() {
+            fs::remove_dir_all(dir).with_context(|| format!("Failed to remove '{}'", dir.display()))?;
+        }
+    }
+    for (original, aside) in replaced.aside.iter().rev() {
+        fs::rename(aside, original)
+            .with_context(|| format!("Failed to move '{}' back to '{}'", aside.display(), original.display()))?;
+    }
+    if let Some((index, entry)) = &replaced.entry {
+        registry.shift_insert((*index).min(registry.len()), name.to_owned(), entry.clone());
+    }
+    Ok(())
+}
+
+impl Provisional {
+    /// Keep the simulation: remove what it replaced, and say that it exists.
+    pub fn keep(self, sim: &Simulation) {
+        for (_, aside) in &self.replaced.aside {
+            if let Err(e) = fs::remove_dir_all(aside) {
+                eprintln!("{} cannot remove the replaced '{}': {e}", "warning:".yellow(), aside.display());
+            }
+        }
+        println!(
+            "Created simulation {} at '{}' (config {})",
+            sim.name.bold(),
+            sim.dir.display(),
+            sim.meta.configuration.bold()
+        );
+    }
+
+    /// Remove the simulation again, and put back what it replaced.
+    pub fn undo(self, inst: &Installation) -> Res<()> {
+        let locked = inst.locked()?;
+        let mut registry = locked.simulations()?;
+        put_back(&mut registry.simulations, &self.name, Some(&self.dir), &self.replaced)?;
+        locked.set_simulations(&registry)?;
+        drop(locked);
+        // Its link into the executable cache is gone: reap what that orphaned
+        // (best effort, as at create).
+        let _ = cache::gc(&self.sim_home, None);
+        Ok(())
+    }
+}
+
+/// [`create`], up to keeping the simulation: see [`Provisional`]. A create
+/// that fails part way through is undone here.
+pub fn create_provisional(
+    ctx: &Ctx,
+    machine: &Machine,
+    inst: &Installation,
+    req: &CreateRequest,
+) -> Res<(Simulation, Provisional)> {
     let CreateRequest { force, ignore_machine, name, parfile, config, sim_dir } = *req;
     let inst_meta = inst.meta()?;
     let sim_home = inst_meta.sim_home()?.to_owned();
@@ -365,116 +471,140 @@ pub fn create(
     let locked = inst.locked()?;
     let mut registry = locked.simulations()?;
 
-    let preexisting = registry.simulations.get(name).map(|e| e.dir.clone());
-    if let Some(old_dir) = &preexisting {
+    // What stands in the way is moved aside, not removed: a submit that
+    // fails puts it back (§8.3), and keeping the new simulation removes it.
+    let mut replaced = Replaced::default();
+    let preexisting = registry.simulations.get_full(name).map(|(i, _, e)| (i, e.clone()));
+    if let Some((index, old)) = preexisting {
         if !force {
             bail!(
                 "Simulation \"{name}\" already exists at '{}' (use -f to replace it)",
-                old_dir.display()
+                old.dir.display()
             );
         }
-        if old_dir.is_dir() {
-            fs::remove_dir_all(old_dir)
-                .with_context(|| format!("Failed to remove old simulation at '{}'", old_dir.display()))?;
+        if old.dir.is_dir() {
+            replaced.set_aside(&old.dir)?;
         }
         registry.simulations.shift_remove(name);
+        replaced.entry = Some((index, old));
+    }
+    if dir.exists() {
+        if !force {
+            // Nothing was moved yet: only a registered simulation is, and
+            // that one needs `force` too.
+            bail!("Directory '{}' already exists (use -f to replace it)", dir.display());
+        }
+        if let Err(e) = replaced.set_aside(&dir) {
+            // Nothing was made: `dir` is still what stood there.
+            put_back(&mut registry.simulations, name, None, &replaced)?;
+            return Err(e);
+        }
+    }
+    if replaced.entry.is_some() {
         // Recorded now, under the same lock: the new entry of this name is
         // then written over a registry without the old one, so none of the
         // old entry's keys are put back onto it.
-        locked.set_simulations(&registry)?;
-    }
-    if dir.exists() {
-        if force {
-            fs::remove_dir_all(&dir)
-                .with_context(|| format!("Failed to remove old directory '{}'", dir.display()))?;
-        } else {
-            bail!("Directory '{}' already exists (use -f to replace it)", dir.display());
+        if let Err(e) = locked.set_simulations(&registry) {
+            put_back(&mut registry.simulations, name, None, &replaced)?;
+            return Err(e);
         }
     }
 
-    // 4. Skeleton (§9.3): .cactup/{cfg,par}.
-    let cactup_dir = dir.join(".cactup");
-    fs::create_dir_all(cactup_dir.join("cfg"))
-        .and_then(|()| fs::create_dir_all(cactup_dir.join("par")))
-        .with_context(|| format!("Failed to create '{}'", cactup_dir.display()))?;
+    let made = (|| -> Res<Simulation> {
+        // 4. Skeleton (§9.3): .cactup/{cfg,par}.
+        let cactup_dir = dir.join(".cactup");
+        fs::create_dir_all(cactup_dir.join("cfg"))
+            .and_then(|()| fs::create_dir_all(cactup_dir.join("par")))
+            .with_context(|| format!("Failed to create '{}'", cactup_dir.display()))?;
 
-    // 6. Master copies: the parfile, and the config's optionlist and thornlist
-    //    snapshots. Each pair is ordered fed-to-Cactus copy first, source
-    //    second; the name recorded in the metadata is the first that exists.
-    fs::copy(parfile, cactup_dir.join("par").join(&par_basename))
-        .with_context(|| format!("Failed to copy '{}' into the simulation", parfile.display()))?;
-    let copy_cfg = |files: &[&str]| -> Res<String> {
-        let mut primary = String::new();
-        for cfg_file in files {
-            let src = cactus_root.join("configs").join(&config).join(cfg_file);
-            if src.is_file() {
-                fs::copy(&src, cactup_dir.join("cfg").join(cfg_file))
-                    .with_context(|| format!("Failed to copy '{}'", src.display()))?;
-                if primary.is_empty() {
-                    primary = (*cfg_file).to_owned();
+        // 6. Master copies: the parfile, and the config's optionlist and thornlist
+        //    snapshots. Each pair is ordered fed-to-Cactus copy first, source
+        //    second; the name recorded in the metadata is the first that exists.
+        fs::copy(parfile, cactup_dir.join("par").join(&par_basename))
+            .with_context(|| format!("Failed to copy '{}' into the simulation", parfile.display()))?;
+        let copy_cfg = |files: &[&str]| -> Res<String> {
+            let mut primary = String::new();
+            for cfg_file in files {
+                let src = cactus_root.join("configs").join(&config).join(cfg_file);
+                if src.is_file() {
+                    fs::copy(&src, cactup_dir.join("cfg").join(cfg_file))
+                        .with_context(|| format!("Failed to copy '{}'", src.display()))?;
+                    if primary.is_empty() {
+                        primary = (*cfg_file).to_owned();
+                    }
                 }
             }
+            Ok(primary)
+        };
+        let optionlist = copy_cfg(&["cactup-optionlist.cfg", "cactup-optionlist.toml"])?;
+        // Which thorns the frozen binary actually contains. The processed list is
+        // the authoritative answer — it is what Cactus was handed — and the source
+        // snapshot rides along to record what it was derived from. Both may be
+        // absent for a config built by an older cactup, hence no hard requirement.
+        let thornlist = copy_cfg(&[build::THORNLIST_PROCESSED, build::THORNLIST_SNAPSHOT])?;
+        // The config record as of the build this simulation freezes: its
+        // `sources` map is the commit set the binary was compiled from, next to
+        // the flags and flavor — all of which the config's next build overwrites,
+        // so without this copy a simulation loses its exact provenance the moment
+        // its config is rebuilt (what `sim export` reads, §8.2 step 6).
+        // Serialized from the record loaded above rather than copied from disk:
+        // that is the record whose build-id this simulation names, and a
+        // concurrent `cactup build` rewriting the file cannot hand us a torn copy.
+        // Written once, as a record made anew (keys of a file already there are
+        // not kept) at the config record's version.
+        format::replace(&cactup_dir.join("cfg").join(build::CONFIG_RECORD), &cfg, &build::CONFIG)?;
+
+        // 5. Freeze the binary: populate CACHE/exe/<build-id> and hard-link it in
+        //    (port of CopyFileWithCaching, §8.1), GC-ing orphans opportunistically.
+        cache::gc(&sim_home, Some(&cfg.build_id))?;
+        let cached = cache::ensure_cached(&sim_home, &cfg.build_id, &exe_src)?;
+        cache::link_into(&cached, &cactup_dir.join("exe"))?;
+
+        let hostname = crate::mdb::discover::resolve_hostname(ctx.globals.hostname.as_deref());
+        let meta = SimulationMeta {
+            machine: machine.name.clone(),
+            simulation_id: simulation_id(name, &machine.name, &hostname),
+            sourcedir: cactus_root.clone(),
+            configuration: config.clone(),
+            config_id: cfg.config_id.clone(),
+            build_id: cfg.build_id.clone(),
+            executable: cactup_dir.join("exe"),
+            optionlist,
+            thornlist,
+            parfile: par_basename,
+            alias: inst.alias.clone(),
+            knobs: Default::default(),
+        };
+        let sim = Simulation { name: name.to_owned(), dir: dir.clone(), meta };
+        sim.store_meta()?;
+
+        // Register it (§8.1).
+        registry.simulations.insert(
+            name.to_owned(),
+            SimEntry { dir: dir.clone(), config: config.clone(), created: Utc::now() },
+        );
+        locked.set_simulations(&registry)?;
+        Ok(sim)
+    })();
+    let sim = match made {
+        Ok(sim) => sim,
+        Err(e) => {
+            // Take back the half-made simulation; the registry was written
+            // only if what it replaced had an entry, or if it was the last
+            // step, so write it back whenever there is one to restore.
+            let registered = registry.simulations.contains_key(name);
+            put_back(&mut registry.simulations, name, Some(&dir), &replaced)?;
+            if registered || replaced.entry.is_some() {
+                locked.set_simulations(&registry)?;
+            }
+            return Err(e);
         }
-        Ok(primary)
     };
-    let optionlist = copy_cfg(&["cactup-optionlist.cfg", "cactup-optionlist.toml"])?;
-    // Which thorns the frozen binary actually contains. The processed list is
-    // the authoritative answer — it is what Cactus was handed — and the source
-    // snapshot rides along to record what it was derived from. Both may be
-    // absent for a config built by an older cactup, hence no hard requirement.
-    let thornlist = copy_cfg(&[build::THORNLIST_PROCESSED, build::THORNLIST_SNAPSHOT])?;
-    // The config record as of the build this simulation freezes: its
-    // `sources` map is the commit set the binary was compiled from, next to
-    // the flags and flavor — all of which the config's next build overwrites,
-    // so without this copy a simulation loses its exact provenance the moment
-    // its config is rebuilt (what `sim export` reads, §8.2 step 6).
-    // Serialized from the record loaded above rather than copied from disk:
-    // that is the record whose build-id this simulation names, and a
-    // concurrent `cactup build` rewriting the file cannot hand us a torn copy.
-    // Written once, as a record made anew (keys of a file already there are
-    // not kept) at the config record's version.
-    format::replace(&cactup_dir.join("cfg").join(build::CONFIG_RECORD), &cfg, &build::CONFIG)?;
-
-    // 5. Freeze the binary: populate CACHE/exe/<build-id> and hard-link it in
-    //    (port of CopyFileWithCaching, §8.1), GC-ing orphans opportunistically.
-    cache::gc(&sim_home, Some(&cfg.build_id))?;
-    let cached = cache::ensure_cached(&sim_home, &cfg.build_id, &exe_src)?;
-    cache::link_into(&cached, &cactup_dir.join("exe"))?;
-
-    let hostname = crate::mdb::discover::resolve_hostname(ctx.globals.hostname.as_deref());
-    let meta = SimulationMeta {
-        machine: machine.name.clone(),
-        simulation_id: simulation_id(name, &machine.name, &hostname),
-        sourcedir: cactus_root.clone(),
-        configuration: config.clone(),
-        config_id: cfg.config_id.clone(),
-        build_id: cfg.build_id.clone(),
-        executable: cactup_dir.join("exe"),
-        optionlist,
-        thornlist,
-        parfile: par_basename,
-        alias: inst.alias.clone(),
-        knobs: Default::default(),
-    };
-    let sim = Simulation { name: name.to_owned(), dir: dir.clone(), meta };
-    sim.store_meta()?;
-
-    // Register it (§8.1) and release the lock.
-    registry.simulations.insert(
-        name.to_owned(),
-        SimEntry { dir: dir.clone(), config: config.clone(), created: Utc::now() },
-    );
-    locked.set_simulations(&registry)?;
     drop(locked);
 
     sim.log("create", &format!("created simulation (config {config}, build-id {})", sim.meta.build_id));
-    println!(
-        "Created simulation {} at '{}' (config {})",
-        name.bold(),
-        dir.display(),
-        config.bold()
-    );
-    Ok(sim)
+    let made = Provisional { name: name.to_owned(), dir, sim_home, replaced };
+    Ok((sim, made))
 }
 
 /// The warning for a stored global knob value simulation `sim`'s own
